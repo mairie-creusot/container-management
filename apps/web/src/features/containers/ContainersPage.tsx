@@ -16,6 +16,7 @@ import StatusPill from "@/components/StatusPill";
 import Gauge from "@/components/Gauge";
 import KeyValueList from "@/components/KeyValueList";
 import Pagination from "@/components/Pagination";
+import { SkeletonTable } from "@/components/Skeleton";
 import { IconPlay, IconRestart, IconStop, IconTrash } from "@/components/icons";
 
 function formatMem(bytes: number): string {
@@ -222,7 +223,12 @@ export default function ContainersPage() {
 
         {createStatus === "error" && createError && <div className="error-banner">{createError}</div>}
         {error && <div className="error-banner">{error}</div>}
-        {status === "loading" && items.length === 0 && <div className="empty-state">Chargement…</div>}
+        {status === "loading" && items.length === 0 && (
+          <SkeletonTable
+            columns={["Nom", "Image", "Environnement", "Nœud", "État", "CPU", "RAM", ""]}
+            rows={8}
+          />
+        )}
         {status !== "loading" && visible.length === 0 && !error && (
           <div className="empty-state">Aucun conteneur ne correspond aux critères.</div>
         )}

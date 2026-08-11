@@ -16,6 +16,7 @@ import {
 } from "@/features/iac/iacSlice";
 import { canOperate } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
+import Skeleton from "@/components/Skeleton";
 import type { IacEngine } from "@/types";
 
 const ENGINE_LABEL: Record<IacEngine, string> = { tofu: "OpenTofu", ansible: "Ansible", packer: "Packer" };
@@ -32,7 +33,7 @@ function formatDate(iso: string): string {
 
 export default function IacPage() {
   const dispatch = useAppDispatch();
-  const { engines, workspaces, selectedWorkspaceId, files, openFilePath, openFileContent, runs, selectedRun } =
+  const { engines, workspaces, selectedWorkspaceId, files, openFilePath, openFileContent, runs, selectedRun, status } =
     useAppSelector((s) => s.iac);
   const session = useAppSelector((s) => s.auth.session);
   const confirm = useConfirm();
@@ -160,20 +161,33 @@ export default function IacPage() {
             </form>
           )}
 
-          {workspaces.length === 0 && <div className="empty-state">Aucun workspace.</div>}
-          <div className="iac-workspace-list">
-            {workspaces.map((w) => (
-              <button
-                key={w.id}
-                type="button"
-                className={`iac-workspace-item${w.id === selectedWorkspaceId ? " is-selected" : ""}`}
-                onClick={() => dispatch(selectWorkspace(w.id))}
-              >
-                <span className="iac-workspace-item__name">{w.name}</span>
-                <span className="iac-workspace-item__engine">{ENGINE_LABEL[w.engine]}</span>
-              </button>
-            ))}
-          </div>
+          {status === "loading" && workspaces.length === 0 ? (
+            <div className="iac-workspace-list">
+              {Array.from({ length: 4 }).map((_, index) => (
+                <div className="iac-workspace-item" style={{ cursor: "default" }} key={index}>
+                  <Skeleton variant="text" height={12} width="70%" />
+                  <Skeleton variant="text" height={9} width="40%" style={{ marginTop: 4 }} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <>
+              {workspaces.length === 0 && <div className="empty-state">Aucun workspace.</div>}
+              <div className="iac-workspace-list">
+                {workspaces.map((w) => (
+                  <button
+                    key={w.id}
+                    type="button"
+                    className={`iac-workspace-item${w.id === selectedWorkspaceId ? " is-selected" : ""}`}
+                    onClick={() => dispatch(selectWorkspace(w.id))}
+                  >
+                    <span className="iac-workspace-item__name">{w.name}</span>
+                    <span className="iac-workspace-item__engine">{ENGINE_LABEL[w.engine]}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
 
         {selectedWorkspace ? (

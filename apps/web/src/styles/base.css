@@ -73,11 +73,16 @@ p {
   color: var(--color-text);
   padding: 10px 16px;
   font-weight: 500;
-  transition: border-color 0.15s ease, background 0.15s ease;
+  transition: border-color 0.15s ease, background 0.15s ease, filter 0.15s ease, transform 0.1s ease;
 }
 
 .btn:hover {
   border-color: var(--color-text-faint);
+}
+
+/* Retour tactile à l'appui — subtil, cohérent avec les transitions de 120-200ms du reste du site. */
+.btn:active {
+  transform: scale(0.97);
 }
 
 .btn:disabled {
@@ -125,11 +130,16 @@ p {
   border-radius: var(--radius-sm);
   color: var(--color-text-muted);
   cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease, transform 0.1s ease;
 }
 
 .icon-btn:hover {
   background: var(--color-surface-2);
   color: var(--color-text);
+}
+
+.icon-btn:active {
+  transform: scale(0.94);
 }
 
 .icon-btn:disabled {
@@ -259,6 +269,33 @@ p {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+/* Sortie en fondu (fermeture manuelle ou auto-dismiss) plutôt qu'une disparition brute — voir
+   apps/web/src/components/ToastStack.tsx. */
+.toast--leaving {
+  animation: toast-out 0.18s ease-in forwards;
+}
+
+@keyframes toast-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+  }
+
+  .toast--leaving {
+    animation: none;
   }
 }
 

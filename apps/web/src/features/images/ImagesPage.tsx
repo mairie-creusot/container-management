@@ -20,6 +20,7 @@ import StatusPill from "@/components/StatusPill";
 import RegistryBadge from "@/components/RegistryBadge";
 import KeyValueList from "@/components/KeyValueList";
 import Pagination from "@/components/Pagination";
+import { SkeletonTable } from "@/components/Skeleton";
 import type { VulnSeverity } from "@/types";
 
 const FILTERS: { id: ImageStatusFilter; label: string }[] = [
@@ -185,7 +186,9 @@ export default function ImagesPage() {
         </div>
 
         {error && <div className="error-banner">{error}</div>}
-        {status === "loading" && items.length === 0 && <div className="empty-state">Chargement…</div>}
+        {status === "loading" && items.length === 0 && (
+          <SkeletonTable columns={["Image", "Registry", "Tag courant", "Dernier tag", "Environnement", "Statut"]} rows={8} />
+        )}
 
         {status !== "loading" && visible.length === 0 && !error && (
           <div className="empty-state">Aucune image ne correspond aux critères.</div>

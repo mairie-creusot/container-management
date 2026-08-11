@@ -13,6 +13,7 @@ import { useConfirm } from "@/components/ConfirmProvider";
 import Inspector from "@/components/Inspector";
 import StatusPill from "@/components/StatusPill";
 import KeyValueList from "@/components/KeyValueList";
+import { SkeletonCard } from "@/components/Skeleton";
 import { registryMeta } from "@/components/RegistryBadge";
 import { IconPlus } from "@/components/icons";
 import type { RegistryKind } from "@/types";
@@ -160,7 +161,13 @@ export default function RegistriesPage() {
         )}
 
         {error && <div className="error-banner">{error}</div>}
-        {status === "loading" && items.length === 0 && <div className="empty-state">Chargement…</div>}
+        {status === "loading" && items.length === 0 && (
+          <div className="registry-grid">
+            {Array.from({ length: 6 }).map((_, index) => (
+              <SkeletonCard key={index} />
+            ))}
+          </div>
+        )}
         {status !== "loading" && visible.length === 0 && !error && (
           <div className="empty-state">Aucun registry configuré.</div>
         )}

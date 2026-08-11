@@ -3,6 +3,7 @@ import { useAppDispatch, useAppSelector } from "@/hooks";
 import { fetchAuditLog } from "@/features/audit/auditSlice";
 import { usePagination } from "@/hooks/usePagination";
 import Pagination from "@/components/Pagination";
+import { SkeletonTable } from "@/components/Skeleton";
 import type { AuditEvent } from "@/types";
 
 function formatDate(iso: string): string {
@@ -80,7 +81,9 @@ export default function AuditPage() {
       </div>
 
       {error && <div className="error-banner">{error}</div>}
-      {status === "loading" && items.length === 0 && <div className="empty-state">Chargement…</div>}
+      {status === "loading" && items.length === 0 && (
+        <SkeletonTable columns={["Horodatage", "Utilisateur", "Action", "Résultat"]} rows={10} />
+      )}
       {status !== "loading" && items.length === 0 && !error && (
         <div className="empty-state">Aucune action enregistrée pour l'instant.</div>
       )}

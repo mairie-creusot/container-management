@@ -41,6 +41,7 @@
   width: 100%;
   font-size: 14.5px;
   font-weight: 500;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .sidebar__item:hover {
@@ -149,6 +150,7 @@
   color: var(--color-text-muted);
   cursor: pointer;
   flex: none;
+  transition: background 0.15s ease, color 0.15s ease;
 }
 
 .topbar__bell:hover {
@@ -189,6 +191,7 @@
   padding: 4px;
   border-radius: var(--radius-sm);
   cursor: pointer;
+  transition: background 0.15s ease;
 }
 
 .topbar__user-trigger:hover {
@@ -239,6 +242,27 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  /* Apparition en léger scale+fade — @keyframes popover-in partagée avec .context-menu et
+     .graph-popover (voir apps/web/src/styles/topology.css). */
+  transform-origin: top right;
+  animation: popover-in 0.15s ease-out;
+}
+
+@keyframes popover-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .profile-menu {
+    animation: none;
+  }
 }
 
 .profile-menu__header {
@@ -323,6 +347,26 @@
   padding: 22px;
   overflow-y: auto;
   min-width: 0;
+  /* Léger fondu/glissement au montage plutôt qu'une apparition brute au changement de vue
+     (App.tsx remonte un nouveau composant de page à chaque changement de currentView). */
+  animation: page-content-in 0.18s ease-out;
+}
+
+@keyframes page-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-content {
+    animation: none;
+  }
 }
 
 .inspector {

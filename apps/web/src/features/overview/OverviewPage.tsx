@@ -7,6 +7,7 @@ import TopologyGraph from "@/components/TopologyGraph";
 import Inspector from "@/components/Inspector";
 import KeyValueList from "@/components/KeyValueList";
 import StatusPill from "@/components/StatusPill";
+import Skeleton from "@/components/Skeleton";
 import { registryMeta } from "@/components/RegistryBadge";
 import type { TopologyNode } from "@/types";
 
@@ -47,6 +48,9 @@ export default function OverviewPage() {
     (state) => state.overview,
   );
   const [selected, setSelected] = useState<TopologyNode | null>(null);
+  // Premier chargement (aucune donnée encore reçue) : affiche des squelettes à la place du
+  // texte "Chargement…" — voir apps/web/src/components/Skeleton.tsx.
+  const isInitialLoading = status === "loading" && !stats;
 
   useEffect(() => {
     dispatch(loadOverview());
@@ -86,7 +90,6 @@ export default function OverviewPage() {
           )}
         </div>
 
-        {status === "loading" && !stats && <div className="empty-state">Chargement…</div>}
         {error && <div className="error-banner">{error}</div>}
 
         <TopologyGraph
@@ -98,29 +101,56 @@ export default function OverviewPage() {
         <div className="overview-grid" style={{ marginTop: 18 }}>
           <div className="panel">
             <div className="panel__title">Utilisation du cluster (historique en direct)</div>
-            <AreaChart
-              labels={utilisation.map((point) => point.label)}
-              series={[
-                { name: "CPU %", color: "var(--accent-end)", values: utilisation.map((p) => p.cpuPercent) },
-                { name: "Mémoire %", color: "var(--registry-harbor)", values: utilisation.map((p) => p.memPercent) },
-              ]}
-            />
+            {isInitialLoading ? (
+              <Skeleton height={180} />
+            ) : (
+              <AreaChart
+                labels={utilisation.map((point) => point.label)}
+                series={[
+                  { name: "CPU %", color: "var(--accent-end)", values: utilisation.map((p) => p.cpuPercent) },
+                  { name: "Mémoire %", color: "var(--registry-harbor)", values: utilisation.map((p) => p.memPercent) },
+                ]}
+              />
+            )}
           </div>
           <div className="panel">
             <div className="panel__title">Images par registry</div>
-            <Donut
-              segments={registrySegments.map((segment) => ({
-                label: segment.name,
-                value: segment.value,
-                color: registryMeta(segment.kind).color,
-              }))}
-            />
+            {isInitialLoading ? (
+              <div className="donut-wrap">
+                <Skeleton variant="circle" width={118} height={118} />
+                <div className="donut-legend">
+                  <Skeleton variant="text" height={12} width="70%" />
+                  <Skeleton variant="text" height={12} width="55%" />
+                  <Skeleton variant="text" height={12} width="60%" />
+                </div>
+              </div>
+            ) : (
+              <Donut
+                segments={registrySegments.map((segment) => ({
+                  label: segment.name,
+                  value: segment.value,
+                  color: registryMeta(segment.kind).color,
+                }))}
+              />
+            )}
           </div>
         </div>
 
         <div className="panel" style={{ marginTop: 14 }}>
           <div className="panel__title">Activité récente (commits GitOps)</div>
-          {recentCommits.length === 0 ? (
+          {isInitialLoading ? (
+            <div className="activity-list">
+              {Array.from({ length: 4 }).map((_, index) => (
+                <div className="activity-item" key={index}>
+                  <span className="activity-item__dot" style={{ background: "var(--color-surface-3)" }} />
+                  <div style={{ flex: 1 }}>
+                    <Skeleton variant="text" height={12} width="70%" />
+                    <Skeleton variant="text" height={10} width="40%" style={{ marginTop: 6 }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : recentCommits.length === 0 ? (
             <div className="empty-state">Aucune activité récente.</div>
           ) : (
             <div className="activity-list">

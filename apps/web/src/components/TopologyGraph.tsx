@@ -31,8 +31,13 @@ import { pushNotification } from "@/features/notifications/notificationsSlice";
 import { canOperate } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
+import Skeleton from "@/components/Skeleton";
 import { IconContainers, IconNetworks, IconVolumes } from "@/components/icons";
 import type { TopologyNode } from "@/types";
+
+/** Nombre de nœuds squelettes par colonne (volumes / conteneurs / networks) pendant le premier
+ * chargement — silhouette approximative, pas besoin de coller exactement au nombre réel. */
+const SKELETON_COLUMN_ROWS = [2, 3, 2];
 
 const REFRESH_INTERVAL_MS = 15_000;
 const COLUMN_X: Record<TopologyNode["kind"], number> = { volume: 0, container: 340, network: 680 };
@@ -584,7 +589,24 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   }
 
   if (status === "loading" && !data) {
-    return <div className="empty-state" style={{ height }}>Chargement de la topologie…</div>;
+    return (
+      <div className="topology-graph topology-graph--skeleton" style={{ height }}>
+        {SKELETON_COLUMN_ROWS.map((rowCount, columnIndex) => (
+          <div className="topology-skeleton-column" key={columnIndex}>
+            {Array.from({ length: rowCount }).map((_, rowIndex) => (
+              <div className="topology-skeleton-node" key={rowIndex}>
+                <div className="skeleton-card__row">
+                  <Skeleton variant="circle" width={22} height={22} />
+                  <Skeleton variant="text" height={12} width="60%" />
+                </div>
+                <Skeleton variant="text" height={10} width="80%" />
+                <Skeleton variant="text" height={8} width="100%" />
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    );
   }
   if (error && !data) {
     return <div className="error-banner">{error}</div>;

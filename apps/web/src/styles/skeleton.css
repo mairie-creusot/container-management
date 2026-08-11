@@ -1,0 +1,92 @@
+/* Squelettes de chargement — voir apps/web/src/components/Skeleton.tsx.
+   Base grise (--color-surface-2) + balayage (shimmer) qui traverse le bloc via un dégradé
+   (--color-surface-3), cohérent avec les tokens sombres du projet (aucune nouvelle couleur). */
+.skeleton {
+  display: inline-block;
+  position: relative;
+  overflow: hidden;
+  background: var(--color-surface-2);
+  border-radius: var(--radius-sm);
+}
+
+.skeleton--circle {
+  border-radius: 50%;
+}
+
+.skeleton--text {
+  border-radius: 4px;
+}
+
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--color-surface-3), transparent);
+  animation: skeleton-shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton::after {
+    animation: none;
+  }
+}
+
+/* Table en squelette (SkeletonTable) — même structure DOM que `.data-table` réelle, sans le
+   curseur/survol interactif d'une vraie ligne cliquable. */
+.data-table.is-skeleton tbody tr {
+  cursor: default;
+}
+
+.data-table.is-skeleton tbody tr:hover {
+  background: transparent;
+}
+
+/* Carte en squelette (SkeletonCard) — ligne icône/pastille et ligne de pied façon
+   `.registry-card`. */
+.skeleton-card {
+  cursor: default;
+}
+
+.skeleton-card__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* Silhouette du graphe de topologie pendant le premier chargement (voir TopologyGraph.tsx) —
+   reprend grossièrement les 3 colonnes (volumes / conteneurs / networks) et la forme d'un
+   `.topology-node` sans les données réelles. */
+.topology-graph--skeleton {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px;
+  overflow: hidden;
+}
+
+.topology-skeleton-column {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  flex: 1;
+  max-width: 260px;
+}
+
+.topology-skeleton-node {
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
