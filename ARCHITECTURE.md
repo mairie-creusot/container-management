@@ -17,8 +17,8 @@ Ajout validé : **Nutanix** comme troisième type d'environnement géré, au mê
 
 ## Stack
 
-- **apps/web** — TypeScript, React, Redux Toolkit, Vite.
-- **apps/api** — TypeScript, Node.js (Fastify), pilote Docker Engine/Swarm (dockerode), Kubernetes (@kubernetes/client-node) et Nutanix (API REST v3 de Prism Central, `node:https`), clients registries, moteur GitOps, auth LDAP (ldapjs) + session JWT.
+- **apps/web** — TypeScript, React, Redux Toolkit, Vite. Terminal interactif : [xterm.js](https://xtermjs.org/) (`@xterm/xterm` + `@xterm/addon-fit`) pour la console conteneur.
+- **apps/api** — TypeScript, Node.js (Fastify), pilote Docker Engine/Swarm (dockerode), Kubernetes (@kubernetes/client-node) et Nutanix (API REST v3 de Prism Central, `node:https`), clients registries, moteur GitOps, auth LDAP (ldapjs) + session JWT. WebSocket : `@fastify/websocket` (route console conteneur, voir « Console interactive dans un conteneur »).
 - **packages/wasm-core** — Rust compilé en WebAssembly (wasm-pack) : diff de manifestes YAML (état désiré vs état réel) et hachage de comparaison, exposé en TS via un wrapper généré. Utilisé côté `api` (calcul de dérive) et potentiellement côté `web` (aperçu diff instantané).
 - **deploy** — Dockerfiles, docker-compose de dev, manifestes Kubernetes/Swarm d'exemple, pipeline GitHub Actions → GHCR.
 
@@ -77,6 +77,15 @@ interface ContainerRef {
   state: "running" | "restarting" | "stopped";
   cpuPercent: number;
   memBytes: number;
+}
+
+// Explorateur de fichiers d'un volume (lecture seule) — voir chapitre dédié plus bas.
+interface VolumeFileEntry {
+  name: string;
+  path: string;                 // relatif à la racine du volume, POSIX, toujours préfixé par "/"
+  isDirectory: boolean;
+  sizeBytes: number;
+  modifiedAt: string;           // ISO 8601 ; chaîne vide si le mtime n'a pas pu être déterminé
 }
 
 interface ClusterNode {
@@ -288,6 +297,31 @@ Chaque conteneur géré par QUAI peut être exposé sous un sous-domaine interne
 
 **Service compose** (`deploy/compose/docker-compose.dev.yml`) : `caddy` (image officielle `caddy:2-alpine`), ports `80`/`443` publiés sur l'hôte pour un test réel, API d'admin `:2019` **non** publiée à l'hôte — joignable uniquement depuis les autres conteneurs du réseau `quai-dev` par son nom de service DNS docker-compose (`http://caddy:2019`, utilisé par `quai-dev-api-1`).
 
+## Explorateur de fichiers d'un volume (lecture seule)
+
+Parcours de l'arborescence d'un volume Docker réel, façon Portainer, déclenché par le bouton **« Parcourir »** de l'Inspector d'un volume (`apps/web/src/features/volumes/VolumesPage.tsx`), affiché dans un `Modal` (`apps/web/src/components/VolumeFilesModal.tsx`). **Lecture seule pour ce premier lot** : aucune route d'édition, de suppression ni d'upload de fichier — le bandeau « Lecture seule » est affiché explicitement dans la modale.
+
+**Mécanisme — conteneur helper éphémère, pas d'API Docker native pour lister un volume.** `apps/api/src/services/docker.ts#listVolumeFiles(volumeName, subPath)` lance un conteneur `alpine:3.19` (même image que les workspaces IaC de démo, tirée à la volée si absente localement) avec le volume monté **en lecture seule** sur `/volume` (`Binds: ["<volume>:/volume:ro"]`), `HostConfig.AutoRemove: true` **et** un `container.remove({ force: true })` défensif dans un `finally` (au cas où `create`/`start` échouerait avant que l'auto-remove ne s'applique) — aucun conteneur helper ne doit jamais rester après usage, vérifié par `docker ps -a` en conditions réelles pendant le développement.
+
+**Listing — `stat`, pas `ls --time-style=full-iso`.** BusyBox (l'`ls` embarqué dans `alpine`) ne supporte pas l'option GNU coreutils `--time-style=full-iso` (vérifié manuellement : `ls: unrecognized option`). Le conteneur helper exécute à la place un petit script shell fixe (jamais construit à partir d'une entrée utilisateur — voir sécurité ci-dessous) qui utilise `stat -c '%n\t%s\t%Y\t%F'` sur `"$dir"/* "$dir"/.[!.]*` (glob shell classique pour inclure les fichiers cachés sauf `.`/`..`), parsé côté Node en `VolumeFileEntry[]` (voir « Contrats de données »).
+
+**Sécurité du chemin (`?path=`) — défense en profondeur à trois niveaux :**
+1. Liste blanche de caractères (`/^[a-zA-Z0-9 _./-]*$/`) — aucun métacaractère shell/glob n'est autorisé dans `path`, ce qui garantit qu'il ne peut jamais altérer le glob shell exécuté dans le conteneur helper.
+2. Résolution POSIX (`path.posix.normalize(path.posix.join("/volume", path))`) qui collapse tout `..`, puis vérification stricte que le résultat reste sous `/volume` — un `path=../../etc` (ou toute variante) est rejeté en `400` avant même d'atteindre Docker.
+3. La valeur validée n'est **jamais interpolée dans une chaîne de commande shell** : elle est passée comme argument positionnel (`$1`) d'un script shell fixe (`/bin/sh -c "$SCRIPT" -- "$path"`), le pattern standard pour éviter l'injection shell.
+
+**Piège vérifié en conditions réelles.** Monter un volume Docker **nommé mais inexistant** via `HostConfig.Binds` le **crée silencieusement** (comportement du démon Docker, pas un bug QUAI) — sans garde-fou, lister un volume inexistant aurait pollué l'hôte d'un volume vide fantôme au lieu de répondre `404`. `listVolumeFiles` vérifie donc explicitement `docker.getVolume(name).inspect()` **avant** tout `createContainer`.
+
+**Route** : `GET /api/volumes/:name/files?path=<sous-chemin>` (`apps/api/src/routes/volumes.ts`) — `400` si `path` est invalide/tente une évasion ou si la cible n'est pas un dossier, `404` si le volume ou le sous-chemin n'existe pas, `502` pour toute autre erreur Docker. Ouvert à toute session authentifiée (comme `GET /api/volumes`), aucune restriction de rôle : lister un contenu en lecture seule n'est pas plus sensible que le reste des vues déjà accessibles à un `viewer`.
+
+## Console interactive dans un conteneur
+
+Terminal shell réel dans un conteneur **en cours d'exécution**, façon Portainer, déclenché par le bouton **« Console »** de l'Inspector d'un conteneur (visible uniquement si `state === "running"` **et** `canOperate(session)`), affiché dans un `Modal` avec un terminal [xterm.js](https://xtermjs.org/) (`@xterm/xterm` + `@xterm/addon-fit`, `apps/web/src/components/ContainerConsole.tsx`).
+
+**Mécanisme — `docker exec` réel via dockerode, relayé par WebSocket.** `apps/api/src/services/docker.ts#openContainerConsole(id)` vérifie d'abord que le conteneur est `running` (lève une erreur explicite sinon — jamais d'exec ouvert dans le vide), puis crée un exec réel (`container.exec({ Cmd: ["/bin/sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash || exec sh"], AttachStdin: true, AttachStdout: true, AttachStderr: true, Tty: true })`) et l'attache (`exec.start({ hijack: true, stdin: true, Tty: true })`). `apps/api/src/routes/console.ts` (route WebSocket `GET /api/console/:id`, plugin [`@fastify/websocket`](https://github.com/fastify/fastify-websocket) `^10` — la branche `11.x` exige Fastify 5, incompatible avec le Fastify `^4` de ce projet) relaie bidirectionnellement le flux dockerode hijacké et le socket du navigateur : `stream.on("data", ...)` → `socket.send`, `socket.on("message", ...)` → `stream.write`. Fermeture propre dans les deux sens (fermeture du WS → `stream.end()`, fin/erreur du flux dockerode → `socket.close()`) — pas de process qui traîne.
+
+**Sécurité — vérifiée réellement, pas supposée.** Le hook `preHandler` global (`apps/api/src/plugins/auth.ts`) s'applique bien à la requête HTTP d'upgrade WebSocket (confirmé par test manuel : une connexion sans cookie de session valide est rejetée en `401` **avant** l'upgrade, jamais acceptée puis fermée) — mais il n'exige le rôle `operator`/`admin` que pour les méthodes HTTP mutantes, et une requête d'upgrade WS est un `GET`. `routes/console.ts` ajoute donc un hook `preHandler` supplémentaire, local à ce plugin, qui exige explicitement `operator`/`admin` avant d'accepter l'upgrade (`403` sinon, testé avec une session `viewer` : rejet confirmé avant tout accès WebSocket). Un conteneur non `running` (ou introuvable) fait échouer l'ouverture de l'exec avec un message clair envoyé dans le terminal puis fermeture du WebSocket (code `4404`).
+
 ## Assistant de configuration au premier lancement
 
 Au tout premier démarrage (aucune configuration persistée), l'API répond "non configurée" et `apps/web` affiche un **assistant plein écran** à la place de l'écran de connexion — pas de sidebar, l'app n'est pas encore utilisable tant que l'assistant n'est pas terminé.
@@ -420,6 +454,18 @@ POST /api/containers/:id/rename          # { name } — équivalent `docker rena
 POST /api/networks/:id/connect           # { containerId } — équivalent `docker network connect`
 POST /api/networks/:id/disconnect        # { containerId } — équivalent `docker network disconnect`
 
+GET  /api/volumes/:name/files?path=<sous-chemin>  # VolumeFileEntry[] — explorateur en LECTURE SEULE (voir
+                                                   # « Explorateur de fichiers d'un volume » ci-dessus). 400 si
+                                                   # `path` est invalide/tente une évasion du volume ou cible un
+                                                   # fichier plutôt qu'un dossier, 404 si le volume ou le
+                                                   # sous-chemin n'existe pas. Ouvert à toute session authentifiée.
+
+GET  /api/console/:id   (WebSocket)      # terminal interactif réel dans un conteneur RUNNING (voir « Console
+                                          # interactive dans un conteneur » ci-dessus) — équivalent `docker exec
+                                          # -it <id> sh`. operator/admin uniquement (403 avant l'upgrade WS sinon,
+                                          # jamais un viewer) ; 404 (fermeture du WS, code 4404) si le conteneur
+                                          # n'existe pas ou n'est pas `running`.
+
 POST /api/images/:id/scan                # { scanner?: "grype" | "osv-scanner" } — "grype" par défaut si absent.
                                           # Lance le scanner réel demandé (services/scan.ts), retourne le ScanResult
                                           # à l'état "running" immédiatement (suivi par polling, voir ci-dessous)
@@ -442,7 +488,7 @@ GET    /api/reverse-proxy/status    # ReverseProxyStatus — Caddy joignable ou 
                                      # GET /api/scanners/status
 ```
 
-Toutes les routes (sauf `/api/auth/*` et `/api/setup/*`) exigent une session valide. Les routes `POST`/`PATCH`/`DELETE` exigent le rôle `operator` ou `admin`. Les routes `/api/setup/*` sont ouvertes tant que `completed=false` ; une fois `completed=true`, elles répondent `403` sauf pour un utilisateur `admin` authentifié (flux de reconfiguration). Exception plus stricte : les 3 routes mutantes de `/api/secrets/*` exigent explicitement `admin` (voir « Gestionnaire de secrets »), pas seulement `operator`.
+Toutes les routes (sauf `/api/auth/*` et `/api/setup/*`) exigent une session valide. Les routes `POST`/`PATCH`/`DELETE` exigent le rôle `operator` ou `admin`. Les routes `/api/setup/*` sont ouvertes tant que `completed=false` ; une fois `completed=true`, elles répondent `403` sauf pour un utilisateur `admin` authentifié (flux de reconfiguration). Exception plus stricte : les 3 routes mutantes de `/api/secrets/*` exigent explicitement `admin` (voir « Gestionnaire de secrets »), pas seulement `operator`. Autre exception, dans l'autre sens : `GET /api/console/:id` (upgrade WebSocket, donc une méthode `GET`) exige quand même explicitement `operator`/`admin` — ajouté par un hook `preHandler` propre à `routes/console.ts` car le hook global ne restreint par rôle que les méthodes mutantes (voir « Console interactive dans un conteneur »).
 
 ## Graphe de topologie (`apps/web/src/components/TopologyGraph.tsx`)
 

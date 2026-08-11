@@ -268,3 +268,23 @@ export function IconGlobe({ className }: IconProps) {
     className,
   );
 }
+
+/** Dossier — utilisé par l'explorateur de fichiers de volume (VolumeFilesModal.tsx). */
+export function IconFolder({ className }: IconProps) {
+  return base(
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />,
+    className,
+  );
+}
+
+/** Console/terminal — bouton "Console" dans l'Inspector d'un conteneur en cours d'exécution. */
+export function IconTerminal({ className }: IconProps) {
+  return base(
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M7 9l4 3-4 3" />
+      <path d="M13 15h4" />
+    </>,
+    className,
+  );
+}

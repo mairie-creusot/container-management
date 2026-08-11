@@ -19,7 +19,8 @@ import Gauge from "@/components/Gauge";
 import KeyValueList from "@/components/KeyValueList";
 import Pagination from "@/components/Pagination";
 import { SkeletonTable } from "@/components/Skeleton";
-import { IconPlay, IconRestart, IconStop, IconTrash } from "@/components/icons";
+import ContainerConsole from "@/components/ContainerConsole";
+import { IconPlay, IconRestart, IconStop, IconTerminal, IconTrash } from "@/components/icons";
 
 /** Une ligne du formulaire "Secrets" — id local (pas de valeur réelle stockée côté client, voir
  * plus bas) le temps de l'édition, avant conversion en SecretEnvEntry[] pour le payload. */
@@ -72,6 +73,7 @@ export default function ContainersPage() {
   const [network, setNetwork] = useState("");
   const [secretEnvRows, setSecretEnvRows] = useState<SecretEnvRow[]>([]);
   const nextSecretRowId = useRef(0);
+  const [consoleTarget, setConsoleTarget] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     dispatch(fetchContainers());
@@ -467,6 +469,18 @@ export default function ContainersPage() {
               </div>
             )}
 
+            {canOperate(session) && selected.state === "running" && (
+              <div className="inspector-actions">
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => setConsoleTarget({ id: selected.id, name: selected.name })}
+                >
+                  <IconTerminal /> Console
+                </button>
+              </div>
+            )}
+
             <Gauge label="CPU" percent={selected.cpuPercent} />
             <Gauge
               label={`Mémoire (${formatMem(selected.memBytes)})`}
@@ -536,6 +550,12 @@ export default function ContainersPage() {
           </>
         )}
       </Inspector>
+
+      <ContainerConsole
+        containerId={consoleTarget?.id ?? null}
+        containerName={consoleTarget?.name ?? ""}
+        onClose={() => setConsoleTarget(null)}
+      />
     </div>
   );
 }

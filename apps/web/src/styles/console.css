@@ -1,0 +1,162 @@
+/* Explorateur de fichiers d'un volume (lecture seule) — VolumeFilesModal.tsx */
+
+.volume-files-modal {
+  width: 640px;
+  max-width: 92vw;
+  padding: 20px 22px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.volume-files-modal__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.volume-files-modal__title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.volume-files-modal__subtitle {
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+
+.volume-files-modal__readonly-note {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+}
+
+.volume-files-modal__breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+}
+
+.volume-files-modal__breadcrumb button {
+  background: none;
+  border: none;
+  color: var(--accent-start, #3b6fef);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.volume-files-modal__breadcrumb button:hover {
+  background: var(--color-surface-2);
+}
+
+.volume-files-modal__breadcrumb button:disabled {
+  color: var(--color-text);
+  cursor: default;
+}
+
+.volume-files-modal__breadcrumb button:disabled:hover {
+  background: none;
+}
+
+.volume-files-modal__body {
+  max-height: 50vh;
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.volume-files-row {
+  cursor: default;
+}
+
+.volume-files-row--dir {
+  cursor: pointer;
+}
+
+.volume-files-row--dir:hover {
+  background: var(--color-surface-2);
+}
+
+.volume-files-row__name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Console interactive dans un conteneur — ContainerConsole.tsx (xterm.js) */
+
+.container-console-modal {
+  width: 860px;
+  max-width: 95vw;
+  height: 72vh;
+  padding: 16px 18px 18px;
+  display: flex;
+  flex-direction: column;
+}
+
+.container-console-modal__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.container-console-modal__title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.container-console-modal__subtitle {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+}
+
+.container-console-modal__status {
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.container-console-modal__status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-faint);
+}
+
+.container-console-modal__status--connected .container-console-modal__status-dot {
+  background: var(--color-success);
+}
+
+.container-console-modal__status--error .container-console-modal__status-dot {
+  background: var(--color-critical);
+}
+
+.container-console-modal__terminal {
+  flex: 1;
+  min-height: 0;
+  background: #0a0e14;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  overflow: hidden;
+}
+
+.container-console-modal__error {
+  margin-top: 10px;
+}

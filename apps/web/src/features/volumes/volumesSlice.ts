@@ -1,6 +1,6 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { apiDelete, apiGet, apiPost, ApiError } from "@/api/client";
-import type { DockerVolume } from "@/types";
+import type { DockerVolume, VolumeFileEntry } from "@/types";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
 
 interface VolumesState {
@@ -9,6 +9,14 @@ interface VolumesState {
   error: string | null;
   selectedName: string | null;
   mutatingName: string | null;
+  /** Explorateur de fichiers (lecture seule) — voir VolumeFilesModal.tsx. */
+  browser: {
+    volumeName: string | null;
+    path: string;
+    entries: VolumeFileEntry[];
+    status: "idle" | "loading" | "ready" | "error";
+    error: string | null;
+  };
 }
 
 const initialState: VolumesState = {
@@ -17,6 +25,13 @@ const initialState: VolumesState = {
   error: null,
   selectedName: null,
   mutatingName: null,
+  browser: {
+    volumeName: null,
+    path: "",
+    entries: [],
+    status: "idle",
+    error: null,
+  },
 };
 
 export const fetchVolumes = createAsyncThunk<DockerVolume[]>("volumes/fetch", async () =>
@@ -51,12 +66,36 @@ export const removeVolume = createAsyncThunk<string, string, { rejectValue: stri
   },
 );
 
+/** Explorateur de fichiers en lecture seule — voir GET /api/volumes/:name/files. */
+export const fetchVolumeFiles = createAsyncThunk<
+  { volumeName: string; path: string; entries: VolumeFileEntry[] },
+  { volumeName: string; path: string },
+  { rejectValue: string }
+>("volumes/fetchFiles", async ({ volumeName, path }, { rejectWithValue }) => {
+  try {
+    const entries = await apiGet<VolumeFileEntry[]>(
+      `/volumes/${encodeURIComponent(volumeName)}/files?path=${encodeURIComponent(path)}`,
+    );
+    return { volumeName, path, entries };
+  } catch (error) {
+    const message = error instanceof ApiError ? error.message : "Impossible de lister le contenu du volume.";
+    return rejectWithValue(message);
+  }
+});
+
 const volumesSlice = createSlice({
   name: "volumes",
   initialState,
   reducers: {
     selectVolume(state, action: PayloadAction<string | null>) {
       state.selectedName = action.payload;
+    },
+    /** Ouvre l'explorateur sur la racine d'un volume — voir VolumesPage.tsx#handleBrowse. */
+    openVolumeBrowser(state, action: PayloadAction<string>) {
+      state.browser = { volumeName: action.payload, path: "", entries: [], status: "idle", error: null };
+    },
+    closeVolumeBrowser(state) {
+      state.browser = { volumeName: null, path: "", entries: [], status: "idle", error: null };
     },
   },
   extraReducers: (builder) => {
@@ -86,9 +125,24 @@ const volumesSlice = createSlice({
       })
       .addCase(removeVolume.rejected, (state) => {
         state.mutatingName = null;
+      })
+      .addCase(fetchVolumeFiles.pending, (state) => {
+        state.browser.status = "loading";
+        state.browser.error = null;
+      })
+      .addCase(fetchVolumeFiles.fulfilled, (state, action) => {
+        // Ignore une réponse pour un volume/chemin qu'on a déjà quitté (navigation rapide).
+        if (state.browser.volumeName !== action.payload.volumeName) return;
+        state.browser.status = "ready";
+        state.browser.path = action.payload.path;
+        state.browser.entries = action.payload.entries;
+      })
+      .addCase(fetchVolumeFiles.rejected, (state, action) => {
+        state.browser.status = "error";
+        state.browser.error = action.payload ?? "Impossible de lister le contenu du volume.";
       });
   },
 });
 
-export const { selectVolume } = volumesSlice.actions;
+export const { selectVolume, openVolumeBrowser, closeVolumeBrowser } = volumesSlice.actions;
 export default volumesSlice.reducer;

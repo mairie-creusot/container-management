@@ -10,6 +10,8 @@
 
 import Docker from "dockerode";
 import type { ContainerInfo } from "dockerode";
+import path from "node:path";
+import { PassThrough } from "node:stream";
 import { demoStore } from "./demoData.js";
 import { getEffectiveDockerConfig } from "./setupStore.js";
 import { withTimeout } from "../utils/async.js";
@@ -23,6 +25,7 @@ import type {
   DockerNetwork,
   DockerVolume,
   Environment,
+  VolumeFileEntry,
 } from "../types.js";
 
 const PING_TIMEOUT_MS = 2000;
@@ -391,6 +394,46 @@ export async function getContainerNetworkAddress(id: string): Promise<string | n
   }
 }
 
+// ---------------------------------------------------------------------------------------
+// Console interactive dans un conteneur (équivalent `docker exec -it <id> sh`) — voir
+// routes/console.ts (WebSocket) qui relaie bidirectionnellement le flux retourné ici avec le
+// socket du navigateur. Un exec réel dockerode, jamais une réimplémentation de terminal.
+// ---------------------------------------------------------------------------------------
+
+/** Duplex stream hijacké dockerode + le handle Exec (pour resize/inspect) d'une session console. */
+export interface ContainerExecSession {
+  stream: NodeJS.ReadWriteStream;
+  exec: Docker.Exec;
+}
+
+/**
+ * Ouvre une session shell interactive dans un conteneur EN COURS D'EXÉCUTION (équivalent
+ * `docker exec -it <id> sh -c "command -v bash >/dev/null 2>&1 && exec bash || exec sh"`).
+ * Lève explicitement si le conteneur n'est pas `running` — vérifié ici en plus de tout
+ * contrôle fait par l'appelant (routes/console.ts), jamais supposé.
+ */
+export async function openContainerConsole(id: string): Promise<ContainerExecSession> {
+  const docker = await requireReachableClient();
+  const container = docker.getContainer(id);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const info: any = await container.inspect();
+  if (info?.State?.Status !== "running") {
+    throw new Error(`Container "${id}" is not running (state: ${info?.State?.Status ?? "unknown"})`);
+  }
+
+  const exec = await container.exec({
+    Cmd: ["/bin/sh", "-c", "command -v bash >/dev/null 2>&1 && exec bash || exec sh"],
+    AttachStdin: true,
+    AttachStdout: true,
+    AttachStderr: true,
+    Tty: true,
+  });
+
+  const stream: NodeJS.ReadWriteStream = await exec.start({ hijack: true, stdin: true, Tty: true });
+  return { stream, exec };
+}
+
 /** Détail complet d'un conteneur (équivalent `docker inspect`) — chargé à la demande par l'Inspector. */
 export async function inspectDockerContainer(id: string): Promise<ContainerDetail | null> {
   const docker = await getClient();
@@ -498,6 +541,198 @@ export async function createVolume(name: string): Promise<DockerVolume> {
 export async function removeVolume(name: string): Promise<void> {
   const docker = await requireReachableClient();
   await docker.getVolume(name).remove();
+}
+
+// ---------------------------------------------------------------------------------------
+// Explorateur de fichiers d'un volume (lecture seule) — pas d'API Docker native pour "lister
+// le contenu d'un volume" : on lance un conteneur alpine éphémère avec le volume monté en
+// lecture seule sur /volume, on exécute un listing dedans, on parse la sortie, puis le
+// conteneur est détruit (HostConfig.AutoRemove, + un remove({force}) défensif en `finally`
+// au cas où il n'aurait jamais démarré). Voir routes/volumes.ts#GET /api/volumes/:name/files.
+// ---------------------------------------------------------------------------------------
+
+/** Même image que celle déjà utilisée par les workspaces IaC de démo (services/iac/workspaces.ts). */
+const VOLUME_HELPER_IMAGE = "alpine:3.19";
+const VOLUME_MOUNT_PATH = "/volume";
+
+/**
+ * Valide et normalise le sous-chemin demandé par le client. Défense en profondeur à deux
+ * niveaux : (1) liste blanche de caractères — aucun métacaractère shell/glob n'est autorisé
+ * (le script exécuté dans le conteneur helper interpole ce chemin dans un glob shell, voir
+ * plus bas — la liste blanche garantit qu'il ne peut jamais en sortir) ; (2) résolution
+ * POSIX (path.posix.normalize) qui collapse tout ".." puis vérification stricte que le
+ * résultat reste sous /volume. Un `path=../../etc` (ou toute variante avec des `..`) est donc
+ * rejeté avant même d'atteindre le conteneur helper.
+ */
+function resolveVolumeSubPath(subPath: string): string {
+  const raw = subPath ?? "";
+  if (!/^[a-zA-Z0-9 _./-]*$/.test(raw)) {
+    throw new Error("Invalid path: contains disallowed characters");
+  }
+  const resolved = path.posix.normalize(path.posix.join(VOLUME_MOUNT_PATH, raw));
+  if (resolved !== VOLUME_MOUNT_PATH && !resolved.startsWith(`${VOLUME_MOUNT_PATH}/`)) {
+    throw new Error("Invalid path: escapes the mounted volume");
+  }
+  return resolved;
+}
+
+/** Nom de volume Docker valide (mêmes règles que celles appliquées par le démon à la création). */
+function assertValidVolumeName(name: string): void {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
+    throw new Error("Invalid volume name");
+  }
+}
+
+async function ensureImagePresent(docker: Docker, reference: string): Promise<void> {
+  try {
+    await docker.getImage(reference).inspect();
+    return;
+  } catch {
+    // pas présente localement : on la tire à la volée, comme documenté.
+  }
+  await new Promise<void>((resolve, reject) => {
+    docker.pull(reference, (err: Error | null, stream?: NodeJS.ReadableStream) => {
+      if (err || !stream) {
+        reject(err ?? new Error("docker.pull returned no stream"));
+        return;
+      }
+      docker.modem.followProgress(stream, (progressErr: Error | null) => {
+        if (progressErr) reject(progressErr);
+        else resolve();
+      });
+    });
+  });
+}
+
+/**
+ * Script exécuté dans le conteneur helper : `$1` (lié plus bas via l'argv, jamais interpolé
+ * dans la chaîne du script) est le chemin absolu à lister. `stat` (busybox, présent dans
+ * alpine) plutôt que `ls --time-style=full-iso` : busybox `ls` ne supporte pas cette option
+ * GNU coreutils (vérifié manuellement : `ls: unrecognized option: time-style=full-iso`).
+ * Sortie : une ligne par entrée, `nom\ttaille\tmtime-epoch\ttype` (tabulation réelle).
+ */
+const LIST_DIR_SCRIPT = `dir="$1"
+if [ ! -e "$dir" ]; then
+  echo ENOENT >&2
+  exit 2
+fi
+if [ ! -d "$dir" ]; then
+  echo ENOTDIR >&2
+  exit 3
+fi
+stat -c '%n\t%s\t%Y\t%F' "$dir"/* "$dir"/.[!.]* 2>/dev/null
+exit 0
+`;
+
+function parseFileType(statType: string): boolean {
+  return statType.trim() === "directory";
+}
+
+/**
+ * Liste le contenu d'un sous-chemin d'un volume Docker (lecture seule), via un conteneur
+ * alpine éphémère (voir en-tête de section). `subPath` est validé/normalisé par
+ * resolveVolumeSubPath avant tout usage.
+ */
+export async function listVolumeFiles(volumeName: string, subPath: string): Promise<VolumeFileEntry[]> {
+  assertValidVolumeName(volumeName);
+  const docker = await requireReachableClient();
+  const targetPath = resolveVolumeSubPath(subPath);
+
+  // Vérifié explicitement AVANT de monter quoi que ce soit : `HostConfig.Binds` sur un volume
+  // nommé qui n'existe pas encore fait que Docker le CRÉE silencieusement à la volée (vérifié
+  // manuellement) — sans ce garde-fou, lister un volume inexistant polluerait l'hôte d'un
+  // volume vide fantôme au lieu de répondre 404.
+  try {
+    await docker.getVolume(volumeName).inspect();
+  } catch {
+    throw new Error(`Volume "${volumeName}" not found`);
+  }
+
+  await ensureImagePresent(docker, VOLUME_HELPER_IMAGE);
+
+  const container = await docker.createContainer({
+    Image: VOLUME_HELPER_IMAGE,
+    Cmd: ["/bin/sh", "-c", LIST_DIR_SCRIPT, "quai-volume-ls", targetPath],
+    Tty: false,
+    HostConfig: {
+      Binds: [`${volumeName}:${VOLUME_MOUNT_PATH}:ro`],
+      AutoRemove: true,
+      NetworkMode: "none",
+    },
+  });
+
+  try {
+    const attachStream = await container.attach({ stream: true, stdout: true, stderr: true });
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    const stdoutSink = new PassThrough();
+    const stderrSink = new PassThrough();
+    stdoutSink.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+    stderrSink.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+    docker.modem.demuxStream(attachStream, stdoutSink, stderrSink);
+    // Enregistré AVANT container.start() pour éviter toute course avec un flux qui se
+    // terminerait avant qu'on ait eu la chance de poser ce listener (le conteneur tourne pour
+    // une fraction de seconde — `ls`/`stat` sur un petit dossier).
+    const streamEnded = new Promise<void>((resolve) => {
+      attachStream.once("end", () => resolve());
+    });
+
+    await container.start();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const waitResult: any = await container.wait();
+    await streamEnded;
+
+    const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+    const stderr = Buffer.concat(stderrChunks).toString("utf8");
+    const statusCode: number = waitResult?.StatusCode ?? 0;
+
+    if (statusCode === 2) {
+      throw new Error(`Path not found in volume "${volumeName}"`);
+    }
+    if (statusCode === 3) {
+      throw new Error(`Path is not a directory in volume "${volumeName}"`);
+    }
+    if (statusCode !== 0) {
+      throw new Error(stderr.trim() || `Listing failed with exit code ${statusCode}`);
+    }
+
+    const entries: VolumeFileEntry[] = stdout
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .filter((line) => line.length > 0)
+      .map((line): VolumeFileEntry | null => {
+        const parts = line.split("\t");
+        if (parts.length !== 4) return null;
+        const [fullName, sizeStr, mtimeStr, fileType] = parts as [string, string, string, string];
+        const relativePath = fullName.slice(VOLUME_MOUNT_PATH.length) || "/";
+        const name = relativePath.split("/").filter(Boolean).pop() ?? relativePath;
+        const mtimeEpochSeconds = Number(mtimeStr);
+        return {
+          name,
+          path: relativePath,
+          isDirectory: parseFileType(fileType),
+          sizeBytes: Number(sizeStr) || 0,
+          modifiedAt: Number.isFinite(mtimeEpochSeconds) ? new Date(mtimeEpochSeconds * 1000).toISOString() : "",
+        };
+      })
+      .filter((entry): entry is VolumeFileEntry => entry !== null);
+
+    entries.sort((a, b) => {
+      if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    return entries;
+  } finally {
+    // AutoRemove:true supprime déjà le conteneur en temps normal ; ce remove défensif ne fait
+    // rien de plus si c'est déjà le cas (404 avalé), mais garantit qu'aucun helper ne traîne
+    // si create/start a échoué avant que le cycle de vie normal ne s'exécute.
+    try {
+      await container.remove({ force: true });
+    } catch {
+      // déjà supprimé (AutoRemove) ou jamais démarré : rien à faire.
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------------------

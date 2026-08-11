@@ -1,11 +1,12 @@
 /**
- * GET    /api/volumes       — volumes Docker réels de l'hôte (équivalent `docker volume ls`).
- * POST   /api/volumes       — crée un volume nommé (équivalent `docker volume create`).
- * DELETE /api/volumes/:name — supprime un volume (échoue si utilisé par un conteneur, sauf ?force=true).
+ * GET    /api/volumes             — volumes Docker réels de l'hôte (équivalent `docker volume ls`).
+ * POST   /api/volumes             — crée un volume nommé (équivalent `docker volume create`).
+ * DELETE /api/volumes/:name       — supprime un volume (échoue si utilisé par un conteneur, sauf ?force=true).
+ * GET    /api/volumes/:name/files — explorateur de fichiers en lecture seule (voir services/docker.ts#listVolumeFiles).
  */
 
 import type { FastifyInstance } from "fastify";
-import { createVolume, listVolumes, removeVolume } from "../services/docker.js";
+import { createVolume, listVolumeFiles, listVolumes, removeVolume } from "../services/docker.js";
 
 interface CreateVolumeBody {
   name?: string;
@@ -40,4 +41,23 @@ export default async function volumesRoutes(fastify: FastifyInstance): Promise<v
       return reply.code(inUse ? 409 : 502).send({ error: message });
     }
   });
+
+  // Explorateur de fichiers d'un volume — LECTURE SEULE (voir ARCHITECTURE.md). `path` est
+  // validé/normalisé côté service (services/docker.ts#resolveVolumeSubPath) : toute tentative
+  // de sortir du volume monté (ex: "../../etc") est rejetée en 400 avant tout appel Docker.
+  fastify.get<{ Params: { name: string }; Querystring: { path?: string } }>(
+    "/api/volumes/:name/files",
+    async (request, reply) => {
+      try {
+        const entries = await listVolumeFiles(request.params.name, request.query.path ?? "");
+        return reply.send(entries);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const isBadRequest = /Invalid path|Invalid volume name|Path is not a directory/.test(message);
+        const isNotFound = /Path not found|Volume ".*" not found/.test(message);
+        const status = isBadRequest ? 400 : isNotFound ? 404 : 502;
+        return reply.code(status).send({ error: message });
+      }
+    },
+  );
 }

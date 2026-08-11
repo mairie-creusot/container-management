@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
-import { createVolume, fetchVolumes, removeVolume, selectVolume } from "@/features/volumes/volumesSlice";
+import { createVolume, fetchVolumes, openVolumeBrowser, removeVolume, selectVolume } from "@/features/volumes/volumesSlice";
 import { canOperate } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import { usePagination } from "@/hooks/usePagination";
@@ -8,6 +8,7 @@ import Inspector from "@/components/Inspector";
 import KeyValueList from "@/components/KeyValueList";
 import Pagination from "@/components/Pagination";
 import { SkeletonTable } from "@/components/Skeleton";
+import VolumeFilesModal from "@/components/VolumeFilesModal";
 
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
@@ -163,20 +164,33 @@ export default function VolumesPage() {
 
       <Inspector title={selected?.name} subtitle={selected?.mountpoint} onClose={() => dispatch(selectVolume(null))}>
         {selected && (
-          <KeyValueList
-            rows={[
-              { key: "Driver", value: selected.driver },
-              { key: "Scope", value: selected.scope },
-              { key: "Point de montage", value: selected.mountpoint },
-              { key: "Créé le", value: formatDate(selected.createdAt) },
-              { key: "Utilisé par", value: `${selected.inUseBy} conteneur(s)` },
-              ...(Object.keys(selected.labels).length > 0
-                ? Object.entries(selected.labels).map(([k, v]) => ({ key: k, value: v }))
-                : []),
-            ]}
-          />
+          <>
+            <div className="inspector-actions">
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => dispatch(openVolumeBrowser(selected.name))}
+              >
+                Parcourir
+              </button>
+            </div>
+            <KeyValueList
+              rows={[
+                { key: "Driver", value: selected.driver },
+                { key: "Scope", value: selected.scope },
+                { key: "Point de montage", value: selected.mountpoint },
+                { key: "Créé le", value: formatDate(selected.createdAt) },
+                { key: "Utilisé par", value: `${selected.inUseBy} conteneur(s)` },
+                ...(Object.keys(selected.labels).length > 0
+                  ? Object.entries(selected.labels).map(([k, v]) => ({ key: k, value: v }))
+                  : []),
+              ]}
+            />
+          </>
         )}
       </Inspector>
+
+      <VolumeFilesModal />
     </div>
   );
 }

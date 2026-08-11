@@ -7,6 +7,17 @@ const BASE_URL: string =
   (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, "") ??
   "http://localhost:3000/api";
 
+/**
+ * Base URL WebSocket dérivée de BASE_URL (même hôte/port que l'API HTTP, schéma ws(s)://
+ * à la place de http(s)://) — utilisée par la console conteneur (ContainerConsole.tsx).
+ * Le cookie de session est envoyé automatiquement par le navigateur avec la requête d'upgrade
+ * WebSocket (même domaine, `credentials: "include"` n'existe pas pour l'API WebSocket — le
+ * cookie httpOnly part de toute façon avec toute requête vers ce host).
+ */
+export function wsUrl(path: string): string {
+  return `${BASE_URL.replace(/^http/, "ws")}${path}`;
+}
+
 export class ApiError extends Error {
   status: number;
 
