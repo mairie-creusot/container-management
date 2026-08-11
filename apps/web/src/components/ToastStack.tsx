@@ -21,7 +21,14 @@ export default function ToastStack() {
   const [seenIds] = useState(() => new Set<string>());
 
   useEffect(() => {
-    const fresh = items.filter((n) => !seenIds.has(n.id)).slice(0, 4);
+    // !n.read exclut les notifications système déjà connues au chargement (fetchSystemNotifications
+    // recharge en une fois jusqu'à 300 événements historiques persistés côté API, voir
+    // notificationsSlice.ts) : sans ce filtre, toute notification déjà lue (curseur "tout lu"
+    // serveur) ressortirait quand même en toast à chaque connexion/rechargement de page, ce qui
+    // irait à l'encontre du but (notifications utiles, pas du bruit). Les notifications purement
+    // client (pushNotification/errorNotificationMiddleware) naissent toujours avec read: false,
+    // donc ce filtre ne change rien à leur comportement existant.
+    const fresh = items.filter((n) => !seenIds.has(n.id) && !n.read).slice(0, 4);
     if (fresh.length === 0) return;
     for (const n of fresh) seenIds.add(n.id);
     setVisibleIds((prev) => [...fresh.map((n) => n.id), ...prev]);
