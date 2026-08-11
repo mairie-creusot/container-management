@@ -256,27 +256,33 @@ p {
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
   position: relative;
-  /* Fond glacé (glassmorphism) : le graphe derrière est majoritairement sombre lui aussi, donc
-     une transparence trop légère (78% testé d'abord) reste visuellement indiscernable d'un fond
-     plat — poussé nettement plus translucide + flou plus large pour que l'effet se voie
-     vraiment, avec un léger liseré clair en haut pour lire "vitre" plutôt que "carte plate". Les
-     variantes --error/--success/--info ci-dessous ne redéfinissent que la teinte, jamais le
-     flou (backdrop-filter n'est pas surchargé, donc partagé par les trois). */
-  background: color-mix(in srgb, var(--color-surface-1) 55%, transparent);
+  /* Fond glacé (glassmorphism) — capture d'écran réelle à l'appui (Playwright, cookie de session
+     miné + /api/topology forcé en échec pour déclencher un toast) : le graphe derrière est
+     presque uniformément sombre, donc le flou seul (blur+transparence) reste indiscernable d'un
+     fond plat, quel que soit le pourcentage d'opacité choisi — il n'y a simplement pas assez de
+     détail derrière pour qu'un flou "révèle" quelque chose. Un effet de vitre qui ne dépend PAS
+     du contenu en arrière-plan est nécessaire : un reflet diagonal (background-image, sheen) +
+     un halo lumineux teinté (box-shadow coloré, voir les variantes ci-dessous) donnent l'identité
+     "verre" même sur fond uniforme. Le blur reste utile quand il y a du contenu derrière (graphe
+     dense), mais n'est plus la SEULE preuve visuelle de l'effet. */
+  background-color: color-mix(in srgb, var(--color-surface-1) 55%, transparent);
+  background-image: linear-gradient(135deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0) 55%);
   backdrop-filter: blur(22px) saturate(1.6);
   -webkit-backdrop-filter: blur(22px) saturate(1.6);
   box-shadow:
     0 12px 32px rgba(0, 0, 0, 0.45),
-    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
   font-size: 13px;
   animation: toast-in 0.18s ease-out;
 }
 
 /* Firefox ne supporte pas backdrop-filter par défaut (flag utilisateur) : sans lui, 55%
-   d'opacité serait trop transparent pour rester lisible — on retombe sur un fond plus couvrant. */
+   d'opacité serait trop transparent pour rester lisible — on retombe sur un fond plus couvrant
+   (le reflet + le halo coloré des variantes restent actifs, l'identité "vitre" ne repose donc
+   plus uniquement sur backdrop-filter ici). */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .toast {
-    background: color-mix(in srgb, var(--color-surface-1) 92%, transparent);
+    background-color: color-mix(in srgb, var(--color-surface-1) 92%, transparent);
   }
 }
 
@@ -326,22 +332,37 @@ p {
    ne produit aucune transparence, quel que soit le ratio — d'où des toasts error/success restés
    opaques malgré le blur ajouté sur .toast. Un second color-mix() imbriqué ramène le résultat
    déjà teinté vers `transparent`, au même niveau (55%) que .toast/.toast--info ci-dessous. */
+/* Halo lumineux teinté en plus de l'ombre de base — c'est LUI, pas le blur, qui rend l'effet
+   "vitre" repérable même sur un fond uniforme (voir le commentaire de tête sur .toast). Chaque
+   variante doit redéclarer box-shadow en entier (les couches ne fusionnent pas entre règles). */
 .toast--error {
   border-color: var(--color-critical);
-  background: color-mix(in srgb, color-mix(in srgb, var(--color-critical) 22%, var(--color-surface-1) 78%) 55%, transparent);
+  background-color: color-mix(in srgb, color-mix(in srgb, var(--color-critical) 22%, var(--color-surface-1) 78%) 55%, transparent);
   color: var(--color-critical);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.45),
+    0 0 26px color-mix(in srgb, var(--color-critical) 35%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 .toast--success {
   border-color: var(--color-success);
-  background: color-mix(in srgb, color-mix(in srgb, var(--color-success) 22%, var(--color-surface-1) 78%) 55%, transparent);
+  background-color: color-mix(in srgb, color-mix(in srgb, var(--color-success) 22%, var(--color-surface-1) 78%) 55%, transparent);
   color: var(--color-success);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.45),
+    0 0 26px color-mix(in srgb, var(--color-success) 35%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 .toast--info {
   border-color: var(--color-border);
-  background: color-mix(in srgb, var(--color-surface-2) 55%, transparent);
+  background-color: color-mix(in srgb, var(--color-surface-2) 55%, transparent);
   color: var(--color-text);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.45),
+    0 0 22px color-mix(in srgb, var(--accent-end) 22%, transparent),
+    inset 0 1px 0 rgba(255, 255, 255, 0.1);
 }
 
 .toast__message {

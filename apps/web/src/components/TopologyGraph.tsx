@@ -606,7 +606,16 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     );
   }
   if (error && !data) {
-    return <div className="error-banner">{error}</div>;
+    // Même traitement que .empty-state juste en dessous (largeur/hauteur pleines, centré) —
+    // sans ça .error-banner (block, largeur au contenu) se retrouvait étiré sur toute la hauteur
+    // du flex du parent .workspace mais étroit, une colonne rouge disgracieuse plutôt qu'un
+    // message centré. Trouvé en testant réellement l'échec de GET /api/topology (capture d'écran
+    // Playwright), pas une supposition.
+    return (
+      <div className="empty-state" style={{ height }}>
+        <div className="error-banner">{error}</div>
+      </div>
+    );
   }
   if (data && data.nodes.length === 0) {
     return (
