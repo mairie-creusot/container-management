@@ -255,7 +255,13 @@ p {
   padding: 12px 14px;
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
-  background: var(--color-surface-1);
+  /* Fond glacé (glassmorphism) : assez opaque pour rester lisible par-dessus le graphe qui
+     défile en arrière-plan, assez translucide pour qu'on le devine encore au travers. Les
+     variantes --error/--success/--info ci-dessous ne redéfinissent que la teinte, jamais le
+     flou (backdrop-filter n'est pas surchargé, donc partagé par les trois). */
+  background: color-mix(in srgb, var(--color-surface-1) 78%, transparent);
+  backdrop-filter: blur(14px) saturate(1.4);
+  -webkit-backdrop-filter: blur(14px) saturate(1.4);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
   font-size: 13px;
   animation: toast-in 0.18s ease-out;
@@ -299,21 +305,25 @@ p {
   }
 }
 
+/* Teintes plus marquées que --color-critical-bg/--color-success-bg (0.14 de base, pensées pour
+   un fond déjà opaque comme les status-pills) : avec le flou du glassmorphisme, une teinte trop
+   faible finit délavée — color-mix() avec la couleur pleine reste cohérent avec le reste du
+   thème sans dupliquer de valeur hexa. */
 .toast--error {
   border-color: var(--color-critical);
-  background: var(--color-critical-bg);
+  background: color-mix(in srgb, var(--color-critical) 22%, var(--color-surface-1) 78%);
   color: var(--color-critical);
 }
 
 .toast--success {
   border-color: var(--color-success);
-  background: var(--color-success-bg);
+  background: color-mix(in srgb, var(--color-success) 22%, var(--color-surface-1) 78%);
   color: var(--color-success);
 }
 
 .toast--info {
   border-color: var(--color-border);
-  background: var(--color-surface-2);
+  background: color-mix(in srgb, var(--color-surface-2) 78%, transparent);
   color: var(--color-text);
 }
 

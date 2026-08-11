@@ -816,6 +816,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
             tout faire ; remplacé plus tard par des boutons en overlay sur mesure. */}
         <Background gap={20} size={1.6} color="var(--color-text-faint)" />
         <MiniMap
+          position="top-left"
           nodeColor={(n) => MINIMAP_NODE_COLOR[(n.data as unknown as TopologyNode).kind]}
           nodeStrokeWidth={0}
           nodeBorderRadius={4}
