@@ -33,6 +33,14 @@
   fill: currentColor;
 }
 
+/* MiniMap — même traitement visuel que .react-flow__controls (surface + bordure du thème). */
+.topology-graph .react-flow__minimap {
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
 .topology-node {
   width: 260px;
   padding: 12px 14px;
@@ -42,10 +50,14 @@
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
   cursor: pointer;
   position: relative;
+  transition: width 0.15s ease, padding 0.15s ease;
 }
 
 /* Poignées de connexion (glisser-connecter conteneur <-> network/volume) — visibles et
-   légèrement agrandies au survol pour rester faciles à attraper malgré leur petite taille. */
+   légèrement agrandies au survol pour rester faciles à attraper malgré leur petite taille.
+   Connexions par capacité : chaque port a une couleur idle propre à sa capacité (pas seulement
+   au survol) pour rester repérable au premier coup d'œil, façon ports colorés de Railway — mêmes
+   variables que celles déjà utilisées pour l'icône du nœud correspondant (pas de couleur ajoutée). */
 .topology-handle.react-flow__handle {
   width: 9px;
   height: 9px;
@@ -56,8 +68,29 @@
 
 .topology-handle.react-flow__handle:hover {
   transform: scale(1.35);
+}
+
+.topology-handle--network.react-flow__handle {
   border-color: var(--accent-end);
+}
+
+.topology-handle--network.react-flow__handle:hover {
   background: var(--accent-end);
+}
+
+.topology-handle--volume.react-flow__handle {
+  border-color: var(--color-warning);
+}
+
+.topology-handle--volume.react-flow__handle:hover {
+  background: var(--color-warning);
+}
+
+/* Ports non interactifs (ex : montage de volume — Docker ne permet pas de le modifier sans
+   recréer le conteneur) : bordure en tirets pour signaler visuellement "informatif seulement",
+   avant même la tentative de glisser-connecter qui affiche le message. */
+.topology-handle--readonly.react-flow__handle {
+  border-style: dashed;
 }
 
 .topology-node.is-selected {
@@ -224,6 +257,50 @@
   color: var(--color-text-faint);
 }
 
+/* Zoom sémantique : sous le seuil de zoom (TopologyGraph.tsx#ZOOM_DETAIL_THRESHOLD), un nœud se
+   réduit à son icône + son point de statut — libellé/sous-titre/badges/métriques s'effacent en
+   fondu plutôt que de disparaître brutalement (transition douce à 0.15s, cohérente avec le reste
+   du site — voir .context-menu / .graph-popover ci-dessous). */
+.topology-node__label,
+.topology-node__subtitle,
+.topology-node__badges,
+.topology-node__metrics,
+.topology-node__status-label {
+  transition: opacity 0.15s ease, max-height 0.15s ease, margin 0.15s ease;
+  max-height: 60px;
+  overflow: hidden;
+}
+
+.topology-node--compact {
+  width: 64px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.topology-node--compact .topology-node__head {
+  flex-direction: column;
+  margin-bottom: 0;
+  gap: 0;
+}
+
+.topology-node--compact .topology-node__status {
+  gap: 0;
+}
+
+.topology-node--compact .topology-node__label,
+.topology-node--compact .topology-node__subtitle,
+.topology-node--compact .topology-node__badges,
+.topology-node--compact .topology-node__metrics,
+.topology-node--compact .topology-node__status-label {
+  opacity: 0;
+  max-height: 0;
+  margin: 0;
+  pointer-events: none;
+}
+
 /* Menu contextuel (clic droit sur le canevas, un nœud ou une arête) — même pattern visuel que
    .profile-menu (Topbar.tsx), mais positionné librement au point de clic. */
 .context-menu {
@@ -291,6 +368,15 @@
   .context-menu,
   .graph-popover {
     animation: none;
+  }
+
+  .topology-node,
+  .topology-node__label,
+  .topology-node__subtitle,
+  .topology-node__badges,
+  .topology-node__metrics,
+  .topology-node__status-label {
+    transition: none;
   }
 }
 

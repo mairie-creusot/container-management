@@ -3,12 +3,16 @@ import {
   ReactFlow,
   Background,
   Controls,
+  MiniMap,
   MarkerType,
   Handle,
   Position,
+  useStore,
+  applyNodeChanges,
   type Node,
   type Edge,
   type NodeProps,
+  type NodeChange,
   type Connection,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -61,6 +65,106 @@ function idWithoutPrefix(id: string): string {
   return id.slice(id.indexOf(":") + 1);
 }
 
+/**
+ * Connexions par capacité, ports typés (façon Railway) — chaque type de nœud déclare la liste des
+ * "ports" qu'il expose. Un port a une capacité (ce qu'il peut relier) et un type de Handle React
+ * Flow (source/target) qui fixe son côté du nœud. Pour ajouter un futur 4e type de nœud (ex :
+ * registry), il suffit de lui déclarer sa propre entrée dans NODE_CAPABILITIES + une entrée dans
+ * CAPABILITY_DEFS pour toute nouvelle capacité qu'il introduit — classifyConnection/
+ * isValidConnection/handleConnect ci-dessous restent inchangés, ils ne lisent que ces deux tables.
+ */
+type CapabilityId = "network" | "attach" | "volume-mount" | "provide";
+
+interface PortSpec {
+  /** Id du Handle React Flow — unique au sein d'un même type de nœud. */
+  id: string;
+  capability: CapabilityId;
+  handleType: "source" | "target";
+  position: Position;
+  /** Tooltip du Handle. */
+  label: string;
+  /** Suffixe de classe .topology-handle--<token> — couleur reprise de celle de l'icône du même
+   * type de nœud (variables.css), pas de couleur arbitraire ajoutée. */
+  colorToken: "network" | "volume";
+}
+
+const NODE_CAPABILITIES: Record<TopologyNode["kind"], PortSpec[]> = {
+  container: [
+    { id: "network", capability: "network", handleType: "source", position: Position.Right, label: "Network", colorToken: "network" },
+    {
+      id: "volume-mount",
+      capability: "volume-mount",
+      handleType: "target",
+      position: Position.Left,
+      label: "Volume (lecture seule)",
+      colorToken: "volume",
+    },
+  ],
+  volume: [
+    { id: "provide", capability: "provide", handleType: "source", position: Position.Right, label: "Fournit un volume", colorToken: "volume" },
+  ],
+  network: [
+    { id: "attach", capability: "attach", handleType: "target", position: Position.Left, label: "Attache un conteneur", colorToken: "network" },
+  ],
+};
+
+interface CapabilityDef {
+  /** Capacité compatible attendue à l'autre bout de la connexion. */
+  linksTo: CapabilityId;
+  /** true = action réelle déclenchée au drop (docker network connect) ; false = message d'info. */
+  interactive: boolean;
+  infoMessage?: string;
+}
+
+const VOLUME_MOUNT_INFO =
+  "Impossible d'attacher un volume à un conteneur existant : Docker ne permet pas de modifier les montages sans recréer le conteneur.";
+
+const CAPABILITY_DEFS: Record<CapabilityId, CapabilityDef> = {
+  network: { linksTo: "attach", interactive: true },
+  attach: { linksTo: "network", interactive: true },
+  "volume-mount": { linksTo: "provide", interactive: false, infoMessage: VOLUME_MOUNT_INFO },
+  provide: { linksTo: "volume-mount", interactive: false, infoMessage: VOLUME_MOUNT_INFO },
+};
+
+/** Zoom sémantique : sous ce niveau, un nœud n'affiche plus que son icône et son point de statut. */
+const ZOOM_DETAIL_THRESHOLD = 0.6;
+/** state.transform du store React Flow est [x, y, zoom] ; ne resélectionne que le zoom pour éviter
+ * un re-render de chaque nœud à chaque pan. */
+const zoomSelector = (s: { transform: [number, number, number] }) => s.transform[2];
+
+/** Positions de nœuds déplacés à la main — persistées par id, indépendamment des données
+ * d'infrastructure (préférence d'affichage locale à l'utilisateur, pas une donnée Docker). */
+const POSITIONS_STORAGE_KEY = "quai:topology:positions";
+
+type NodePositions = Record<string, { x: number; y: number }>;
+
+function loadStoredPositions(): NodePositions {
+  try {
+    const raw = localStorage.getItem(POSITIONS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as NodePositions) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveStoredPositions(positions: NodePositions): void {
+  try {
+    localStorage.setItem(POSITIONS_STORAGE_KEY, JSON.stringify(positions));
+  } catch {
+    // Quota dépassé / stockage indisponible (navigation privée) — la préférence sera simplement perdue.
+  }
+}
+
+/** Couleurs de la MiniMap par type de nœud — mêmes valeurs que celles utilisées pour l'icône du
+ * nœud correspondant dans topology.css (--accent-start, --color-warning, --accent-end). */
+const MINIMAP_NODE_COLOR: Record<TopologyNode["kind"], string> = {
+  container: "#3b6fef",
+  volume: "#f5a524",
+  network: "#7c5cfc",
+};
+
 function formatMem(bytes: number): string {
   const mb = bytes / (1024 * 1024);
   if (mb < 1024) return `${mb.toFixed(0)} Mo`;
@@ -71,9 +175,28 @@ function GraphNode({ data, selected }: NodeProps) {
   const node = data as unknown as TopologyNode;
   const Icon = KIND_ICON[node.kind];
   const isContainer = node.kind === "container";
+  const ports = NODE_CAPABILITIES[node.kind];
+  // Zoom sémantique : en dessous du seuil, on masque libellé/badges/métriques et on ne garde que
+  // l'icône + le point de statut — évite un canevas illisible une fois dézoomé sur toute l'infra.
+  const zoom = useStore(zoomSelector);
+  const isCompact = zoom < ZOOM_DETAIL_THRESHOLD;
   return (
-    <div className={`topology-node topology-node--${node.kind} topology-node--${node.status}${selected ? " is-selected" : ""}`}>
-      <Handle type="target" position={Position.Left} className="topology-handle" />
+    <div
+      className={`topology-node topology-node--${node.kind} topology-node--${node.status}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}`}
+      title={isCompact ? node.label : undefined}
+    >
+      {ports.map((port) => (
+        <Handle
+          key={port.id}
+          id={port.id}
+          type={port.handleType}
+          position={port.position}
+          className={`topology-handle topology-handle--${port.colorToken}${
+            CAPABILITY_DEFS[port.capability].interactive ? "" : " topology-handle--readonly"
+          }`}
+          title={port.label}
+        />
+      ))}
       <div className="topology-node__head">
         <span className="topology-node__icon">
           <Icon />
@@ -109,9 +232,10 @@ function GraphNode({ data, selected }: NodeProps) {
       )}
       <div className={`topology-node__status topology-node__status--${node.status}`}>
         <span className="topology-node__status-dot" />
-        {node.status === "running" ? "En cours" : node.status === "stopped" ? "Arrêté" : node.status}
+        <span className="topology-node__status-label">
+          {node.status === "running" ? "En cours" : node.status === "stopped" ? "Arrêté" : node.status}
+        </span>
       </div>
-      <Handle type="source" position={Position.Right} className="topology-handle" />
     </div>
   );
 }
@@ -393,6 +517,10 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [renamePopover, setRenamePopover] = useState<{ containerId: string; initialName: string; x: number; y: number } | null>(
     null,
   );
+  // Canevas libre et persistant : positions déplacées à la main, par id de nœud, chargées une
+  // seule fois depuis localStorage puis tenues à jour par handleNodeDragStop.
+  const [positions, setPositions] = useState<NodePositions>(() => loadStoredPositions());
+  const [flowNodes, setFlowNodes] = useState<Node[]>([]);
 
   useEffect(() => {
     dispatch(fetchTopology());
@@ -402,28 +530,39 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     return () => clearInterval(interval);
   }, [dispatch, refreshIntervalMs]);
 
-  function selectNode(id: string | null) {
-    setSelectedId(id);
-    const topoNode = id ? data?.nodes.find((n) => n.id === id) ?? null : null;
-    onSelectNode?.(topoNode);
-  }
-
-  const { nodes, edges } = useMemo(() => {
-    if (!data) return { nodes: [] as Node[], edges: [] as Edge[] };
-
+  // Recalcule la liste des nœuds à chaque nouveau fetch (toutes les 15s) ou changement de
+  // positions sauvegardées — sans écraser la position d'un nœud déjà positionné (à la main ou par
+  // un calcul précédent), contrairement à l'ancien recalcul systématique en 3 colonnes fixes.
+  useEffect(() => {
+    if (!data) {
+      setFlowNodes([]);
+      return;
+    }
     const columnCounters: Record<TopologyNode["kind"], number> = { volume: 0, container: 0, network: 0 };
-    const flowNodes: Node[] = data.nodes.map((n) => {
-      const row = columnCounters[n.kind]++;
-      return {
-        id: n.id,
-        type: "graphNode",
-        position: { x: COLUMN_X[n.kind], y: row * ROW_HEIGHT },
-        data: n as unknown as Record<string, unknown>,
-        selected: n.id === selectedId,
-      };
+    setFlowNodes((prev) => {
+      const prevById = new Map(prev.map((n) => [n.id, n]));
+      return data.nodes.map((n) => {
+        const row = columnCounters[n.kind]++;
+        const defaultPosition = { x: COLUMN_X[n.kind], y: row * ROW_HEIGHT };
+        const position = positions[n.id] ?? prevById.get(n.id)?.position ?? defaultPosition;
+        return {
+          id: n.id,
+          type: "graphNode",
+          position,
+          data: n as unknown as Record<string, unknown>,
+        };
+      });
     });
+  }, [data, positions]);
 
-    const flowEdges: Edge[] = data.edges.map((e) => ({
+  const nodes = useMemo(
+    () => flowNodes.map((n) => ({ ...n, selected: n.id === selectedId })),
+    [flowNodes, selectedId],
+  );
+
+  const edges = useMemo<Edge[]>(() => {
+    if (!data) return [];
+    return data.edges.map((e) => ({
       id: e.id,
       source: e.source,
       target: e.target,
@@ -432,52 +571,71 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       markerEnd: { type: MarkerType.ArrowClosed, color: "var(--color-text-faint)", width: 16, height: 16 },
       data: { kind: e.kind },
     }));
+  }, [data]);
 
-    return { nodes: flowNodes, edges: flowEdges };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, selectedId]);
+  function selectNode(id: string | null) {
+    setSelectedId(id);
+    const topoNode = id ? data?.nodes.find((n) => n.id === id) ?? null : null;
+    onSelectNode?.(topoNode);
+  }
 
-  /** Classe une tentative de connexion glissée entre deux nœuds — seules container<->network
-   * (réelle, docker network connect) et container<->volume (impossible sans recréation,
-   * message d'info) sont reconnues ; toute autre combinaison est rejetée silencieusement. */
-  function classifyConnection(sourceId: string, targetId: string): "container-network" | "container-volume" | null {
-    const sourceNode = data?.nodes.find((n) => n.id === sourceId);
-    const targetNode = data?.nodes.find((n) => n.id === targetId);
-    if (!sourceNode || !targetNode || sourceNode.id === targetNode.id) return null;
-    const kinds = [sourceNode.kind, targetNode.kind];
-    if (kinds.includes("container") && kinds.includes("network")) return "container-network";
-    if (kinds.includes("container") && kinds.includes("volume")) return "container-volume";
-    return null;
+  /** Applique les changements React Flow (drag en cours, redimensionnement...) à l'état local des
+   * nœuds — nécessaire pour que le drag reste fluide, un <ReactFlow> "contrôlé" sans ceci ignore
+   * les déplacements en cours de geste. */
+  function handleNodesChange(changes: NodeChange[]) {
+    setFlowNodes((nds) => applyNodeChanges(changes, nds));
+  }
+
+  /** Fin de glissé d'un nœud : persiste sa position finale par id, dans localStorage — elle
+   * survivra au prochain fetch (15s) et à un rechargement de page. */
+  function handleNodeDragStop(_event: unknown, node: Node) {
+    setPositions((prev) => {
+      const next = { ...prev, [node.id]: { x: node.position.x, y: node.position.y } };
+      saveStoredPositions(next);
+      return next;
+    });
+  }
+
+  function findPort(nodeId: string | null | undefined, handleId: string | null | undefined): PortSpec | null {
+    if (!nodeId || !handleId) return null;
+    const node = data?.nodes.find((n) => n.id === nodeId);
+    if (!node) return null;
+    return NODE_CAPABILITIES[node.kind].find((p) => p.id === handleId) ?? null;
+  }
+
+  /** Classe une tentative de connexion glissée en comparant les capacités des deux ports visés
+   * (table déclarative NODE_CAPABILITIES/CAPABILITY_DEFS ci-dessus) — remplace l'ancienne logique
+   * à deux paires de kinds codées en dur, sans changer le comportement fonctionnel : container<->
+   * network reste la seule connexion réelle, container<->volume reste un message d'information. */
+  function classifyConnection(connection: Edge | Connection): CapabilityDef | null {
+    if (!connection.source || !connection.target || connection.source === connection.target) return null;
+    const sourcePort = findPort(connection.source, connection.sourceHandle);
+    const targetPort = findPort(connection.target, connection.targetHandle);
+    if (!sourcePort || !targetPort) return null;
+    if (CAPABILITY_DEFS[sourcePort.capability].linksTo !== targetPort.capability) return null;
+    return CAPABILITY_DEFS[sourcePort.capability];
   }
 
   function isValidConnection(connection: Edge | Connection): boolean {
-    if (!connection.source || !connection.target) return false;
-    return classifyConnection(connection.source, connection.target) !== null;
+    return classifyConnection(connection) !== null;
   }
 
   function handleConnect(connection: Connection) {
-    if (!connection.source || !connection.target) return;
-    const kind = classifyConnection(connection.source, connection.target);
-    if (kind === "container-volume") {
-      dispatch(
-        pushNotification({
-          level: "info",
-          message:
-            "Impossible d'attacher un volume à un conteneur existant : Docker ne permet pas de modifier les montages sans recréer le conteneur.",
-        }),
-      );
+    const def = classifyConnection(connection);
+    if (!def) return;
+    if (!def.interactive) {
+      if (def.infoMessage) dispatch(pushNotification({ level: "info", message: def.infoMessage }));
       return;
     }
-    if (kind === "container-network") {
-      const sourceNode = data?.nodes.find((n) => n.id === connection.source);
-      const containerNodeId = sourceNode?.kind === "container" ? connection.source : connection.target;
-      const networkNodeId = containerNodeId === connection.source ? connection.target : connection.source;
-      const containerId = idWithoutPrefix(containerNodeId);
-      const networkId = idWithoutPrefix(networkNodeId);
-      dispatch(connectContainerToNetwork({ networkId, containerId })).then((result) => {
-        if (connectContainerToNetwork.fulfilled.match(result)) dispatch(fetchTopology());
-      });
-    }
+    // Seule capacité interactive à ce jour : container <-> network (docker network connect réel).
+    const sourceNode = data?.nodes.find((n) => n.id === connection.source);
+    const containerNodeId = sourceNode?.kind === "container" ? connection.source! : connection.target!;
+    const networkNodeId = containerNodeId === connection.source ? connection.target! : connection.source!;
+    const containerId = idWithoutPrefix(containerNodeId);
+    const networkId = idWithoutPrefix(networkNodeId);
+    dispatch(connectContainerToNetwork({ networkId, containerId })).then((result) => {
+      if (connectContainerToNetwork.fulfilled.match(result)) dispatch(fetchTopology());
+    });
   }
 
   function handleNodeClick(_event: unknown, node: Node) {
@@ -625,6 +783,8 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        onNodesChange={handleNodesChange}
+        onNodeDragStop={handleNodeDragStop}
         onNodeClick={handleNodeClick}
         onPaneClick={() => selectNode(null)}
         onPaneContextMenu={handlePaneContextMenu}
@@ -633,12 +793,21 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         onConnect={handleConnect}
         isValidConnection={isValidConnection}
         nodesConnectable={operate}
+        deleteKeyCode={null}
         fitView
         proOptions={{ hideAttribution: true }}
         minZoom={0.3}
       >
         <Background gap={20} size={1.6} color="var(--color-text-faint)" />
         <Controls showInteractive={false} />
+        <MiniMap
+          nodeColor={(n) => MINIMAP_NODE_COLOR[(n.data as unknown as TopologyNode).kind]}
+          nodeStrokeWidth={0}
+          nodeBorderRadius={4}
+          maskColor="rgba(11, 12, 16, 0.75)"
+          pannable
+          zoomable
+        />
       </ReactFlow>
 
       {canvasMenu && operate && (

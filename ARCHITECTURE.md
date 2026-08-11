@@ -188,6 +188,29 @@ Un utilisateur `admin` déjà authentifié peut rouvrir cet assistant depuis Par
 
 **Nouvelles routes** (voir liste complète ci-dessous) : chacune des routes `test/*` prend la config candidate dans le corps de la requête (pas la config déjà persistée) pour permettre de tester avant de sauvegarder, et ne modifie jamais l'état persisté.
 
+## Détection proactive (watchdog)
+
+Le reste de l'app ne notifie qu'en réaction à une action utilisateur (ex: une mise à jour d'image qui échoue). Le watchdog (`apps/api/src/services/watchdog.ts`) fait l'inverse : il détecte tout seul, en tâche de fond, sans qu'aucun utilisateur n'ait rien demandé.
+
+**Scheduler** : `startWatchdog()` est démarré une seule fois depuis `index.ts#main()` (jamais depuis `buildServer()`, pour ne déclencher aucun appel réseau pendant les tests), un cycle toutes les 75s par défaut, arrêté proprement sur `SIGTERM`/`SIGINT` comme le reste du serveur.
+
+**Ce qu'un cycle vérifie** :
+
+1. **Nouvelles versions d'image** — réutilise `getImages("update")` (`services/images.ts`, déjà utilisé pour les badges "MàJ dispo") et compare aux ids déjà connus lors du cycle précédent : un événement `image_update_available` n'est émis QUE pour une image nouvellement détectée en mise à jour, jamais répété à chaque cycle pour la même image.
+2. **Joignabilité des intégrations réellement configurées** — Docker (toujours surveillé, l'app tente toujours de le joindre), Kubernetes (`isKubernetesConfigured()`), Nutanix (`isNutanixConfigured()`), chaque registry avec des identifiants persistés (`getEffectiveRegistryCredentials`). Jamais de vérification, donc jamais de notification, pour une intégration qui n'a jamais été configurée — même garde que partout ailleurs dans le projet. Émission edge-triggered : `integration_unreachable` sur la transition joignable → injoignable, `integration_reachable` sur la transition inverse, jamais de répétition tant que l'état ne change pas.
+
+**Baseline sans bruit** : au tout premier cycle après déploiement de la fonctionnalité (aucun état persisté trouvé), le watchdog enregistre juste l'état courant comme référence sans rien notifier — sinon tout ce qui serait déjà en attente de mise à jour ou déjà injoignable au moment de l'activation déclencherait une notification, alors que ce n'est pas un nouvel événement.
+
+**Persistance** (même répertoire que `CONFIG_PATH`, même pattern JSON Lines append-only que `services/auditLog.ts`) :
+
+- `watchdog-state.json` — dernier état connu (ids d'images en mise à jour, joignabilité par intégration), pour que les transitions survivent à un redémarrage de l'API sans spam au reboot.
+- `notifications-log.jsonl` — un événement par ligne (`SystemNotificationEvent`, voir « Contrats de données »), jamais réécrit, exposé par `GET /api/notifications`.
+- `notifications-read-state.json` — un curseur temporel (`readAllBeforeIso`) plutôt qu'un ensemble d'ids lus : `POST /api/notifications/read-all` le positionne à l'instant présent, un événement est considéré lu s'il est antérieur ou égal à ce curseur.
+
+Chaque message est concret et actionnable (jamais de texte générique) : ex. `"Nouvelle version disponible pour nginx:1.25 -> 1.27"`, `"Kubernetes injoignable depuis 11:42"`, `"Kubernetes de nouveau joignable"`.
+
+Côté `apps/web`, `notificationsSlice.ts` récupère ces événements au chargement puis les repolle (`App.tsx`, indépendant de la vue affichée) et les fusionne par id dans le même état que les notifications purement client existantes (`pushNotification`/`errorNotificationMiddleware.ts`, inchangées) — un événement système apparaît donc à la fois en toast (`ToastStack.tsx`) et dans l'historique (`NotificationsPage.tsx`) sans code supplémentaire dans ces deux composants.
+
 ## Routes API (consommées par `apps/web`)
 
 ```
@@ -239,9 +262,47 @@ GET  /api/topology                       # graphe visuel (conteneurs/volumes/net
 POST /api/containers/:id/rename          # { name } — équivalent `docker rename`
 POST /api/networks/:id/connect           # { containerId } — équivalent `docker network connect`
 POST /api/networks/:id/disconnect        # { containerId } — équivalent `docker network disconnect`
+
+GET  /api/notifications?since=<ISO 8601>  # événements détectés par le watchdog (voir « Détection
+                                           # proactive » ci-dessus), les plus récents d'abord
+POST /api/notifications/read-all          # marque tous les événements connus comme lus (operator/admin)
 ```
 
 Toutes les routes (sauf `/api/auth/*` et `/api/setup/*`) exigent une session valide. Les routes `POST` exigent le rôle `operator` ou `admin`. Les routes `/api/setup/*` sont ouvertes tant que `completed=false` ; une fois `completed=true`, elles répondent `403` sauf pour un utilisateur `admin` authentifié (flux de reconfiguration).
+
+## Graphe de topologie (`apps/web/src/components/TopologyGraph.tsx`)
+
+Le graphe visuel (React Flow, `GET /api/topology` — voir « Routes API » ci-dessus) a trois
+particularités, toutes côté client uniquement (aucune donnée d'infrastructure supplémentaire
+n'est nécessaire côté `apps/api`) :
+
+1. **Connexions par capacité, ports typés.** Chaque type de nœud déclare la liste des « ports »
+   qu'il expose dans une table `NODE_CAPABILITIES` (id, capacité, côté source/target, position,
+   couleur reprise des variables déjà utilisées pour l'icône du même type de nœud — pas de couleur
+   ajoutée) : un conteneur expose un port `network` (source, connexion réelle vers un network) et
+   un port `volume-mount` (target, informatif seulement — Docker ne permet pas de modifier les
+   montages sans recréer le conteneur) ; un volume expose un port `provide` ; un network expose un
+   port `attach`. La compatibilité entre deux ports (et l'action déclenchée — `docker network
+   connect` réel ou simple message d'info) est décrite dans une seconde table `CAPABILITY_DEFS`.
+   `classifyConnection`/`isValidConnection`/`handleConnect` ne lisent que ces deux tables : ajouter
+   un futur 4e type de nœud (ex : registry) ne demande que de lui déclarer ses propres ports, sans
+   toucher à cette logique. Chaque port est un `<Handle>` React Flow distinct, visuellement propre
+   à sa capacité (couleur idle, pas seulement au survol ; bordure en tirets pour les ports
+   informatifs).
+2. **Canevas libre et persistant.** La position d'un nœud déplacé à la main (drag React Flow
+   standard, `onNodesChange`/`onNodeDragStop`) est conservée par id de nœud dans `localStorage`
+   (clé `quai:topology:positions`) — elle survit au rafraîchissement périodique (15s) et à un
+   rechargement de page. C'est une préférence d'affichage locale à l'utilisateur, pas une donnée
+   d'infrastructure : aucune route API dédiée. Un nœud jamais vu (absent du localStorage) reçoit
+   toujours une position par défaut selon le placement en 3 colonnes (volumes / conteneurs /
+   networks) historique. Une `<MiniMap>` (`@xyflow/react`) est ancrée en bas à droite du canevas,
+   stylée comme les autres contrôles React Flow du thème sombre.
+3. **Zoom sémantique.** Sous un seuil de zoom (`ZOOM_DETAIL_THRESHOLD = 0.6`, lu via
+   `useStore((s) => s.transform[2])` à l'intérieur même du composant de nœud), un nœud se réduit à
+   son icône et son point de statut — libellé, sous-titre, badges et métriques CPU/mémoire
+   s'effacent en fondu (transition CSS 0.15s, désactivée sous `prefers-reduced-motion`, même
+   pattern que le reste du site depuis la passe micro-interactions). Au-dessus du seuil, détail
+   complet comme avant.
 
 ## CI/CD
 
