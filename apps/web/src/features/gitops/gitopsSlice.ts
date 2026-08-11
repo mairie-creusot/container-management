@@ -15,6 +15,10 @@ interface GitopsState {
   diffStatus: "idle" | "loading" | "ready" | "error";
   syncing: boolean;
   error: string | null;
+  /** Horodatage du dernier GET /api/gitops/files réussi — sert d'indicateur "dernière
+   *  vérification automatique" sur la page (voir GitOpsPage.tsx), même pattern que
+   *  overviewSlice.ts#lastRefreshedAt. */
+  lastCheckedAt: string | null;
 }
 
 const initialState: GitopsState = {
@@ -28,6 +32,7 @@ const initialState: GitopsState = {
   diffStatus: "idle",
   syncing: false,
   error: null,
+  lastCheckedAt: null,
 };
 
 export const fetchGitopsFiles = createAsyncThunk<GitOpsFile[]>(
@@ -73,6 +78,7 @@ const gitopsSlice = createSlice({
       .addCase(fetchGitopsFiles.fulfilled, (state, action) => {
         state.filesStatus = "ready";
         state.files = action.payload;
+        state.lastCheckedAt = new Date().toISOString();
       })
       .addCase(fetchGitopsFiles.rejected, (state, action) => {
         state.filesStatus = "error";

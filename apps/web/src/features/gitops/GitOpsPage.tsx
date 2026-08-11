@@ -10,6 +10,12 @@ import {
 } from "@/features/gitops/gitopsSlice";
 import { canOperate } from "@/features/auth/authSlice";
 
+// Reflète côté client le rythme de la boucle de réconciliation GitOps côté API (voir
+// apps/api/src/services/gitopsReconciler.ts) : ce polling ne fait que rafraîchir l'affichage de
+// la dérive déjà calculée par listGitOpsFiles(), jamais une resynchronisation — même principe
+// que overview/OverviewPage.tsx#REFRESH_INTERVAL_MS.
+const REFRESH_INTERVAL_MS = 90_000;
+
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString("fr-FR", {
     day: "2-digit",
@@ -18,6 +24,10 @@ function formatDate(iso: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
 }
 
 export default function GitOpsPage() {
@@ -33,12 +43,20 @@ export default function GitOpsPage() {
     diffStatus,
     syncing,
     error,
+    lastCheckedAt,
   } = useAppSelector((s) => s.gitops);
   const session = useAppSelector((s) => s.auth.session);
 
   useEffect(() => {
     dispatch(fetchGitopsFiles());
     dispatch(fetchGitopsCommits());
+    // Vérification automatique périodique de la dérive tant que la page est ouverte — coupée
+    // quand l'onglet est en arrière-plan, même garde que OverviewPage.tsx. Lecture seule
+    // (GET /api/gitops/files) : ne déclenche jamais de resynchronisation.
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") dispatch(fetchGitopsFiles());
+    }, REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
   }, [dispatch]);
 
   useEffect(() => {
@@ -62,6 +80,12 @@ export default function GitOpsPage() {
         <div>
           <h2>GitOps</h2>
           <p>Le dépôt Git est la source de vérité — comparaison état désiré / état réel.</p>
+          {lastCheckedAt && (
+            <span className="overview-refresh-hint">
+              <span className="overview-refresh-dot" />
+              Dernière vérification automatique : {formatTime(lastCheckedAt)} · toutes les {REFRESH_INTERVAL_MS / 1000}s
+            </span>
+          )}
         </div>
         <button
           type="button"

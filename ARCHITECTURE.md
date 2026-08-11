@@ -136,7 +136,7 @@ interface Session {
   roles: ("admin" | "operator" | "viewer")[];
 }
 
-type SystemNotificationKind = "image_update_available" | "integration_unreachable" | "integration_reachable";
+type SystemNotificationKind = "image_update_available" | "integration_unreachable" | "integration_reachable" | "gitops_drift_detected";
 
 interface SystemNotificationEvent {
   id: string;
@@ -280,12 +280,25 @@ Le reste de l'app ne notifie qu'en réaction à une action utilisateur (ex: une 
 **Persistance** (même répertoire que `CONFIG_PATH`, même pattern JSON Lines append-only que `services/auditLog.ts`) :
 
 - `watchdog-state.json` — dernier état connu (ids d'images en mise à jour, joignabilité par intégration), pour que les transitions survivent à un redémarrage de l'API sans spam au reboot.
+- `gitops-reconciler-state.json` — dernier ensemble connu de chemins GitOps en dérive (voir « Réconciliation GitOps » ci-dessous), même raison que watchdog-state.json.
 - `notifications-log.jsonl` — un événement par ligne (`SystemNotificationEvent`, voir « Contrats de données »), jamais réécrit, exposé par `GET /api/notifications`.
 - `notifications-read-state.json` — un curseur temporel (`readAllBeforeIso`) plutôt qu'un ensemble d'ids lus : `POST /api/notifications/read-all` le positionne à l'instant présent, un événement est considéré lu s'il est antérieur ou égal à ce curseur.
 
 Chaque message est concret et actionnable (jamais de texte générique) : ex. `"Nouvelle version disponible pour nginx:1.25 -> 1.27"`, `"Kubernetes injoignable depuis 11:42"`, `"Kubernetes de nouveau joignable"`.
 
 Côté `apps/web`, `notificationsSlice.ts` récupère ces événements au chargement puis les repolle (`App.tsx`, indépendant de la vue affichée) et les fusionne par id dans le même état que les notifications purement client existantes (`pushNotification`/`errorNotificationMiddleware.ts`, inchangées) — un événement système apparaît donc à la fois en toast (`ToastStack.tsx`) et dans l'historique (`NotificationsPage.tsx`) sans code supplémentaire dans ces deux composants.
+
+## Réconciliation GitOps (détection de dérive)
+
+Même principe que le watchdog ci-dessus, appliqué à la dérive GitOps : `apps/api/src/services/gitopsReconciler.ts` détecte tout seul, en tâche de fond, qu'un manifeste s'est mis à dériver (ou a cessé de dériver) — mais ne l'applique **jamais**. Conformément à « GitOps » ci-dessus (« l'application du changement reste une action explicite depuis l'UI »), ce module n'appelle que `listGitOpsFiles()` (lecture pure) ; `sync()` reste déclenché exclusivement par un clic humain sur `POST /api/gitops/sync`, inchangé.
+
+**Scheduler** : `startGitopsReconciler()` est démarré une seule fois depuis `index.ts#main()` (jamais depuis `buildServer()`, même raison que le watchdog), un cycle toutes les 90s par défaut, arrêté proprement sur `SIGTERM`/`SIGINT`.
+
+**Ce qu'un cycle vérifie** : compare l'ensemble des chemins actuellement en dérive (`listGitOpsFiles().filter(f => f.drift)`) à l'ensemble précédemment connu (persisté sur disque). Edge-triggered, comme le watchdog : un chemin qui passe de « pas en dérive » à « en dérive » émet `gitops_drift_detected` (level `error`) ; un chemin qui repasse de « en dérive » à « pas en dérive » (ex: sync manuel entre deux cycles) émet le même `kind` en level `success`. Baseline sans bruit au premier cycle (aucun état persisté), même garde que le watchdog.
+
+**Persistance** : `gitops-reconciler-state.json` (même répertoire que `watchdog-state.json`) — chemins actuellement en dérive, pour que les transitions survivent à un redémarrage sans spam au reboot.
+
+Côté `apps/web`, `GitOpsPage.tsx` affiche un indicateur discret « Dernière vérification automatique : HH:MM » basé sur son propre polling read-only de `GET /api/gitops/files` toutes les 90s (coupé quand l'onglet est en arrière-plan, même garde que `OverviewPage.tsx`) — pas de nouvelle route dédiée.
 
 ## Routes API (consommées par `apps/web`)
 

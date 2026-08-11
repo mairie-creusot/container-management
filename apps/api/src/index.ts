@@ -28,6 +28,7 @@ import secretsRoutes from "./routes/secrets.js";
 import setupRoutes from "./routes/setup.js";
 import topologyRoutes from "./routes/topology.js";
 import volumesRoutes from "./routes/volumes.js";
+import { startGitopsReconciler } from "./services/gitopsReconciler.js";
 import { startWatchdog } from "./services/watchdog.js";
 
 function buildLoggerOptions(): NonNullable<FastifyServerOptions["logger"]> {
@@ -93,6 +94,11 @@ async function main(): Promise<void> {
   // tests qui construisent le serveur avec `app.inject` sans jamais appeler main().
   const stopWatchdog = startWatchdog();
 
+  // Boucle de réconciliation GitOps (détection de dérive seulement, jamais d'application
+  // automatique — voir services/gitopsReconciler.ts) : même câblage que le watchdog ci-dessus,
+  // démarré seulement ici pour ne jamais taper le disque/réseau pendant les tests.
+  const stopGitopsReconciler = startGitopsReconciler();
+
   // Sans ceci, un SIGTERM (docker stop, ou nodemon qui redémarre le process en dev) tue le
   // process sans libérer explicitement le port avant que le suivant ne démarre — source
   // d'EADDRINUSE intermittents observés avec `nodemon --legacy-watch` (voir package.json,
@@ -100,6 +106,7 @@ async function main(): Promise<void> {
   const shutdown = (signal: string) => {
     fastify.log.info(`${signal} received, closing server`);
     stopWatchdog();
+    stopGitopsReconciler();
     void fastify.close().then(() => process.exit(0));
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));

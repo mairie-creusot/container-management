@@ -386,7 +386,8 @@ export interface ScanResult {
 export type SystemNotificationKind =
   | "image_update_available"
   | "integration_unreachable"
-  | "integration_reachable";
+  | "integration_reachable"
+  | "gitops_drift_detected";
 
 export interface SystemNotificationEvent {
   id: string;
