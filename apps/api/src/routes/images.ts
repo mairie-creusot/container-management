@@ -2,11 +2,21 @@
  * GET  /api/images?status=update|uptodate — liste des images suivies.
  * POST /api/images/:id/update             — déclenche la mise à jour explicite d'une image
  *                                            (jamais automatique, cf. ARCHITECTURE.md).
+ * GET  /api/images/:id/history            — historique RÉEL des couches (équivalent `docker
+ *                                            history`), voir services/docker.ts#getImageHistory.
  */
 
 import type { FastifyInstance } from "fastify";
+import { getImageHistory } from "../services/docker.js";
 import { deleteImage, getImages, ImageNotFoundError, ImagePullError, pullNewImage, updateImage } from "../services/images.js";
 import type { ImageRef } from "../types.js";
+
+/** Référence Docker réelle à passer au démon pour une image suivie (locale ou démo) — même
+ * rapprochement par nom que routes/scan.ts#dockerReferenceFor (dupliqué à l'identique, un
+ * utilitaire partagé serait disproportionné pour une seule ligne). */
+function dockerReferenceFor(image: ImageRef): string {
+  return `${image.name}:${image.currentTag}`;
+}
 
 function isValidStatus(value: unknown): value is ImageRef["status"] {
   return value === "update" || value === "uptodate";
@@ -31,6 +41,18 @@ export default async function imagesRoutes(fastify: FastifyInstance): Promise<vo
         return reply.code(404).send({ error: err.message });
       }
       throw err;
+    }
+  });
+
+  fastify.get<{ Params: { id: string } }>("/api/images/:id/history", async (request, reply) => {
+    const image = (await getImages()).find((i) => i.id === request.params.id);
+    if (!image) return reply.code(404).send({ error: `Image "${request.params.id}" not found` });
+    try {
+      const history = await getImageHistory(dockerReferenceFor(image));
+      return reply.send(history);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return reply.code(502).send({ error: message });
     }
   });
 

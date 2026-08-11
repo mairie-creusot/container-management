@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   ReactFlow,
   Background,
@@ -31,7 +31,7 @@ import { useConfirm } from "@/components/ConfirmProvider";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import Skeleton from "@/components/Skeleton";
 import TopologyNodeDetailModal from "@/components/TopologyNodeDetailModal";
-import TopologySubGraphModal from "@/components/TopologySubGraphModal";
+import TopologySubGraphPanel from "@/components/TopologySubGraphPanel";
 import {
   CAPABILITY_DEFS,
   MINIMAP_NODE_COLOR,
@@ -41,6 +41,7 @@ import {
   idWithoutPrefix,
   nodeTypes,
   useDismiss,
+  usePrefersReducedMotion,
   type CapabilityDef,
   type PortSpec,
 } from "@/components/topologyGraphShared";
@@ -329,10 +330,19 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   // conservée) : ce n'est plus l'Inspector latéral (retiré de la Vue d'ensemble) qui affiche quoi
   // que ce soit ici, uniquement cette modal ouverte à la demande.
   const [detailNode, setDetailNode] = useState<TopologyNode | null>(null);
-  // Sous-graphe de dépendances (double-clic sur un nœud) — voir TopologySubGraphModal.tsx. Ne
-  // stocke que l'id racine : le sous-graphe se recalcule depuis `data` (déjà en mémoire), jamais
-  // de nouvel appel réseau.
+  // Sous-graphe de dépendances/composition interne (double-clic sur un nœud, ou "Visualiser les
+  // dépendances" du menu contextuel) — voir TopologySubGraphPanel.tsx. Ne stocke que l'id racine :
+  // le sous-graphe se recalcule depuis `data` (déjà en mémoire), jamais de nouvel appel réseau.
+  // Remplace le graphe principal EN PLACE (pas une modal flottante) avec une transition "on rentre
+  // dans le nœud" (scale+fade depuis sa position à l'écran) : `subGraphMounted` garde le panneau
+  // monté pendant l'animation de sortie (`subGraphVisible -> false`), `handleSubGraphExited` fait
+  // le démontage réel une fois cette animation terminée (voir onTransitionEnd du panneau).
   const [subGraphRootId, setSubGraphRootId] = useState<string | null>(null);
+  const [subGraphMounted, setSubGraphMounted] = useState(false);
+  const [subGraphVisible, setSubGraphVisible] = useState(false);
+  const [subGraphOrigin, setSubGraphOrigin] = useState<{ x: number; y: number }>({ x: 50, y: 50 });
+  const graphContainerRef = useRef<HTMLDivElement>(null);
+  const reducedMotion = usePrefersReducedMotion();
 
   useEffect(() => {
     dispatch(fetchTopology());
@@ -550,13 +560,58 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     setDetailNode(node);
   }
 
+  /** Ouvre le panneau de sous-graphe sur `nodeId`, avec une transition "on rentre dans le nœud" —
+   * `clientX`/`clientY` (coordonnées écran du double-clic, ou du clic droit d'origine ayant ouvert
+   * le menu contextuel) fixent le point de départ du scale+fade (voir TopologySubGraphPanel.tsx).
+   * Sous `prefers-reduced-motion`, le panneau apparaît directement visible (pas d'étape
+   * intermédiaire à transitionner). */
+  function openSubGraph(nodeId: string, clientX: number, clientY: number) {
+    const rect = graphContainerRef.current?.getBoundingClientRect();
+    setSubGraphOrigin(
+      rect && rect.width > 0 && rect.height > 0
+        ? { x: ((clientX - rect.left) / rect.width) * 100, y: ((clientY - rect.top) / rect.height) * 100 }
+        : { x: 50, y: 50 },
+    );
+    setSubGraphRootId(nodeId);
+    setSubGraphMounted(true);
+    if (reducedMotion) {
+      setSubGraphVisible(true);
+      return;
+    }
+    // Monté d'abord non visible (scale réduit + transparent), puis basculé à visible une frame
+    // plus tard pour que le navigateur ait le temps d'appliquer l'état de départ avant de
+    // transitionner vers l'état final — sans ce double rAF, les deux styles seraient posés dans
+    // le même frame et la transition CSS ne jouerait pas (aucun changement d'état détecté).
+    setSubGraphVisible(false);
+    requestAnimationFrame(() => requestAnimationFrame(() => setSubGraphVisible(true)));
+  }
+
+  /** L'utilisateur remonte vers le graphe complet — sous `prefers-reduced-motion`, démontage
+   * immédiat (pas d'animation à attendre) ; sinon, `TopologySubGraphPanel` joue l'animation de
+   * sortie et appelle `handleSubGraphExited` une fois terminée. */
+  function closeSubGraph() {
+    if (reducedMotion) {
+      setSubGraphVisible(false);
+      setSubGraphMounted(false);
+      setSubGraphRootId(null);
+      return;
+    }
+    setSubGraphVisible(false);
+  }
+
+  function handleSubGraphExited() {
+    setSubGraphMounted(false);
+    setSubGraphRootId(null);
+  }
+
   function nodeMenuItems(node: TopologyNode, x: number, y: number): ContextMenuItem[] {
     const items: ContextMenuItem[] = [
       { label: "Voir le détail", onClick: () => openNodeDetail(node) },
       // Toujours proposé, même pour un nœud isolé (ex : VM Nutanix, jamais reliée à Docker) — le
       // sous-graphe affiche alors simplement le nœud seul avec un message explicite plutôt que de
-      // masquer l'entrée du menu selon le kind.
-      { label: "Visualiser les dépendances", onClick: () => setSubGraphRootId(node.id) },
+      // masquer l'entrée du menu selon le kind. Origine de la transition = position du clic droit
+      // qui a ouvert CE menu (x, y), pas la position du clic sur l'entrée de menu elle-même.
+      { label: "Visualiser les dépendances", onClick: () => openSubGraph(node.id, x, y) },
     ];
     if (!operate) return items;
 
@@ -626,45 +681,51 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   }
 
   return (
-    <div className="topology-graph" style={{ height }}>
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        nodeTypes={nodeTypes}
-        edgeTypes={edgeTypes}
-        onNodesChange={handleNodesChange}
-        onNodeDragStop={handleNodeDragStop}
-        onNodeClick={handleNodeClick}
-        onNodeDoubleClick={(_event, node) => setSubGraphRootId(node.id)}
-        onPaneClick={() => selectNode(null)}
-        onPaneContextMenu={handlePaneContextMenu}
-        onNodeContextMenu={handleNodeContextMenu}
-        onEdgeContextMenu={handleEdgeContextMenu}
-        onConnect={handleConnect}
-        isValidConnection={isValidConnection}
-        nodesConnectable={operate}
-        // La disposition est persistée par compte (PUT /api/topology/positions, réservé
-        // operator/admin comme toute route mutante — voir plugins/auth.ts) : un viewer ne peut
-        // donc pas la faire persister, autant ne pas lui laisser croire qu'un glissé "prend".
-        nodesDraggable={operate}
-        deleteKeyCode={null}
-        fitView
-        proOptions={{ hideAttribution: true }}
-        minZoom={0.3}
-      >
-        {/* Pas de <Controls> (zoom +/-, fit-view) — la souris (molette + glisser) suffit déjà à
-            tout faire ; remplacé plus tard par des boutons en overlay sur mesure. */}
-        <Background gap={20} size={1.6} color="var(--color-text-faint)" />
-        <MiniMap
-          position="top-left"
-          nodeColor={(n) => MINIMAP_NODE_COLOR[(n.data as unknown as TopologyNode).kind]}
-          nodeStrokeWidth={0}
-          nodeBorderRadius={4}
-          maskColor="rgba(11, 12, 16, 0.75)"
-          pannable
-          zoomable
-        />
-      </ReactFlow>
+    <div className="topology-graph" style={{ height }} ref={graphContainerRef}>
+      {/* Graphe principal — s'efface/se dézoome légèrement quand le panneau de sous-graphe est
+          monté par-dessus (topology-graph__main--receded, voir topology.css), pour l'effet "on
+          rentre dans le nœud" plutôt qu'un calque flottant classique. `pointer-events: none` dans
+          cet état évite toute interaction fantôme avec le graphe caché derrière le panneau. */}
+      <div className={`topology-graph__main${subGraphMounted ? " topology-graph__main--receded" : ""}`}>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          onNodesChange={handleNodesChange}
+          onNodeDragStop={handleNodeDragStop}
+          onNodeClick={handleNodeClick}
+          onNodeDoubleClick={(event, node) => openSubGraph(node.id, event.clientX, event.clientY)}
+          onPaneClick={() => selectNode(null)}
+          onPaneContextMenu={handlePaneContextMenu}
+          onNodeContextMenu={handleNodeContextMenu}
+          onEdgeContextMenu={handleEdgeContextMenu}
+          onConnect={handleConnect}
+          isValidConnection={isValidConnection}
+          nodesConnectable={operate}
+          // La disposition est persistée par compte (PUT /api/topology/positions, réservé
+          // operator/admin comme toute route mutante — voir plugins/auth.ts) : un viewer ne peut
+          // donc pas la faire persister, autant ne pas lui laisser croire qu'un glissé "prend".
+          nodesDraggable={operate}
+          deleteKeyCode={null}
+          fitView
+          proOptions={{ hideAttribution: true }}
+          minZoom={0.3}
+        >
+          {/* Pas de <Controls> (zoom +/-, fit-view) — la souris (molette + glisser) suffit déjà à
+              tout faire ; remplacé plus tard par des boutons en overlay sur mesure. */}
+          <Background gap={20} size={1.6} color="var(--color-text-faint)" />
+          <MiniMap
+            position="top-left"
+            nodeColor={(n) => MINIMAP_NODE_COLOR[(n.data as unknown as TopologyNode).kind]}
+            nodeStrokeWidth={0}
+            nodeBorderRadius={4}
+            maskColor="rgba(11, 12, 16, 0.75)"
+            pannable
+            zoomable
+          />
+        </ReactFlow>
+      </div>
 
       {canvasMenu && operate && (
         <ContextMenu
@@ -713,15 +774,23 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         />
       )}
 
-      {/* Sous-graphe de dépendances (double-clic sur un nœud, ou "Visualiser les dépendances" du
-          menu contextuel) — rendu APRÈS les popovers/menus mais AVANT la modal de détail ci-dessous
-          dans le DOM, pour qu'une modal de détail ouverte depuis l'intérieur du sous-graphe
-          s'affiche bien par-dessus (même z-index, l'ordre de montage tranche). */}
-      {data && (
-        <TopologySubGraphModal
+      {/* Sous-graphe de dépendances/composition interne (double-clic sur un nœud, ou "Visualiser
+          les dépendances" du menu contextuel) — remplace le graphe principal EN PLACE (voir
+          .topology-graph__main--receded ci-dessus), rendu APRÈS les popovers/menus mais AVANT la
+          modal de détail ci-dessous dans le DOM, pour qu'une modal de détail ouverte depuis
+          l'intérieur du panneau s'affiche bien par-dessus (même z-index, l'ordre de montage
+          tranche). Resté monté pendant l'animation de sortie (`subGraphMounted`), démonté
+          seulement une fois celle-ci terminée (`handleSubGraphExited`, voir openSubGraph/
+          closeSubGraph ci-dessus). */}
+      {subGraphMounted && data && (
+        <TopologySubGraphPanel
           topology={data}
           rootId={subGraphRootId}
-          onClose={() => setSubGraphRootId(null)}
+          visible={subGraphVisible}
+          origin={subGraphOrigin}
+          reducedMotion={reducedMotion}
+          onRequestClose={closeSubGraph}
+          onExited={handleSubGraphExited}
           onOpenDetail={openNodeDetail}
         />
       )}

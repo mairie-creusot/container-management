@@ -1,6 +1,6 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { apiDelete, apiGet, apiPost, ApiError } from "@/api/client";
-import type { ImageRef, ScannerId, ScannerStatus, ScanResult } from "@/types";
+import type { ImageHistoryLayer, ImageRef, ScannerId, ScannerStatus, ScanResult } from "@/types";
 
 export type ImageStatusFilter = "all" | "update" | "uptodate";
 
@@ -21,6 +21,12 @@ interface ImagesState {
   scanError: string | null;
   /** Présence/version des binaires scanner sur l'hôte — voir GET /api/scanners/status. */
   scannerStatuses: ScannerStatus[];
+  /** Historique des couches d'image (équivalent `docker history`), clé = ImageRef.id — voir
+   * GET /api/images/:id/history, consommé par la vue "composition interne" du sous-graphe de
+   * topologie (TopologySubGraphPanel.tsx). */
+  historyByImageId: Record<string, ImageHistoryLayer[]>;
+  historyStatus: "idle" | "loading" | "error";
+  historyError: string | null;
 }
 
 const initialState: ImagesState = {
@@ -37,6 +43,9 @@ const initialState: ImagesState = {
   scanStatus: "idle",
   scanError: null,
   scannerStatuses: [],
+  historyByImageId: {},
+  historyStatus: "idle",
+  historyError: null,
 };
 
 export const fetchImages = createAsyncThunk<ImageRef[], ImageStatusFilter | undefined>(
@@ -119,6 +128,22 @@ export const fetchScanDetail = createAsyncThunk<ScanResult, { imageId: string; s
 /** Présence/version de grype et osv-scanner sur l'hôte — voir GET /api/scanners/status. */
 export const fetchScannerStatuses = createAsyncThunk<ScannerStatus[]>("images/fetchScannerStatuses", async () => {
   return apiGet<ScannerStatus[]>("/scanners/status");
+});
+
+/** Historique réel des couches d'une image (équivalent `docker history`) — voir
+ * GET /api/images/:id/history. */
+export const fetchImageHistory = createAsyncThunk<
+  { id: string; layers: ImageHistoryLayer[] },
+  string,
+  { rejectValue: string }
+>("images/fetchImageHistory", async (id, { rejectWithValue }) => {
+  try {
+    const layers = await apiGet<ImageHistoryLayer[]>(`/images/${encodeURIComponent(id)}/history`);
+    return { id, layers };
+  } catch (error) {
+    const message = error instanceof ApiError ? error.message : "Impossible de récupérer l'historique des couches.";
+    return rejectWithValue(message);
+  }
 });
 
 const imagesSlice = createSlice({
@@ -206,6 +231,18 @@ const imagesSlice = createSlice({
       })
       .addCase(fetchScannerStatuses.fulfilled, (state, action) => {
         state.scannerStatuses = action.payload;
+      })
+      .addCase(fetchImageHistory.pending, (state) => {
+        state.historyStatus = "loading";
+        state.historyError = null;
+      })
+      .addCase(fetchImageHistory.fulfilled, (state, action) => {
+        state.historyStatus = "idle";
+        state.historyByImageId[action.payload.id] = action.payload.layers;
+      })
+      .addCase(fetchImageHistory.rejected, (state, action) => {
+        state.historyStatus = "error";
+        state.historyError = action.payload ?? "Impossible de récupérer l'historique des couches.";
       });
   },
 });

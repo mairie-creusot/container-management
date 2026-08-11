@@ -9,6 +9,10 @@
  * POST   /api/containers               — crée puis démarre un conteneur Docker (équivalent `docker run -d`).
  *                                         L'image doit déjà être locale (POST /api/images/pull d'abord si besoin).
  * GET    /api/containers/:id           — détail complet (équivalent `docker inspect`), Docker uniquement.
+ * GET    /api/containers/:id/processes — processus RÉELS en cours d'exécution (équivalent `docker top`),
+ *                                         voir services/docker.ts#getContainerProcesses — 409 si le
+ *                                         conteneur n'est pas démarré (docker top l'exige), jamais une
+ *                                         liste vide silencieuse.
  * POST   /api/containers/:id/start     — démarre un conteneur arrêté.
  * POST   /api/containers/:id/stop      — arrête un conteneur en cours d'exécution.
  * POST   /api/containers/:id/restart   — redémarre un conteneur.
@@ -19,6 +23,7 @@
 import type { FastifyInstance } from "fastify";
 import {
   createAndStartContainer,
+  getContainerProcesses,
   getDockerContainers,
   inspectDockerContainer,
   removeContainer,
@@ -59,7 +64,10 @@ interface RenameContainerBody {
 function sendDockerActionError(reply: import("fastify").FastifyReply, err: unknown): void {
   const message = err instanceof Error ? err.message : String(err);
   const notFound = /no such container|404/i.test(message);
-  reply.code(notFound ? 404 : 502).send({ error: message });
+  // "is not running" : réponse du démon pour `docker top` sur un conteneur arrêté — 409
+  // (conflit d'état), un message plus honnête qu'un 502 générique pour ce cas très courant.
+  const notRunning = /is not running/i.test(message);
+  reply.code(notFound ? 404 : notRunning ? 409 : 502).send({ error: message });
 }
 
 export default async function containersRoutes(fastify: FastifyInstance): Promise<void> {
@@ -124,6 +132,15 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
       return reply.code(404).send({ error: `Container "${request.params.id}" not found` });
     }
     return reply.send(detail);
+  });
+
+  fastify.get<{ Params: { id: string } }>("/api/containers/:id/processes", async (request, reply) => {
+    try {
+      const list = await getContainerProcesses(request.params.id);
+      return reply.send(list);
+    } catch (err) {
+      sendDockerActionError(reply, err);
+    }
   });
 
   fastify.post<{ Params: { id: string } }>("/api/containers/:id/start", async (request, reply) => {

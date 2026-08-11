@@ -163,6 +163,97 @@ export default function TopologyNodeDetailModal({ node, onClose }: TopologyNodeD
     if (imageRef) dispatch(scanImage({ id: imageRef.id }));
   }
 
+  // Vulnérabilités : bloc pleine largeur, potentiellement long — sa propre section, jamais mêlé
+  // aux colonnes identité/réseau pour ne pas les étirer verticalement (voir topology.css
+  // #topology-detail-modal__vulns, scroll interne cantonné à CE bloc si la liste est longue).
+  const vulnSection = node.kind === "container" && (
+    <div className="topology-detail-modal__vulns">
+      <div className="inspector-section-title">
+        Vulnérabilités{imageRef ? ` (image ${imageRef.name}:${imageRef.currentTag})` : ""}
+      </div>
+      {!imageRef && <div className="empty-state">Image introuvable parmi les images suivies.</div>}
+      {imageRef && scans.length === 0 && (
+        <div className="empty-state">
+          Aucun scan n'a jamais été effectué pour cette image.
+          {operate && (
+            <div className="topology-detail-modal__scan-cta">
+              <button type="button" className="btn btn-secondary btn-sm" disabled={scanStatus === "starting"} onClick={handleLaunchScan}>
+                {scanStatus === "starting" ? "Lancement…" : "Lancer un scan (Grype)"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      {imageRef && scans.length > 0 && !latestSuccess && (
+        <div className="empty-state">
+          {latestOverall?.status === "running"
+            ? "Un scan est en cours pour cette image…"
+            : "Le dernier scan de cette image a échoué, aucune vulnérabilité connue à afficher."}
+          {operate && latestOverall?.status !== "running" && (
+            <div className="topology-detail-modal__scan-cta">
+              <button type="button" className="btn btn-secondary btn-sm" disabled={scanStatus === "starting"} onClick={handleLaunchScan}>
+                {scanStatus === "starting" ? "Lancement…" : "Relancer un scan (Grype)"}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+      {scanStatus === "error" && scanError && <div className="error-banner">{scanError}</div>}
+      {latestSuccess && (
+        <>
+          <div className="scan-summary">
+            {latestSuccess.vulnerabilities.length === 0 ? (
+              <span className="status-pill status-pill--success">Aucune vulnérabilité connue</span>
+            ) : (
+              SEVERITY_ORDER.filter((sev) => latestSuccess.summary[sev] > 0).map((sev) => (
+                <span key={sev} className={`status-pill status-pill--${SEVERITY_SEMANTIC[sev]}`}>
+                  {sev} · {latestSuccess.summary[sev]}
+                </span>
+              ))
+            )}
+          </div>
+          {latestSuccess.vulnerabilities.length > 0 && (
+            // Scroll INTERNE cantonné à cette table (max-height, voir topology.css) plutôt que de
+            // laisser toute la modal défiler — c'est la seule section qui peut légitimement
+            // dépasser la hauteur de l'écran (des dizaines de CVE sur une image mal maintenue).
+            <div className="data-table-wrap scan-vuln-table-wrap topology-detail-modal__vuln-table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>CVE</th>
+                    <th>Sévérité</th>
+                    <th>Paquet</th>
+                    <th>Version</th>
+                    <th>Corrigé</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {latestSuccess.vulnerabilities
+                    .slice()
+                    .sort((a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity))
+                    .map((vuln) => (
+                      <tr key={`${vuln.id}-${vuln.packageName}-${vuln.installedVersion}`}>
+                        <td className="cell-mono">{vuln.id}</td>
+                        <td>
+                          <span className={`status-pill status-pill--${SEVERITY_SEMANTIC[vuln.severity]}`}>{vuln.severity}</span>
+                        </td>
+                        <td>{vuln.packageName}</td>
+                        <td className="cell-mono">{vuln.installedVersion}</td>
+                        <td className="cell-mono">{vuln.fixedInVersion ?? "—"}</td>
+                      </tr>
+                    ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="topology-detail-modal__hint">
+            {latestSuccess.scanner === "grype" ? "Grype" : "OSV-Scanner"} · terminé {formatDate(latestSuccess.finishedAt)}
+          </p>
+        </>
+      )}
+    </div>
+  );
+
   return (
     <Modal open={open} onClose={onClose} labelledBy="topology-detail-title">
       <div className="topology-detail-modal">
@@ -181,199 +272,134 @@ export default function TopologyNodeDetailModal({ node, onClose }: TopologyNodeD
           </button>
         </div>
 
-        <div className="topology-detail-modal__body">
-          <div className="chip-row">
-            <StatusPill status={node.status} />
-            {node.kind === "container" && node.healthStatus && (
-              <span className={`status-pill status-pill--${HEALTH_SEMANTIC[node.healthStatus]}`}>
-                {HEALTH_LABEL[node.healthStatus]}
-              </span>
-            )}
-            {node.updateAvailable && <span className="status-pill status-pill--warning">Mise à jour d'image disponible</span>}
-            {node.drift && <span className="status-pill status-pill--critical">Dérive GitOps détectée</span>}
-          </div>
+        <div className="chip-row topology-detail-modal__chips">
+          <StatusPill status={node.status} />
+          {node.kind === "container" && node.healthStatus && (
+            <span className={`status-pill status-pill--${HEALTH_SEMANTIC[node.healthStatus]}`}>
+              {HEALTH_LABEL[node.healthStatus]}
+            </span>
+          )}
+          {node.updateAvailable && <span className="status-pill status-pill--warning">Mise à jour d'image disponible</span>}
+          {node.drift && <span className="status-pill status-pill--critical">Dérive GitOps détectée</span>}
+        </div>
 
+        {/* Grille 2 colonnes sur écran large (identité/métriques à gauche, réseau/volumes/labels/env
+            à droite) — chaque colonne a son propre flux vertical normal (pas de scroll individuel),
+            seule .topology-detail-modal__vulns (pleine largeur, en bas) peut scroller en interne.
+            Sous ~860px de large, .topology-detail-modal__grid repasse à 1 colonne (voir topology.css). */}
+        <div className="topology-detail-modal__body">
           {/* --- Conteneur ---------------------------------------------------------------- */}
           {node.kind === "container" && (
             <>
-              {typeof node.cpuPercent === "number" && (
-                <>
-                  <Gauge label="CPU" percent={node.cpuPercent} />
-                  <KeyValueList rows={[{ key: "Mémoire", value: formatMem(node.memBytes ?? 0) }]} />
-                </>
-              )}
-
-              {detailStatus === "loading" && <div className="empty-state">Chargement du détail…</div>}
-              {detailStatus === "error" && <div className="error-banner">Impossible de charger le détail de ce conteneur.</div>}
-
-              {isContainerDetailReady && detail && (
-                <>
-                  <div className="inspector-section-title">Détail</div>
-                  <KeyValueList
-                    rows={[
-                      { key: "ID complet", value: detail.fullId },
-                      { key: "Créé le", value: formatDate(detail.createdAt) },
-                      { key: "Commande", value: detail.command || "—" },
-                      { key: "Politique de redémarrage", value: detail.restartPolicy },
-                      { key: "Network", value: detail.networkMode },
-                    ]}
-                  />
-
-                  {detail.ports.length > 0 && (
+              <div className="topology-detail-modal__grid">
+                <div className="topology-detail-modal__col">
+                  {typeof node.cpuPercent === "number" && (
                     <>
-                      <div className="inspector-section-title">Ports</div>
+                      <Gauge label="CPU" percent={node.cpuPercent} />
+                      <KeyValueList rows={[{ key: "Mémoire", value: formatMem(node.memBytes ?? 0) }]} />
+                    </>
+                  )}
+
+                  {detailStatus === "loading" && <div className="empty-state">Chargement du détail…</div>}
+                  {detailStatus === "error" && <div className="error-banner">Impossible de charger le détail de ce conteneur.</div>}
+
+                  {isContainerDetailReady && detail && (
+                    <>
+                      <div className="inspector-section-title">Détail</div>
                       <KeyValueList
-                        rows={detail.ports.map((p) => ({
-                          key: `${p.containerPort}/${p.proto}`,
-                          value: p.hostPort ? `→ ${p.hostPort}` : "non publié",
-                        }))}
+                        rows={[
+                          { key: "ID complet", value: detail.fullId },
+                          { key: "Créé le", value: formatDate(detail.createdAt) },
+                          { key: "Commande", value: detail.command || "—" },
+                          { key: "Politique de redémarrage", value: detail.restartPolicy },
+                          { key: "Network", value: detail.networkMode },
+                        ]}
                       />
                     </>
                   )}
-
-                  {detail.mounts.length > 0 && (
-                    <>
-                      <div className="inspector-section-title">Volumes montés</div>
-                      <KeyValueList
-                        rows={detail.mounts.map((m) => ({
-                          key: m.destination,
-                          value: `${m.source}${m.readOnly ? " (ro)" : ""}`,
-                        }))}
-                      />
-                    </>
-                  )}
-
-                  {Object.keys(detail.labels).length > 0 && (
-                    <>
-                      <div className="inspector-section-title">Labels</div>
-                      <KeyValueList rows={Object.entries(detail.labels).map(([key, value]) => ({ key, value }))} />
-                    </>
-                  )}
-
-                  {detail.env.length > 0 && (
-                    <>
-                      <div className="inspector-section-title">
-                        Variables d'environnement
-                        <span className="topology-detail-modal__hint"> — les clés ressemblant à un secret sont masquées</span>
-                      </div>
-                      <div className="kv-list">
-                        {detail.env.map((entry, index) => (
-                          <EnvVarRow key={`${entry}-${index}`} entry={entry} />
-                        ))}
-                      </div>
-                    </>
-                  )}
-                </>
-              )}
-
-              <div className="inspector-section-title">
-                Vulnérabilités{imageRef ? ` (image ${imageRef.name}:${imageRef.currentTag})` : ""}
-              </div>
-              {!imageRef && <div className="empty-state">Image introuvable parmi les images suivies.</div>}
-              {imageRef && scans.length === 0 && (
-                <div className="empty-state">
-                  Aucun scan n'a jamais été effectué pour cette image.
-                  {operate && (
-                    <div className="topology-detail-modal__scan-cta">
-                      <button type="button" className="btn btn-secondary btn-sm" disabled={scanStatus === "starting"} onClick={handleLaunchScan}>
-                        {scanStatus === "starting" ? "Lancement…" : "Lancer un scan (Grype)"}
-                      </button>
-                    </div>
-                  )}
                 </div>
-              )}
-              {imageRef && scans.length > 0 && !latestSuccess && (
-                <div className="empty-state">
-                  {latestOverall?.status === "running"
-                    ? "Un scan est en cours pour cette image…"
-                    : "Le dernier scan de cette image a échoué, aucune vulnérabilité connue à afficher."}
-                  {operate && latestOverall?.status !== "running" && (
-                    <div className="topology-detail-modal__scan-cta">
-                      <button type="button" className="btn btn-secondary btn-sm" disabled={scanStatus === "starting"} onClick={handleLaunchScan}>
-                        {scanStatus === "starting" ? "Lancement…" : "Relancer un scan (Grype)"}
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-              {scanStatus === "error" && scanError && <div className="error-banner">{scanError}</div>}
-              {latestSuccess && (
-                <>
-                  <div className="scan-summary">
-                    {latestSuccess.vulnerabilities.length === 0 ? (
-                      <span className="status-pill status-pill--success">Aucune vulnérabilité connue</span>
-                    ) : (
-                      SEVERITY_ORDER.filter((sev) => latestSuccess.summary[sev] > 0).map((sev) => (
-                        <span key={sev} className={`status-pill status-pill--${SEVERITY_SEMANTIC[sev]}`}>
-                          {sev} · {latestSuccess.summary[sev]}
-                        </span>
-                      ))
+
+                {isContainerDetailReady && detail && (
+                  <div className="topology-detail-modal__col">
+                    {detail.ports.length > 0 && (
+                      <>
+                        <div className="inspector-section-title">Ports</div>
+                        <KeyValueList
+                          rows={detail.ports.map((p) => ({
+                            key: `${p.containerPort}/${p.proto}`,
+                            value: p.hostPort ? `→ ${p.hostPort}` : "non publié",
+                          }))}
+                        />
+                      </>
+                    )}
+
+                    {detail.mounts.length > 0 && (
+                      <>
+                        <div className="inspector-section-title">Volumes montés</div>
+                        <KeyValueList
+                          rows={detail.mounts.map((m) => ({
+                            key: m.destination,
+                            value: `${m.source}${m.readOnly ? " (ro)" : ""}`,
+                          }))}
+                        />
+                      </>
+                    )}
+
+                    {Object.keys(detail.labels).length > 0 && (
+                      <>
+                        <div className="inspector-section-title">Labels</div>
+                        <KeyValueList rows={Object.entries(detail.labels).map(([key, value]) => ({ key, value }))} />
+                      </>
+                    )}
+
+                    {detail.env.length > 0 && (
+                      <>
+                        <div className="inspector-section-title">
+                          Variables d'environnement
+                          <span className="topology-detail-modal__hint"> — les clés ressemblant à un secret sont masquées</span>
+                        </div>
+                        <div className="kv-list">
+                          {detail.env.map((entry, index) => (
+                            <EnvVarRow key={`${entry}-${index}`} entry={entry} />
+                          ))}
+                        </div>
+                      </>
                     )}
                   </div>
-                  {latestSuccess.vulnerabilities.length > 0 && (
-                    <div className="data-table-wrap scan-vuln-table-wrap">
-                      <table className="data-table">
-                        <thead>
-                          <tr>
-                            <th>CVE</th>
-                            <th>Sévérité</th>
-                            <th>Paquet</th>
-                            <th>Version</th>
-                            <th>Corrigé</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {latestSuccess.vulnerabilities
-                            .slice()
-                            .sort((a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity))
-                            .map((vuln) => (
-                              <tr key={`${vuln.id}-${vuln.packageName}-${vuln.installedVersion}`}>
-                                <td className="cell-mono">{vuln.id}</td>
-                                <td>
-                                  <span className={`status-pill status-pill--${SEVERITY_SEMANTIC[vuln.severity]}`}>{vuln.severity}</span>
-                                </td>
-                                <td>{vuln.packageName}</td>
-                                <td className="cell-mono">{vuln.installedVersion}</td>
-                                <td className="cell-mono">{vuln.fixedInVersion ?? "—"}</td>
-                              </tr>
-                            ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                  <p className="topology-detail-modal__hint">
-                    {latestSuccess.scanner === "grype" ? "Grype" : "OSV-Scanner"} · terminé {formatDate(latestSuccess.finishedAt)}
-                  </p>
-                </>
-              )}
+                )}
+              </div>
+
+              {vulnSection}
             </>
           )}
 
           {/* --- Volume -------------------------------------------------------------------- */}
           {node.kind === "volume" && (
-            <>
+            <div className="topology-detail-modal__grid">
               {!volume && <div className="empty-state">Chargement du détail du volume…</div>}
               {volume && (
                 <>
-                  <KeyValueList
-                    rows={[
-                      { key: "Nom", value: volume.name },
-                      { key: "Driver", value: volume.driver },
-                      { key: "Point de montage", value: volume.mountpoint },
-                      { key: "Scope", value: volume.scope },
-                      { key: "Créé le", value: formatDate(volume.createdAt) },
-                      { key: "Utilisé par", value: `${volume.inUseBy} conteneur(s)` },
-                    ]}
-                  />
+                  <div className="topology-detail-modal__col">
+                    <KeyValueList
+                      rows={[
+                        { key: "Nom", value: volume.name },
+                        { key: "Driver", value: volume.driver },
+                        { key: "Point de montage", value: volume.mountpoint },
+                        { key: "Scope", value: volume.scope },
+                        { key: "Créé le", value: formatDate(volume.createdAt) },
+                        { key: "Utilisé par", value: `${volume.inUseBy} conteneur(s)` },
+                      ]}
+                    />
+                  </div>
                   {Object.keys(volume.labels).length > 0 && (
-                    <>
+                    <div className="topology-detail-modal__col">
                       <div className="inspector-section-title">Labels</div>
                       <KeyValueList rows={Object.entries(volume.labels).map(([key, value]) => ({ key, value }))} />
-                    </>
+                    </div>
                   )}
                 </>
               )}
-            </>
+            </div>
           )}
 
           {/* --- Network --------------------------------------------------------------------- */}

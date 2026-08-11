@@ -1,6 +1,6 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { apiDelete, apiGet, apiPost, ApiError } from "@/api/client";
-import type { ContainerDetail, ContainerRef } from "@/types";
+import type { ContainerDetail, ContainerProcessList, ContainerRef } from "@/types";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
 
 /** Référence par nom vers un secret défini dans le gestionnaire de secrets (features/secrets) —
@@ -35,6 +35,14 @@ interface ContainersState {
   /** Id du conteneur ayant une action de cycle de vie en cours (désactive ses boutons). */
   actionPendingId: string | null;
   actionError: string | null;
+  /** Processus réels (`docker top`) du conteneur consulté dans la vue "composition interne" du
+   * sous-graphe (voir TopologySubGraphPanel.tsx) — un seul à la fois, `processesContainerId`
+   * évite d'afficher la liste d'un AUTRE conteneur pendant le chargement du nouveau (même garde
+   * que `detail`/`rawId` dans TopologyNodeDetailModal.tsx). */
+  processes: ContainerProcessList | null;
+  processesContainerId: string | null;
+  processesStatus: "idle" | "loading" | "ready" | "error";
+  processesError: string | null;
 }
 
 const initialState: ContainersState = {
@@ -48,6 +56,10 @@ const initialState: ContainersState = {
   detailStatus: "idle",
   actionPendingId: null,
   actionError: null,
+  processes: null,
+  processesContainerId: null,
+  processesStatus: "idle",
+  processesError: null,
 };
 
 /**
@@ -68,6 +80,25 @@ export const fetchContainerDetail = createAsyncThunk<ContainerDetail, string>(
   "containers/fetchContainerDetail",
   async (id) => apiGet<ContainerDetail>(`/containers/${id}`),
 );
+
+/** Processus réels en cours d'exécution (équivalent `docker top`) — voir
+ * GET /api/containers/:id/processes. Échoue explicitement (409 conteneur arrêté, 404 disparu,
+ * 502 démon injoignable...) plutôt que de retomber sur une liste vide qui prétendrait "aucun
+ * process" : le composant appelant doit distinguer "aucun process" (impossible en pratique, un
+ * conteneur a toujours au moins son PID 1) d'un échec réel. */
+export const fetchContainerProcesses = createAsyncThunk<
+  { id: string; list: ContainerProcessList },
+  string,
+  { rejectValue: string }
+>("containers/fetchProcesses", async (id, { rejectWithValue }) => {
+  try {
+    const list = await apiGet<ContainerProcessList>(`/containers/${id}/processes`);
+    return { id, list };
+  } catch (error) {
+    const message = error instanceof ApiError ? error.message : "Impossible de récupérer les processus du conteneur.";
+    return rejectWithValue(message);
+  }
+});
 
 /** Crée puis démarre un conteneur (équivalent `docker run -d`) — voir POST /api/containers. */
 export const createContainer = createAsyncThunk<ContainerRef[], CreateContainerInput, { rejectValue: string }>(
@@ -154,6 +185,20 @@ const containersSlice = createSlice({
       })
       .addCase(fetchContainerDetail.rejected, (state) => {
         state.detailStatus = "error";
+      })
+      .addCase(fetchContainerProcesses.pending, (state, action) => {
+        state.processesStatus = "loading";
+        state.processesError = null;
+        state.processesContainerId = action.meta.arg;
+      })
+      .addCase(fetchContainerProcesses.fulfilled, (state, action) => {
+        state.processesStatus = "ready";
+        state.processes = action.payload.list;
+        state.processesContainerId = action.payload.id;
+      })
+      .addCase(fetchContainerProcesses.rejected, (state, action) => {
+        state.processesStatus = "error";
+        state.processesError = action.payload ?? "Impossible de récupérer les processus du conteneur.";
       })
       .addCase(createContainer.pending, (state) => {
         state.createStatus = "creating";

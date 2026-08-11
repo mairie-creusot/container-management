@@ -15,7 +15,7 @@ import type { TopologyEdge, TopologyNode } from "@/types";
 
 /**
  * Éléments du graphe de topologie partagés entre le graphe principal (TopologyGraph.tsx) et le
- * sous-graphe de dépendances ouvert au double-clic (TopologySubGraphModal.tsx) — extraits ici pour
+ * panneau de sous-graphe ouvert au double-clic (TopologySubGraphPanel.tsx) — extraits ici pour
  * que les deux rendus aient EXACTEMENT le même look (mêmes nœuds, mêmes arêtes, mêmes couleurs),
  * sans dupliquer le JSX/CSS. Voir ARCHITECTURE.md § "Graphe de topologie" pour le contexte complet.
  */
@@ -351,7 +351,49 @@ export function GraphNode({ data, selected }: NodeProps) {
   );
 }
 
+/**
+ * Rayon (px) du cercle de nœuds voisins autour d'un nœud racine — disposition "hub and spoke",
+ * réutilisée par TopologySubGraphPanel.tsx pour le sous-graphe de dépendances ET la vue
+ * "composition interne" (processus réels autour du nœud conteneur).
+ */
+const RADIAL_RADIUS = 260;
+
+export function radialPositions(rootId: string, satelliteIds: string[], radius = RADIAL_RADIUS): Record<string, { x: number; y: number }> {
+  const positions: Record<string, { x: number; y: number }> = { [rootId]: { x: 0, y: 0 } };
+  const count = satelliteIds.length;
+  satelliteIds.forEach((id, index) => {
+    const angle = (index / Math.max(count, 1)) * 2 * Math.PI - Math.PI / 2;
+    positions[id] = { x: Math.round(Math.cos(angle) * radius), y: Math.round(Math.sin(angle) * radius) };
+  });
+  return positions;
+}
+
 export const nodeTypes = { graphNode: GraphNode };
+
+/**
+ * Un processus RÉEL du conteneur (`docker top`, voir TopologySubGraphPanel.tsx "composition
+ * interne") — nœud délibérément minimal (PID/utilisateur/commande, les seules colonnes qu'on
+ * peut identifier avec confiance dans une sortie `ps` dont les colonnes varient selon l'image),
+ * jamais cliquable/connectable : ce n'est pas une ressource QUAI, juste une donnée d'observation.
+ */
+export interface ProcessNodeData {
+  pid: string;
+  user: string;
+  command: string;
+}
+
+export function ProcessNode({ data }: NodeProps) {
+  const p = data as unknown as ProcessNodeData;
+  return (
+    <div className="topology-process-node" title={p.command}>
+      <div className="topology-process-node__pid">PID {p.pid}</div>
+      <div className="topology-process-node__user">{p.user}</div>
+      <div className="topology-process-node__command">{p.command || "—"}</div>
+    </div>
+  );
+}
+
+export const interiorNodeTypes = { graphNode: GraphNode, processNode: ProcessNode };
 
 /** Ferme un popover au clic en dehors ou à Échap — même pattern que ContextMenu/Topbar. Partagé
  * par les popovers de création/renommage du graphe principal et par tout futur usage similaire. */

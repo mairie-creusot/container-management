@@ -135,6 +135,27 @@ export interface ContainerDetail extends ContainerRef {
   labels: Record<string, string>;
 }
 
+/**
+ * Processus RÉELLEMENT en cours d'exécution dans un conteneur (équivalent `docker top <id>`) —
+ * voir GET /api/containers/:id/processes. `titles` reflète les colonnes RÉELLES retournées par
+ * le démon (dépend de la commande `ps` disponible dans l'image cible). Ce n'est PAS une
+ * reconstruction de l'architecture applicative interne (QUAI n'a aucun moyen de la connaître).
+ */
+export interface ContainerProcessList {
+  titles: string[];
+  processes: string[][];
+}
+
+/** Une couche de l'image d'un conteneur (équivalent `docker history <image>`) — voir
+ * GET /api/images/:id/history. `id` vaut souvent "<missing>" pour une couche intermédiaire. */
+export interface ImageHistoryLayer {
+  id: string;
+  createdAt: string;
+  createdBy: string;
+  sizeBytes: number;
+  comment: string;
+}
+
 export interface DockerVolume {
   name: string;
   driver: string;

@@ -81,6 +81,28 @@ interface ContainerRef {
   memBytes: number;
 }
 
+// Composition interne d'un conteneur (voir « Graphe de topologie » plus bas, vue "composition
+// interne" du sous-graphe) — UNIQUEMENT ce que Docker expose réellement, rien d'inventé sur
+// l'architecture applicative (impossible à connaître sans tracing applicatif, hors périmètre).
+
+/** GET /api/containers/:id/processes — équivalent `docker top <id>`. `titles` reflète les
+ * colonnes RÉELLES retournées par le démon (dépend de la commande `ps` de l'image cible, pas un
+ * schéma fixe imposé côté QUAI) ; `processes` porte une entrée par ligne, alignée avec `titles`. */
+interface ContainerProcessList {
+  titles: string[];
+  processes: string[][];
+}
+
+/** GET /api/images/:id/history — équivalent `docker history <image>`. `id` vaut souvent
+ * "<missing>" pour une couche intermédiaire (comportement natif Docker, pas une anomalie). */
+interface ImageHistoryLayer {
+  id: string;
+  createdAt: string;             // ISO 8601, chaîne vide si le démon ne l'a pas fournie
+  createdBy: string;             // commande Dockerfile telle que Docker la restitue (déjà tronquée par le démon)
+  sizeBytes: number;
+  comment: string;
+}
+
 // Explorateur de fichiers d'un volume (lecture seule) — voir chapitre dédié plus bas.
 interface VolumeFileEntry {
   name: string;
@@ -535,6 +557,13 @@ POST /api/containers   # { image, name?, ports?, env?, secretEnv?, volumes?, net
                         # ci-dessus et fusionné dans l'Env final — secretName introuvable = 400 avant
                         # toute création. La gestion déclarative complète passe par GitOps (voir plus
                         # bas) ; ceci reste pensé pour tester vite en local.
+GET  /api/containers/:id/processes  # ContainerProcessList — équivalent `docker top <id>`, voir « Graphe
+                                     # de topologie » (vue "composition interne"). 409 si le conteneur
+                                     # n'est pas démarré (docker top l'exige), 404 s'il n'existe plus,
+                                     # jamais une liste vide silencieuse pour un échec réel.
+GET  /api/images/:id/history        # ImageHistoryLayer[] — équivalent `docker history`, même vue
+                                     # "composition interne". 404 si l'image n'est pas suivie, 502 si le
+                                     # démon est injoignable ou l'image n'existe plus localement.
 
 GET  /api/gitops/files
 GET  /api/gitops/files/:path/diff
@@ -687,11 +716,11 @@ côté API :
    frame) plutôt que le tiret défilant générique conservé côté "network" (plus subtil, `animated:
    true` + `strokeDasharray`, comportement inchangé). Les particules ne sont pas rendues si le
    conteneur est arrêté (rien ne transite réellement) ou sous `prefers-reduced-motion`.
-6. **Modal de détail complet et sous-graphe de dépendances.** Les éléments de rendu du graphe
+6. **Modal de détail complet et panneau de sous-graphe.** Les éléments de rendu du graphe
    (`GraphNode`, `edgeTypes`/`nodeTypes`, `NODE_CAPABILITIES`/`CAPABILITY_DEFS`, `buildTopologyEdges`,
-   `idWithoutPrefix`, `formatMem`...) ont été extraits de `TopologyGraph.tsx` vers
-   `apps/web/src/components/topologyGraphShared.tsx`, pour être réutilisés à l'identique par deux
-   nouveaux composants :
+   `idWithoutPrefix`, `formatMem`, `radialPositions`, `ProcessNode`/`interiorNodeTypes`...) ont été
+   extraits de `TopologyGraph.tsx` vers `apps/web/src/components/topologyGraphShared.tsx`, pour être
+   réutilisés à l'identique par deux composants :
    - `TopologyNodeDetailModal.tsx` — ouverte par "Voir le détail" (menu contextuel d'un nœud). Le
      résumé déjà présent sur `TopologyNode` (ex : `vulnCritical`) ne suffit pas pour cette vue : la
      modal va chercher le VRAI détail selon le kind — `GET /api/containers/:id` (ports, montages,
@@ -706,23 +735,65 @@ côté API :
      le pattern visuel `.scan-summary`/`.scan-vuln-table-wrap` déjà utilisé par `ImagesPage.tsx`,
      pas un design ad hoc. Pour un volume/network : objets complets `DockerVolume`/`DockerNetwork`
      déjà exposés par `GET /api/volumes`/`GET /api/networks` (aucune nouvelle route). Pour une VM
-     Nutanix : ce qui est déjà dans `TopologyNode`, présenté proprement.
-   - `TopologySubGraphModal.tsx` — ouverte au double-clic sur un nœud (ou "Visualiser les
-     dépendances" du menu contextuel) : affiche UNIQUEMENT ce nœud + tous les nœuds reliés à lui par
-     au moins une arête du graphe complet déjà chargé côté client (`state.topology.data` — pur
-     calcul dérivé, aucun nouvel appel réseau), en disposition radiale (racine au centre, voisins en
-     cercle). Double-cliquer sur un nœud DANS le sous-graphe re-centre la vue dessus (drill-down
-     récursif à un niveau à la fois, avec fil d'Ariane + bouton "Retour" pour remonter) plutôt que
-     d'empiler des modals. Un nœud isolé (ex : VM Nutanix, ou volume/network jamais monté) affiche
-     un message explicite plutôt qu'un canevas vide silencieux. "Voir le détail" depuis le
-     sous-graphe délègue à l'unique instance de `TopologyNodeDetailModal` montée par
-     `TopologyGraph.tsx` (pas de doublon). Les deux modals réutilisent `<Modal>` (`Modal.tsx`) avec
-     un enfant plus large que `.modal-card` (même pattern que `.volume-files-modal`/
-     `.container-console-modal`, `console.css` — un flex item grandit automatiquement au-delà de son
-     `max-width` si son contenu l'exige, voir `modal.css`).
+     Nutanix : ce qui est déjà dans `TopologyNode`, présenté proprement. Toujours un enfant de
+     `<Modal>` (`Modal.tsx`, INCHANGÉ — aucune nouvelle variante de taille n'y a été ajoutée), mais
+     volontairement TRÈS large (`.topology-detail-modal`, jusqu'à 1180px) et organisée en grille 2
+     colonnes (identité/métriques à gauche, réseau/volumes/labels/env à droite, `.topology-detail-
+     modal__grid`/`__col`) plutôt qu'une seule colonne verticale : un écran de bureau normal affiche
+     tout sans faire défiler la modal entière. Seule la section vulnérabilités (pleine largeur, en
+     bas, potentiellement longue) garde un scroll INTERNE cantonné à sa table
+     (`.topology-detail-modal__vuln-table-wrap`, `max-height` + `overflow-y: auto`) — le seul scroll
+     restant, jamais celui de toute la modal.
+   - `TopologySubGraphPanel.tsx` (`TopologySubGraphModal.tsx` avant cette passe) — ouvert au
+     double-clic sur un nœud (ou "Visualiser les dépendances" du menu contextuel). Différence majeure
+     de PRÉSENTATION par rapport à avant : ce n'est plus un enfant de `<Modal>` (calque flottant par
+     portail `document.body`) mais un panneau `position: absolute; inset: 0` À L'INTÉRIEUR de
+     `.topology-graph` (devenu `position: relative`) — il occupe exactement la même zone que le
+     graphe principal, jamais un calque par-dessus toute la page. `TopologyGraph.tsx` orchestre une
+     transition "on rentre dans le nœud" : au double-clic/clic menu, `openSubGraph(nodeId, clientX,
+     clientY)` calcule l'origine en % relatifs à `.topology-graph` (position à l'écran du clic),
+     monte le panneau (`opacity: 0; transform: scale(0.42)` posé avec ce `transform-origin`) puis
+     bascule une frame plus tard vers `.topology-subgraph-panel--visible` (`opacity: 1; scale(1)`)
+     pendant que `.topology-graph__main` (enveloppe du `<ReactFlow>` principal) s'efface légèrement
+     en retrait (`opacity: 0; scale(1.06)`, `pointer-events: none`). Remonter ("↑ Remonter au graphe
+     complet") joue la même transition en sens inverse ; le panneau reste monté jusqu'à la fin de
+     l'animation de sortie (`onTransitionEnd` sur `opacity` → `onExited`) pour ne pas disparaître
+     brutalement. Sous `prefers-reduced-motion`, ni transition ni double `requestAnimationFrame` :
+     montage/démontage direct. Contenu du panneau, deux vues choisies par bascule (`viewMode`,
+     `.topology-subgraph-panel__mode-toggle`, proposée UNIQUEMENT pour un nœud "container") :
+     - **"Dépendances"** (par défaut, tous les kinds) — comportement de sous-graphe INCHANGÉ par
+       rapport à avant cette passe : UNIQUEMENT ce nœud + tous les nœuds reliés à lui par au moins
+       une arête du graphe complet déjà chargé côté client (`state.topology.data`, pur calcul dérivé,
+       aucun nouvel appel réseau), disposition radiale (racine au centre, voisins en cercle,
+       `radialPositions`). Double-cliquer sur un nœud DANS le sous-graphe re-centre la vue dessus
+       (drill-down récursif, fil d'Ariane + bouton "← Retour"), continue de fonctionner à l'identique
+       dans ce nouveau panneau plein écran. Un nœud isolé affiche un message explicite plutôt qu'un
+       canevas vide. "Voir le détail" délègue à l'unique instance de `TopologyNodeDetailModal` montée
+       par `TopologyGraph.tsx` (pas de doublon).
+     - **"Composition interne"** (conteneurs uniquement — les autres kinds n'ont pas cette notion) —
+       QUAI ne peut PAS connaître la vraie architecture applicative interne d'un conteneur (il
+       faudrait du tracing applicatif, hors périmètre de ce projet) : cette vue n'invente RIEN à ce
+       sujet, elle affiche UNIQUEMENT ce que Docker expose réellement, avec un sous-titre explicite
+       dans l'UI elle-même (`.topology-interior__caption`) précisant quelles données et leur
+       provenance exacte, pour ne jamais être prise pour une carte d'architecture applicative :
+       - **Processus réels en cours d'exécution** — `GET /api/containers/:id/processes`
+         (`docker.ts#getContainerProcesses`, équivalent `docker top <id>`), rendus comme des nœuds
+         "processus" (`ProcessNode`, `.topology-process-node` — PID/utilisateur/commande, colonnes
+         identifiées avec confiance dans `titles` par regex ; repli honnête sur la dernière colonne
+         réelle si "CMD"/"COMMAND" n'est pas reconnu, jamais une valeur inventée) reliés par de
+         simples arêtes au nœud conteneur, même disposition radiale que la vue "Dépendances"
+         (`radialPositions`, rayon plus serré). Conteneur arrêté → message explicite AVANT même
+         d'appeler l'API (`docker top` l'exige) ; échec réel (404/409/502) → message honnête
+         (`processesError`), jamais une liste vide qui prétendrait "aucun process".
+       - **Historique des couches de l'image** — `GET /api/images/:id/history`
+         (`docker.ts#getImageHistory`, équivalent `docker history`), présenté en liste compacte
+         empilée (`.topology-interior__layers`, taille + commande Dockerfile tronquée par couche)
+         avec son propre scroll interne si l'image a beaucoup de couches — secondaire par rapport aux
+         processus réels, image rapprochée par nom "name:tag" comme la section vulnérabilités de
+         `TopologyNodeDetailModal.tsx`.
    L'Inspector latéral permanent n'est PAS réintroduit sur la Vue d'ensemble (retiré
-   intentionnellement, voir `OverviewPage.tsx`) : ces deux modals ne s'ouvrent qu'à la demande
-   (clic droit / double-clic), jamais affichées en permanence.
+   intentionnellement, voir `OverviewPage.tsx`) : la modal de détail et le panneau de sous-graphe ne
+   s'affichent qu'à la demande (clic droit / double-clic), jamais affichés en permanence.
 
 ## Volumes/networks orphelins (détection + nettoyage)
 

@@ -22,11 +22,13 @@ import type {
   ContainerDetail,
   ContainerMount,
   ContainerPortMapping,
+  ContainerProcessList,
   ContainerRef,
   DockerHostInfo,
   DockerNetwork,
   DockerVolume,
   Environment,
+  ImageHistoryLayer,
   VolumeFileEntry,
 } from "../types.js";
 
@@ -577,6 +579,45 @@ export async function inspectDockerContainer(id: string): Promise<ContainerDetai
   } catch {
     return null;
   }
+}
+
+/**
+ * Processus RÉELLEMENT en cours d'exécution dans un conteneur (équivalent `docker top <id>`) —
+ * voir types.ts#ContainerProcessList pour ce que ça représente (et ne représente PAS : QUAI ne
+ * reconstruit aucune architecture applicative interne, uniquement ce que le noyau hôte voit
+ * tourner dans le namespace PID du conteneur). Ne masque JAMAIS un échec par une liste vide :
+ * lève si le démon est injoignable, si le conteneur n'existe pas, ou si `docker top` échoue
+ * (conteneur arrêté — la cause la plus fréquente — ou droits insuffisants) ; l'appelant
+ * (routes/containers.ts) traduit en message honnête.
+ */
+export async function getContainerProcesses(id: string): Promise<ContainerProcessList> {
+  const docker = await requireReachableClient();
+  const container = docker.getContainer(id);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const result: any = await container.top();
+  return {
+    titles: Array.isArray(result?.Titles) ? result.Titles : [],
+    processes: Array.isArray(result?.Processes) ? result.Processes : [],
+  };
+}
+
+/**
+ * Historique des couches de l'image d'un conteneur (équivalent `docker history <image>`) — voir
+ * types.ts#ImageHistoryLayer. `reference` est une référence Docker réelle ("name:tag" ou id),
+ * pas un ImageRef.id QUAI (résolution faite par l'appelant, voir routes/images.ts). Lève si le
+ * démon est injoignable ou si l'image n'existe plus localement — jamais de liste vide silencieuse.
+ */
+export async function getImageHistory(reference: string): Promise<ImageHistoryLayer[]> {
+  const docker = await requireReachableClient();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const history: any[] = await docker.getImage(reference).history();
+  return history.map((layer) => ({
+    id: typeof layer?.Id === "string" && layer.Id ? layer.Id : "<missing>",
+    createdAt: typeof layer?.Created === "number" ? new Date(layer.Created * 1000).toISOString() : "",
+    createdBy: typeof layer?.CreatedBy === "string" ? layer.CreatedBy : "",
+    sizeBytes: typeof layer?.Size === "number" ? layer.Size : 0,
+    comment: typeof layer?.Comment === "string" ? layer.Comment : "",
+  }));
 }
 
 // ---------------------------------------------------------------------------------------

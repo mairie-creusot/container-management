@@ -4,6 +4,33 @@
   overflow: hidden;
   border: 1px solid var(--color-border);
   background: var(--color-bg);
+  /* Ancre pour .topology-subgraph-panel (position: absolute, même zone que le graphe principal —
+     voir TopologyGraph.tsx) et .topology-graph__main (le graphe principal lui-même, qui s'efface/
+     se dézoome légèrement pendant que le panneau est affiché). */
+  position: relative;
+}
+
+/* Graphe principal — enveloppe introduite pour porter la transition "on rentre dans le nœud" sans
+   toucher au <ReactFlow> lui-même. transform-origin posé en inline style par TopologyGraph.tsx
+   (position à l'écran du nœud double-cliqué). */
+.topology-graph__main {
+  width: 100%;
+  height: 100%;
+  transition: opacity 0.32s ease, transform 0.36s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+.topology-graph__main--receded {
+  opacity: 0;
+  transform: scale(1.06);
+  /* Le graphe principal est visuellement caché derrière le panneau : aucune interaction fantôme
+     (survol de Handle, drag de nœud...) ne doit lui parvenir tant qu'il est dans cet état. */
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topology-graph__main {
+    transition: none;
+  }
 }
 
 .topology-graph .react-flow__attribution {
@@ -502,16 +529,19 @@
 /* --- Modal de détail complet d'un nœud (clic droit -> "Voir le détail", TopologyNodeDetailModal.tsx)
    Même famille visuelle que .volume-files-modal/.container-console-modal (console.css) : un enfant
    plus large que .modal-card, qui grandit automatiquement dessus (min-width auto d'un flex item,
-   voir modal.css) — pas de nouvelle variante de <Modal> à maintenir. --------------------------- */
+   voir modal.css) — pas de nouvelle variante de <Modal> à maintenir. Volontairement TRÈS large
+   (jusqu'à 1180px) : l'objectif est qu'un écran de bureau normal affiche tout le contenu (identité,
+   métriques, réseau, volumes, labels, env) sans jamais faire défiler la modal entière — seule
+   .topology-detail-modal__vulns (potentiellement longue) garde un scroll cantonné à elle-même,
+   voir plus bas. --------------------------------------------------------------------------- */
 .topology-detail-modal {
-  width: 720px;
+  width: 1180px;
   max-width: 94vw;
-  max-height: 86vh;
-  padding: 20px 22px 22px;
+  max-height: 90vh;
+  padding: 22px 26px 26px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  overflow: hidden;
+  gap: 16px;
 }
 
 .topology-detail-modal__header {
@@ -562,11 +592,55 @@
 }
 
 .topology-detail-modal__body {
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  /* Pas d'overflow-y ici, volontairement : le contenu doit tenir dans la grille ci-dessous sur un
+     écran de bureau normal. .modal-card (modal.css) garde son overflow-y:auto en dernier recours
+     pour un très petit viewport, mais ce n'est plus le mode de fonctionnement attendu. */
+}
+
+.topology-detail-modal__chips {
+  margin: 0;
+}
+
+/* Grille identité/métriques (gauche) + réseau/volumes/labels/env (droite) — 2 colonnes sur un
+   écran de bureau normal, 1 seule sous ~860px (tablette/mobile). Chaque colonne garde un flux
+   vertical normal, SANS scroll individuel : seule .topology-detail-modal__vulns (pleine largeur,
+   ci-dessous) peut légitimement dépasser et scroller en interne. */
+.topology-detail-modal__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 32px;
+  align-items: start;
+}
+
+.topology-detail-modal__col {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  padding-right: 2px;
+  min-width: 0;
+}
+
+@media (max-width: 860px) {
+  .topology-detail-modal__grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Section vulnérabilités — pleine largeur, sous la grille : c'est la seule zone de la modal
+   susceptible d'être vraiment longue (des dizaines de CVE), donc la seule à garder un scroll
+   INTERNE cantonné à elle-même (.scan-vuln-table-wrap, components.css, complété ci-dessous). */
+.topology-detail-modal__vulns {
+  border-top: 1px solid var(--color-border);
+  padding-top: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.topology-detail-modal__vuln-table-wrap {
+  max-height: 340px;
 }
 
 .topology-detail-modal__hint {
@@ -604,30 +678,51 @@
   color: var(--color-text);
 }
 
-/* --- Sous-graphe de dépendances (double-clic sur un nœud, TopologySubGraphModal.tsx) — plein
-   écran (quasi), même principe d'agrandissement d'un enfant de .modal-card que ci-dessus. Réutilise
+/* --- Panneau de sous-graphe (double-clic sur un nœud, TopologySubGraphPanel.tsx) — REMPLACE le
+   graphe principal EN PLACE (position: absolute, même zone que .topology-graph, voir la règle
+   `position: relative` posée dessus plus haut), PAS une modal flottante : ce n'est donc plus un
+   enfant de .modal-card. Transition "on rentre dans le nœud" : scale+fade depuis `origin` (posé en
+   inline style par TopologySubGraphPanel.tsx, position à l'écran du nœud double-cliqué). Réutilise
    .topology-node/.topology-edge/etc. tels quels (GraphNode partagé) : pas de nouvelle règle sur ces
    classes ici, seulement le cadre autour du canevas. ------------------------------------------- */
-.topology-subgraph-modal {
-  width: 96vw;
-  max-width: 1400px;
-  height: 88vh;
-  max-height: 92vh;
-  padding: 16px 18px 18px;
+.topology-subgraph-panel {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  padding: 16px 18px 18px;
+  background: var(--color-bg);
+  border-radius: inherit;
+  opacity: 0;
+  transform: scale(0.42);
+  transition: opacity 0.32s ease, transform 0.36s cubic-bezier(0.22, 0.61, 0.36, 1);
+  pointer-events: none;
 }
 
-.topology-subgraph-modal__header {
+.topology-subgraph-panel--visible {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topology-subgraph-panel {
+    transition: none;
+  }
+}
+
+.topology-subgraph-panel__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   flex-shrink: 0;
+  flex-wrap: wrap;
 }
 
-.topology-subgraph-modal__breadcrumb {
+.topology-subgraph-panel__breadcrumb {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -637,29 +732,30 @@
   min-width: 0;
 }
 
-.topology-subgraph-modal__crumb {
+.topology-subgraph-panel__crumb {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   color: var(--color-text-muted);
 }
 
-.topology-subgraph-modal__crumb:last-child {
+.topology-subgraph-panel__crumb:last-child {
   color: var(--color-text);
 }
 
-.topology-subgraph-modal__crumb-sep {
+.topology-subgraph-panel__crumb-sep {
   color: var(--color-text-faint);
   font-weight: 400;
 }
 
-.topology-subgraph-modal__actions {
+.topology-subgraph-panel__actions {
   display: flex;
+  align-items: center;
   gap: 8px;
   flex-shrink: 0;
 }
 
-.topology-subgraph-modal__note {
+.topology-subgraph-panel__note {
   font-size: 12.5px;
   color: var(--color-text-faint);
   background: var(--color-surface-2);
@@ -669,7 +765,7 @@
   flex-shrink: 0;
 }
 
-.topology-subgraph-modal__graph {
+.topology-subgraph-panel__graph {
   flex: 1;
   min-height: 0;
   position: relative;
@@ -678,6 +774,202 @@
   overflow: hidden;
 }
 
-.topology-subgraph-modal__graph .react-flow {
+.topology-subgraph-panel__graph .react-flow {
   background: var(--color-surface-1);
+}
+
+/* Bascule "Dépendances" / "Composition interne" — proposée uniquement pour un nœud "container"
+   (voir TopologySubGraphPanel.tsx), même famille visuelle que .context-menu/.graph-popover
+   (surface + bordure du thème) mais en groupe de boutons horizontal façon onglets. */
+.topology-subgraph-panel__mode-toggle {
+  display: flex;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.topology-subgraph-panel__mode-btn {
+  background: var(--color-surface-1);
+  border: none;
+  color: var(--color-text-muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 6px 12px;
+  cursor: pointer;
+}
+
+.topology-subgraph-panel__mode-btn + .topology-subgraph-panel__mode-btn {
+  border-left: 1px solid var(--color-border);
+}
+
+.topology-subgraph-panel__mode-btn:hover {
+  background: var(--color-surface-2);
+  color: var(--color-text);
+}
+
+.topology-subgraph-panel__mode-btn.is-active {
+  background: var(--gradient-accent);
+  color: #fff;
+}
+
+/* --- Vue "composition interne" d'un conteneur (processus réels + historique des couches) ------ */
+.topology-interior {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.topology-interior__caption {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-muted);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  flex-shrink: 0;
+}
+
+.topology-interior__caption code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--color-surface-3);
+  border-radius: 3px;
+  padding: 1px 4px;
+}
+
+.topology-interior__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 14px;
+}
+
+.topology-interior__graph {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.topology-interior__graph .react-flow {
+  background: var(--color-surface-1);
+}
+
+.topology-interior__status-message {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+  z-index: 1;
+}
+
+.topology-interior__history {
+  width: 300px;
+  flex-shrink: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  overflow-y: auto;
+  background: var(--color-surface-1);
+}
+
+.topology-interior__history-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  margin-bottom: 10px;
+}
+
+.topology-interior__history-title code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.topology-interior__layers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Couches empilées visuellement (bordure gauche épaisse façon "pile") — simple liste, pas des
+   nœuds de graphe : voir en-tête de TopologySubGraphPanel.tsx, cette section reste secondaire par
+   rapport aux processus réels. */
+.topology-interior__layer {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--color-border);
+  background: var(--color-surface-2);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.topology-interior__layer-size {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-text-faint);
+}
+
+.topology-interior__layer-cmd {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 900px) {
+  .topology-interior__body {
+    flex-direction: column;
+  }
+  .topology-interior__history {
+    width: auto;
+    max-height: 200px;
+  }
+}
+
+/* Nœud "processus" (docker top) — délibérément plus petit/sobre que .topology-node : ce n'est pas
+   une ressource QUAI, juste une donnée d'observation en lecture seule (voir ProcessNode,
+   topologyGraphShared.tsx). Pas de Handle (aucune connexion possible). */
+.topology-process-node {
+  width: 190px;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed var(--color-border);
+  background: var(--color-surface-2);
+  cursor: default;
+}
+
+.topology-process-node__pid {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.topology-process-node__user {
+  font-size: 10.5px;
+  color: var(--color-text-faint);
+  margin-bottom: 4px;
+}
+
+.topology-process-node__command {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

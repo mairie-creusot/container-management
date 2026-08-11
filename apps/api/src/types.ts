@@ -81,6 +81,35 @@ export interface ContainerDetail extends ContainerRef {
   labels: Record<string, string>;
 }
 
+/**
+ * Processus RÉELLEMENT en cours d'exécution dans un conteneur (équivalent `docker top <id>`) —
+ * voir GET /api/containers/:id/processes et services/docker.ts#getContainerProcesses. `titles`
+ * reflète les colonnes RÉELLES retournées par le démon (dépend de la commande `ps` disponible
+ * dans l'image cible, pas un schéma fixe imposé côté QUAI) ; `processes` porte une entrée par
+ * ligne, valeurs alignées avec `titles`. Ce n'est PAS une reconstruction de l'architecture
+ * applicative interne du conteneur (QUAI n'a aucun moyen de la connaître réellement) : seulement
+ * ce que le noyau hôte voit tourner dans le namespace PID du conteneur, tel quel.
+ */
+export interface ContainerProcessList {
+  titles: string[];
+  processes: string[][];
+}
+
+/**
+ * Une couche de l'image d'un conteneur (équivalent `docker history <image>`) — voir
+ * GET /api/images/:id/history et services/docker.ts#getImageHistory. `id` vaut souvent
+ * "<missing>" pour une couche intermédiaire sans image id propre (comportement natif Docker,
+ * pas une anomalie). `createdBy` est la commande Dockerfile telle que Docker la restitue
+ * (déjà tronquée par le démon lui-même au-delà d'une certaine longueur).
+ */
+export interface ImageHistoryLayer {
+  id: string;
+  createdAt: string;
+  createdBy: string;
+  sizeBytes: number;
+  comment: string;
+}
+
 export interface DockerVolume {
   name: string;
   driver: string;
