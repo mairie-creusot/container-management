@@ -3,7 +3,10 @@ import { useAppDispatch, useAppSelector } from "@/hooks";
 import {
   deleteImage,
   fetchImages,
+  fetchScanDetail,
+  fetchScans,
   pullImage,
+  scanImage,
   selectImage,
   setImageFilter,
   updateImage,
@@ -17,12 +20,28 @@ import StatusPill from "@/components/StatusPill";
 import RegistryBadge from "@/components/RegistryBadge";
 import KeyValueList from "@/components/KeyValueList";
 import Pagination from "@/components/Pagination";
+import type { VulnSeverity } from "@/types";
 
 const FILTERS: { id: ImageStatusFilter; label: string }[] = [
   { id: "all", label: "Toutes" },
   { id: "update", label: "Mise à jour dispo" },
   { id: "uptodate", label: "À jour" },
 ];
+
+// Ordre d'affichage des sévérités et mapping vers les couleurs sémantiques déjà définies
+// (apps/web/src/styles/variables.css) — Critical/High en rouge, Medium en ambre, Low/Negligible/
+// Unknown en neutre pour ne pas noyer les vraies alertes.
+const SEVERITY_ORDER: VulnSeverity[] = ["Critical", "High", "Medium", "Low", "Negligible", "Unknown"];
+const SEVERITY_SEMANTIC: Record<VulnSeverity, "critical" | "warning" | "neutral"> = {
+  Critical: "critical",
+  High: "critical",
+  Medium: "warning",
+  Low: "neutral",
+  Negligible: "neutral",
+  Unknown: "neutral",
+};
+
+const SCAN_POLL_MS = 2000;
 
 function formatBytes(bytes: number): string {
   if (bytes <= 0) return "0 Mo";
@@ -31,11 +50,27 @@ function formatBytes(bytes: number): string {
   return `${(mb / 1024).toFixed(2)} Go`;
 }
 
+function formatDate(iso: string | null): string {
+  if (!iso) return "—";
+  return new Date(iso).toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
 export default function ImagesPage() {
   const dispatch = useAppDispatch();
-  const { items, status, error, filter, selectedId, updatingId, deletingId, pullStatus, pullError } = useAppSelector(
-    (s) => s.images,
-  );
+  const {
+    items,
+    status,
+    error,
+    filter,
+    selectedId,
+    updatingId,
+    deletingId,
+    pullStatus,
+    pullError,
+    scansByImageId,
+    scanStatus,
+    scanError,
+  } = useAppSelector((s) => s.images);
   const [pullReference, setPullReference] = useState("");
   const searchQuery = useAppSelector((s) => s.ui.searchQuery);
   const selectedEnvironmentId = useAppSelector((s) => s.ui.selectedEnvironmentId);
@@ -46,6 +81,10 @@ export default function ImagesPage() {
   useEffect(() => {
     dispatch(fetchImages(filter));
   }, [dispatch, filter]);
+
+  useEffect(() => {
+    if (selectedId) dispatch(fetchScans(selectedId));
+  }, [dispatch, selectedId]);
 
   async function handleUpdate(imageId: string, imageName: string, latestTag: string) {
     const ok = await confirm({
@@ -85,6 +124,22 @@ export default function ImagesPage() {
 
   const selected = items.find((image) => image.id === selectedId) ?? null;
   const { page, totalPages, pageItems, setPage, pageSize, setPageSize } = usePagination(visible, 10);
+
+  const currentScan = selected ? scansByImageId[selected.id]?.[0] ?? null : null;
+
+  // Poll le scan en cours toutes les 2s — même principe que le suivi de run IaC (voir
+  // apps/web/src/features/iac/IacPage.tsx), plus simple qu'un flux WebSocket pour ce premier lot.
+  useEffect(() => {
+    if (!selected || !currentScan || currentScan.status !== "running") return;
+    const interval = setInterval(() => {
+      dispatch(fetchScanDetail({ imageId: selected.id, scanId: currentScan.id }));
+    }, SCAN_POLL_MS);
+    return () => clearInterval(interval);
+  }, [dispatch, selected, currentScan]);
+
+  function handleScan(imageId: string) {
+    dispatch(scanImage(imageId));
+  }
 
   return (
     <div className="workspace">
@@ -213,6 +268,16 @@ export default function ImagesPage() {
               {canOperate(session) && (
                 <button
                   type="button"
+                  className="btn btn-secondary btn-sm"
+                  disabled={scanStatus === "starting" || currentScan?.status === "running"}
+                  onClick={() => handleScan(selected.id)}
+                >
+                  {currentScan?.status === "running" ? "Scan en cours…" : "Scanner"}
+                </button>
+              )}
+              {canOperate(session) && (
+                <button
+                  type="button"
                   className="btn btn-danger btn-sm"
                   disabled={deletingId === selected.id}
                   onClick={() => handleDelete(selected.id, selected.name)}
@@ -223,8 +288,73 @@ export default function ImagesPage() {
             </div>
             {!canOperate(session) && (
               <p style={{ fontSize: 11.5, color: "var(--color-text-faint)" }}>
-                Rôle operator ou admin requis pour mettre à jour ou supprimer.
+                Rôle operator ou admin requis pour mettre à jour, scanner ou supprimer.
               </p>
+            )}
+
+            {scanStatus === "error" && scanError && <div className="error-banner">{scanError}</div>}
+
+            {currentScan && (
+              <>
+                <div className="inspector-section-title">Vulnérabilités (Grype)</div>
+                {currentScan.status === "running" && (
+                  <div className="empty-state">
+                    Scan en cours… (peut prendre du temps au premier scan, le temps de télécharger la base
+                    de vulnérabilités)
+                  </div>
+                )}
+                {currentScan.status === "failed" && (
+                  <div className="error-banner">Le scan a échoué (binaire grype absent ou erreur d'exécution).</div>
+                )}
+                {currentScan.status === "success" && (
+                  <>
+                    <div className="scan-summary">
+                      {currentScan.vulnerabilities.length === 0 ? (
+                        <span className="status-pill status-pill--success">Aucune vulnérabilité connue</span>
+                      ) : (
+                        SEVERITY_ORDER.filter((sev) => currentScan.summary[sev] > 0).map((sev) => (
+                          <span key={sev} className={`status-pill status-pill--${SEVERITY_SEMANTIC[sev]}`}>
+                            {sev} · {currentScan.summary[sev]}
+                          </span>
+                        ))
+                      )}
+                    </div>
+                    {currentScan.vulnerabilities.length > 0 && (
+                      <div className="data-table-wrap scan-vuln-table-wrap">
+                        <table className="data-table">
+                          <thead>
+                            <tr>
+                              <th>CVE</th>
+                              <th>Sévérité</th>
+                              <th>Paquet</th>
+                              <th>Version</th>
+                              <th>Corrigé</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {currentScan.vulnerabilities.map((vuln) => (
+                              <tr key={`${vuln.id}-${vuln.packageName}-${vuln.installedVersion}`}>
+                                <td className="cell-mono">{vuln.id}</td>
+                                <td>
+                                  <span className={`status-pill status-pill--${SEVERITY_SEMANTIC[vuln.severity]}`}>
+                                    {vuln.severity}
+                                  </span>
+                                </td>
+                                <td>{vuln.packageName}</td>
+                                <td className="cell-mono">{vuln.installedVersion}</td>
+                                <td className="cell-mono">{vuln.fixedInVersion ?? "—"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    <p style={{ fontSize: 11.5, color: "var(--color-text-faint)" }}>
+                      Terminé {formatDate(currentScan.finishedAt)}
+                    </p>
+                  </>
+                )}
+              </>
             )}
           </>
         )}

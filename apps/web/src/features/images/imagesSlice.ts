@@ -1,6 +1,6 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { apiDelete, apiGet, apiPost, ApiError } from "@/api/client";
-import type { ImageRef } from "@/types";
+import type { ImageRef, ScanResult } from "@/types";
 
 export type ImageStatusFilter = "all" | "update" | "uptodate";
 
@@ -14,6 +14,10 @@ interface ImagesState {
   deletingId: string | null;
   pullStatus: "idle" | "pulling" | "error";
   pullError: string | null;
+  /** Historique des scans Grype, clé = ImageRef.id, les plus récents en premier (index 0). */
+  scansByImageId: Record<string, ScanResult[]>;
+  scanStatus: "idle" | "starting" | "error";
+  scanError: string | null;
 }
 
 const initialState: ImagesState = {
@@ -26,6 +30,9 @@ const initialState: ImagesState = {
   deletingId: null,
   pullStatus: "idle",
   pullError: null,
+  scansByImageId: {},
+  scanStatus: "idle",
+  scanError: null,
 };
 
 export const fetchImages = createAsyncThunk<ImageRef[], ImageStatusFilter | undefined>(
@@ -78,6 +85,31 @@ export const pullImage = createAsyncThunk<ImageRef[], string, { rejectValue: str
       return rejectWithValue(message);
     }
   },
+);
+
+/** Lance un scan Grype réel pour l'image `id` — voir POST /api/images/:id/scan. */
+export const scanImage = createAsyncThunk<ScanResult, string, { rejectValue: string }>(
+  "images/scanImage",
+  async (id, { rejectWithValue }) => {
+    try {
+      // id peut contenir des "/" (voir updateImage ci-dessus pour le bug déjà corrigé) : encodé ici.
+      return await apiPost<ScanResult>(`/images/${encodeURIComponent(id)}/scan`);
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : "Échec du lancement du scan.";
+      return rejectWithValue(message);
+    }
+  },
+);
+
+/** Historique des scans d'une image — voir GET /api/images/:id/scans. */
+export const fetchScans = createAsyncThunk<ScanResult[], string>("images/fetchScans", async (id) => {
+  return apiGet<ScanResult[]>(`/images/${encodeURIComponent(id)}/scans`);
+});
+
+/** Rafraîchit le statut d'un scan en cours — voir GET /api/scans/:scanId (à poller). */
+export const fetchScanDetail = createAsyncThunk<ScanResult, { imageId: string; scanId: string }>(
+  "images/fetchScanDetail",
+  async ({ scanId }) => apiGet<ScanResult>(`/scans/${scanId}`),
 );
 
 const imagesSlice = createSlice({
@@ -139,6 +171,29 @@ const imagesSlice = createSlice({
       .addCase(pullImage.rejected, (state, action) => {
         state.pullStatus = "error";
         state.pullError = action.payload ?? "Échec du pull.";
+      })
+      .addCase(scanImage.pending, (state) => {
+        state.scanStatus = "starting";
+        state.scanError = null;
+      })
+      .addCase(scanImage.fulfilled, (state, action) => {
+        state.scanStatus = "idle";
+        const imageId = action.meta.arg;
+        const existing = state.scansByImageId[imageId] ?? [];
+        state.scansByImageId[imageId] = [action.payload, ...existing];
+      })
+      .addCase(scanImage.rejected, (state, action) => {
+        state.scanStatus = "error";
+        state.scanError = action.payload ?? "Échec du lancement du scan.";
+      })
+      .addCase(fetchScans.fulfilled, (state, action) => {
+        state.scansByImageId[action.meta.arg] = action.payload;
+      })
+      .addCase(fetchScanDetail.fulfilled, (state, action) => {
+        const list = state.scansByImageId[action.meta.arg.imageId];
+        if (!list) return;
+        const index = list.findIndex((s) => s.id === action.payload.id);
+        if (index >= 0) list[index] = action.payload;
       });
   },
 });

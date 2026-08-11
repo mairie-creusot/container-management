@@ -46,6 +46,12 @@ RUN PACKER_VERSION=1.11.2 \
     && chmod +x /usr/local/bin/packer \
     && rm -f /tmp/packer.zip
 
+# Grype : script d'installation officiel (gère l'architecture cible automatiquement), scanner
+# de vulnérabilités CVE pour images de conteneurs — pilote le même principe que
+# OpenTofu/Ansible/Packer ci-dessus (binaire réel en sous-processus, voir
+# apps/api/src/services/scan.ts), aucune réimplémentation.
+RUN curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
+
 RUN corepack enable && corepack prepare pnpm@9.1.0 --activate
 
 WORKDIR /workspace

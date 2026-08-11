@@ -22,6 +22,7 @@ import iacRoutes from "./routes/iac.js";
 import imagesRoutes from "./routes/images.js";
 import networksRoutes from "./routes/networks.js";
 import registriesRoutes from "./routes/registries.js";
+import scanRoutes from "./routes/scan.js";
 import setupRoutes from "./routes/setup.js";
 import topologyRoutes from "./routes/topology.js";
 import volumesRoutes from "./routes/volumes.js";
@@ -53,6 +54,7 @@ export function buildServer() {
   void fastify.register(setupRoutes);
   void fastify.register(environmentsRoutes);
   void fastify.register(imagesRoutes);
+  void fastify.register(scanRoutes);
   void fastify.register(registriesRoutes);
   void fastify.register(containersRoutes);
   void fastify.register(volumesRoutes);

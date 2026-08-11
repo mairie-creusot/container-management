@@ -308,6 +308,32 @@ export interface RegistryTestResult extends SetupTestResult {
   trackedImages?: number;
 }
 
+// --- Scan de vulnérabilités (Grype) — voir apps/api/src/services/scan.ts ---
+// QUAI pilote le VRAI binaire Grype (https://github.com/anchore/grype, Apache-2.0) en
+// sous-processus, comme OpenTofu/Ansible/Packer : aucune réimplémentation d'un scanner CVE.
+
+export type VulnSeverity = "Critical" | "High" | "Medium" | "Low" | "Negligible" | "Unknown";
+
+export interface Vulnerability {
+  id: string; // ex: "CVE-2023-1255"
+  severity: VulnSeverity;
+  packageName: string;
+  installedVersion: string;
+  fixedInVersion: string | null; // null si Grype ne connaît pas de correctif
+}
+
+export type ScanStatus = "running" | "success" | "failed";
+
+export interface ScanResult {
+  id: string;
+  image: string; // référence Docker passée à Grype, ex: "nginx:1.27"
+  status: ScanStatus;
+  startedAt: string; // ISO 8601
+  finishedAt: string | null;
+  vulnerabilities: Vulnerability[];
+  summary: Record<VulnSeverity, number>;
+}
+
 export interface SetupCompletePayload {
   // API : POST /api/setup/complete attend { ldap: SetupLdapConfig, ... } où
   // SetupLdapConfig inclut defaultRole (rôle appliqué quand aucun groupe LDAP
