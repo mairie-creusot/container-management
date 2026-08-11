@@ -9,9 +9,8 @@ import { IconChevron } from "@/components/icons";
 
 export default function RegistryExplorerPage() {
   const dispatch = useAppDispatch();
-  const { items, exploringId, repositories, reposStatus, reposError, tagsByRepo, tagsLoadingRepo } = useAppSelector(
-    (s) => s.registries,
-  );
+  const { items, exploringId, repositories, reposStatus, reposError, reposDiagnostic, tagsByRepo, tagsLoadingRepo } =
+    useAppSelector((s) => s.registries);
   const pullStatus = useAppSelector((s) => s.images.pullStatus);
   const session = useAppSelector((s) => s.auth.session);
   const [expandedRepo, setExpandedRepo] = useState<string | null>(null);
@@ -41,6 +40,10 @@ export default function RegistryExplorerPage() {
     dispatch(setCurrentView("registries"));
   }
 
+  function handleRecheck() {
+    if (exploringId) dispatch(fetchRepositories(exploringId));
+  }
+
   if (!registry) {
     return (
       <div className="page-content">
@@ -66,14 +69,17 @@ export default function RegistryExplorerPage() {
           <h2>Explorer {registry.name}</h2>
           <p>Catalogue distant réel de {meta.label} — {registry.url}</p>
         </div>
+        <button type="button" className="btn btn-secondary btn-sm" onClick={handleRecheck} disabled={reposStatus === "loading"}>
+          {reposStatus === "loading" ? "Vérification…" : "Retester"}
+        </button>
       </div>
 
       {reposStatus === "loading" && <div className="empty-state">Chargement du catalogue…</div>}
       {reposStatus === "error" && <div className="error-banner">{reposError}</div>}
       {reposStatus === "ready" && repositories.length === 0 && (
-        <div className="empty-state">
-          Aucun dépôt trouvé. GitLab/Harbor ne sont pas encore parcourables ici, ou les
-          identifiants configurés n'ont pas accès au catalogue.
+        <div className={reposDiagnostic ? "error-banner" : "empty-state"}>
+          {reposDiagnostic ??
+            "Aucun dépôt trouvé — le catalogue distant a répondu mais ne contient rien à afficher."}
         </div>
       )}
 

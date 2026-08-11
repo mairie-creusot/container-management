@@ -14,7 +14,7 @@ import { config } from "../../config.js";
 import { demoStore } from "../demoData.js";
 import { getEffectiveRegistryCredentials } from "../setupStore.js";
 import { getLocalDockerImages } from "../docker.js";
-import { fetchJson, RegistryHttpError } from "./http.js";
+import { fetchJson, RegistryCredentialsMissingError, RegistryHttpError } from "./http.js";
 
 interface GhcrTokenResponse {
   token: string;
@@ -61,28 +61,44 @@ interface GhcrOrgPackage {
   name: string;
 }
 
+async function fetchPackages(ownerKind: "orgs" | "users", owner: string, token: string): Promise<string[]> {
+  const packages = await fetchJson<GhcrOrgPackage[]>(
+    `https://api.github.com/${ownerKind}/${encodeURIComponent(owner)}/packages?package_type=container&per_page=100`,
+    { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" } },
+  );
+  return packages.map((p) => p.name);
+}
+
 /**
  * Liste les packages (images) réellement présents dans un org/user GHCR — API REST GitHub
  * (api.github.com), PAS l'API OCI distribution (ghcr.io/v2/...) utilisée par listTags : ce
  * sont deux API GitHub distinctes. Nécessite un jeton avec la permission `read:packages`.
  * Utilisé pour que "images suivies" sur la page Registries reflète le vrai catalogue distant,
  * pas seulement les images de ce registry déjà tirées localement (voir registriesStore.ts).
+ *
+ * Ne masque plus les échecs derrière un `[]` silencieux : lève RegistryCredentialsMissingError
+ * (aucun jeton) ou RegistryHttpError (401/403/404/réseau) pour que l'appelant (registries/index.ts)
+ * puisse construire un diagnostic précis plutôt que de laisser l'explorateur afficher un vague
+ * "aucun dépôt trouvé" sans dire pourquoi.
  */
-export async function listOrgPackages(org: string): Promise<string[]> {
+export async function listOrgPackages(owner: string): Promise<string[]> {
   const token = await resolveToken();
-  if (!token) return [];
+  if (!token) {
+    throw new RegistryCredentialsMissingError(
+      "aucun identifiant GHCR configuré — ajoutez un jeton d'accès via l'icône engrenage du registry",
+    );
+  }
   try {
-    const packages = await fetchJson<GhcrOrgPackage[]>(
-      `https://api.github.com/orgs/${encodeURIComponent(org)}/packages?package_type=container&per_page=100`,
-      { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" } },
-    );
-    return packages.map((p) => p.name);
+    return await fetchPackages("orgs", owner, token);
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `[ghcr] listOrgPackages("${org}") failed (${err instanceof Error ? err.message : String(err)})`,
-    );
-    return [];
+    // Les packages GHCR peuvent appartenir à un compte GitHub personnel plutôt qu'à une
+    // organisation — l'API GitHub distingue /orgs/ et /users/, impossible de savoir lequel sans
+    // essayer. Un 404 sur /orgs/ (contrairement à 401/403, qui signalent un vrai problème
+    // d'identifiants) déclenche donc un repli sur /users/ avant d'abandonner.
+    if (err instanceof RegistryHttpError && err.status === 404) {
+      return await fetchPackages("users", owner, token);
+    }
+    throw err;
   }
 }
 

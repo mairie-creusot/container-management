@@ -82,13 +82,20 @@ export default async function registriesRoutes(fastify: FastifyInstance): Promis
     if (!persisted) {
       return reply.code(404).send({ error: `Registry "${request.params.id}" not found` });
     }
-    // Le "username" persisté est l'identité d'authentification (ex: un email pour GHCR), pas
-    // forcément l'org/namespace du catalogue à parcourir — ne le passer qu'à Docker Hub, où
-    // il correspond bien au namespace (compte perso/org Docker Hub). Pour GHCR, laisser
-    // resolveOrg() déduire l'org depuis une image locale déjà tirée (voir ghcr.ts).
-    const namespace = persisted.kind === "dockerhub" ? persisted.username : undefined;
-    const repositories = await listRegistryRepositories(persisted.kind, namespace);
-    return reply.send({ repositories });
+    // Le "username" persisté est l'identité d'authentification, pas forcément l'org/namespace du
+    // catalogue à parcourir — pour Docker Hub il correspond toujours au namespace (compte
+    // perso/org). Pour GHCR, GitHub demande souvent un e-mail comme identifiant de connexion
+    // (docker login), qui n'est jamais un nom d'org/user GitHub valide : on ne le passe comme
+    // org explicite que s'il n'y ressemble pas, sinon on laisse resolveOrg() le déduire d'une
+    // image locale déjà tirée (voir ghcr.ts).
+    const namespace =
+      persisted.kind === "dockerhub"
+        ? persisted.username
+        : persisted.kind === "ghcr" && persisted.username && !persisted.username.includes("@")
+          ? persisted.username
+          : undefined;
+    const result = await listRegistryRepositories(persisted.kind, namespace);
+    return reply.send(result);
   });
 
   fastify.get<{ Params: { id: string; repo: string } }>(

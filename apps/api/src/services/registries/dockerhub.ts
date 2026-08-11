@@ -101,11 +101,18 @@ export async function listNamespaceRepositories(namespace?: string): Promise<str
     }
     return repos;
   } catch (err) {
-    if (err instanceof RegistryHttpError) {
-      // eslint-disable-next-line no-console
-      console.warn(`[dockerhub] listNamespaceRepositories("${ns}") failed (${err.message})`);
+    // Échec en cours de pagination avec déjà des résultats en main : on les rend tels quels
+    // (comportement historique), l'utilisateur a un catalogue partiel mais utilisable. Échec
+    // dès la première page (rien récupéré du tout) : on laisse remonter pour que l'appelant
+    // (registries/index.ts) construise un diagnostic précis au lieu d'un [] silencieux.
+    if (repos.length > 0) {
+      if (err instanceof RegistryHttpError) {
+        // eslint-disable-next-line no-console
+        console.warn(`[dockerhub] listNamespaceRepositories("${ns}") failed mid-pagination (${err.message}), returning ${repos.length} repo(s) already fetched`);
+      }
+      return repos;
     }
-    return repos; // ce qui a déjà été récupéré avant l'échec (pagination partielle), sinon []
+    throw err;
   }
 }
 

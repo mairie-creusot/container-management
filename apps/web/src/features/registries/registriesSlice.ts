@@ -1,6 +1,6 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { apiGet, apiPatch, apiPost, ApiError } from "@/api/client";
-import type { Registry, RegistryKind } from "@/types";
+import type { Registry, RegistryCatalogResult, RegistryKind } from "@/types";
 
 interface NewRegistryInput {
   kind: RegistryKind;
@@ -34,6 +34,11 @@ interface RegistriesState {
   repositories: string[];
   reposStatus: "idle" | "loading" | "ready" | "error";
   reposError: string | null;
+  // Raison concrète pour laquelle `repositories` est vide (identifiants invalides, org
+  // introuvable...) — distinct de reposError (échec réseau/HTTP de la requête elle-même) : le
+  // catalogue a bien répondu, mais avec un résultat vide et une explication (voir
+  // registries/index.ts#diagnosticFromError côté API).
+  reposDiagnostic: string | null;
   tagsByRepo: Record<string, string[]>;
   tagsLoadingRepo: string | null;
 }
@@ -50,6 +55,7 @@ const initialState: RegistriesState = {
   repositories: [],
   reposStatus: "idle",
   reposError: null,
+  reposDiagnostic: null,
   tagsByRepo: {},
   tagsLoadingRepo: null,
 };
@@ -93,12 +99,11 @@ export const updateRegistry = createAsyncThunk<
 });
 
 /** Vrai catalogue distant d'un registry — voir GET /api/registries/:id/repositories. */
-export const fetchRepositories = createAsyncThunk<string[], string, { rejectValue: string }>(
+export const fetchRepositories = createAsyncThunk<RegistryCatalogResult, string, { rejectValue: string }>(
   "registries/fetchRepositories",
   async (id, { rejectWithValue }) => {
     try {
-      const result = await apiGet<{ repositories: string[] }>(`/registries/${id}/repositories`);
-      return result.repositories;
+      return await apiGet<RegistryCatalogResult>(`/registries/${id}/repositories`);
     } catch (error) {
       const message = error instanceof ApiError ? error.message : "Impossible de charger le catalogue.";
       return rejectWithValue(message);
@@ -131,6 +136,7 @@ const registriesSlice = createSlice({
       state.exploringId = action.payload;
       state.repositories = [];
       state.reposStatus = "idle";
+      state.reposDiagnostic = null;
       state.tagsByRepo = {};
     },
     stopExploring(state) {
@@ -188,10 +194,12 @@ const registriesSlice = createSlice({
       .addCase(fetchRepositories.pending, (state) => {
         state.reposStatus = "loading";
         state.reposError = null;
+        state.reposDiagnostic = null;
       })
       .addCase(fetchRepositories.fulfilled, (state, action) => {
         state.reposStatus = "ready";
-        state.repositories = action.payload;
+        state.repositories = action.payload.repositories;
+        state.reposDiagnostic = action.payload.diagnostic ?? null;
       })
       .addCase(fetchRepositories.rejected, (state, action) => {
         state.reposStatus = "error";

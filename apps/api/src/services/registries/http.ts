@@ -12,6 +12,15 @@ export class RegistryHttpError extends Error {
   }
 }
 
+/** Aucun identifiant utilisable pour ce registry — distingué de RegistryHttpError pour que
+ * l'appelant puisse produire un diagnostic ("configurez un jeton") plutôt qu'un message HTTP. */
+export class RegistryCredentialsMissingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RegistryCredentialsMissingError";
+  }
+}
+
 export async function fetchJson<T>(url: string, init: RequestInit = {}): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.registries.requestTimeoutMs);

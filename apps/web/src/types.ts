@@ -25,6 +25,13 @@ export interface Registry {
   status: "connected" | "unconfigured" | "error";
   trackedImages: number;
   lastSyncAt: string | null; // ISO 8601
+  statusDetail?: string;
+}
+
+/** Résultat de l'exploration du catalogue distant d'un registry — voir GET /api/registries/:id/repositories. */
+export interface RegistryCatalogResult {
+  repositories: string[];
+  diagnostic?: string;
 }
 
 export interface ContainerRef {

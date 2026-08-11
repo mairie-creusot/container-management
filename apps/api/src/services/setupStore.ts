@@ -322,6 +322,14 @@ export interface EffectiveRegistryCredentials {
  * ou `null` si aucun n'est configuré via l'assistant — dans ce cas les clients registries
  * (src/services/registries/*) retombent sur les variables d'environnement globales
  * (DOCKERHUB_TOKEN, GHCR_TOKEN, GITLAB_TOKEN).
+ *
+ * LIMITATION CONNUE : sélectionne par `kind` seul, pas par registry précis. Avec UN SEUL
+ * registry par kind (cas actuel de tous les déploiements testés), aucun souci. Si un jour
+ * DEUX registries GHCR (ou deux Docker Hub, etc.) sont configurés, les appels concernant le
+ * second utiliseraient quand même les identifiants du premier — trouvé en vérifiant le système
+ * de diagnostic d'exploration de catalogue (registries/index.ts#diagnosticFromError), pas
+ * encore corrigé (nécessiterait de faire remonter l'id de registry, pas seulement le kind,
+ * jusqu'à chaque client registries/*.ts).
  */
 export async function getEffectiveRegistryCredentials(kind: RegistryKind): Promise<EffectiveRegistryCredentials | null> {
   const current = await getCurrent();

@@ -29,6 +29,19 @@ export interface Registry {
   status: "connected" | "unconfigured" | "error";
   trackedImages: number;
   lastSyncAt: string | null; // ISO 8601
+  // Raison concrète de "error" (ex: "GHCR : identifiants invalides ou expirés (401)") — absent
+  // si status !== "error" ou si le test n'a produit qu'un échec réseau générique déjà couvert
+  // par "error". Voir registries/index.ts#testRegistryConnection.
+  statusDetail?: string;
+}
+
+/** Résultat de l'exploration du catalogue distant d'un registry — voir GET /api/registries/:id/repositories. */
+export interface RegistryCatalogResult {
+  repositories: string[];
+  // Raison concrète pour laquelle `repositories` est vide (ou incomplet) : identifiants
+  // invalides, organisation introuvable, aucune organisation déduite, etc. Absent si tout s'est
+  // bien passé (y compris quand le catalogue est simplement, réellement, vide).
+  diagnostic?: string;
 }
 
 export interface ContainerRef {

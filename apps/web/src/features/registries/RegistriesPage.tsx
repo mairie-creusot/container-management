@@ -280,6 +280,7 @@ export default function RegistriesPage() {
                 { key: "Dernière synchro", value: formatSync(selectedDetail.lastSyncAt) },
               ]}
             />
+            {selectedDetail.statusDetail && <div className="error-banner">{selectedDetail.statusDetail}</div>}
             <button
               type="button"
               className="btn btn-primary btn-sm"

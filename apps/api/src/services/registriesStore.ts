@@ -56,10 +56,19 @@ async function buildRegistryView(persisted: SetupRegistryConfig, index: number):
   // trompeur pour un registry qu'on vient de configurer.
   let trackedImages = localCount;
   if (persisted.kind === "ghcr") {
-    const org = inferGhcrOrg(localImages);
+    // Priorité au nom d'utilisateur/organisation explicitement configuré (icône engrenage) —
+    // même règle que registries.ts#namespace pour GET .../repositories, voir ce fichier pour
+    // le pourquoi (un e-mail n'est pas un org/user GitHub valide).
+    const org = persisted.username && !persisted.username.includes("@") ? persisted.username : inferGhcrOrg(localImages);
     if (org) {
-      const packages = await listOrgPackages(org);
-      if (packages.length > 0) trackedImages = packages.length;
+      try {
+        const packages = await listOrgPackages(org);
+        if (packages.length > 0) trackedImages = packages.length;
+      } catch {
+        // Le compteur "images suivies" reste sur le total local en cas d'échec — le diagnostic
+        // précis (identifiants invalides, org introuvable...) est réservé à l'explorateur de
+        // registry (GET .../repositories, voir routes/registries.ts), pas à cette vue résumée.
+      }
     }
   }
 
@@ -68,6 +77,7 @@ async function buildRegistryView(persisted: SetupRegistryConfig, index: number):
     status: test.ok ? "connected" : "error",
     trackedImages,
     lastSyncAt: test.ok ? new Date().toISOString() : null,
+    ...(test.ok ? {} : { statusDetail: test.message }),
   };
 }
 

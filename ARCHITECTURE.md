@@ -242,7 +242,12 @@ PATCH /api/registries/:id                              # { name?, url?, username
                                                          # omis ou vides = identifiant déjà enregistré conservé (voir
                                                          # setupStore.ts#updateRegistryAt). Icône engrenage sur chaque
                                                          # carte de RegistriesPage.tsx (admin uniquement).
-GET   /api/registries/:id/repositories                 # vrai catalogue distant (GHCR/Docker Hub), pas juste le local
+GET   /api/registries/:id/repositories                 # { repositories, diagnostic? } — vrai catalogue distant (GHCR/
+                                                         # Docker Hub). diagnostic = raison concrète d'un catalogue
+                                                         # vide (401/403/404/429, org introuvable, aucune org déduite,
+                                                         # aucun identifiant...) au lieu d'un [] muet — voir
+                                                         # registries/index.ts#diagnosticFromError. Bouton "Retester"
+                                                         # sur RegistryExplorerPage.tsx.
 GET   /api/registries/:id/repositories/:repo/tags       # tags d'un dépôt du catalogue (:repo encodé)
 
 GET  /api/containers
