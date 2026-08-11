@@ -160,6 +160,14 @@ export interface TopologyNode {
    */
   vulnCritical?: number;
   vulnHigh?: number;
+  /**
+   * Conteneurs uniquement : état de santé Docker NATIF (`State.Health.Status`, voir
+   * apps/api/src/services/docker.ts#readContainerHealth) — "none" si l'image ne définit aucun
+   * `HEALTHCHECK` (résultat honnête et attendu pour la plupart des conteneurs, pas un échec).
+   * Une arête ne duplique pas ce champ : on le lit directement sur le(s) nœud(s) conteneur à ses
+   * deux bouts (voir TopologyGraph.tsx).
+   */
+  healthStatus?: "healthy" | "unhealthy" | "starting" | "none";
   /** VMs Nutanix uniquement (voir apps/api/src/services/nutanix.ts#NutanixVm). */
   numVcpus?: number;
   memoryMib?: number;

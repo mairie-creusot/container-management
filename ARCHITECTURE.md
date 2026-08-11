@@ -228,6 +228,12 @@ interface TopologyNode {
   // Critical d'un côté, High de l'autre) — voir apps/api/src/services/topology.ts#vulnSummaryForImage.
   vulnCritical?: number;
   vulnHigh?: number;
+  // Conteneurs uniquement : état de santé Docker NATIF (`State.Health.Status`, résolu par un
+  // inspect() par conteneur — apps/api/src/services/docker.ts#readContainerHealth). "none" si
+  // l'image ne définit aucune instruction HEALTHCHECK : résultat honnête et attendu pour la
+  // plupart des conteneurs de ce projet, jamais une valeur fabriquée par convention de port/
+  // chemin "/health" deviné (non implémenté volontairement, voir « Santé des conteneurs » plus bas).
+  healthStatus?: "healthy" | "unhealthy" | "starting" | "none";
   numVcpus?: number;            // VMs Nutanix uniquement
   memoryMib?: number;           // VMs Nutanix uniquement
 }
@@ -492,9 +498,10 @@ Toutes les routes (sauf `/api/auth/*` et `/api/setup/*`) exigent une session val
 
 ## Graphe de topologie (`apps/web/src/components/TopologyGraph.tsx`)
 
-Le graphe visuel (React Flow, `GET /api/topology` — voir « Routes API » ci-dessus) a trois
-particularités, toutes côté client uniquement (aucune donnée d'infrastructure supplémentaire
-n'est nécessaire côté `apps/api`) :
+Le graphe visuel (React Flow, `GET /api/topology` — voir « Routes API » ci-dessus) a cinq
+particularités, les quatre premières purement côté client (aucune donnée d'infrastructure
+supplémentaire nécessaire côté `apps/api`), la cinquième (santé des conteneurs) nécessitant un
+appel Docker additionnel côté API :
 
 1. **Connexions par capacité, ports typés.** Chaque type de nœud déclare la liste des « ports »
    qu'il expose dans une table `NODE_CAPABILITIES` (id, capacité, côté source/target, position,
@@ -533,6 +540,35 @@ n'est nécessaire côté `apps/api`) :
    si configuré mais injoignable (même garde `isNutanixConfigured()` que le reste du projet) —
    jamais de VM inventée. Détail complet (vCPUs, mémoire, cluster, état) affiché dans l'Inspector
    au clic, comme pour les autres types de nœuds.
+5. **Santé des conteneurs → couleur des arêtes, côté API cette fois.** Contrairement aux points
+   1-4 (purement client), `healthStatus` est calculé côté `apps/api` : `docker.ts#
+   readContainerHealth` fait un `inspect()` par conteneur (résumé `listContainers` n'expose que
+   `Status`, une chaîne texte, pas de champ structuré) et lit `State.Health.Status` — LE signal que
+   Docker calcule déjà lui-même en pingant la commande définie par l'instruction `HEALTHCHECK` de
+   l'image (ex : `curl -f http://localhost/health`). `"none"` si l'image n'en définit aucune : un
+   résultat honnête et attendu pour la plupart des conteneurs d'un host de dev, jamais une valeur
+   fabriquée par convention de port/chemin `/health` deviné — **ce ping HTTP par convention n'est
+   volontairement pas implémenté** dans ce premier lot, seul le signal Docker natif est utilisé.
+   Une arête ne duplique pas cette donnée : `TopologyGraph.tsx` la lit directement sur le(s) nœud(s)
+   conteneur à ses deux bouts (`edgeContainerNode`, il y en a toujours exactement un — mount =
+   volume<->conteneur, network = conteneur<->network) pour dériver sa couleur :
+   - conteneur `status !== "running"` (arrêté) → arête grise à tirets larges espacés, quel que soit
+     `healthStatus` (un arrêt est souvent volontaire, pas une panne — pas de rouge) ;
+   - sinon `healthStatus: "healthy"` → `var(--color-success)` (verte) ;
+   - `"unhealthy"` → `var(--color-critical)` (rouge), avec une pulsation d'opacité légère
+     (`@keyframes topology-pulse`, même principe que `.overview-refresh-dot`/`overview-pulse` dans
+     `layout.css`) désactivée sous `prefers-reduced-motion` ;
+   - `"starting"` → `var(--color-warning)` ;
+   - `"none"` (pas de healthcheck défini) → `var(--color-text-faint)`, inchangé par rapport à avant
+     cette passe — jamais de fausse alerte pour un conteneur qui n'a simplement pas de healthcheck.
+   Un badge `Unhealthy`/`Healthcheck…` (même pulsation que l'arête pour "unhealthy") apparaît sur le
+   nœud conteneur lui-même, utile même sans arête visible (nœud isolé). Les arêtes "mount" (données/
+   fichiers qui transitent) se distinguent visuellement des arêtes "network" : trait plein plus
+   épais avec des particules qui voyagent réellement le long du tracé (`MountFlowEdge`, propriété
+   CSS `offset-path`/`offset-distance` — animation native du navigateur, aucun recalcul JS par
+   frame) plutôt que le tiret défilant générique conservé côté "network" (plus subtil, `animated:
+   true` + `strokeDasharray`, comportement inchangé). Les particules ne sont pas rendues si le
+   conteneur est arrêté (rien ne transite réellement) ou sous `prefers-reduced-motion`.
 
 ## CI/CD
 

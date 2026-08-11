@@ -30,6 +30,7 @@ import type {
 
 const PING_TIMEOUT_MS = 2000;
 const STATS_TIMEOUT_MS = 2000;
+const HEALTH_TIMEOUT_MS = 2000;
 
 function buildDockerClient(host: string | undefined): Docker {
   if (host) {
@@ -276,6 +277,34 @@ export async function readContainerUsage(docker: Docker, containerId: string): P
     return { cpuPercent: Math.round(cpuPercent * 10) / 10, memBytes };
   } catch {
     return { cpuPercent: 0, memBytes: 0 };
+  }
+}
+
+/**
+ * État de santé Docker NATIF d'un conteneur — reflète `State.Health.Status` tel que calculé par
+ * le démon lui-même à partir de l'instruction `HEALTHCHECK` définie (ou non) dans son image
+ * (ex: image basée sur `curl -f http://localhost/health`, `pg_isready`...). "none" signifie
+ * honnêtement "cette image ne définit aucun HEALTHCHECK" — CE N'EST PAS un échec, la grande
+ * majorité des images de ce host n'en définissent probablement aucune : on ne fabrique jamais
+ * "healthy"/"unhealthy" par convention (deviner un port/chemin "/health") faute de signal réel.
+ * Nécessite un `inspect()` par conteneur (le résumé `listContainers` n'expose que `Status`, une
+ * chaîne texte comme "Up 2 minutes (healthy)" — pas de champ structuré) : appel séparé de
+ * `readContainerUsage` ci-dessus (qui interroge `stats()`, pas `inspect()`), donc pas de requête
+ * réseau redondante entre les deux, seulement un appel de plus, en parallèle par conteneur comme
+ * les stats (voir services/topology.ts).
+ */
+export type ContainerHealthStatus = "healthy" | "unhealthy" | "starting" | "none";
+
+export async function readContainerHealth(docker: Docker, containerId: string): Promise<ContainerHealthStatus> {
+  try {
+    const container = docker.getContainer(containerId);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data: any = await withTimeout(container.inspect(), HEALTH_TIMEOUT_MS, "docker inspect (health)");
+    const status = data?.State?.Health?.Status;
+    if (status === "healthy" || status === "unhealthy" || status === "starting") return status;
+    return "none";
+  } catch {
+    return "none";
   }
 }
 

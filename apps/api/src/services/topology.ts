@@ -11,6 +11,11 @@
  *  - drift : rapproché de GET /api/gitops/files (drift=true) par nom de fichier ~ nom de conteneur.
  *  - vulnCritical/vulnHigh : rapproché du DERNIER scan RÉUSSI connu (Grype et/ou OSV-Scanner,
  *    services/scan.ts) pour l'image "name:tag" du conteneur — voir vulnSummaryForImage ci-dessous.
+ *  - healthStatus : état de santé Docker NATIF (docker.ts#readContainerHealth, `State.Health.
+ *    Status` via un inspect() par conteneur) — "none" si l'image ne définit aucun HEALTHCHECK,
+ *    jamais deviné/fabriqué. Une arête ne le duplique pas : le frontend lit ce champ directement
+ *    sur le(s) nœud(s) conteneur à ses deux bouts pour en dériver sa couleur (conception la plus
+ *    simple — pas de donnée à garder synchronisée sur deux entités pour la même information).
  * Tous best-effort par nom — aucune donnée arbitraire n'est inventée si rien ne correspond (le
  * nœud reste simplement sans badge).
  *
@@ -20,7 +25,7 @@
  * Nutanix n'a jamais été configuré ou si configuré mais injoignable (nutanix.ts#getNutanixVms).
  */
 
-import { getClient, isDockerReachable, readContainerUsage } from "./docker.js";
+import { getClient, isDockerReachable, readContainerHealth, readContainerUsage } from "./docker.js";
 import { getImages } from "./images.js";
 import { listGitOpsFiles } from "./gitops.js";
 import { listAllScans } from "./scan.js";
@@ -134,6 +139,9 @@ export async function getTopology(): Promise<Topology> {
     // Snapshot d'utilisation par conteneur, en parallèle (chaque appel est déjà borné par un
     // timeout côté docker.ts) — même approche que docker.ts#getDockerContainers.
     const usages = await Promise.all(containers.map((c) => readContainerUsage(docker, c.Id)));
+    // État de santé Docker natif, en parallèle lui aussi — requête distincte de readContainerUsage
+    // ci-dessus (inspect() vs stats(), voir docker.ts#readContainerHealth), pas de doublon réseau.
+    const healthStatuses = await Promise.all(containers.map((c) => readContainerHealth(docker, c.Id)));
 
     const nodes: TopologyNode[] = [];
     const edges: TopologyEdge[] = [];
@@ -156,6 +164,7 @@ export async function getTopology(): Promise<Topology> {
         updateAvailable: updateAvailableImages.has(c.Image),
         drift: driftFilePaths.some((path) => containerMatchesGitOpsFile(name, path)),
         ...(vulnSummary ? { vulnCritical: vulnSummary.vulnCritical, vulnHigh: vulnSummary.vulnHigh } : {}),
+        healthStatus: healthStatuses[index]!,
       });
 
       for (const mount of c.Mounts ?? []) {

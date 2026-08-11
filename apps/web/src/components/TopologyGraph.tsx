@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import {
   ReactFlow,
   Background,
+  BaseEdge,
   MiniMap,
   MarkerType,
   Handle,
   Position,
+  getBezierPath,
   useStore,
   applyNodeChanges,
   type Node,
   type Edge,
+  type EdgeProps,
   type NodeProps,
   type NodeChange,
   type Connection,
@@ -153,6 +156,95 @@ function formatMem(bytes: number): string {
   return `${(mb / 1024).toFixed(2)} Go`;
 }
 
+// --- Couleur des arêtes selon la santé réelle du/des conteneur(s) qu'elles touchent -------------
+// Une arête ne porte aucune donnée de santé propre (voir services/topology.ts côté API) : on lit
+// `healthStatus`/`status` du nœud conteneur à l'une ou l'autre extrémité (mount : volume<->
+// conteneur ; network : conteneur<->network — il y a toujours exactement un nœud conteneur parmi
+// les deux bouts). "stopped" prime sur healthStatus : un conteneur arrêté n'a plus de healthcheck
+// qui tourne, ce n'est pas une panne (arrêt souvent volontaire) donc pas rouge, mais clairement
+// visuellement "injoignable" (tirets plus espacés, voir topology.css).
+type EdgeHealthState = "healthy" | "unhealthy" | "starting" | "none" | "stopped";
+
+const EDGE_STATE_COLOR: Record<EdgeHealthState, string> = {
+  healthy: "var(--color-success)",
+  unhealthy: "var(--color-critical)",
+  starting: "var(--color-warning)",
+  none: "var(--color-text-faint)",
+  stopped: "var(--color-text-faint)",
+};
+
+/** Le nœud conteneur (s'il y en a un) parmi les deux extrémités d'une arête — jamais les deux à
+ * la fois dans ce graphe (mount = volume<->conteneur, network = conteneur<->network). */
+function edgeContainerNode(edge: TopologyEdgeLike, nodesById: Map<string, TopologyNode>): TopologyNode | null {
+  const source = nodesById.get(edge.source);
+  if (source?.kind === "container") return source;
+  const target = nodesById.get(edge.target);
+  if (target?.kind === "container") return target;
+  return null;
+}
+
+interface TopologyEdgeLike {
+  source: string;
+  target: string;
+}
+
+/** true si l'utilisateur préfère moins d'animations — coupe les particules de flux et les
+ * pulsations, garde couleur/information statique (même contrat que le reste du site). */
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const handler = () => setReduced(query.matches);
+    query.addEventListener("change", handler);
+    return () => query.removeEventListener("change", handler);
+  }, []);
+  return reduced;
+}
+
+/** Nombre de particules simultanées par arête "mount" — impression de flux continu sans arête
+ * trop "vide" entre deux particules, tout en restant un petit nombre fixe d'éléments SVG par
+ * arête (coût de rendu borné même avec des dizaines d'arêtes affichées en même temps). */
+const MOUNT_PARTICLE_COUNT = 3;
+const MOUNT_PARTICLE_DURATION_S = 2.2;
+
+/**
+ * Arête "mount" (conteneur <-> volume, des fichiers/données qui transitent) : un rendu distinct
+ * de l'animation générique "tirets qui défilent" des arêtes "network" — trait plein + particules
+ * qui voyagent réellement le long du tracé de l'arête via la propriété CSS `offset-path` (animation
+ * native du navigateur sur la propriété `offset-distance`, donc aucun recalcul JS par frame, coût
+ * quasi nul même avec beaucoup d'arêtes à l'écran). Rien ne "coule" si le conteneur est arrêté
+ * (aucune donnée ne transite réellement) ou si l'utilisateur préfère moins d'animations — dans les
+ * deux cas on retombe sur le simple trait coloré, sans les particules.
+ */
+function MountFlowEdge({ id, sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, style, markerEnd, data }: EdgeProps) {
+  const [edgePath] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
+  const reducedMotion = usePrefersReducedMotion();
+  const edgeData = data as { state?: EdgeHealthState; color?: string } | undefined;
+  const flowing = edgeData?.state !== "stopped" && !reducedMotion;
+  return (
+    <>
+      <BaseEdge id={id} path={edgePath} {...(markerEnd ? { markerEnd } : {})} {...(style ? { style } : {})} />
+      {flowing &&
+        Array.from({ length: MOUNT_PARTICLE_COUNT }).map((_, particleIndex) => {
+          const particleColor = edgeData?.color ?? "var(--color-warning)";
+          const particleStyle: CSSProperties = {
+            offsetPath: `path('${edgePath}')`,
+            animationDuration: `${MOUNT_PARTICLE_DURATION_S}s`,
+            animationDelay: `${(particleIndex * MOUNT_PARTICLE_DURATION_S) / MOUNT_PARTICLE_COUNT}s`,
+            fill: particleColor,
+            color: particleColor, // lu par le filtre drop-shadow (currentColor) en CSS, voir topology.css
+          };
+          return <circle key={particleIndex} r={2.6} className="topology-edge-particle" style={particleStyle} />;
+        })}
+    </>
+  );
+}
+
+const edgeTypes = { mountFlow: MountFlowEdge };
+
 function GraphNode({ data, selected }: NodeProps) {
   const node = data as unknown as TopologyNode;
   const Icon = KIND_ICON[node.kind];
@@ -185,8 +277,30 @@ function GraphNode({ data, selected }: NodeProps) {
         </span>
         <span className="topology-node__label">{node.label}</span>
       </div>
-      {isContainer && (node.updateAvailable || node.drift || !!node.vulnCritical || !!node.vulnHigh) && (
+      {isContainer &&
+        (node.updateAvailable ||
+          node.drift ||
+          !!node.vulnCritical ||
+          !!node.vulnHigh ||
+          node.healthStatus === "unhealthy" ||
+          node.healthStatus === "starting") && (
         <div className="topology-node__badges">
+          {node.healthStatus === "unhealthy" && (
+            <span
+              className="topology-badge topology-badge--critical topology-badge--pulse"
+              title="Healthcheck Docker natif en échec (State.Health.Status = unhealthy)"
+            >
+              Unhealthy
+            </span>
+          )}
+          {node.healthStatus === "starting" && (
+            <span
+              className="topology-badge topology-badge--warning"
+              title="Healthcheck Docker natif en cours de démarrage (State.Health.Status = starting)"
+            >
+              Healthcheck…
+            </span>
+          )}
           {node.updateAvailable && (
             <span className="topology-badge topology-badge--warning" title="Mise à jour d'image disponible">
               MàJ dispo
@@ -573,18 +687,36 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     [flowNodes, selectedId],
   );
 
+  // Recherche O(1) du nœud à chaque bout d'une arête pour en dériver sa couleur (voir
+  // edgeContainerNode ci-dessus) — recalculée seulement quand les données de topologie changent.
+  const nodesById = useMemo(() => new Map((data?.nodes ?? []).map((n) => [n.id, n])), [data]);
+
   const edges = useMemo<Edge[]>(() => {
     if (!data) return [];
-    return data.edges.map((e) => ({
-      id: e.id,
-      source: e.source,
-      target: e.target,
-      animated: true,
-      style: { stroke: "var(--color-text-faint)", strokeDasharray: "4 4" },
-      markerEnd: { type: MarkerType.ArrowClosed, color: "var(--color-text-faint)", width: 16, height: 16 },
-      data: { kind: e.kind },
-    }));
-  }, [data]);
+    return data.edges.map((e) => {
+      const containerNode = edgeContainerNode(e, nodesById);
+      const stopped = containerNode ? containerNode.status !== "running" : false;
+      const state: EdgeHealthState = stopped ? "stopped" : (containerNode?.healthStatus ?? "none");
+      const color = EDGE_STATE_COLOR[state];
+      const isMount = e.kind === "mount";
+      // "stopped" prime sur le type : tirets larges et espacés, quel que soit mount/network.
+      // Sinon : réseau garde ses tirets fins animés (existant) ; mount reste en trait plein — les
+      // particules de MountFlowEdge assurent seules l'impression de flux, un dasharray en plus
+      // ferait double emploi visuel.
+      const strokeDasharray = state === "stopped" ? "2 8" : isMount ? undefined : "4 4";
+      return {
+        id: e.id,
+        source: e.source,
+        target: e.target,
+        ...(isMount ? { type: "mountFlow" } : {}),
+        animated: !isMount,
+        className: `topology-edge topology-edge--${e.kind} topology-edge--${state}`,
+        style: { stroke: color, ...(strokeDasharray ? { strokeDasharray } : {}) },
+        markerEnd: { type: MarkerType.ArrowClosed, color, width: 16, height: 16 },
+        data: { kind: e.kind, state, color },
+      };
+    });
+  }, [data, nodesById]);
 
   function selectNode(id: string | null) {
     setSelectedId(id);
@@ -793,6 +925,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodesChange={handleNodesChange}
         onNodeDragStop={handleNodeDragStop}
         onNodeClick={handleNodeClick}

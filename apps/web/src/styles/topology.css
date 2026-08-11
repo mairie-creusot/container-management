@@ -308,6 +308,95 @@
   pointer-events: none;
 }
 
+/* --- Arêtes : couleur pilotée par état de santé --------------------------------------------
+   La couleur (`var(--color-success|warning|critical|text-faint)`) est posée en inline style par
+   TopologyGraph.tsx#edges (dérivée de healthStatus/status du nœud conteneur aux deux bouts) — ces
+   règles ne gèrent que les effets visuels additionnels : distinction mount (trait plein +
+   particules) / network (tirets fins, existant) / stopped (tirets larges espacés, conteneur
+   injoignable mais pas nécessairement en panne), et la pulsation d'alerte "unhealthy". Le
+   sélecteur cible `.react-flow__edge-path` (le <path> réel) à l'intérieur du groupe `<g>` qui
+   porte les classes `topology-edge--*` posées via la prop `className` de chaque arête. */
+.react-flow__edge.topology-edge--mount .react-flow__edge-path {
+  stroke-width: 2;
+}
+
+.react-flow__edge.topology-edge--network .react-flow__edge-path {
+  stroke-width: 1.5;
+}
+
+/* Conteneur arrêté (status !== "running") : arrêt souvent volontaire, pas une panne — donc pas de
+   rouge, mais visuellement clairement "injoignable" (tirets larges + légèrement estompée). Prime
+   sur mount/network ci-dessus (règle plus spécifique via topology-edge--stopped, même poids CSS
+   mais déclarée après dans la feuille de style, stroke-width laissé tel quel volontairement). */
+.react-flow__edge.topology-edge--stopped .react-flow__edge-path {
+  opacity: 0.55;
+}
+
+/* Pulsation d'alerte sur une arête touchant un conteneur "unhealthy" — même principe que
+   .overview-refresh-dot/@keyframes overview-pulse (layout.css) : oscillation d'opacité seule (pas
+   de propriété de layout animée), coût de rendu négligeable même sur plusieurs arêtes. */
+.react-flow__edge.topology-edge--unhealthy .react-flow__edge-path {
+  animation: topology-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes topology-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* Badge "Unhealthy" du nœud (TopologyGraph.tsx#GraphNode) — même pulsation, utile même quand le
+   conteneur est un nœud isolé sans arête (pas de volume/network affiché sur ce nœud). */
+.topology-badge--pulse {
+  animation: topology-pulse 1.6s ease-in-out infinite;
+}
+
+/* Particules de flux le long d'une arête "mount" (MountFlowEdge dans TopologyGraph.tsx) —
+   matérialise "des données/fichiers transitent ici", plus marqué que le tiret défilant générique
+   des arêtes "network". `offset-path`/`fill`/`color` sont posés en inline style (le tracé change à
+   chaque render, impossible à figer ici) ; cette règle ne définit que l'animation de la position le
+   long du chemin (`offset-distance`, natif navigateur — aucun recalcul JS par frame) et le halo. */
+.topology-edge-particle {
+  offset-rotate: 0deg;
+  animation: topology-edge-flow linear infinite;
+  filter: drop-shadow(0 0 3px currentColor);
+}
+
+@keyframes topology-edge-flow {
+  0% {
+    offset-distance: 0%;
+    opacity: 0;
+  }
+  8% {
+    opacity: 1;
+  }
+  92% {
+    opacity: 1;
+  }
+  100% {
+    offset-distance: 100%;
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .react-flow__edge.topology-edge--unhealthy .react-flow__edge-path,
+  .topology-badge--pulse {
+    animation: none;
+  }
+
+  /* Défense en profondeur : MountFlowEdge ne rend déjà plus ces particules sous
+     prefers-reduced-motion (usePrefersReducedMotion), cette règle couvre le cas où le média query
+     changerait sans re-render React (rare, mais gratuit à couvrir en CSS pur). */
+  .topology-edge-particle {
+    display: none;
+  }
+}
+
 /* Menu contextuel (clic droit sur le canevas, un nœud ou une arête) — même pattern visuel que
    .profile-menu (Topbar.tsx), mais positionné librement au point de clic. */
 .context-menu {
