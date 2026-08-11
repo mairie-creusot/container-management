@@ -4,9 +4,18 @@
  * (son résumé inclut déjà Mounts et NetworkSettings.Networks, pas besoin d'un inspect() par
  * conteneur) + listVolumes()/listNetworks() pour les nœuds isolés (pas encore montés/attachés
  * à un conteneur, mais existants sur l'hôte).
+ *
+ * Chaque nœud "conteneur" est en plus enrichi (dashboard vue d'ensemble, cf. ARCHITECTURE.md) :
+ *  - cpuPercent/memBytes : snapshot d'utilisation réel (docker.ts#readContainerUsage).
+ *  - updateAvailable : rapproché de GET /api/images (status "update") par "name:tag".
+ *  - drift : rapproché de GET /api/gitops/files (drift=true) par nom de fichier ~ nom de conteneur.
+ * Ces deux derniers sont du best-effort par nom — aucune donnée arbitraire n'est inventée si
+ * rien ne correspond (le nœud reste simplement sans badge).
  */
 
-import { getClient, isDockerReachable } from "./docker.js";
+import { getClient, isDockerReachable, readContainerUsage } from "./docker.js";
+import { getImages } from "./images.js";
+import { listGitOpsFiles } from "./gitops.js";
 import type { Topology, TopologyEdge, TopologyNode } from "../types.js";
 
 function primaryContainerName(names: string[] | undefined, id: string): string {
@@ -20,31 +29,60 @@ function mapState(state: string): TopologyNode["status"] {
   return "stopped";
 }
 
+/** "prod/nginx.yaml" -> "nginx" — pour un rapprochement approximatif fichier GitOps <-> conteneur. */
+function gitOpsBaseName(filePath: string): string {
+  const file = filePath.split("/").pop() ?? filePath;
+  return file.replace(/\.(ya?ml)$/i, "").toLowerCase();
+}
+
+function containerMatchesGitOpsFile(containerName: string, filePath: string): boolean {
+  const base = gitOpsBaseName(filePath);
+  const name = containerName.toLowerCase();
+  if (!base || !name) return false;
+  return base === name || base.includes(name) || name.includes(base);
+}
+
 export async function getTopology(): Promise<Topology> {
   const docker = await getClient();
   const empty: Topology = { nodes: [], edges: [], generatedAt: new Date().toISOString() };
   if (!(await isDockerReachable(docker))) return empty;
 
   try {
-    const [containers, volumesResponse, networks] = await Promise.all([
+    const [containers, volumesResponse, networks, imagesToUpdate, gitopsFiles] = await Promise.all([
       docker.listContainers({ all: true }),
       docker.listVolumes(),
       docker.listNetworks(),
+      getImages("update").catch(() => []),
+      listGitOpsFiles().catch(() => []),
     ]);
+
+    // "name:tag" des images ayant une mise à jour disponible — même format que ContainerInfo#Image.
+    const updateAvailableImages = new Set(imagesToUpdate.map((i) => `${i.name}:${i.currentTag}`));
+    const driftFilePaths = gitopsFiles.filter((f) => f.drift).map((f) => f.path);
+
+    // Snapshot d'utilisation par conteneur, en parallèle (chaque appel est déjà borné par un
+    // timeout côté docker.ts) — même approche que docker.ts#getDockerContainers.
+    const usages = await Promise.all(containers.map((c) => readContainerUsage(docker, c.Id)));
 
     const nodes: TopologyNode[] = [];
     const edges: TopologyEdge[] = [];
     const referencedVolumeNames = new Set<string>();
     const referencedNetworkIds = new Set<string>();
 
-    for (const c of containers) {
+    containers.forEach((c, index) => {
       const containerNodeId = `container:${c.Id}`;
+      const name = primaryContainerName(c.Names, c.Id);
+      const usage = usages[index]!;
       nodes.push({
         id: containerNodeId,
         kind: "container",
-        label: primaryContainerName(c.Names, c.Id),
+        label: name,
         subtitle: c.Image,
         status: mapState(c.State),
+        cpuPercent: usage.cpuPercent,
+        memBytes: usage.memBytes,
+        updateAvailable: updateAvailableImages.has(c.Image),
+        drift: driftFilePaths.some((path) => containerMatchesGitOpsFile(name, path)),
       });
 
       for (const mount of c.Mounts ?? []) {
@@ -72,7 +110,7 @@ export async function getTopology(): Promise<Topology> {
           kind: "network",
         });
       }
-    }
+    });
 
     // Seuls les volumes/networks RATTACHÉS À AU MOINS UN CONTENEUR ci-dessus sont affichés —
     // avec des dizaines/centaines de volumes orphelins possibles sur un hôte de dev (cache

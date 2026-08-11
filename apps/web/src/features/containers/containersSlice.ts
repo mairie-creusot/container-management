@@ -1,6 +1,7 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { apiDelete, apiGet, apiPost, ApiError } from "@/api/client";
 import type { ContainerDetail, ContainerRef } from "@/types";
+import { pushNotification } from "@/features/notifications/notificationsSlice";
 
 export interface CreateContainerInput {
   image: string;
@@ -84,6 +85,24 @@ export const runContainerAction = createAsyncThunk<
   }
 });
 
+/** Renomme un conteneur (équivalent `docker rename`) — voir POST /api/containers/:id/rename.
+ * Utilisé par le menu contextuel "Renommer" de l'éditeur visuel de topologie. */
+export const renameContainer = createAsyncThunk<
+  { id: string; containers: ContainerRef[] },
+  { id: string; name: string },
+  { rejectValue: string }
+>("containers/rename", async ({ id, name }, { rejectWithValue, dispatch }) => {
+  try {
+    const result = await apiPost<{ ok: true; containers: ContainerRef[] }>(`/containers/${id}/rename`, { name });
+    dispatch(pushNotification({ level: "success", message: `Conteneur renommé en "${name}".` }));
+    return { id, containers: result.containers };
+  } catch (error) {
+    const message = error instanceof ApiError ? error.message : "Échec du renommage.";
+    dispatch(pushNotification({ level: "error", message }));
+    return rejectWithValue(message);
+  }
+});
+
 const containersSlice = createSlice({
   name: "containers",
   initialState,
@@ -145,6 +164,18 @@ const containersSlice = createSlice({
       .addCase(runContainerAction.rejected, (state, action) => {
         state.actionPendingId = null;
         state.actionError = action.payload ?? "Échec de l'action.";
+      })
+      .addCase(renameContainer.pending, (state, action) => {
+        state.actionPendingId = action.meta.arg.id;
+        state.actionError = null;
+      })
+      .addCase(renameContainer.fulfilled, (state, action) => {
+        state.actionPendingId = null;
+        state.items = action.payload.containers;
+      })
+      .addCase(renameContainer.rejected, (state, action) => {
+        state.actionPendingId = null;
+        state.actionError = action.payload ?? "Échec du renommage.";
       });
   },
 });

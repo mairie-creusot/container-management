@@ -1,13 +1,26 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import { loadOverview } from "@/features/overview/overviewSlice";
-import { setCurrentView } from "@/features/ui/uiSlice";
 import AreaChart from "@/components/AreaChart";
 import Donut from "@/components/Donut";
 import TopologyGraph from "@/components/TopologyGraph";
+import Inspector from "@/components/Inspector";
+import KeyValueList from "@/components/KeyValueList";
+import StatusPill from "@/components/StatusPill";
 import { registryMeta } from "@/components/RegistryBadge";
+import type { TopologyNode } from "@/types";
 
-const REFRESH_INTERVAL_MS = 15_000;
+// Le graphe est désormais la pièce centrale du dashboard : il porte lui-même les informations
+// qui étaient auparavant dans des stat-cards séparées (mise à jour d'image, dérive GitOps,
+// CPU/mémoire — voir les badges sur chaque nœud dans TopologyGraph.tsx). Rafraîchissement plus
+// fréquent qu'avant (15s), sans spammer l'API pour autant.
+const REFRESH_INTERVAL_MS = 9_000;
+
+const KIND_LABEL: Record<TopologyNode["kind"], string> = {
+  container: "Conteneur",
+  volume: "Volume",
+  network: "Network",
+};
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString("fr-FR", {
@@ -22,11 +35,18 @@ function formatTime(iso: string): string {
   return new Date(iso).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+function formatMem(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1024) return `${mb.toFixed(0)} Mo`;
+  return `${(mb / 1024).toFixed(2)} Go`;
+}
+
 export default function OverviewPage() {
   const dispatch = useAppDispatch();
   const { status, error, stats, utilisation, registrySegments, recentCommits, lastRefreshedAt } = useAppSelector(
     (state) => state.overview,
   );
+  const [selected, setSelected] = useState<TopologyNode | null>(null);
 
   useEffect(() => {
     dispatch(loadOverview());
@@ -39,111 +59,113 @@ export default function OverviewPage() {
   }, [dispatch]);
 
   return (
-    <div className="page-content">
-      <div className="page-header">
-        <div>
-          <h2>Vue d'ensemble</h2>
-          <p>État courant du cluster, des images et de la dérive GitOps.</p>
-        </div>
-        {lastRefreshedAt && (
-          <span className="overview-refresh-hint">
-            <span className="overview-refresh-dot" />
-            Actualisé à {formatTime(lastRefreshedAt)} · toutes les {REFRESH_INTERVAL_MS / 1000}s
-          </span>
-        )}
-      </div>
-
-      {status === "loading" && !stats && <div className="empty-state">Chargement…</div>}
-      {error && <div className="error-banner">{error}</div>}
-
-      {stats && (
-        <div className="stat-grid">
-          <div className="stat-card stat-card--hero">
-            <span className="stat-card__label">Conteneurs actifs</span>
-            <span className="stat-card__value">{stats.activeContainers}</span>
-            <span className="stat-card__hint">En cours d'exécution</span>
+    <div className="workspace">
+      <div className="page-content">
+        <div className="page-header">
+          <div>
+            <h2>Vue d'ensemble</h2>
+            <p>
+              Infrastructure en direct — clic droit pour créer/gérer une ressource, glisser un
+              conteneur vers un network pour le connecter.
+              {stats && (
+                <>
+                  {" "}
+                  <span className={stats.healthyNodes === stats.totalNodes ? "" : "overview-summary--warning"}>
+                    {stats.healthyNodes}/{stats.totalNodes} environnement(s) sain(s)
+                  </span>
+                  .
+                </>
+              )}
+            </p>
           </div>
-          <div className="stat-card">
-            <span className="stat-card__label">Images à mettre à jour</span>
-            <span className="stat-card__value">{stats.imagesToUpdate}</span>
-            <span className={`stat-card__hint ${stats.imagesToUpdate > 0 ? "is-warning" : "is-success"}`}>
-              {stats.imagesToUpdate > 0 ? "Nouvelles versions disponibles" : "Tout est à jour"}
+          {lastRefreshedAt && (
+            <span className="overview-refresh-hint">
+              <span className="overview-refresh-dot" />
+              Actualisé à {formatTime(lastRefreshedAt)} · toutes les {REFRESH_INTERVAL_MS / 1000}s
             </span>
-          </div>
-          <div className="stat-card">
-            <span className="stat-card__label">Nœuds sains</span>
-            <span className="stat-card__value">
-              {stats.healthyNodes}/{stats.totalNodes}
-            </span>
-            <span
-              className={`stat-card__hint ${stats.healthyNodes === stats.totalNodes ? "is-success" : "is-warning"}`}
-            >
-              Sur l'ensemble des environnements
-            </span>
-          </div>
-          <div className="stat-card">
-            <span className="stat-card__label">Dérive GitOps</span>
-            <span className="stat-card__value">{stats.driftCount}</span>
-            <span className={`stat-card__hint ${stats.driftCount > 0 ? "is-critical" : "is-success"}`}>
-              {stats.driftCount > 0 ? "Manifestes désynchronisés" : "Cluster synchronisé"}
-            </span>
-          </div>
+          )}
         </div>
-      )}
 
-      <div className="panel" style={{ marginBottom: 18 }}>
-        <div className="panel__title-row">
-          <div className="panel__title">Topologie de l'infrastructure</div>
-          <button type="button" className="btn btn-ghost btn-sm" onClick={() => dispatch(setCurrentView("topology"))}>
-            Vue plein écran
-          </button>
-        </div>
-        <TopologyGraph height={420} />
-      </div>
+        {status === "loading" && !stats && <div className="empty-state">Chargement…</div>}
+        {error && <div className="error-banner">{error}</div>}
 
-      <div className="overview-grid">
-        <div className="panel">
-          <div className="panel__title">Utilisation du cluster (historique en direct)</div>
-          <AreaChart
-            labels={utilisation.map((point) => point.label)}
-            series={[
-              { name: "CPU %", color: "var(--accent-end)", values: utilisation.map((p) => p.cpuPercent) },
-              { name: "Mémoire %", color: "var(--registry-harbor)", values: utilisation.map((p) => p.memPercent) },
-            ]}
-          />
-        </div>
-        <div className="panel">
-          <div className="panel__title">Images par registry</div>
-          <Donut
-            segments={registrySegments.map((segment) => ({
-              label: segment.name,
-              value: segment.value,
-              color: registryMeta(segment.kind).color,
-            }))}
-          />
-        </div>
-      </div>
+        <TopologyGraph
+          height={Math.max(460, Math.min(760, window.innerHeight - 420))}
+          onSelectNode={setSelected}
+          refreshIntervalMs={REFRESH_INTERVAL_MS}
+        />
 
-      <div className="panel" style={{ marginTop: 14 }}>
-        <div className="panel__title">Activité récente (commits GitOps)</div>
-        {recentCommits.length === 0 ? (
-          <div className="empty-state">Aucune activité récente.</div>
-        ) : (
-          <div className="activity-list">
-            {recentCommits.map((commit) => (
-              <div className="activity-item" key={commit.hash}>
-                <span className="activity-item__dot" />
-                <div>
-                  <div className="activity-item__message">{commit.message}</div>
-                  <div className="activity-item__meta">
-                    {commit.author} · {commit.hash.slice(0, 7)} · {formatDate(commit.date)}
+        <div className="overview-grid" style={{ marginTop: 18 }}>
+          <div className="panel">
+            <div className="panel__title">Utilisation du cluster (historique en direct)</div>
+            <AreaChart
+              labels={utilisation.map((point) => point.label)}
+              series={[
+                { name: "CPU %", color: "var(--accent-end)", values: utilisation.map((p) => p.cpuPercent) },
+                { name: "Mémoire %", color: "var(--registry-harbor)", values: utilisation.map((p) => p.memPercent) },
+              ]}
+            />
+          </div>
+          <div className="panel">
+            <div className="panel__title">Images par registry</div>
+            <Donut
+              segments={registrySegments.map((segment) => ({
+                label: segment.name,
+                value: segment.value,
+                color: registryMeta(segment.kind).color,
+              }))}
+            />
+          </div>
+        </div>
+
+        <div className="panel" style={{ marginTop: 14 }}>
+          <div className="panel__title">Activité récente (commits GitOps)</div>
+          {recentCommits.length === 0 ? (
+            <div className="empty-state">Aucune activité récente.</div>
+          ) : (
+            <div className="activity-list">
+              {recentCommits.map((commit) => (
+                <div className="activity-item" key={commit.hash}>
+                  <span className="activity-item__dot" />
+                  <div>
+                    <div className="activity-item__message">{commit.message}</div>
+                    <div className="activity-item__meta">
+                      {commit.author} · {commit.hash.slice(0, 7)} · {formatDate(commit.date)}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
+          )}
+        </div>
       </div>
+
+      <Inspector
+        title={selected?.label}
+        subtitle={selected ? KIND_LABEL[selected.kind] : undefined}
+        onClose={() => setSelected(null)}
+        emptyLabel="Cliquez sur un nœud du graphe pour voir son détail (clic droit pour les actions)."
+      >
+        {selected && (
+          <>
+            <StatusPill status={selected.status} />
+            <KeyValueList
+              rows={[
+                { key: "Type", value: KIND_LABEL[selected.kind] },
+                { key: "Détail", value: selected.subtitle },
+                ...(selected.kind === "container" && typeof selected.cpuPercent === "number"
+                  ? [
+                      { key: "CPU", value: `${selected.cpuPercent.toFixed(0)}%` },
+                      { key: "Mémoire", value: formatMem(selected.memBytes ?? 0) },
+                      { key: "Mise à jour d'image", value: selected.updateAvailable ? "Disponible" : "À jour" },
+                      { key: "Dérive GitOps", value: selected.drift ? "Détectée" : "Aucune" },
+                    ]
+                  : []),
+              ]}
+            />
+          </>
+        )}
+      </Inspector>
     </div>
   );
 }

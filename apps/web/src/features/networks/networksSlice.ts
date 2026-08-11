@@ -56,6 +56,42 @@ export const removeNetwork = createAsyncThunk<string, { id: string; name: string
   },
 );
 
+/**
+ * Attache/détache un conteneur à un network (équivalent `docker network connect/disconnect`) —
+ * voir POST /api/networks/:id/{connect,disconnect}. Utilisé par le glisser-connecter (ou le
+ * menu contextuel d'une arête pour la déconnexion) de l'éditeur visuel de topologie ; le graphe
+ * lui-même est rafraîchi séparément (topologySlice) après succès, pas ici.
+ */
+export const connectContainerToNetwork = createAsyncThunk<
+  void,
+  { networkId: string; containerId: string },
+  { rejectValue: string }
+>("networks/connectContainer", async ({ networkId, containerId }, { rejectWithValue, dispatch }) => {
+  try {
+    await apiPost(`/networks/${networkId}/connect`, { containerId });
+    dispatch(pushNotification({ level: "success", message: "Conteneur connecté au network." }));
+  } catch (error) {
+    const message = error instanceof ApiError ? error.message : "Échec de la connexion au network.";
+    dispatch(pushNotification({ level: "error", message }));
+    return rejectWithValue(message);
+  }
+});
+
+export const disconnectContainerFromNetwork = createAsyncThunk<
+  void,
+  { networkId: string; containerId: string },
+  { rejectValue: string }
+>("networks/disconnectContainer", async ({ networkId, containerId }, { rejectWithValue, dispatch }) => {
+  try {
+    await apiPost(`/networks/${networkId}/disconnect`, { containerId });
+    dispatch(pushNotification({ level: "success", message: "Conteneur déconnecté du network." }));
+  } catch (error) {
+    const message = error instanceof ApiError ? error.message : "Échec de la déconnexion du network.";
+    dispatch(pushNotification({ level: "error", message }));
+    return rejectWithValue(message);
+  }
+});
+
 const networksSlice = createSlice({
   name: "networks",
   initialState,

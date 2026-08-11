@@ -41,6 +41,23 @@
   background: var(--color-surface-1);
   box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
   cursor: pointer;
+  position: relative;
+}
+
+/* Poignées de connexion (glisser-connecter conteneur <-> network/volume) — visibles et
+   légèrement agrandies au survol pour rester faciles à attraper malgré leur petite taille. */
+.topology-handle.react-flow__handle {
+  width: 9px;
+  height: 9px;
+  background: var(--color-surface-3);
+  border: 1.5px solid var(--color-text-faint);
+  transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.topology-handle.react-flow__handle:hover {
+  transform: scale(1.35);
+  border-color: var(--accent-end);
+  background: var(--accent-end);
 }
 
 .topology-node.is-selected {
@@ -130,4 +147,158 @@
 
 .topology-node__status--restarting .topology-node__status-dot {
   background: var(--color-warning);
+}
+
+/* Badges (mise à jour d'image disponible, dérive GitOps) — portés directement par le nœud
+   plutôt que par des stat-cards séparées, cf. OverviewPage.tsx. */
+.topology-node__badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.topology-badge {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.topology-badge--warning {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+
+.topology-badge--critical {
+  background: var(--color-critical-bg);
+  color: var(--color-critical);
+}
+
+/* CPU/mémoire en direct sur le nœud conteneur. */
+.topology-node__metrics {
+  margin-bottom: 8px;
+}
+
+.topology-node__metric-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.topology-node__metric-label {
+  font-size: 10.5px;
+  color: var(--color-text-faint);
+  flex: none;
+}
+
+.topology-node__metric-track {
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--color-surface-3);
+  overflow: hidden;
+}
+
+.topology-node__metric-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--gradient-accent);
+}
+
+.topology-node__metric-value {
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  color: var(--color-text-muted);
+  flex: none;
+  min-width: 28px;
+  text-align: right;
+}
+
+.topology-node__metric-mem {
+  margin-top: 2px;
+  font-size: 10.5px;
+  font-family: var(--font-mono);
+  color: var(--color-text-faint);
+}
+
+/* Menu contextuel (clic droit sur le canevas, un nœud ou une arête) — même pattern visuel que
+   .profile-menu (Topbar.tsx), mais positionné librement au point de clic. */
+.context-menu {
+  position: fixed;
+  width: 220px;
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg, 0 12px 32px rgba(0, 0, 0, 0.35));
+  padding: 6px;
+  z-index: 60;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.context-menu__item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.context-menu__item:hover:not(:disabled) {
+  background: var(--color-surface-2);
+}
+
+.context-menu__item:disabled {
+  color: var(--color-text-faint);
+  cursor: default;
+}
+
+.context-menu__item--danger {
+  color: var(--color-critical);
+}
+
+/* Popover de création/renommage rapide, ancré près du point de clic — pas une nouvelle page,
+   pas le <Modal> centré (réservé aux vraies boîtes de dialogue), façon Railway. */
+.graph-popover {
+  position: fixed;
+  width: 260px;
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg, 0 12px 32px rgba(0, 0, 0, 0.35));
+  padding: 14px;
+  z-index: 60;
+}
+
+.graph-popover__title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.graph-popover .field {
+  margin-bottom: 10px;
+}
+
+.graph-popover__error {
+  font-size: 12px;
+  color: var(--color-critical);
+  margin: 0 0 10px;
+}
+
+.graph-popover__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
 }

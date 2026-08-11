@@ -6,6 +6,7 @@
  * POST   /api/containers/:id/start     — démarre un conteneur arrêté.
  * POST   /api/containers/:id/stop      — arrête un conteneur en cours d'exécution.
  * POST   /api/containers/:id/restart   — redémarre un conteneur.
+ * POST   /api/containers/:id/rename    — renomme un conteneur (équivalent `docker rename`).
  * DELETE /api/containers/:id           — supprime un conteneur (?force=true pour un conteneur en cours d'exécution).
  */
 
@@ -15,6 +16,7 @@ import {
   getDockerContainers,
   inspectDockerContainer,
   removeContainer,
+  renameContainer,
   restartContainer,
   startContainer,
   stopContainer,
@@ -28,6 +30,10 @@ interface CreateContainerBody {
   env?: string[];
   volumes?: string[];
   network?: string;
+}
+
+interface RenameContainerBody {
+  name?: string;
 }
 
 /** Traduit une erreur dockerode/moteur Docker en réponse HTTP — 404 si le conteneur n'existe
@@ -109,6 +115,23 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
       sendDockerActionError(reply, err);
     }
   });
+
+  fastify.post<{ Params: { id: string }; Body: RenameContainerBody }>(
+    "/api/containers/:id/rename",
+    async (request, reply) => {
+      const name = request.body?.name?.trim();
+      if (!name) {
+        return reply.code(400).send({ error: "name is required" });
+      }
+      try {
+        await renameContainer(request.params.id, name);
+        const containers = await getDockerContainers();
+        return reply.send({ ok: true, containers });
+      } catch (err) {
+        sendDockerActionError(reply, err);
+      }
+    },
+  );
 
   fastify.delete<{ Params: { id: string }; Querystring: { force?: string } }>(
     "/api/containers/:id",

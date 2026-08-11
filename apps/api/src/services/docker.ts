@@ -253,8 +253,12 @@ export async function createAndStartContainer(options: CreateContainerOptions): 
   return { id: container.id };
 }
 
-/** Calcule un cpuPercent/memBytes approximatif à partir d'un snapshot unique de stats. */
-async function readContainerUsage(docker: Docker, containerId: string): Promise<{ cpuPercent: number; memBytes: number }> {
+/**
+ * Calcule un cpuPercent/memBytes approximatif à partir d'un snapshot unique de stats. Exporté
+ * pour être réutilisé par services/topology.ts (métriques par conteneur affichées sur le nœud
+ * du graphe), en plus de son usage interne à ce module.
+ */
+export async function readContainerUsage(docker: Docker, containerId: string): Promise<{ cpuPercent: number; memBytes: number }> {
   try {
     const container = docker.getContainer(containerId);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -354,6 +358,12 @@ export async function restartContainer(id: string): Promise<void> {
 export async function removeContainer(id: string, force: boolean): Promise<void> {
   const docker = await requireReachableClient();
   await docker.getContainer(id).remove({ force });
+}
+
+/** Renomme un conteneur existant (équivalent `docker rename <id> <name>`). */
+export async function renameContainer(id: string, name: string): Promise<void> {
+  const docker = await requireReachableClient();
+  await docker.getContainer(id).rename({ name });
 }
 
 /** Détail complet d'un conteneur (équivalent `docker inspect`) — chargé à la demande par l'Inspector. */
@@ -508,6 +518,21 @@ export async function createNetwork(name: string, driver: string): Promise<Docke
 export async function removeNetwork(id: string): Promise<void> {
   const docker = await requireReachableClient();
   await docker.getNetwork(id).remove();
+}
+
+/**
+ * Attache/détache un conteneur à un network (équivalent `docker network {connect,disconnect}`).
+ * Utilisé par l'éditeur visuel de topologie (glisser-connecter un conteneur à un network,
+ * ou déconnecter depuis le menu contextuel d'une arête) — voir routes/networks.ts.
+ */
+export async function connectContainerToNetwork(networkId: string, containerId: string): Promise<void> {
+  const docker = await requireReachableClient();
+  await docker.getNetwork(networkId).connect({ Container: containerId });
+}
+
+export async function disconnectContainerFromNetwork(networkId: string, containerId: string): Promise<void> {
+  const docker = await requireReachableClient();
+  await docker.getNetwork(networkId).disconnect({ Container: containerId });
 }
 
 // ---------------------------------------------------------------------------------------

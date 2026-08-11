@@ -237,6 +237,13 @@ export interface TopologyNode {
   /** Sous-titre affiché sous le label (ex: image du conteneur, driver du volume). */
   subtitle: string;
   status: "running" | "stopped" | "restarting" | "neutral";
+  /** Conteneurs uniquement : utilisation courante (docker.ts#readContainerUsage), pour affichage direct sur le nœud du graphe. */
+  cpuPercent?: number;
+  memBytes?: number;
+  /** Conteneurs uniquement : une image plus récente est disponible (GET /api/images, status "update"). */
+  updateAvailable?: boolean;
+  /** Conteneurs uniquement : un fichier GitOps rapproché par nom est en dérive (GET /api/gitops/files). */
+  drift?: boolean;
 }
 
 export interface TopologyEdge {

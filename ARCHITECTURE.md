@@ -218,6 +218,12 @@ GET  /api/gitops/files
 GET  /api/gitops/files/:path/diff
 GET  /api/gitops/commits
 POST /api/gitops/sync
+
+GET  /api/topology                       # graphe visuel (conteneurs/volumes/networks + relations réelles),
+                                          # nœuds "conteneur" enrichis de cpuPercent/memBytes/updateAvailable/drift
+POST /api/containers/:id/rename          # { name } — équivalent `docker rename`
+POST /api/networks/:id/connect           # { containerId } — équivalent `docker network connect`
+POST /api/networks/:id/disconnect        # { containerId } — équivalent `docker network disconnect`
 ```
 
 Toutes les routes (sauf `/api/auth/*` et `/api/setup/*`) exigent une session valide. Les routes `POST` exigent le rôle `operator` ou `admin`. Les routes `/api/setup/*` sont ouvertes tant que `completed=false` ; une fois `completed=true`, elles répondent `403` sauf pour un utilisateur `admin` authentifié (flux de reconfiguration).

@@ -139,6 +139,13 @@ export interface TopologyNode {
   label: string;
   subtitle: string;
   status: "running" | "stopped" | "restarting" | "neutral";
+  /** Conteneurs uniquement : utilisation courante, pour affichage direct sur le nœud du graphe. */
+  cpuPercent?: number;
+  memBytes?: number;
+  /** Conteneurs uniquement : une image plus récente est disponible (GET /api/images, status "update"). */
+  updateAvailable?: boolean;
+  /** Conteneurs uniquement : un fichier GitOps rapproché par nom est en dérive (GET /api/gitops/files). */
+  drift?: boolean;
 }
 
 export interface TopologyEdge {

@@ -11,6 +11,12 @@ const KIND_LABEL: Record<TopologyNode["kind"], string> = {
   network: "Network",
 };
 
+function formatMem(bytes: number): string {
+  const mb = bytes / (1024 * 1024);
+  if (mb < 1024) return `${mb.toFixed(0)} Mo`;
+  return `${(mb / 1024).toFixed(2)} Go`;
+}
+
 export default function TopologyPage() {
   const [selected, setSelected] = useState<TopologyNode | null>(null);
 
@@ -22,7 +28,8 @@ export default function TopologyPage() {
             <h2>Topologie</h2>
             <p>
               Vue visuelle de l'infrastructure — conteneurs, volumes et networks réellement
-              rattachés les uns aux autres, en direct.
+              rattachés les uns aux autres, en direct. Clic droit pour créer/gérer une
+              ressource, glisser un conteneur vers un network pour le connecter.
             </p>
           </div>
         </div>
@@ -43,6 +50,14 @@ export default function TopologyPage() {
               rows={[
                 { key: "Type", value: KIND_LABEL[selected.kind] },
                 { key: "Détail", value: selected.subtitle },
+                ...(selected.kind === "container" && typeof selected.cpuPercent === "number"
+                  ? [
+                      { key: "CPU", value: `${selected.cpuPercent.toFixed(0)}%` },
+                      { key: "Mémoire", value: formatMem(selected.memBytes ?? 0) },
+                      { key: "Mise à jour d'image", value: selected.updateAvailable ? "Disponible" : "À jour" },
+                      { key: "Dérive GitOps", value: selected.drift ? "Détectée" : "Aucune" },
+                    ]
+                  : []),
               ]}
             />
           </>

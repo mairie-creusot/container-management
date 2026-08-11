@@ -402,6 +402,11 @@
   flex-wrap: wrap;
 }
 
+.overview-summary--warning {
+  color: var(--color-warning);
+  font-weight: 600;
+}
+
 .overview-refresh-hint {
   display: flex;
   align-items: center;
