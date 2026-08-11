@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   ReactFlow,
   Background,
-  Controls,
   MiniMap,
   MarkerType,
   Handle,
@@ -17,7 +16,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useAppDispatch, useAppSelector } from "@/hooks";
-import { fetchTopology } from "@/features/topology/topologySlice";
+import { fetchTopology, fetchTopologyPositions, saveTopologyPositions } from "@/features/topology/topologySlice";
 import {
   createContainer,
   renameContainer,
@@ -138,31 +137,6 @@ const ZOOM_DETAIL_THRESHOLD = 0.6;
 /** state.transform du store React Flow est [x, y, zoom] ; ne resélectionne que le zoom pour éviter
  * un re-render de chaque nœud à chaque pan. */
 const zoomSelector = (s: { transform: [number, number, number] }) => s.transform[2];
-
-/** Positions de nœuds déplacés à la main — persistées par id, indépendamment des données
- * d'infrastructure (préférence d'affichage locale à l'utilisateur, pas une donnée Docker). */
-const POSITIONS_STORAGE_KEY = "quai:topology:positions";
-
-type NodePositions = Record<string, { x: number; y: number }>;
-
-function loadStoredPositions(): NodePositions {
-  try {
-    const raw = localStorage.getItem(POSITIONS_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed: unknown = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? (parsed as NodePositions) : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveStoredPositions(positions: NodePositions): void {
-  try {
-    localStorage.setItem(POSITIONS_STORAGE_KEY, JSON.stringify(positions));
-  } catch {
-    // Quota dépassé / stockage indisponible (navigation privée) — la préférence sera simplement perdue.
-  }
-}
 
 /** Couleurs de la MiniMap par type de nœud — mêmes valeurs que celles utilisées pour l'icône du
  * nœud correspondant dans topology.css (--accent-start, --color-warning, --accent-end). */
@@ -539,7 +513,7 @@ interface TopologyGraphProps {
 
 export default function TopologyGraph({ height = 460, onSelectNode, refreshIntervalMs = REFRESH_INTERVAL_MS }: TopologyGraphProps) {
   const dispatch = useAppDispatch();
-  const { data, status, error } = useAppSelector((s) => s.topology);
+  const { data, status, error, positions } = useAppSelector((s) => s.topology);
   const session = useAppSelector((s) => s.auth.session);
   const operate = canOperate(session);
   const confirm = useConfirm();
@@ -552,9 +526,6 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [renamePopover, setRenamePopover] = useState<{ containerId: string; initialName: string; x: number; y: number } | null>(
     null,
   );
-  // Canevas libre et persistant : positions déplacées à la main, par id de nœud, chargées une
-  // seule fois depuis localStorage puis tenues à jour par handleNodeDragStop.
-  const [positions, setPositions] = useState<NodePositions>(() => loadStoredPositions());
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
 
   useEffect(() => {
@@ -564,6 +535,13 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     }, refreshIntervalMs);
     return () => clearInterval(interval);
   }, [dispatch, refreshIntervalMs]);
+
+  // Canevas libre et persistant : positions déplacées à la main, chargées une seule fois depuis
+  // le compte de l'utilisateur connecté (GET /api/topology/positions — pas localStorage, la
+  // disposition suit l'identité, pas l'appareil) puis tenues à jour par handleNodeDragStop.
+  useEffect(() => {
+    dispatch(fetchTopologyPositions());
+  }, [dispatch]);
 
   // Recalcule la liste des nœuds à chaque nouveau fetch (toutes les 15s) ou changement de
   // positions sauvegardées — sans écraser la position d'un nœud déjà positionné (à la main ou par
@@ -621,14 +599,11 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     setFlowNodes((nds) => applyNodeChanges(changes, nds));
   }
 
-  /** Fin de glissé d'un nœud : persiste sa position finale par id, dans localStorage — elle
-   * survivra au prochain fetch (15s) et à un rechargement de page. */
+  /** Fin de glissé d'un nœud : persiste sa position finale par id, sur le compte de l'utilisateur
+   * connecté (PUT /api/topology/positions) — elle survivra au prochain fetch (15s), à un
+   * rechargement de page, et suit désormais l'utilisateur d'un poste à l'autre. */
   function handleNodeDragStop(_event: unknown, node: Node) {
-    setPositions((prev) => {
-      const next = { ...prev, [node.id]: { x: node.position.x, y: node.position.y } };
-      saveStoredPositions(next);
-      return next;
-    });
+    dispatch(saveTopologyPositions({ ...positions, [node.id]: { x: node.position.x, y: node.position.y } }));
   }
 
   function findPort(nodeId: string | null | undefined, handleId: string | null | undefined): PortSpec | null {
@@ -828,13 +803,18 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         onConnect={handleConnect}
         isValidConnection={isValidConnection}
         nodesConnectable={operate}
+        // La disposition est persistée par compte (PUT /api/topology/positions, réservé
+        // operator/admin comme toute route mutante — voir plugins/auth.ts) : un viewer ne peut
+        // donc pas la faire persister, autant ne pas lui laisser croire qu'un glissé "prend".
+        nodesDraggable={operate}
         deleteKeyCode={null}
         fitView
         proOptions={{ hideAttribution: true }}
         minZoom={0.3}
       >
+        {/* Pas de <Controls> (zoom +/-, fit-view) — la souris (molette + glisser) suffit déjà à
+            tout faire ; remplacé plus tard par des boutons en overlay sur mesure. */}
         <Background gap={20} size={1.6} color="var(--color-text-faint)" />
-        <Controls showInteractive={false} />
         <MiniMap
           nodeColor={(n) => MINIMAP_NODE_COLOR[(n.data as unknown as TopologyNode).kind]}
           nodeStrokeWidth={0}

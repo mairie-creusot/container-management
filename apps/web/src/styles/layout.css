@@ -446,18 +446,25 @@
   flex-wrap: wrap;
 }
 
-.overview-summary--warning {
-  color: var(--color-warning);
-  font-weight: 600;
+/* Vue d'ensemble = le graphe seul, plein écran (voir OverviewPage.tsx) — pas de page-content/
+   Inspector, juste un conteneur relatif pour positionner l'overlay de rafraîchissement. */
+.overview-workspace {
+  position: relative;
 }
 
-.overview-refresh-hint {
+.overview-refresh-overlay {
+  position: absolute;
+  top: 14px;
+  right: 18px;
+  z-index: 5;
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 11.5px;
-  color: var(--color-text-faint);
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
   white-space: nowrap;
+  pointer-events: none;
 }
 
 .overview-refresh-dot {

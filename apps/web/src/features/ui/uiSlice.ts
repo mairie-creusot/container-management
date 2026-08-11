@@ -7,7 +7,6 @@ export type ViewId =
   | "containers"
   | "volumes"
   | "networks"
-  | "topology"
   | "iac"
   | "registry-explorer"
   | "gitops"
@@ -69,7 +68,6 @@ export const NAV_ITEMS: { id: ViewId; label: string }[] = [
   { id: "volumes", label: "Volumes" },
   { id: "networks", label: "Networks" },
   { id: "reverse-proxy", label: "Reverse proxy" },
-  { id: "topology", label: "Topologie" },
   { id: "iac", label: "Infra-as-code" },
   { id: "gitops", label: "GitOps" },
   { id: "clusters", label: "Environnements" },

@@ -2,7 +2,6 @@ import { configureStore } from "@reduxjs/toolkit";
 import authReducer from "@/features/auth/authSlice";
 import setupReducer from "@/features/setup/setupSlice";
 import uiReducer from "@/features/ui/uiSlice";
-import overviewReducer from "@/features/overview/overviewSlice";
 import imagesReducer from "@/features/images/imagesSlice";
 import registriesReducer from "@/features/registries/registriesSlice";
 import secretsReducer from "@/features/secrets/secretsSlice";
@@ -23,7 +22,6 @@ export const store = configureStore({
     auth: authReducer,
     setup: setupReducer,
     ui: uiReducer,
-    overview: overviewReducer,
     images: imagesReducer,
     registries: registriesReducer,
     secrets: secretsReducer,

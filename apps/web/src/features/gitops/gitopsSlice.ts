@@ -16,8 +16,7 @@ interface GitopsState {
   syncing: boolean;
   error: string | null;
   /** Horodatage du dernier GET /api/gitops/files réussi — sert d'indicateur "dernière
-   *  vérification automatique" sur la page (voir GitOpsPage.tsx), même pattern que
-   *  overviewSlice.ts#lastRefreshedAt. */
+   *  vérification automatique" sur la page (voir GitOpsPage.tsx). */
   lastCheckedAt: string | null;
 }
 

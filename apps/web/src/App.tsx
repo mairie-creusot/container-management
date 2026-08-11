@@ -20,7 +20,6 @@ import GitOpsPage from "@/features/gitops/GitOpsPage";
 import EnvironmentsPage from "@/features/clusters/EnvironmentsPage";
 import NotificationsPage from "@/features/notifications/NotificationsPage";
 import AuditPage from "@/features/audit/AuditPage";
-import TopologyPage from "@/features/topology/TopologyPage";
 import IacPage from "@/features/iac/IacPage";
 import ToastStack from "@/components/ToastStack";
 
@@ -51,8 +50,6 @@ function renderView(view: string) {
       return <NetworksPage />;
     case "reverse-proxy":
       return <ReverseProxyPage />;
-    case "topology":
-      return <TopologyPage />;
     case "iac":
       return <IacPage />;
     case "gitops":
