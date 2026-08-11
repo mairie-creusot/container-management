@@ -459,3 +459,106 @@
   font-size: 13px;
   margin-top: 4px;
 }
+
+/* ==========================================================================
+   Responsive — coquille principale (sidebar, topbar, workspace/inspector).
+   Breakpoints alignés sur ceux déjà utilisés par l'assistant de configuration
+   (apps/web/src/styles/setup.css, 640px) :
+   - 1200px : l'Inspector docké se réduit.
+   - 900px  : sidebar réduite à une barre d'icônes, Inspector en overlay.
+   - 640px  : tout s'empile en une colonne.
+   ========================================================================== */
+
+/* 1200px : l'Inspector prend moins de place sur le contenu principal. */
+@media (max-width: 1200px) {
+  .inspector {
+    width: var(--inspector-width-compact);
+  }
+}
+
+/* 900px : sidebar compacte (icônes seules) + Inspector en overlay au-dessus du contenu. */
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: var(--sidebar-width-collapsed) 1fr;
+  }
+
+  .sidebar {
+    padding: 16px 8px;
+  }
+
+  /* Plus assez de place pour le nom de marque et le pied de page textuel :
+     seules les icônes (marque + navigation) restent visibles. */
+  .sidebar__brand .brand__text,
+  .sidebar__footer {
+    display: none;
+  }
+
+  .sidebar__item {
+    justify-content: center;
+    gap: 0;
+    padding: 12px 0;
+    font-size: 0; /* masque le libellé texte sans changer les dimensions propres de l'icône */
+  }
+
+  .topbar {
+    gap: 10px;
+    padding: 0 14px;
+  }
+
+  .topbar__search {
+    max-width: 180px;
+  }
+
+  .topbar__env-select {
+    min-width: 0;
+    max-width: 150px;
+  }
+
+  .topbar__user-meta {
+    display: none; /* seul l'avatar reste visible, le détail complet reste dans le menu déroulant */
+  }
+
+  /* L'Inspector vide (aucune sélection) n'occupe plus de place sur petit écran : il ne
+     s'affiche, en overlay, qu'au moment où l'utilisateur sélectionne réellement un élément. */
+  .inspector:has(.inspector__empty) {
+    display: none;
+  }
+
+  .inspector {
+    position: fixed;
+    top: var(--topbar-height);
+    right: 0;
+    bottom: 0;
+    width: min(360px, 100vw);
+    z-index: 30;
+    box-shadow: -16px 0 40px rgba(0, 0, 0, 0.45);
+  }
+}
+
+/* 640px : la coquille s'empile entièrement en une colonne. */
+@media (max-width: 640px) {
+  .page-content {
+    padding: 14px;
+  }
+
+  .pull-form {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .pull-form input {
+    width: 100%;
+  }
+
+  .topbar__title {
+    font-size: 14px;
+  }
+
+  .topbar__search {
+    max-width: 120px;
+  }
+
+  .inspector {
+    width: 100%;
+  }
+}

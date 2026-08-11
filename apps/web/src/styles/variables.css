@@ -38,8 +38,10 @@
 
   /* Dimensions layout */
   --sidebar-width: 250px;
+  --sidebar-width-collapsed: 64px; /* sidebar réduite à une barre d'icônes sous 900px */
   --topbar-height: 60px;
   --inspector-width: 380px;
+  --inspector-width-compact: 300px; /* Inspector docké réduit sous 1200px */
   --radius-sm: 6px;
   --radius-md: 10px;
   --radius-lg: 14px;

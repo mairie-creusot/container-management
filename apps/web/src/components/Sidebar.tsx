@@ -73,6 +73,7 @@ export default function Sidebar() {
               type="button"
               className={`sidebar__item${currentView === item.id ? " is-active" : ""}`}
               onClick={() => handleNavigate(item.id)}
+              title={item.label}
             >
               <span className="sidebar__icon">
                 <Icon />
@@ -87,6 +88,7 @@ export default function Sidebar() {
             type="button"
             className={`sidebar__item${currentView === "audit" ? " is-active" : ""}`}
             onClick={() => handleNavigate("audit")}
+            title={pageTitle("audit")}
           >
             <span className="sidebar__icon">
               <IconHistory />

@@ -169,3 +169,19 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* Responsive — même breakpoint que la sidebar compacte (apps/web/src/styles/layout.css). */
+@media (max-width: 900px) {
+  .iac-layout {
+    /* Les 3 colonnes fixes (workspaces / éditeur / runs) s'empilent verticalement. */
+    grid-template-columns: 1fr;
+  }
+
+  .iac-column {
+    max-height: 360px;
+  }
+
+  .iac-column--placeholder {
+    grid-column: span 1;
+  }
+}
