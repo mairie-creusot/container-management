@@ -9,6 +9,7 @@ import Topbar from "@/components/Topbar";
 import OverviewPage from "@/features/overview/OverviewPage";
 import ImagesPage from "@/features/images/ImagesPage";
 import RegistriesPage from "@/features/registries/RegistriesPage";
+import RegistryExplorerPage from "@/features/registries/RegistryExplorerPage";
 import ContainersPage from "@/features/containers/ContainersPage";
 import VolumesPage from "@/features/volumes/VolumesPage";
 import NetworksPage from "@/features/networks/NetworksPage";
@@ -28,6 +29,8 @@ function renderView(view: string) {
       return <ImagesPage />;
     case "registries":
       return <RegistriesPage />;
+    case "registry-explorer":
+      return <RegistryExplorerPage />;
     case "containers":
       return <ContainersPage />;
     case "volumes":

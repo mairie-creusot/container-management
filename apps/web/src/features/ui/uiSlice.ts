@@ -9,6 +9,7 @@ export type ViewId =
   | "networks"
   | "topology"
   | "iac"
+  | "registry-explorer"
   | "gitops"
   | "clusters"
   | "notifications"
@@ -74,6 +75,7 @@ export const NAV_ITEMS: { id: ViewId; label: string }[] = [
 const PAGE_TITLES: Partial<Record<ViewId, string>> = {
   notifications: "Notifications",
   audit: "Traçabilité",
+  "registry-explorer": "Explorateur de registry",
 };
 
 export function pageTitle(view: ViewId): string {

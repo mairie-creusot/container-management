@@ -365,6 +365,74 @@
   color: #fff;
 }
 
+.explorer-back {
+  margin-bottom: 8px;
+}
+
+.explorer-back__icon {
+  transform: rotate(180deg);
+}
+
+.explorer-repo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.explorer-repo {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+  overflow: hidden;
+}
+
+.explorer-repo__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px 16px;
+  background: transparent;
+  border: none;
+  color: var(--color-text);
+  text-align: left;
+}
+
+.explorer-repo__head:hover {
+  background: var(--color-surface-2);
+}
+
+.explorer-repo__caret {
+  color: var(--color-text-faint);
+  transition: transform 0.15s ease;
+  font-size: 11px;
+  width: 12px;
+}
+
+.explorer-repo__caret.is-open {
+  transform: rotate(90deg);
+}
+
+.explorer-tag-list {
+  border-top: 1px solid var(--color-border);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.explorer-tag-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+}
+
+.explorer-tag-row:hover {
+  background: var(--color-surface-2);
+}
+
 /* Grille de registries */
 .registry-grid {
   display: grid;

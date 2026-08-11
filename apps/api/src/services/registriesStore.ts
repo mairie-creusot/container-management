@@ -21,7 +21,7 @@ import type { Registry, RegistryKind } from "../types.js";
 
 /** "ghcr.io/mairie-creusot/foo" -> "mairie-creusot" — pas d'org configurable dans l'assistant
  * aujourd'hui, donc déduite d'une image ghcr.io déjà tirée localement (best-effort). */
-function inferGhcrOrg(localImages: LocalDockerImage[]): string | null {
+export function inferGhcrOrg(localImages: LocalDockerImage[]): string | null {
   for (const img of localImages) {
     if (!img.name.startsWith("ghcr.io/")) continue;
     const org = img.name.slice("ghcr.io/".length).split("/")[0];
@@ -76,6 +76,18 @@ export async function listRegistries(): Promise<Registry[]> {
 export async function getRegistry(id: string): Promise<Registry | undefined> {
   const all = await listRegistries();
   return all.find((r) => r.id === id);
+}
+
+/**
+ * Retrouve la config persistée (avec identifiants) correspondant à un id de vue (`reg-ghcr-0`)
+ * — nécessaire pour parcourir le catalogue distant d'un registry précis (voir routes/registries.ts,
+ * l'explorateur de registry), contrairement à `getRegistry()` qui ne renvoie que la vue publique
+ * sans secret.
+ */
+export async function getPersistedRegistryConfig(id: string): Promise<SetupRegistryConfig | undefined> {
+  const current = await getCurrent();
+  const persisted = current.registries ?? [];
+  return persisted.find((r, index) => `reg-${r.kind}-${index}` === id);
 }
 
 export interface CreateRegistryInput {

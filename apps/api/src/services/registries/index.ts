@@ -28,6 +28,35 @@ export async function listTagsForImage(image: Pick<ImageRef, "name" | "registry"
   }
 }
 
+/**
+ * Liste les dépôts (images) réellement présents dans le catalogue distant d'un registry — le
+ * vrai catalogue, pas seulement les images déjà tirées localement (voir explorateur de
+ * registry, apps/web/src/features/registries/RegistryExplorerPage.tsx). GitLab/Harbor : hors
+ * périmètre pour l'instant (nécessiterait une recherche de projets par groupe, plus complexe
+ * que le listing direct GHCR/Docker Hub), renvoie [].
+ */
+export async function listRegistryRepositories(kind: RegistryKind, username?: string): Promise<string[]> {
+  switch (kind) {
+    case "ghcr": {
+      const org = await ghcr.resolveOrg(username);
+      if (!org) return [];
+      const packages = await ghcr.listOrgPackages(org);
+      // Préfixé en forme canonique "ghcr.io/org/repo" — même forme que ImageRef.name, pour
+      // que le résultat soit directement réutilisable par listTagsForImage()/POST /images/pull.
+      return packages.map((p) => `ghcr.io/${org}/${p}`);
+    }
+    case "dockerhub":
+      return dockerhub.listNamespaceRepositories(username);
+    case "gitlab":
+    case "harbor":
+      return [];
+    default: {
+      const exhaustiveCheck: never = kind;
+      throw new Error(`Unsupported registry kind: ${String(exhaustiveCheck)}`);
+    }
+  }
+}
+
 export function registryKindFromImageName(name: string): RegistryKind {
   if (name.startsWith("ghcr.io/")) return "ghcr";
   if (name.includes("gitlab")) return "gitlab";

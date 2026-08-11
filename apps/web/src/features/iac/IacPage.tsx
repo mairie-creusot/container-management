@@ -117,8 +117,13 @@ export default function IacPage() {
         </div>
         <div className="iac-engine-badges">
           {engines.map((e) => (
-            <span key={e.engine} className={`chip ${e.available ? "chip--accent" : "chip--danger"}`} title={e.version ?? "indisponible"}>
-              {ENGINE_LABEL[e.engine]} {e.available ? "✓" : "✗"}
+            <span
+              key={e.engine}
+              className={`chip ${e.available ? "chip--accent" : "chip--danger"}`}
+              title={e.available ? `${ENGINE_LABEL[e.engine]} — vérifié en lançant le binaire réel` : "binaire introuvable dans le PATH du conteneur API"}
+            >
+              {e.available ? "●" : "✗"} {ENGINE_LABEL[e.engine]}
+              {e.available && e.version && <span className="iac-engine-badges__version">{e.version}</span>}
             </span>
           ))}
         </div>

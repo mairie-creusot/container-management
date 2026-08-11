@@ -41,37 +41,92 @@ async function writeIndex(workspaces: IacWorkspace[]): Promise<void> {
 
 /** Contenu de départ par moteur — un workspace nouvellement créé est immédiatement exécutable. */
 const SCAFFOLD: Record<IacEngine, Record<string, string>> = {
+  // Démos RÉELLES et autonomes (aucun accès cloud/identifiants requis) : "init"/"plan"/"apply"/
+  // "run"/"build" produisent un vrai résultat visible, pas juste "ça s'est initialisé sans
+  // erreur" sur une config vide. Objectif : prouver que le moteur tourne vraiment, pas
+  // simuler — remplacez ensuite par votre vraie configuration.
   tofu: {
-    "main.tf": `# Exemple minimal — remplacez par votre configuration réelle.
-# Documentation des providers OpenTofu : https://search.opentofu.org
+    "main.tf": `# Démo autoportante — le provider "local" ne nécessite aucun identifiant ni accès
+# réseau : "plan" puis "apply" créent réellement un fichier sur le disque du conteneur API,
+# preuve tangible qu'OpenTofu s'exécute pour de vrai. "destroy" le supprime.
+# Remplacez par votre vraie configuration (providers cloud, Docker, Kubernetes...) une fois
+# que vous avez confirmé que le cycle init/plan/apply/destroy fonctionne chez vous.
 
 terraform {
   required_providers {
-    # ex: docker = { source = "kreuzwerker/docker" }
+    local = {
+      source  = "hashicorp/local"
+      version = "~> 2.5"
+    }
   }
+}
+
+resource "local_file" "demo" {
+  filename = "\${path.module}/quai-demo.txt"
+  content  = "Généré par OpenTofu via QUAI le \${timestamp()}\\n"
+}
+
+output "chemin_fichier" {
+  value = local_file.demo.filename
 }
 `,
   },
   ansible: {
     "playbook.yml": `---
-- name: Exemple de playbook
-  hosts: all
-  gather_facts: false
+# Démo autoportante — tourne en local dans le conteneur API (voir inventory.ini), aucun hôte
+# distant requis. Affiche des infos système réelles et écrit un vrai fichier, preuve tangible
+# qu'Ansible s'exécute pour de vrai. Remplacez "hosts: local" par votre inventaire réel une
+# fois confirmé que ça fonctionne chez vous.
+- name: Démo QUAI
+  hosts: local
+  gather_facts: true
   tasks:
-    - name: Ping
-      ansible.builtin.ping:
+    - name: Afficher la date et le système
+      ansible.builtin.debug:
+        msg: "Exécuté le {{ ansible_date_time.iso8601 }} sur {{ ansible_system }} ({{ ansible_architecture }})"
+
+    - name: Écrire un fichier de preuve
+      ansible.builtin.copy:
+        dest: "{{ playbook_dir }}/quai-demo.txt"
+        content: "Généré par Ansible via QUAI le {{ ansible_date_time.iso8601 }}\\n"
 `,
     "inventory.ini": `[local]
 localhost ansible_connection=local
 `,
   },
   packer: {
-    "template.pkr.hcl": `# Exemple minimal — remplacez par votre configuration réelle.
-# Documentation des builders Packer : https://developer.hashicorp.com/packer/plugins/builders
+    "template.pkr.hcl": `# Démo autoportante — construit une VRAIE image Docker (visible ensuite sur la page Images
+# de QUAI) à partir d'alpine, sans identifiant ni accès cloud requis. Preuve tangible que
+# Packer s'exécute pour de vrai. Remplacez par votre vrai template (AMI, ISO, VMware...) une
+# fois confirmé que ça fonctionne chez vous.
 
 packer {
   required_plugins {
-    # ex: docker = { source = "github.com/hashicorp/docker", version = ">= 1.0.0" }
+    docker = {
+      source  = "github.com/hashicorp/docker"
+      version = ">= 1.0.0"
+    }
+  }
+}
+
+source "docker" "demo" {
+  image  = "alpine:3.19"
+  commit = true
+}
+
+build {
+  sources = ["source.docker.demo"]
+
+  provisioner "shell" {
+    inline = [
+      "echo 'Construit par Packer via QUAI' > /quai-demo.txt",
+      "date >> /quai-demo.txt"
+    ]
+  }
+
+  post-processor "docker-tag" {
+    repository = "quai-demo"
+    tags       = ["latest"]
   }
 }
 `,

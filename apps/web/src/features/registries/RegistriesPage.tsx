@@ -5,9 +5,10 @@ import {
   fetchRegistries,
   fetchRegistryDetail,
   selectRegistry,
+  startExploring,
 } from "@/features/registries/registriesSlice";
 import { canAdminister } from "@/features/auth/authSlice";
-import { setUnsavedFormActive } from "@/features/ui/uiSlice";
+import { setCurrentView, setUnsavedFormActive } from "@/features/ui/uiSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import Inspector from "@/components/Inspector";
 import StatusPill from "@/components/StatusPill";
@@ -208,6 +209,16 @@ export default function RegistriesPage() {
                 { key: "Dernière synchro", value: formatSync(selectedDetail.lastSyncAt) },
               ]}
             />
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              onClick={() => {
+                dispatch(startExploring(selectedDetail.id));
+                dispatch(setCurrentView("registry-explorer"));
+              }}
+            >
+              Explorer le catalogue
+            </button>
           </>
         )}
       </Inspector>

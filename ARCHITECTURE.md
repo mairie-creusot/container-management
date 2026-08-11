@@ -204,6 +204,8 @@ POST   /api/images/pull                     # { reference } — équivalent `doc
 GET  /api/registries
 POST /api/registries
 GET  /api/registries/:id
+GET  /api/registries/:id/repositories                 # vrai catalogue distant (GHCR/Docker Hub), pas juste le local
+GET  /api/registries/:id/repositories/:repo/tags       # tags d'un dépôt du catalogue (:repo encodé)
 
 GET  /api/containers
 POST /api/containers   # { image, name?, ports? } — équivalent `docker run -d`, flux minimal

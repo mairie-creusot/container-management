@@ -27,6 +27,11 @@ interface DockerHubTagsResponse {
   next: string | null;
 }
 
+interface DockerHubRepoResponse {
+  results: Array<{ name: string; namespace: string; is_private: boolean; description: string | null }>;
+  next: string | null;
+}
+
 function splitImageName(image: string): { namespace: string; repository: string } {
   const parts = image.split("/");
   if (parts.length === 1) {
@@ -72,6 +77,35 @@ async function resolveAuthHeaders(): Promise<Record<string, string>> {
     // anonyme plutôt que de faire échouer tout l'appel — au pire un dépôt privé restera
     // sur les données de démonstration, ce qui est déjà le comportement de repli standard.
     return {};
+  }
+}
+
+/**
+ * Liste les dépôts (images) réellement présents dans un namespace Docker Hub — le vrai
+ * catalogue distant, pas seulement les images déjà tirées localement. `namespace` par défaut :
+ * l'identifiant configuré pour ce registry (compte personnel/org Docker Hub), sinon "library"
+ * (images officielles).
+ */
+export async function listNamespaceRepositories(namespace?: string): Promise<string[]> {
+  const credentials = await resolveCredentials();
+  const ns = namespace ?? credentials?.username ?? "library";
+  const headers = await resolveAuthHeaders();
+  const repos: string[] = [];
+  let url: string | null = `https://hub.docker.com/v2/repositories/${encodeURIComponent(ns)}/?page_size=100`;
+
+  try {
+    while (url) {
+      const data: DockerHubRepoResponse = await fetchJson<DockerHubRepoResponse>(url, { headers });
+      repos.push(...data.results.map((r) => `${r.namespace}/${r.name}`));
+      url = data.next;
+    }
+    return repos;
+  } catch (err) {
+    if (err instanceof RegistryHttpError) {
+      // eslint-disable-next-line no-console
+      console.warn(`[dockerhub] listNamespaceRepositories("${ns}") failed (${err.message})`);
+    }
+    return repos; // ce qui a déjà été récupéré avant l'échec (pagination partielle), sinon []
   }
 }
 
