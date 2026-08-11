@@ -14,7 +14,8 @@ export type ViewId =
   | "clusters"
   | "notifications"
   | "audit"
-  | "secrets";
+  | "secrets"
+  | "reverse-proxy";
 
 interface UiState {
   currentView: ViewId;
@@ -67,6 +68,7 @@ export const NAV_ITEMS: { id: ViewId; label: string }[] = [
   { id: "containers", label: "Conteneurs" },
   { id: "volumes", label: "Volumes" },
   { id: "networks", label: "Networks" },
+  { id: "reverse-proxy", label: "Reverse proxy" },
   { id: "topology", label: "Topologie" },
   { id: "iac", label: "Infra-as-code" },
   { id: "gitops", label: "GitOps" },

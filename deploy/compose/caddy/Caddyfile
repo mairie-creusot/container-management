@@ -1,0 +1,28 @@
+# Caddyfile de BOOTSTRAP uniquement — juste assez pour que le process Caddy démarre avec son
+# API d'administration joignable depuis les autres conteneurs du réseau quai-dev (le point
+# important : `admin 0.0.0.0:2019`, car le défaut de Caddy est `localhost:2019`, donc
+# injoignable depuis quai-dev-api-1). Tout le VRAI routage (les sous-domaines vers les
+# conteneurs QUAI) est ensuite poussé en direct, en JSON, via cette API d'administration par
+# apps/api/src/services/reverseProxy.ts#pushConfigToCaddy() (POST /load) — jamais en éditant
+# ce fichier ni via `caddy reload`. Voir ARCHITECTURE.md § "Reverse proxy interne".
+{
+	# `origins` : sans ça, Caddy rejette en 403 toute requête d'admin dont l'en-tête Host/Origin
+	# ne fait pas partie d'une liste blanche qui ne connaît nativement que localhost/127.0.0.1/::1
+	# — "caddy" (nom de service docker-compose, ce que tape quai-dev-api-1 pour joindre cette
+	# API) en est absent par défaut. Doit être présent dès CE Caddyfile de bootstrap (et pas
+	# seulement dans les push JSON ultérieurs de reverseProxy.ts) : le tout premier push
+	# viendrait sinon buter dessus avant même de pouvoir le corriger lui-même. Vérifié en
+	# conditions réelles lors du développement de cette fonctionnalité.
+	admin 0.0.0.0:2019 {
+		origins caddy:2019 localhost:2019 127.0.0.1:2019
+	}
+	# auto_https off : les sous-domaines internes (*.lecreusot.priv) ne sont pas résolubles
+	# publiquement, donc Caddy ne doit jamais tenter d'obtenir un certificat ACME pour eux.
+	# HTTPS interne (TLS auto-signé) est explicitement hors périmètre de ce premier lot — voir
+	# ARCHITECTURE.md.
+	auto_https off
+}
+
+:80 {
+	respond "QUAI reverse proxy — aucune route configurée pour cet hôte (en-tête Host inconnu)." 404
+}

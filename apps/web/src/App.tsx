@@ -15,6 +15,7 @@ import SecretsPage from "@/features/secrets/SecretsPage";
 import ContainersPage from "@/features/containers/ContainersPage";
 import VolumesPage from "@/features/volumes/VolumesPage";
 import NetworksPage from "@/features/networks/NetworksPage";
+import ReverseProxyPage from "@/features/reverseProxy/ReverseProxyPage";
 import GitOpsPage from "@/features/gitops/GitOpsPage";
 import EnvironmentsPage from "@/features/clusters/EnvironmentsPage";
 import NotificationsPage from "@/features/notifications/NotificationsPage";
@@ -48,6 +49,8 @@ function renderView(view: string) {
       return <VolumesPage />;
     case "networks":
       return <NetworksPage />;
+    case "reverse-proxy":
+      return <ReverseProxyPage />;
     case "topology":
       return <TopologyPage />;
     case "iac":

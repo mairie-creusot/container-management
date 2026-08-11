@@ -129,6 +129,16 @@ export const config = {
     // sont chiffrées au repos (crypto.ts) avant écriture, comme le reste des secrets persistés.
     storePath: readString("SECRETS_PATH", "./data/secrets.json"),
   },
+  reverseProxy: {
+    // Persistance des routes du reverse proxy interne (cf. ARCHITECTURE.md, chapitre "Reverse
+    // proxy interne"). Même répertoire/pattern que secrets.json — aucune valeur sensible dans
+    // une route, donc pas de chiffrement au repos ici.
+    storePath: readString("REVERSE_PROXY_PATH", "./data/reverse-proxy.json"),
+    // API d'administration JSON de Caddy (https://caddyserver.com/docs/api), jamais exposée à
+    // l'hôte — jointe par son nom de service docker-compose (voir deploy/compose/docker-compose.dev.yml).
+    caddyAdminUrl: readString("CADDY_ADMIN_URL", "http://caddy:2019"),
+    requestTimeoutMs: readNumber("CADDY_REQUEST_TIMEOUT_MS", 5000),
+  },
 } as const;
 
 export type Config = typeof config;

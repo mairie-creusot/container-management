@@ -15,6 +15,7 @@ import networksReducer from "@/features/networks/networksSlice";
 import auditReducer from "@/features/audit/auditSlice";
 import topologyReducer from "@/features/topology/topologySlice";
 import iacReducer from "@/features/iac/iacSlice";
+import reverseProxyReducer from "@/features/reverseProxy/reverseProxySlice";
 import { errorNotificationMiddleware } from "@/features/notifications/errorNotificationMiddleware";
 
 export const store = configureStore({
@@ -35,6 +36,7 @@ export const store = configureStore({
     audit: auditReducer,
     topology: topologyReducer,
     iac: iacReducer,
+    reverseProxy: reverseProxyReducer,
   },
   middleware: (getDefaultMiddleware) => getDefaultMiddleware().concat(errorNotificationMiddleware),
 });

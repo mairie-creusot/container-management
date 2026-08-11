@@ -101,6 +101,36 @@ services:
     networks:
       - quai-dev
 
+  # Reverse proxy interne réel (https://caddyserver.com, Apache-2.0) : QUAI ne réimplémente
+  # aucun serveur HTTP/proxy, il pilote ce VRAI binaire en direct via son API d'administration
+  # JSON (:2019, PAS exposée à l'hôte — seulement joignable depuis les autres conteneurs du
+  # réseau quai-dev, ex `http://caddy:2019` depuis quai-dev-api-1) — voir
+  # apps/api/src/services/reverseProxy.ts. Le Caddyfile monté ne sert qu'à démarrer Caddy avec
+  # son admin API accessible sur le réseau docker-compose (`admin 0.0.0.0:2019`, sinon défaut
+  # localhost:2019 injoignable depuis les autres conteneurs) ; tout le routage réel est ensuite
+  # poussé en JSON à chaud, sans jamais réécrire ce fichier ni recharger le process.
+  caddy:
+    image: caddy:2-alpine
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      # 443 exposé pour un futur lot TLS interne (auto-signé) — non utilisé pour l'instant,
+      # Caddy ne sert qu'en HTTP (voir ARCHITECTURE.md § "Reverse proxy interne").
+      - "443:443"
+    networks:
+      - quai-dev
+    healthcheck:
+      # wget (busybox) est présent sur caddy:2-alpine ; /config/ répond 200 dès que l'admin API
+      # est prête, même sans aucune route applicative encore poussée.
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:2019/config/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   ldap:
     image: osixia/openldap:1.5.0
     environment:
@@ -153,3 +183,5 @@ volumes:
   ldap_config:
   api_node_modules:
   web_node_modules:
+  caddy_data:
+  caddy_config:

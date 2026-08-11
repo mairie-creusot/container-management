@@ -366,6 +366,31 @@ export async function renameContainer(id: string, name: string): Promise<void> {
   await docker.getContainer(id).rename({ name });
 }
 
+/**
+ * IP réelle d'un conteneur sur le réseau Docker (équivalent
+ * `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' <id>`) —
+ * utilisé par services/reverseProxy.ts pour résoudre l'upstream d'une route ciblant un
+ * conteneur QUAI À CHAQUE push vers Caddy (jamais mise en cache), pour ne jamais casser une
+ * route au redémarrage du conteneur cible (nouvelle IP à chaque (re)création). `null` si le
+ * démon est injoignable, si le conteneur n'existe plus, ou s'il n'est attaché à aucun réseau
+ * (arrêté sans réseau bridge par défaut, par exemple).
+ */
+export async function getContainerNetworkAddress(id: string): Promise<string | null> {
+  const docker = await getClient();
+  if (!(await isDockerReachable(docker))) return null;
+
+  try {
+    const container = docker.getContainer(id);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data: any = await container.inspect();
+    const networks: Record<string, { IPAddress?: string }> = data.NetworkSettings?.Networks ?? {};
+    const firstWithAddress = Object.values(networks).find((n) => n.IPAddress);
+    return firstWithAddress?.IPAddress ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** Détail complet d'un conteneur (équivalent `docker inspect`) — chargé à la demande par l'Inspector. */
 export async function inspectDockerContainer(id: string): Promise<ContainerDetail | null> {
   const docker = await getClient();
