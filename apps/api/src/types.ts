@@ -270,6 +270,16 @@ export interface TopologyNode {
   updateAvailable?: boolean;
   /** Conteneurs uniquement : un fichier GitOps rapproché par nom est en dérive (GET /api/gitops/files). */
   drift?: boolean;
+  /**
+   * Conteneurs uniquement : nombre de vulnérabilités Critical/High rapprochées du DERNIER scan
+   * connu (tous scanners confondus, GET /api/images/:id/scans) pour l'image de ce conteneur —
+   * même principe best-effort par nom que updateAvailable/drift ci-dessus, rien d'inventé si
+   * aucun scan n'a jamais tourné pour cette image (absent, pas 0). Règle si Grype ET
+   * OSV-Scanner ont chacun un dernier scan réussi pour la même image : le plus sévère des deux
+   * l'emporte (max des deux comptes), voir services/topology.ts#vulnSummaryForImage.
+   */
+  vulnCritical?: number;
+  vulnHigh?: number;
 }
 
 export interface TopologyEdge {
@@ -285,26 +295,38 @@ export interface Topology {
   generatedAt: string; // ISO 8601
 }
 
-// --- Scan de vulnérabilités (Grype) — voir apps/api/src/services/scan.ts ---
-// QUAI pilote le VRAI binaire Grype (https://github.com/anchore/grype, Apache-2.0) en
-// sous-processus, comme OpenTofu/Ansible/Packer (services/iac/*) : aucune réimplémentation
-// d'un scanner de CVE.
+// --- Scan de vulnérabilités (Grype + OSV-Scanner) — voir apps/api/src/services/scan.ts ---
+// QUAI pilote les VRAIS binaires Grype (https://github.com/anchore/grype, Apache-2.0) ET
+// OSV-Scanner (https://github.com/google/osv-scanner, Apache-2.0) en sous-processus, comme
+// OpenTofu/Ansible/Packer (services/iac/*) : aucune réimplémentation d'un scanner de CVE. Les
+// deux scanners coexistent (l'un n'exclut pas l'autre) : un seul historique de scans par image,
+// chaque entrée sait de quel scanner elle vient (champ `scanner` ci-dessous).
+
+export type ScannerId = "grype" | "osv-scanner";
+
+/** Présence + version du binaire d'un scanner sur l'hôte — même pattern que IacEngineStatus. */
+export interface ScannerStatus {
+  scanner: ScannerId;
+  available: boolean;
+  version: string | null;
+}
 
 export type VulnSeverity = "Critical" | "High" | "Medium" | "Low" | "Negligible" | "Unknown";
 
 export interface Vulnerability {
-  id: string; // ex: "CVE-2023-1255"
+  id: string; // ex: "CVE-2023-1255", ou "GHSA-..."/"DEBIAN-CVE-..." pour OSV-Scanner
   severity: VulnSeverity;
   packageName: string;
   installedVersion: string;
-  fixedInVersion: string | null; // null si Grype ne connaît pas de correctif
+  fixedInVersion: string | null; // null si le scanner ne connaît pas de correctif
 }
 
 export type ScanStatus = "running" | "success" | "failed";
 
 export interface ScanResult {
   id: string;
-  image: string; // référence Docker passée à Grype, ex: "nginx:1.27"
+  scanner: ScannerId; // scanner à l'origine de ce résultat
+  image: string; // référence Docker passée au scanner, ex: "nginx:1.27"
   status: ScanStatus;
   startedAt: string; // ISO 8601
   finishedAt: string | null;

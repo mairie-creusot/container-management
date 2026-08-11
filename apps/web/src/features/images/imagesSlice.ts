@@ -1,6 +1,6 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { apiDelete, apiGet, apiPost, ApiError } from "@/api/client";
-import type { ImageRef, ScanResult } from "@/types";
+import type { ImageRef, ScannerId, ScannerStatus, ScanResult } from "@/types";
 
 export type ImageStatusFilter = "all" | "update" | "uptodate";
 
@@ -14,10 +14,13 @@ interface ImagesState {
   deletingId: string | null;
   pullStatus: "idle" | "pulling" | "error";
   pullError: string | null;
-  /** Historique des scans Grype, clé = ImageRef.id, les plus récents en premier (index 0). */
+  /** Historique des scans (Grype + OSV-Scanner mélangés, champ `scanner` par entrée), clé =
+   * ImageRef.id, les plus récents en premier (index 0). */
   scansByImageId: Record<string, ScanResult[]>;
   scanStatus: "idle" | "starting" | "error";
   scanError: string | null;
+  /** Présence/version des binaires scanner sur l'hôte — voir GET /api/scanners/status. */
+  scannerStatuses: ScannerStatus[];
 }
 
 const initialState: ImagesState = {
@@ -33,6 +36,7 @@ const initialState: ImagesState = {
   scansByImageId: {},
   scanStatus: "idle",
   scanError: null,
+  scannerStatuses: [],
 };
 
 export const fetchImages = createAsyncThunk<ImageRef[], ImageStatusFilter | undefined>(
@@ -87,13 +91,13 @@ export const pullImage = createAsyncThunk<ImageRef[], string, { rejectValue: str
   },
 );
 
-/** Lance un scan Grype réel pour l'image `id` — voir POST /api/images/:id/scan. */
-export const scanImage = createAsyncThunk<ScanResult, string, { rejectValue: string }>(
+/** Lance un scan réel (Grype par défaut, ou OSV-Scanner) pour l'image `id` — voir POST /api/images/:id/scan. */
+export const scanImage = createAsyncThunk<ScanResult, { id: string; scanner?: ScannerId }, { rejectValue: string }>(
   "images/scanImage",
-  async (id, { rejectWithValue }) => {
+  async ({ id, scanner }, { rejectWithValue }) => {
     try {
       // id peut contenir des "/" (voir updateImage ci-dessus pour le bug déjà corrigé) : encodé ici.
-      return await apiPost<ScanResult>(`/images/${encodeURIComponent(id)}/scan`);
+      return await apiPost<ScanResult>(`/images/${encodeURIComponent(id)}/scan`, scanner ? { scanner } : undefined);
     } catch (error) {
       const message = error instanceof ApiError ? error.message : "Échec du lancement du scan.";
       return rejectWithValue(message);
@@ -101,7 +105,7 @@ export const scanImage = createAsyncThunk<ScanResult, string, { rejectValue: str
   },
 );
 
-/** Historique des scans d'une image — voir GET /api/images/:id/scans. */
+/** Historique des scans d'une image, tous scanners confondus — voir GET /api/images/:id/scans. */
 export const fetchScans = createAsyncThunk<ScanResult[], string>("images/fetchScans", async (id) => {
   return apiGet<ScanResult[]>(`/images/${encodeURIComponent(id)}/scans`);
 });
@@ -111,6 +115,11 @@ export const fetchScanDetail = createAsyncThunk<ScanResult, { imageId: string; s
   "images/fetchScanDetail",
   async ({ scanId }) => apiGet<ScanResult>(`/scans/${scanId}`),
 );
+
+/** Présence/version de grype et osv-scanner sur l'hôte — voir GET /api/scanners/status. */
+export const fetchScannerStatuses = createAsyncThunk<ScannerStatus[]>("images/fetchScannerStatuses", async () => {
+  return apiGet<ScannerStatus[]>("/scanners/status");
+});
 
 const imagesSlice = createSlice({
   name: "images",
@@ -178,7 +187,7 @@ const imagesSlice = createSlice({
       })
       .addCase(scanImage.fulfilled, (state, action) => {
         state.scanStatus = "idle";
-        const imageId = action.meta.arg;
+        const imageId = action.meta.arg.id;
         const existing = state.scansByImageId[imageId] ?? [];
         state.scansByImageId[imageId] = [action.payload, ...existing];
       })
@@ -194,6 +203,9 @@ const imagesSlice = createSlice({
         if (!list) return;
         const index = list.findIndex((s) => s.id === action.payload.id);
         if (index >= 0) list[index] = action.payload;
+      })
+      .addCase(fetchScannerStatuses.fulfilled, (state, action) => {
+        state.scannerStatuses = action.payload;
       });
   },
 });

@@ -4,6 +4,7 @@ import {
   deleteImage,
   fetchImages,
   fetchScanDetail,
+  fetchScannerStatuses,
   fetchScans,
   pullImage,
   scanImage,
@@ -21,7 +22,7 @@ import RegistryBadge from "@/components/RegistryBadge";
 import KeyValueList from "@/components/KeyValueList";
 import Pagination from "@/components/Pagination";
 import { SkeletonTable } from "@/components/Skeleton";
-import type { VulnSeverity } from "@/types";
+import type { ScannerId, ScanStatus, VulnSeverity } from "@/types";
 
 const FILTERS: { id: ImageStatusFilter; label: string }[] = [
   { id: "all", label: "Toutes" },
@@ -40,6 +41,24 @@ const SEVERITY_SEMANTIC: Record<VulnSeverity, "critical" | "warning" | "neutral"
   Low: "neutral",
   Negligible: "neutral",
   Unknown: "neutral",
+};
+
+// Les deux scanners réels pilotés par l'API (services/scan.ts) — coexistent, aucun ne remplace
+// l'autre : l'utilisateur choisit lequel lancer, l'historique affiche les deux.
+const SCANNERS: { id: ScannerId; label: string }[] = [
+  { id: "grype", label: "Grype" },
+  { id: "osv-scanner", label: "OSV-Scanner" },
+];
+const SCANNER_LABEL: Record<ScannerId, string> = { grype: "Grype", "osv-scanner": "OSV-Scanner" };
+const SCAN_STATUS_SEMANTIC: Record<ScanStatus, "success" | "critical" | "warning"> = {
+  success: "success",
+  failed: "critical",
+  running: "warning",
+};
+const SCAN_STATUS_LABEL: Record<ScanStatus, string> = {
+  success: "Terminé",
+  failed: "Échoué",
+  running: "En cours",
 };
 
 const SCAN_POLL_MS = 2000;
@@ -71,8 +90,10 @@ export default function ImagesPage() {
     scansByImageId,
     scanStatus,
     scanError,
+    scannerStatuses,
   } = useAppSelector((s) => s.images);
   const [pullReference, setPullReference] = useState("");
+  const [scannerChoice, setScannerChoice] = useState<ScannerId>("grype");
   const searchQuery = useAppSelector((s) => s.ui.searchQuery);
   const selectedEnvironmentId = useAppSelector((s) => s.ui.selectedEnvironmentId);
   const environments = useAppSelector((s) => s.clusters.environments);
@@ -82,6 +103,10 @@ export default function ImagesPage() {
   useEffect(() => {
     dispatch(fetchImages(filter));
   }, [dispatch, filter]);
+
+  useEffect(() => {
+    dispatch(fetchScannerStatuses());
+  }, [dispatch]);
 
   useEffect(() => {
     if (selectedId) dispatch(fetchScans(selectedId));
@@ -139,7 +164,11 @@ export default function ImagesPage() {
   }, [dispatch, selected, currentScan]);
 
   function handleScan(imageId: string) {
-    dispatch(scanImage(imageId));
+    dispatch(scanImage({ id: imageId, scanner: scannerChoice }));
+  }
+
+  function scannerStatusFor(scanner: ScannerId) {
+    return scannerStatuses.find((s) => s.scanner === scanner);
   }
 
   return (
@@ -259,6 +288,27 @@ export default function ImagesPage() {
                 { key: "Couches", value: String(selected.layers) },
               ]}
             />
+            {canOperate(session) && (
+              <div className="chip-row">
+                {SCANNERS.map((s) => {
+                  const scannerStatus = scannerStatusFor(s.id);
+                  const unavailable = scannerStatus ? !scannerStatus.available : false;
+                  return (
+                    <button
+                      key={s.id}
+                      type="button"
+                      className={`chip${scannerChoice === s.id ? " is-active" : ""}`}
+                      onClick={() => setScannerChoice(s.id)}
+                      title={unavailable ? `${s.label} : binaire non détecté sur l'hôte` : s.label}
+                    >
+                      {s.label}
+                      {unavailable ? " (indisponible)" : ""}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
             <div className="inspector-actions">
               <button
                 type="button"
@@ -275,7 +325,7 @@ export default function ImagesPage() {
                   disabled={scanStatus === "starting" || currentScan?.status === "running"}
                   onClick={() => handleScan(selected.id)}
                 >
-                  {currentScan?.status === "running" ? "Scan en cours…" : "Scanner"}
+                  {currentScan?.status === "running" ? "Scan en cours…" : `Scanner (${SCANNER_LABEL[scannerChoice]})`}
                 </button>
               )}
               {canOperate(session) && (
@@ -299,7 +349,7 @@ export default function ImagesPage() {
 
             {currentScan && (
               <>
-                <div className="inspector-section-title">Vulnérabilités (Grype)</div>
+                <div className="inspector-section-title">Vulnérabilités ({SCANNER_LABEL[currentScan.scanner]})</div>
                 {currentScan.status === "running" && (
                   <div className="empty-state">
                     Scan en cours… (peut prendre du temps au premier scan, le temps de télécharger la base
@@ -307,7 +357,9 @@ export default function ImagesPage() {
                   </div>
                 )}
                 {currentScan.status === "failed" && (
-                  <div className="error-banner">Le scan a échoué (binaire grype absent ou erreur d'exécution).</div>
+                  <div className="error-banner">
+                    Le scan a échoué (binaire {SCANNER_LABEL[currentScan.scanner]} absent ou erreur d'exécution).
+                  </div>
                 )}
                 {currentScan.status === "success" && (
                   <>
@@ -357,6 +409,44 @@ export default function ImagesPage() {
                     </p>
                   </>
                 )}
+              </>
+            )}
+
+            {(scansByImageId[selected.id]?.length ?? 0) > 0 && (
+              <>
+                <div className="inspector-section-title">Historique des scans</div>
+                <div className="data-table-wrap scan-history-table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Scanner</th>
+                        <th>Démarré</th>
+                        <th>Statut</th>
+                        <th>Résumé</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {scansByImageId[selected.id]!.map((scan) => (
+                        <tr key={scan.id}>
+                          <td>{SCANNER_LABEL[scan.scanner]}</td>
+                          <td className="cell-mono">{formatDate(scan.startedAt)}</td>
+                          <td>
+                            <span className={`status-pill status-pill--${SCAN_STATUS_SEMANTIC[scan.status]}`}>
+                              {SCAN_STATUS_LABEL[scan.status]}
+                            </span>
+                          </td>
+                          <td>
+                            {scan.status === "success"
+                              ? SEVERITY_ORDER.filter((sev) => scan.summary[sev] > 0)
+                                  .map((sev) => `${sev} · ${scan.summary[sev]}`)
+                                  .join("  ") || "Aucune vulnérabilité"
+                              : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </>
             )}
           </>

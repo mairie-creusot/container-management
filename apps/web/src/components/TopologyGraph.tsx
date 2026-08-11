@@ -203,7 +203,7 @@ function GraphNode({ data, selected }: NodeProps) {
         </span>
         <span className="topology-node__label">{node.label}</span>
       </div>
-      {isContainer && (node.updateAvailable || node.drift) && (
+      {isContainer && (node.updateAvailable || node.drift || !!node.vulnCritical || !!node.vulnHigh) && (
         <div className="topology-node__badges">
           {node.updateAvailable && (
             <span className="topology-badge topology-badge--warning" title="Mise à jour d'image disponible">
@@ -213,6 +213,22 @@ function GraphNode({ data, selected }: NodeProps) {
           {node.drift && (
             <span className="topology-badge topology-badge--critical" title="Dérive GitOps détectée">
               Dérive GitOps
+            </span>
+          )}
+          {!!node.vulnCritical && (
+            <span
+              className="topology-badge topology-badge--critical"
+              title={`${node.vulnCritical} vulnérabilité(s) critique(s) détectée(s) (dernier scan)`}
+            >
+              {node.vulnCritical} critique{node.vulnCritical > 1 ? "s" : ""}
+            </span>
+          )}
+          {!node.vulnCritical && !!node.vulnHigh && (
+            <span
+              className="topology-badge topology-badge--warning"
+              title={`${node.vulnHigh} vulnérabilité(s) élevée(s) détectée(s) (dernier scan)`}
+            >
+              {node.vulnHigh} élevée{node.vulnHigh > 1 ? "s" : ""}
             </span>
           )}
         </div>

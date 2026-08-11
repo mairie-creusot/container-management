@@ -52,6 +52,31 @@ RUN PACKER_VERSION=1.11.2 \
 # apps/api/src/services/scan.ts), aucune réimplémentation.
 RUN curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin
 
+# OSV-Scanner (https://github.com/google/osv-scanner, Apache-2.0) : scanner de vulnérabilités
+# basé sur la base OSV.dev, en complément de Grype (voir apps/api/src/services/scan.ts) — les
+# deux scanners coexistent, aucun ne remplace l'autre. Pas de script d'installation officiel
+# (contrairement à OpenTofu/Grype ci-dessus) : binaire statique de release téléchargé
+# directement, un seul fichier par architecture (pas d'archive à extraire).
+RUN OSV_SCANNER_VERSION=v2.5.0 \
+    && ARCH=$(if [ "$TARGETARCH" = "arm64" ]; then echo "arm64"; else echo "amd64"; fi) \
+    && curl -fsSL "https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/osv-scanner_linux_${ARCH}" -o /usr/local/bin/osv-scanner \
+    && chmod +x /usr/local/bin/osv-scanner
+
+# Docker CLI (client uniquement, pas le daemon) : contrairement à Grype qui parle directement à
+# l'API du démon Docker, `osv-scanner scan image` shelle vers la commande `docker` (pull/save)
+# pour résoudre une image locale — constaté en testant le binaire ci-dessus (erreur "exec: docker:
+# executable file not found in $PATH" sans ce paquet). Le socket Docker de l'hôte est déjà monté
+# dans le conteneur dev (docker-compose.dev.yml) ; seul le client manquait. Binaire statique
+# officiel Docker (archive contenant plusieurs binaires, seul `docker/docker` — le client — est
+# conservé), même démarche que Packer/OSV-Scanner ci-dessus.
+RUN DOCKER_CLI_VERSION=29.7.2 \
+    && ARCH=$(if [ "$TARGETARCH" = "arm64" ]; then echo "aarch64"; else echo "x86_64"; fi) \
+    && curl -fsSL "https://download.docker.com/linux/static/stable/${ARCH}/docker-${DOCKER_CLI_VERSION}.tgz" -o /tmp/docker-cli.tgz \
+    && tar -xzf /tmp/docker-cli.tgz -C /tmp docker/docker \
+    && mv /tmp/docker/docker /usr/local/bin/docker \
+    && chmod +x /usr/local/bin/docker \
+    && rm -rf /tmp/docker-cli.tgz /tmp/docker
+
 RUN corepack enable && corepack prepare pnpm@9.1.0 --activate
 
 WORKDIR /workspace

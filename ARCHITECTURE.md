@@ -146,6 +146,60 @@ interface SystemNotificationEvent {
   message: string;              // concret et actionnable, ex: "Nouvelle version disponible pour nginx:1.25 -> 1.27"
   read: boolean;
 }
+
+// Scan de vulnérabilités — QUAI pilote les VRAIS binaires Grype (anchore/grype) ET OSV-Scanner
+// (google/osv-scanner, tous deux Apache-2.0) en sous-processus (voir apps/api/src/services/
+// scan.ts) : les deux scanners coexistent, un seul historique de scans par image, chaque entrée
+// sait de quel scanner elle vient.
+type ScannerId = "grype" | "osv-scanner";
+
+interface ScannerStatus {
+  scanner: ScannerId;
+  available: boolean;
+  version: string | null;
+}
+
+type VulnSeverity = "Critical" | "High" | "Medium" | "Low" | "Negligible" | "Unknown";
+
+interface Vulnerability {
+  id: string;                   // ex: "CVE-2023-1255", ou "GHSA-..."/"DEBIAN-CVE-..." pour OSV-Scanner
+  severity: VulnSeverity;
+  packageName: string;
+  installedVersion: string;
+  fixedInVersion: string | null;
+}
+
+interface ScanResult {
+  id: string;
+  scanner: ScannerId;           // scanner à l'origine de ce résultat
+  image: string;                // référence Docker passée au scanner, ex: "nginx:1.27"
+  status: "running" | "success" | "failed";
+  startedAt: string;            // ISO 8601
+  finishedAt: string | null;
+  vulnerabilities: Vulnerability[];
+  summary: Record<VulnSeverity, number>;
+}
+
+// Graphe de topologie (voir chapitre dédié plus bas) — nœuds "conteneur" uniquement.
+type TopologyNodeKind = "container" | "volume" | "network";
+
+interface TopologyNode {
+  id: string;
+  kind: TopologyNodeKind;
+  label: string;
+  subtitle: string;
+  status: "running" | "stopped" | "restarting" | "neutral";
+  cpuPercent?: number;
+  memBytes?: number;
+  updateAvailable?: boolean;    // rapproché de GET /api/images (status "update") par "name:tag"
+  drift?: boolean;              // rapproché de GET /api/gitops/files (drift=true) par nom de fichier ~ nom de conteneur
+  // Rapprochés du DERNIER scan RÉUSSI connu (Grype et/ou OSV-Scanner) pour l'image "name:tag" du
+  // conteneur — absents (pas 0) si aucun scan n'a jamais tourné pour cette image. Règle si les
+  // deux scanners ont chacun un dernier scan réussi : le plus sévère l'emporte (MAX des comptes
+  // Critical d'un côté, High de l'autre) — voir apps/api/src/services/topology.ts#vulnSummaryForImage.
+  vulnCritical?: number;
+  vulnHigh?: number;
+}
 ```
 
 ## Authentification LDAP
@@ -294,10 +348,18 @@ GET  /api/gitops/commits
 POST /api/gitops/sync
 
 GET  /api/topology                       # graphe visuel (conteneurs/volumes/networks + relations réelles),
-                                          # nœuds "conteneur" enrichis de cpuPercent/memBytes/updateAvailable/drift
+                                          # nœuds "conteneur" enrichis de cpuPercent/memBytes/updateAvailable/drift/
+                                          # vulnCritical/vulnHigh (voir « Contrats de données » ci-dessus)
 POST /api/containers/:id/rename          # { name } — équivalent `docker rename`
 POST /api/networks/:id/connect           # { containerId } — équivalent `docker network connect`
 POST /api/networks/:id/disconnect        # { containerId } — équivalent `docker network disconnect`
+
+POST /api/images/:id/scan                # { scanner?: "grype" | "osv-scanner" } — "grype" par défaut si absent.
+                                          # Lance le scanner réel demandé (services/scan.ts), retourne le ScanResult
+                                          # à l'état "running" immédiatement (suivi par polling, voir ci-dessous)
+GET  /api/images/:id/scans               # historique des scans d'une image, tous scanners confondus
+GET  /api/scans/:scanId                  # détail + statut d'un scan (à poller pendant qu'il tourne)
+GET  /api/scanners/status                # ScannerStatus[] — présence/version de grype et osv-scanner sur l'hôte
 
 GET  /api/notifications?since=<ISO 8601>  # événements détectés par le watchdog (voir « Détection
                                            # proactive » ci-dessus), les plus récents d'abord
@@ -345,6 +407,7 @@ n'est nécessaire côté `apps/api`) :
 - `.github/workflows/build.yml` : sur push vers `main` et sur tag, build multi-stage de `deploy/docker/Dockerfile.api` et `Dockerfile.web`, push vers `ghcr.io/<org>/quai-api` et `ghcr.io/<org>/quai-web`, tag `latest` + SHA court + tag Git le cas échéant.
 - `deploy/compose/docker-compose.dev.yml` sert au développement local (api + web + LDAP de test type `osixia/openldap` + registry factice).
 - Les manifestes `deploy/k8s/` et `deploy/swarm/` référencent les images GHCR publiées — c'est le mécanisme GitOps que QUAI pilote lui-même.
+- `deploy/docker/Dockerfile.api.dev` installe les VRAIS binaires pilotés en sous-processus par l'API dev (aucun n'est réimplémenté) : OpenTofu/Ansible/Packer (infra-as-code), Grype ET OSV-Scanner (scan de vulnérabilités — binaire statique de release `osv-scanner_linux_${ARCH}`, téléchargé directement depuis `github.com/google/osv-scanner/releases`, pas de script d'installation officiel contrairement à Grype/OpenTofu), ainsi qu'un client Docker CLI (binaire statique officiel, socket déjà monté par docker-compose.dev.yml) requis par `osv-scanner scan image` pour résoudre une image locale — contrairement à Grype qui parle directement à l'API du démon. Reconstruire après modif : `docker compose -f deploy/compose/docker-compose.dev.yml build api && docker compose -f deploy/compose/docker-compose.dev.yml up -d api`.
 
 ## Conventions UI (`apps/web`) — pas de fenêtres natives du navigateur
 

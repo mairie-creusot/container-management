@@ -9,14 +9,46 @@
  *  - cpuPercent/memBytes : snapshot d'utilisation réel (docker.ts#readContainerUsage).
  *  - updateAvailable : rapproché de GET /api/images (status "update") par "name:tag".
  *  - drift : rapproché de GET /api/gitops/files (drift=true) par nom de fichier ~ nom de conteneur.
- * Ces deux derniers sont du best-effort par nom — aucune donnée arbitraire n'est inventée si
- * rien ne correspond (le nœud reste simplement sans badge).
+ *  - vulnCritical/vulnHigh : rapproché du DERNIER scan RÉUSSI connu (Grype et/ou OSV-Scanner,
+ *    services/scan.ts) pour l'image "name:tag" du conteneur — voir vulnSummaryForImage ci-dessous.
+ * Tous best-effort par nom — aucune donnée arbitraire n'est inventée si rien ne correspond (le
+ * nœud reste simplement sans badge).
  */
 
 import { getClient, isDockerReachable, readContainerUsage } from "./docker.js";
 import { getImages } from "./images.js";
 import { listGitOpsFiles } from "./gitops.js";
-import type { Topology, TopologyEdge, TopologyNode } from "../types.js";
+import { listAllScans } from "./scan.js";
+import type { ScanResult, Topology, TopologyEdge, TopologyNode } from "../types.js";
+
+/**
+ * Résumé Critical/High pour l'image `image` ("name:tag", même format que ContainerInfo#Image) à
+ * partir de l'historique de scans complet — ou `null` si aucun scan RÉUSSI n'a jamais tourné pour
+ * cette image précise (aucun badge affiché dans ce cas, plutôt que 0 inventé).
+ *
+ * Règle de rapprochement (documentée ici car ni Grype ni OSV-Scanner n'est "the" scanner de
+ * référence pour QUAI, les deux coexistent) : on prend le dernier scan réussi de CHAQUE scanner
+ * pour cette image (au plus un par scanner), puis on retient le plus sévère des deux — le MAX des
+ * comptes Critical d'un côté, des comptes High de l'autre. Simple, jamais optimiste (un scanner
+ * qui trouve une faille que l'autre a manquée reste visible), pas besoin de fusionner les listes
+ * de CVE elles-mêmes puisque seul le compte par sévérité est affiché sur le badge.
+ */
+function vulnSummaryForImage(image: string, scans: ScanResult[]): { vulnCritical: number; vulnHigh: number } | null {
+  const latestByScanner = new Map<string, ScanResult>();
+  for (const scan of scans) {
+    if (scan.image !== image || scan.status !== "success") continue;
+    const current = latestByScanner.get(scan.scanner);
+    if (!current || scan.startedAt > current.startedAt) latestByScanner.set(scan.scanner, scan);
+  }
+  if (latestByScanner.size === 0) return null;
+  let vulnCritical = 0;
+  let vulnHigh = 0;
+  for (const scan of latestByScanner.values()) {
+    vulnCritical = Math.max(vulnCritical, scan.summary.Critical);
+    vulnHigh = Math.max(vulnHigh, scan.summary.High);
+  }
+  return { vulnCritical, vulnHigh };
+}
 
 function primaryContainerName(names: string[] | undefined, id: string): string {
   const name = names?.[0] ?? id.slice(0, 12);
@@ -48,12 +80,13 @@ export async function getTopology(): Promise<Topology> {
   if (!(await isDockerReachable(docker))) return empty;
 
   try {
-    const [containers, volumesResponse, networks, imagesToUpdate, gitopsFiles] = await Promise.all([
+    const [containers, volumesResponse, networks, imagesToUpdate, gitopsFiles, allScans] = await Promise.all([
       docker.listContainers({ all: true }),
       docker.listVolumes(),
       docker.listNetworks(),
       getImages("update").catch(() => []),
       listGitOpsFiles().catch(() => []),
+      listAllScans().catch(() => []),
     ]);
 
     // "name:tag" des images ayant une mise à jour disponible — même format que ContainerInfo#Image.
@@ -73,6 +106,7 @@ export async function getTopology(): Promise<Topology> {
       const containerNodeId = `container:${c.Id}`;
       const name = primaryContainerName(c.Names, c.Id);
       const usage = usages[index]!;
+      const vulnSummary = vulnSummaryForImage(c.Image, allScans);
       nodes.push({
         id: containerNodeId,
         kind: "container",
@@ -83,6 +117,7 @@ export async function getTopology(): Promise<Topology> {
         memBytes: usage.memBytes,
         updateAvailable: updateAvailableImages.has(c.Image),
         drift: driftFilePaths.some((path) => containerMatchesGitOpsFile(name, path)),
+        ...(vulnSummary ? { vulnCritical: vulnSummary.vulnCritical, vulnHigh: vulnSummary.vulnHigh } : {}),
       });
 
       for (const mount of c.Mounts ?? []) {
