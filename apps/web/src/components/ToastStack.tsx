@@ -7,6 +7,29 @@ const AUTO_DISMISS_MS = 6000;
 // toast reste dans le DOM le temps de l'animation de sortie avant d'être vraiment retiré.
 const LEAVE_ANIMATION_MS = 180;
 
+// Curseur "déjà toasté" persisté — sans lui, seenIds (en mémoire, remis à zéro à chaque montage
+// du composant) ne protège que dans la session en cours : un simple rechargement de page faisait
+// ressortir en toast tout ce qui n'était pas encore explicitement marqué lu (clic sur la cloche),
+// même une notification déjà vue plusieurs fois. Voir aussi le filtre !n.read ci-dessous.
+const LAST_TOASTED_KEY = "quai:toasts:lastSeenAt";
+
+function loadLastToastedAt(): string {
+  try {
+    return localStorage.getItem(LAST_TOASTED_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function saveLastToastedAt(iso: string): void {
+  try {
+    localStorage.setItem(LAST_TOASTED_KEY, iso);
+  } catch {
+    // Stockage indisponible (navigation privée, quota) — la dédup ne survivra pas au
+    // rechargement, mais seenIds continue de protéger dans la session en cours.
+  }
+}
+
 /**
  * Toasts éphémères en bas à droite pour les notifications qui arrivent pendant que l'app est
  * ouverte — l'historique complet (lu/non lu, tout conserver) vit sur la page Notifications
@@ -19,18 +42,23 @@ export default function ToastStack() {
   // terminée, pour éviter une disparition brute.
   const [leavingIds, setLeavingIds] = useState<Set<string>>(new Set());
   const [seenIds] = useState(() => new Set<string>());
+  const [lastToastedAt, setLastToastedAt] = useState(() => loadLastToastedAt());
 
   useEffect(() => {
     // !n.read exclut les notifications système déjà connues au chargement (fetchSystemNotifications
     // recharge en une fois jusqu'à 300 événements historiques persistés côté API, voir
-    // notificationsSlice.ts) : sans ce filtre, toute notification déjà lue (curseur "tout lu"
-    // serveur) ressortirait quand même en toast à chaque connexion/rechargement de page, ce qui
-    // irait à l'encontre du but (notifications utiles, pas du bruit). Les notifications purement
-    // client (pushNotification/errorNotificationMiddleware) naissent toujours avec read: false,
-    // donc ce filtre ne change rien à leur comportement existant.
-    const fresh = items.filter((n) => !seenIds.has(n.id) && !n.read).slice(0, 4);
+    // notificationsSlice.ts) ; n.createdAt > lastToastedAt exclut tout ce qui a déjà été toasté
+    // lors d'une session/rechargement précédent (persisté dans localStorage, contrairement à
+    // seenIds qui ne protège que le montage courant) — sans ça, une notification pas encore
+    // marquée lue ressortait en toast à chaque rechargement de page. Les notifications purement
+    // client (pushNotification/errorNotificationMiddleware) naissent avec un createdAt "à
+    // l'instant", donc toujours postérieur au curseur : leur comportement est inchangé.
+    const fresh = items.filter((n) => !seenIds.has(n.id) && !n.read && n.createdAt > lastToastedAt).slice(0, 4);
     if (fresh.length === 0) return;
     for (const n of fresh) seenIds.add(n.id);
+    const newestSeen = fresh.reduce((max, n) => (n.createdAt > max ? n.createdAt : max), lastToastedAt);
+    setLastToastedAt(newestSeen);
+    saveLastToastedAt(newestSeen);
     setVisibleIds((prev) => [...fresh.map((n) => n.id), ...prev]);
     const timers = fresh.map((n) => setTimeout(() => dismiss(n.id), AUTO_DISMISS_MS));
     return () => timers.forEach(clearTimeout);
