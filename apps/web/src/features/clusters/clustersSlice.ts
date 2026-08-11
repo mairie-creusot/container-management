@@ -1,6 +1,6 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { apiGet } from "@/api/client";
-import type { ClusterNode, Environment } from "@/types";
+import type { ClusterNode, Environment, NutanixVm } from "@/types";
 
 interface ClustersState {
   environments: Environment[];
@@ -9,6 +9,13 @@ interface ClustersState {
   expandedIds: string[];
   nodesStatusByEnv: Record<string, "idle" | "loading" | "ready" | "error">;
   selectedNodeId: string | null;
+  // Détail par VM de l'environnement Nutanix (GET /api/nutanix/vms) — distinct de
+  // environments[].nodes qui n'expose qu'un nœud PAR CLUSTER PHYSIQUE (compteur agrégé, voir
+  // apps/api/src/services/nutanix.ts#getNutanixEnvironment). Chargé à la demande, seulement
+  // quand l'environnement Nutanix est déplié (EnvironmentsPage.tsx#handleToggle).
+  nutanixVms: NutanixVm[];
+  nutanixVmsStatus: "idle" | "loading" | "ready" | "error";
+  selectedVmId: string | null;
 }
 
 const initialState: ClustersState = {
@@ -18,6 +25,9 @@ const initialState: ClustersState = {
   expandedIds: [],
   nodesStatusByEnv: {},
   selectedNodeId: null,
+  nutanixVms: [],
+  nutanixVmsStatus: "idle",
+  selectedVmId: null,
 };
 
 export const fetchEnvironments = createAsyncThunk<Environment[]>(
@@ -33,6 +43,11 @@ export const fetchEnvironmentNodes = createAsyncThunk<
   return { environmentId, nodes };
 });
 
+export const fetchNutanixVms = createAsyncThunk<NutanixVm[]>(
+  "clusters/fetchNutanixVms",
+  async () => apiGet<NutanixVm[]>("/nutanix/vms"),
+);
+
 const clustersSlice = createSlice({
   name: "clusters",
   initialState,
@@ -45,6 +60,11 @@ const clustersSlice = createSlice({
     },
     selectNode(state, action: PayloadAction<string | null>) {
       state.selectedNodeId = action.payload;
+      if (action.payload) state.selectedVmId = null;
+    },
+    selectVm(state, action: PayloadAction<string | null>) {
+      state.selectedVmId = action.payload;
+      if (action.payload) state.selectedNodeId = null;
     },
   },
   extraReducers: (builder) => {
@@ -71,9 +91,19 @@ const clustersSlice = createSlice({
       })
       .addCase(fetchEnvironmentNodes.rejected, (state, action) => {
         state.nodesStatusByEnv[action.meta.arg] = "error";
+      })
+      .addCase(fetchNutanixVms.pending, (state) => {
+        state.nutanixVmsStatus = "loading";
+      })
+      .addCase(fetchNutanixVms.fulfilled, (state, action) => {
+        state.nutanixVmsStatus = "ready";
+        state.nutanixVms = action.payload;
+      })
+      .addCase(fetchNutanixVms.rejected, (state) => {
+        state.nutanixVmsStatus = "error";
       });
   },
 });
 
-export const { toggleEnvironmentExpanded, selectNode } = clustersSlice.actions;
+export const { toggleEnvironmentExpanded, selectNode, selectVm } = clustersSlice.actions;
 export default clustersSlice.reducer;

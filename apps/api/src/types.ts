@@ -102,6 +102,21 @@ export interface DockerNetwork {
   internal: boolean;
 }
 
+/**
+ * Une entrée (fichier ou dossier) listée dans un volume Docker — voir
+ * GET /api/volumes/:name/files et services/docker.ts#listVolumeFiles. Lecture seule pour ce
+ * premier lot : aucune route d'édition/suppression/upload ne consomme ce type.
+ */
+export interface VolumeFileEntry {
+  name: string;
+  /** Chemin relatif à la racine du volume, POSIX, toujours préfixé par "/" (ex: "/sub/file.txt"). */
+  path: string;
+  isDirectory: boolean;
+  sizeBytes: number;
+  /** ISO 8601 ; chaîne vide si le mtime n'a pas pu être déterminé. */
+  modifiedAt: string;
+}
+
 /** Infos hôte du démon Docker d'un environnement (équivalent `docker info`) — CPU/RAM totaux, version, socket... */
 export interface DockerHostInfo {
   serverVersion: string;
@@ -180,6 +195,27 @@ export interface SecretRef {
   updatedAt: string; // ISO 8601
 }
 
+// --- Reverse proxy interne (*.lecreusot.priv) — voir apps/api/src/services/reverseProxy.ts.
+// QUAI pilote un VRAI reverse proxy (Caddy, https://caddyserver.com, Apache-2.0) via son API
+// d'administration JSON en direct : aucune réimplémentation d'un serveur HTTP/proxy. Une route
+// cible soit un conteneur géré par QUAI (IP résolue en direct sur le réseau Docker, jamais
+// figée), soit un host:port arbitraire.
+
+export interface ReverseProxyRoute {
+  id: string;
+  subdomain: string; // ex: "monapp.lecreusot.priv" — matché sur l'en-tête Host par Caddy
+  targetContainerId?: string;
+  targetHost?: string;
+  targetPort: number;
+  createdAt: string; // ISO 8601
+}
+
+/** GET /api/reverse-proxy/status — Caddy joignable ou non, même pattern que ScannerStatus. */
+export interface ReverseProxyStatus {
+  reachable: boolean;
+  adminUrl: string;
+}
+
 export type Role = "admin" | "operator" | "viewer";
 
 export interface Session {
@@ -254,13 +290,13 @@ export interface IacRunDetail extends IacRun {
 // Construit à partir des vraies données Docker (docker.listContainers renvoie déjà Mounts et
 // NetworkSettings.Networks dans son résumé, pas besoin d'un inspect() par conteneur).
 
-export type TopologyNodeKind = "container" | "volume" | "network";
+export type TopologyNodeKind = "container" | "volume" | "network" | "nutanix-vm";
 
 export interface TopologyNode {
-  id: string; // ex: "container:<id>", "volume:<name>", "network:<id>"
+  id: string; // ex: "container:<id>", "volume:<name>", "network:<id>", "nutanix-vm:<uuid>"
   kind: TopologyNodeKind;
   label: string;
-  /** Sous-titre affiché sous le label (ex: image du conteneur, driver du volume). */
+  /** Sous-titre affiché sous le label (ex: image du conteneur, driver du volume, cluster physique pour une VM Nutanix). */
   subtitle: string;
   status: "running" | "stopped" | "restarting" | "neutral";
   /** Conteneurs uniquement : utilisation courante (docker.ts#readContainerUsage), pour affichage direct sur le nœud du graphe. */
@@ -280,6 +316,9 @@ export interface TopologyNode {
    */
   vulnCritical?: number;
   vulnHigh?: number;
+  /** VMs Nutanix uniquement (voir services/nutanix.ts#NutanixVm) : nombre de vCPUs et mémoire allouée. */
+  numVcpus?: number;
+  memoryMib?: number;
 }
 
 export interface TopologyEdge {

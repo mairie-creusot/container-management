@@ -21,6 +21,7 @@ const KIND_LABEL: Record<TopologyNode["kind"], string> = {
   container: "Conteneur",
   volume: "Volume",
   network: "Network",
+  "nutanix-vm": "VM Nutanix",
 };
 
 function formatDate(iso: string): string {
@@ -40,6 +41,12 @@ function formatMem(bytes: number): string {
   const mb = bytes / (1024 * 1024);
   if (mb < 1024) return `${mb.toFixed(0)} Mo`;
   return `${(mb / 1024).toFixed(2)} Go`;
+}
+
+/** VMs Nutanix uniquement : memoryMib est déjà en MiB (pas en octets) — voir TopologyPage.tsx#formatMib. */
+function formatMib(mib: number): string {
+  if (mib < 1024) return `${mib.toFixed(0)} Mo`;
+  return `${(mib / 1024).toFixed(2)} Go`;
 }
 
 export default function OverviewPage() {
@@ -182,13 +189,20 @@ export default function OverviewPage() {
             <KeyValueList
               rows={[
                 { key: "Type", value: KIND_LABEL[selected.kind] },
-                { key: "Détail", value: selected.subtitle },
+                ...(selected.kind !== "nutanix-vm" ? [{ key: "Détail", value: selected.subtitle }] : []),
                 ...(selected.kind === "container" && typeof selected.cpuPercent === "number"
                   ? [
                       { key: "CPU", value: `${selected.cpuPercent.toFixed(0)}%` },
                       { key: "Mémoire", value: formatMem(selected.memBytes ?? 0) },
                       { key: "Mise à jour d'image", value: selected.updateAvailable ? "Disponible" : "À jour" },
                       { key: "Dérive GitOps", value: selected.drift ? "Détectée" : "Aucune" },
+                    ]
+                  : []),
+                ...(selected.kind === "nutanix-vm"
+                  ? [
+                      { key: "Cluster", value: selected.subtitle },
+                      { key: "vCPUs", value: String(selected.numVcpus ?? 0) },
+                      { key: "Mémoire", value: formatMib(selected.memoryMib ?? 0) },
                     ]
                   : []),
               ]}

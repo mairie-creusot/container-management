@@ -842,6 +842,16 @@
   text-transform: uppercase;
 }
 
+/* Sous-en-tête d'une liste de nœuds (ex : "VMs Nutanix" sous les nœuds de cluster physique,
+   EnvironmentsPage.tsx) — même traitement typographique que .node-row__role. */
+.node-list-label {
+  padding: 8px 12px 2px;
+  font-size: 11px;
+  color: var(--color-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
 /* Login */
 .login-screen {
   min-height: 100vh;

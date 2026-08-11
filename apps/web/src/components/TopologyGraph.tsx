@@ -36,7 +36,7 @@ import { canOperate } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import Skeleton from "@/components/Skeleton";
-import { IconContainers, IconNetworks, IconVolumes } from "@/components/icons";
+import { IconContainers, IconNetworks, IconVm, IconVolumes } from "@/components/icons";
 import type { TopologyNode } from "@/types";
 
 /** Nombre de nœuds squelettes par colonne (volumes / conteneurs / networks) pendant le premier
@@ -44,7 +44,9 @@ import type { TopologyNode } from "@/types";
 const SKELETON_COLUMN_ROWS = [2, 3, 2];
 
 const REFRESH_INTERVAL_MS = 15_000;
-const COLUMN_X: Record<TopologyNode["kind"], number> = { volume: 0, container: 340, network: 680 };
+// Colonne "nutanix-vm" à part, après network — nœuds isolés (jamais d'arête vers Docker), une
+// colonne dédiée les garde lisibles plutôt que de les mélanger aux conteneurs.
+const COLUMN_X: Record<TopologyNode["kind"], number> = { volume: 0, container: 340, network: 680, "nutanix-vm": 1020 };
 const ROW_HEIGHT = 130;
 const NETWORK_DRIVERS = ["bridge", "overlay", "host", "none"];
 const ACTION_LABEL: Record<LifecycleAction, string> = {
@@ -58,6 +60,7 @@ const KIND_ICON: Record<TopologyNode["kind"], (props: { className?: string }) =>
   container: IconContainers,
   volume: IconVolumes,
   network: IconNetworks,
+  "nutanix-vm": IconVm,
 };
 
 /** "container:abcd1234" -> "abcd1234" (l'id du nœud préfixe toujours son type). */
@@ -106,6 +109,10 @@ const NODE_CAPABILITIES: Record<TopologyNode["kind"], PortSpec[]> = {
   network: [
     { id: "attach", capability: "attach", handleType: "target", position: Position.Left, label: "Attache un conteneur", colorToken: "network" },
   ],
+  // Aucun port pour ce premier lot : les VMs Nutanix sont indépendantes de l'infra Docker locale
+  // (voir services/topology.ts), pas de capacité de connexion à déclarer. GraphNode ci-dessous
+  // gère déjà un tableau de ports vide sans erreur (ports.map sur []).
+  "nutanix-vm": [],
 };
 
 interface CapabilityDef {
@@ -163,6 +170,7 @@ const MINIMAP_NODE_COLOR: Record<TopologyNode["kind"], string> = {
   container: "#3b6fef",
   volume: "#f5a524",
   network: "#7c5cfc",
+  "nutanix-vm": "#22c55e",
 };
 
 function formatMem(bytes: number): string {
@@ -249,7 +257,13 @@ function GraphNode({ data, selected }: NodeProps) {
       <div className={`topology-node__status topology-node__status--${node.status}`}>
         <span className="topology-node__status-dot" />
         <span className="topology-node__status-label">
-          {node.status === "running" ? "En cours" : node.status === "stopped" ? "Arrêté" : node.status}
+          {node.status === "running"
+            ? "En cours"
+            : node.status === "stopped"
+              ? "Arrêté"
+              : node.status === "neutral"
+                ? "Indéterminé"
+                : node.status}
         </span>
       </div>
     </div>
@@ -278,14 +292,19 @@ function useDismiss(onClose: () => void) {
   return ref;
 }
 
+/** Sous-ensemble créable par le popover de création rapide (clic droit sur le canevas) — les
+ * VMs Nutanix ne le sont pas (QUAI ne fait que les lire via Prism Central), pas d'entrée pour
+ * ce kind ici plutôt qu'une entrée jamais utilisée dans TopologyNode["kind"] au complet. */
+type CreatableKind = "container" | "volume" | "network";
+
 interface CreatePopoverProps {
-  kind: TopologyNode["kind"];
+  kind: CreatableKind;
   x: number;
   y: number;
   onClose: () => void;
 }
 
-const CREATE_TITLE: Record<TopologyNode["kind"], string> = {
+const CREATE_TITLE: Record<CreatableKind, string> = {
   container: "Nouveau conteneur",
   volume: "Nouveau volume",
   network: "Nouveau network",
@@ -529,7 +548,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [canvasMenu, setCanvasMenu] = useState<{ x: number; y: number } | null>(null);
   const [nodeMenu, setNodeMenu] = useState<{ x: number; y: number; node: TopologyNode } | null>(null);
   const [edgeMenu, setEdgeMenu] = useState<{ x: number; y: number; source: string; target: string; kind: string } | null>(null);
-  const [popover, setPopover] = useState<{ kind: TopologyNode["kind"]; x: number; y: number } | null>(null);
+  const [popover, setPopover] = useState<{ kind: CreatableKind; x: number; y: number } | null>(null);
   const [renamePopover, setRenamePopover] = useState<{ containerId: string; initialName: string; x: number; y: number } | null>(
     null,
   );
@@ -554,7 +573,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       setFlowNodes([]);
       return;
     }
-    const columnCounters: Record<TopologyNode["kind"], number> = { volume: 0, container: 0, network: 0 };
+    const columnCounters: Record<TopologyNode["kind"], number> = { volume: 0, container: 0, network: 0, "nutanix-vm": 0 };
     setFlowNodes((prev) => {
       const prevById = new Map(prev.map((n) => [n.id, n]));
       return data.nodes.map((n) => {
@@ -788,7 +807,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   if (data && data.nodes.length === 0) {
     return (
       <div className="empty-state" style={{ height }}>
-        Aucune ressource Docker à représenter pour l'instant.
+        Aucune ressource à représenter pour l'instant.
       </div>
     );
   }

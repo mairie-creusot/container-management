@@ -7,6 +7,7 @@
 
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
+import websocket from "@fastify/websocket";
 import Fastify from "fastify";
 import type { FastifyServerOptions } from "fastify";
 import { pathToFileURL } from "node:url";
@@ -15,6 +16,7 @@ import auditPlugin from "./plugins/audit.js";
 import authPlugin from "./plugins/auth.js";
 import auditRoutes from "./routes/audit.js";
 import authRoutes from "./routes/auth.js";
+import consoleRoutes from "./routes/console.js";
 import containersRoutes from "./routes/containers.js";
 import environmentsRoutes from "./routes/environments.js";
 import gitopsRoutes from "./routes/gitops.js";
@@ -22,7 +24,9 @@ import iacRoutes from "./routes/iac.js";
 import imagesRoutes from "./routes/images.js";
 import networksRoutes from "./routes/networks.js";
 import notificationsRoutes from "./routes/notifications.js";
+import nutanixRoutes from "./routes/nutanix.js";
 import registriesRoutes from "./routes/registries.js";
+import reverseProxyRoutes from "./routes/reverseProxy.js";
 import scanRoutes from "./routes/scan.js";
 import secretsRoutes from "./routes/secrets.js";
 import setupRoutes from "./routes/setup.js";
@@ -51,6 +55,7 @@ export function buildServer() {
   });
 
   void fastify.register(cookie);
+  void fastify.register(websocket);
   void fastify.register(authPlugin);
   void fastify.register(auditPlugin);
 
@@ -69,6 +74,9 @@ export function buildServer() {
   void fastify.register(iacRoutes);
   void fastify.register(topologyRoutes);
   void fastify.register(notificationsRoutes);
+  void fastify.register(nutanixRoutes);
+  void fastify.register(reverseProxyRoutes);
+  void fastify.register(consoleRoutes);
 
   // /health : chemin attendu par les healthchecks Docker et les probes Kubernetes (voir deploy/).
   // /healthz : alias conservé au cas où un outil externe le suppose (convention courante).

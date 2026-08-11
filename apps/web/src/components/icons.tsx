@@ -244,3 +244,27 @@ export function IconKey({ className }: IconProps) {
     className,
   );
 }
+
+/** VM Nutanix — écran + socle, façon "poste virtuel", distincte de IconContainers (boîte 3D). */
+export function IconVm({ className }: IconProps) {
+  return base(
+    <>
+      <rect x="3" y="4" width="18" height="12" rx="1.5" />
+      <path d="M8 20h8" />
+      <path d="M12 16v4" />
+    </>,
+    className,
+  );
+}
+
+/** Reverse proxy interne — globe (réseau) + flèche de routage, distincte de IconNetworks. */
+export function IconGlobe({ className }: IconProps) {
+  return base(
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18" />
+      <path d="M12 3c2.5 2.7 3.8 6 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-6-3.8-9s1.3-6.3 3.8-9Z" />
+    </>,
+    className,
+  );
+}

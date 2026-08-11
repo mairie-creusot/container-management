@@ -13,13 +13,19 @@
  *    services/scan.ts) pour l'image "name:tag" du conteneur — voir vulnSummaryForImage ci-dessous.
  * Tous best-effort par nom — aucune donnée arbitraire n'est inventée si rien ne correspond (le
  * nœud reste simplement sans badge).
+ *
+ * Nœuds "nutanix-vm" (voir getNutanixVmNodes ci-dessous) : source totalement indépendante de
+ * Docker — récupérés et ajoutés au graphe que Docker soit joignable ou non, jamais reliés par une
+ * arête aux nœuds Docker (aucune relation réelle entre les deux dans ce projet), [] tant que
+ * Nutanix n'a jamais été configuré ou si configuré mais injoignable (nutanix.ts#getNutanixVms).
  */
 
 import { getClient, isDockerReachable, readContainerUsage } from "./docker.js";
 import { getImages } from "./images.js";
 import { listGitOpsFiles } from "./gitops.js";
 import { listAllScans } from "./scan.js";
-import type { ScanResult, Topology, TopologyEdge, TopologyNode } from "../types.js";
+import { getNutanixVms, isNutanixConfigured } from "./nutanix.js";
+import type { NutanixVm, ScanResult, Topology, TopologyEdge, TopologyNode } from "../types.js";
 
 /**
  * Résumé Critical/High pour l'image `image` ("name:tag", même format que ContainerInfo#Image) à
@@ -74,9 +80,41 @@ function containerMatchesGitOpsFile(containerName: string, filePath: string): bo
   return base === name || base.includes(name) || name.includes(base);
 }
 
+function mapNutanixPowerState(powerState: NutanixVm["powerState"]): TopologyNode["status"] {
+  if (powerState === "on") return "running";
+  if (powerState === "off") return "stopped";
+  return "neutral";
+}
+
+function nutanixVmToNode(vm: NutanixVm): TopologyNode {
+  return {
+    id: `nutanix-vm:${vm.id}`,
+    kind: "nutanix-vm",
+    label: vm.name,
+    subtitle: vm.cluster,
+    status: mapNutanixPowerState(vm.powerState),
+    numVcpus: vm.numVcpus,
+    memoryMib: vm.memoryMib,
+  };
+}
+
+/**
+ * Nœuds VM Nutanix, indépendants de Docker (voir en-tête de fichier) — jamais d'arête forcée
+ * vers les nœuds Docker, de simples nœuds isolés dans le graphe. [] si Nutanix n'a jamais été
+ * configuré via l'assistant (isNutanixConfigured, même garde que nutanix.ts#getNutanixEnvironment)
+ * ou si configuré mais injoignable (getNutanixVms() retombe déjà sur [] dans ce cas) — jamais de
+ * VM inventée.
+ */
+async function getNutanixVmNodes(): Promise<TopologyNode[]> {
+  if (!(await isNutanixConfigured())) return [];
+  const vms = await getNutanixVms();
+  return vms.map(nutanixVmToNode);
+}
+
 export async function getTopology(): Promise<Topology> {
   const docker = await getClient();
-  const empty: Topology = { nodes: [], edges: [], generatedAt: new Date().toISOString() };
+  const nutanixVmNodes = await getNutanixVmNodes();
+  const empty: Topology = { nodes: nutanixVmNodes, edges: [], generatedAt: new Date().toISOString() };
   if (!(await isDockerReachable(docker))) return empty;
 
   try {
@@ -162,7 +200,7 @@ export async function getTopology(): Promise<Topology> {
       nodes.push({ id: `network:${n.Id}`, kind: "network", label: n.Name, subtitle: n.Driver, status: "running" });
     }
 
-    return { nodes, edges, generatedAt: new Date().toISOString() };
+    return { nodes: [...nodes, ...nutanixVmNodes], edges, generatedAt: new Date().toISOString() };
   } catch {
     return empty;
   }

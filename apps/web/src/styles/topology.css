@@ -135,6 +135,13 @@
   color: var(--accent-end);
 }
 
+/* VM Nutanix — vert (--color-success), distinct des trois couleurs Docker ci-dessus, cohérent
+   avec MINIMAP_NODE_COLOR["nutanix-vm"] dans TopologyGraph.tsx. */
+.topology-node--nutanix-vm .topology-node__icon {
+  background: rgba(34, 197, 94, 0.16);
+  color: var(--color-success);
+}
+
 .topology-node__label {
   font-size: 13.5px;
   font-weight: 600;

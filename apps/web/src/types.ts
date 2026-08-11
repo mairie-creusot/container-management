@@ -138,7 +138,7 @@ export interface AuditEvent {
   ok: boolean;
 }
 
-export type TopologyNodeKind = "container" | "volume" | "network";
+export type TopologyNodeKind = "container" | "volume" | "network" | "nutanix-vm";
 
 export interface TopologyNode {
   id: string;
@@ -160,6 +160,9 @@ export interface TopologyNode {
    */
   vulnCritical?: number;
   vulnHigh?: number;
+  /** VMs Nutanix uniquement (voir apps/api/src/services/nutanix.ts#NutanixVm). */
+  numVcpus?: number;
+  memoryMib?: number;
 }
 
 export interface TopologyEdge {
@@ -224,6 +227,17 @@ export interface DockerNetwork {
   internal: boolean;
 }
 
+/** Une entrée (fichier ou dossier) listée dans un volume Docker — lecture seule. */
+export interface VolumeFileEntry {
+  name: string;
+  /** Chemin relatif à la racine du volume, POSIX, toujours préfixé par "/" (ex: "/sub/file.txt"). */
+  path: string;
+  isDirectory: boolean;
+  sizeBytes: number;
+  /** ISO 8601 ; chaîne vide si le mtime n'a pas pu être déterminé. */
+  modifiedAt: string;
+}
+
 export interface GitOpsFile {
   path: string; // ex: "prod/nginx.yaml"
   desiredManifest: string; // YAML brut
@@ -249,6 +263,27 @@ export interface SecretRef {
   description?: string;
   createdAt: string; // ISO 8601
   updatedAt: string; // ISO 8601
+}
+
+// --- Reverse proxy interne (*.lecreusot.priv) — voir apps/api/src/services/reverseProxy.ts.
+// QUAI pilote un VRAI reverse proxy (Caddy, https://caddyserver.com, Apache-2.0) via son API
+// d'administration JSON en direct : aucune réimplémentation d'un serveur HTTP/proxy. Une route
+// cible soit un conteneur géré par QUAI (IP résolue en direct sur le réseau Docker, jamais
+// figée), soit un host:port arbitraire.
+
+export interface ReverseProxyRoute {
+  id: string;
+  subdomain: string; // ex: "monapp.lecreusot.priv" — matché sur l'en-tête Host par Caddy
+  targetContainerId?: string;
+  targetHost?: string;
+  targetPort: number;
+  createdAt: string; // ISO 8601
+}
+
+/** GET /api/reverse-proxy/status — Caddy joignable ou non, même pattern que ScannerStatus. */
+export interface ReverseProxyStatus {
+  reachable: boolean;
+  adminUrl: string;
 }
 
 export type Role = "admin" | "operator" | "viewer";

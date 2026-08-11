@@ -136,6 +136,25 @@ interface Session {
   roles: ("admin" | "operator" | "viewer")[];
 }
 
+// Reverse proxy interne (façon Portainer + un vrai reverse proxy devant) — voir chapitre
+// "Reverse proxy interne" plus bas. Une route cible soit un conteneur géré par QUAI (IP résolue
+// en direct sur le réseau Docker à chaque push vers Caddy, jamais figée), soit un host:port
+// arbitraire.
+interface ReverseProxyRoute {
+  id: string;
+  subdomain: string;            // ex: "monapp.lecreusot.priv" — matché sur l'en-tête Host par Caddy
+  targetContainerId?: string;
+  targetHost?: string;
+  targetPort: number;
+  createdAt: string;            // ISO 8601
+}
+
+/** GET /api/reverse-proxy/status — même pattern que ScannerStatus. */
+interface ReverseProxyStatus {
+  reachable: boolean;
+  adminUrl: string;
+}
+
 type SystemNotificationKind = "image_update_available" | "integration_unreachable" | "integration_reachable" | "gitops_drift_detected";
 
 interface SystemNotificationEvent {
@@ -180,14 +199,15 @@ interface ScanResult {
   summary: Record<VulnSeverity, number>;
 }
 
-// Graphe de topologie (voir chapitre dédié plus bas) — nœuds "conteneur" uniquement.
-type TopologyNodeKind = "container" | "volume" | "network";
+// Graphe de topologie (voir chapitre dédié plus bas) — nœuds "conteneur"/"volume"/"network"
+// (Docker) + "nutanix-vm" (VMs Nutanix, ajouté en même temps que GET /api/nutanix/vms ci-dessous).
+type TopologyNodeKind = "container" | "volume" | "network" | "nutanix-vm";
 
 interface TopologyNode {
-  id: string;
+  id: string;                   // ex: "container:<id>", "volume:<name>", "network:<id>", "nutanix-vm:<uuid>"
   kind: TopologyNodeKind;
   label: string;
-  subtitle: string;
+  subtitle: string;             // image/driver pour Docker, cluster physique pour une VM Nutanix
   status: "running" | "stopped" | "restarting" | "neutral";
   cpuPercent?: number;
   memBytes?: number;
@@ -199,6 +219,8 @@ interface TopologyNode {
   // Critical d'un côté, High de l'autre) — voir apps/api/src/services/topology.ts#vulnSummaryForImage.
   vulnCritical?: number;
   vulnHigh?: number;
+  numVcpus?: number;            // VMs Nutanix uniquement
+  memoryMib?: number;           // VMs Nutanix uniquement
 }
 ```
 
@@ -245,6 +267,26 @@ Console de secrets nommés façon Vault/GitHub Actions secrets (`apps/api/src/se
 **Rôle requis** : un secret est plus sensible qu'un registry — les 3 routes mutantes (`POST`/`PATCH`/`DELETE`) exigent explicitement le rôle `admin` (403 sinon), au-delà du operator/admin déjà exigé par le hook global pour toute méthode mutante. `GET /api/secrets` reste ouvert à toute session authentifiée (nécessaire pour peupler le sélecteur de secrets du formulaire de création de conteneur, y compris pour un `operator`).
 
 **Intégration à la création de conteneur** : `POST /api/containers` accepte, en plus de `env?: string[]` (texte brut, inchangé), un champ optionnel `secretEnv?: { key: string; secretName: string }[]`. Résolu **côté serveur uniquement**, avant tout appel Docker : chaque `secretName` est déchiffré et fusionné en `"${key}=${valeur}"` dans l'`Env` final. Un `secretName` introuvable fait échouer toute la requête en `400` (`Secret "X" not found`) — jamais de conteneur créé avec un environnement partiellement résolu. Aucune valeur de secret n'est jamais journalisée (audit log, console) : `plugins/audit.ts` ne trace que method/path/statusCode/acteur, jamais le corps de la requête.
+
+## Reverse proxy interne
+
+Chaque conteneur géré par QUAI peut être exposé sous un sous-domaine interne (`*.lecreusot.priv`) via un **VRAI** reverse proxy — [Caddy](https://caddyserver.com) (Apache-2.0) — piloté en direct par QUAI, même philosophie que OpenTofu/Ansible/Packer/Grype/OSV-Scanner déjà intégrés dans ce projet : aucune réimplémentation d'un serveur HTTP/proxy.
+
+**Mécanisme retenu — API d'administration JSON de Caddy, pas de Caddyfile généré.** Caddy expose une API d'admin en direct sur `:2019` (`POST /load`, voir https://caddyserver.com/docs/api) qui accepte la configuration **complète** du serveur en JSON et la remplace atomiquement en mémoire, sans jamais toucher au disque ni redémarrer le process. `apps/api/src/services/reverseProxy.ts#pushConfigToCaddy()` reconstruit cette configuration complète (un serveur HTTP `quai` écoutant sur `:80`, une route par sous-domaine actif, chacune avec un handler `reverse_proxy` vers l'upstream résolu) et la pousse à chaque création/suppression de route — jamais de fichier Caddyfile écrit, jamais de `caddy reload`. `pushConfigToCaddy()` est réutilisable et rejouable manuellement (`POST /api/reverse-proxy/push`), utile après un redémarrage de Caddy qui repartirait de son Caddyfile de bootstrap minimal (`deploy/compose/caddy/Caddyfile`, qui ne sert qu'à démarrer Caddy avec son admin API accessible sur le réseau docker-compose — `admin 0.0.0.0:2019`, le défaut `localhost:2019` étant injoignable depuis les autres conteneurs).
+
+**Résolution de cible.** `targetContainerId` n'est jamais résolu en IP à la création puis figé : l'IP réelle du conteneur sur le réseau Docker (`docker.ts#getContainerNetworkAddress`, dockerode) est relue à **chaque** push vers Caddy, pour ne jamais casser une route quand le conteneur cible est recréé/redémarré (nouvelle IP à chaque fois côté Docker — utiliser une IP statique aurait cassé la route au premier redémarrage). Une route peut aussi cibler un `targetHost:targetPort` arbitraire (cas générique, hors conteneurs QUAI). Un conteneur cible introuvable/arrêté au moment du push voit sa route simplement omise de la config envoyée à Caddy (les autres routes actives restent fonctionnelles) — elle revient automatiquement au push suivant une fois le conteneur de nouveau joignable.
+
+**Persistance** : `apps/api/data/reverse-proxy.json` (chemin `REVERSE_PROXY_PATH`), même répertoire et même pattern que `secrets.json` (cache mémoire process invalidé à chaque écriture, fichier `0600`) — aucune valeur sensible dans une route, donc pas de chiffrement au repos nécessaire ici contrairement à `secretsStore.ts`.
+
+**Piège vérifié en conditions réelles — liste blanche `origins` de l'admin API.** Caddy rejette par défaut (`403`) toute requête admin dont l'en-tête `Host` ne fait pas partie d'une liste blanche qui ne connaît nativement que `localhost`/`127.0.0.1`/`::1` — un nom de service docker-compose comme `caddy:2019` (ce que QUAI utilise forcément pour joindre Caddy depuis `quai-dev-api-1`) en est absent par défaut. `pushConfigToCaddy()` réinclut donc explicitement `admin.origins` (l'autorité de `CADDY_ADMIN_URL` + les variantes localhost) à chaque `/load`, sinon toute mutation de route échouerait silencieusement côté Caddy malgré une route correctement persistée côté QUAI.
+
+**Échec de push explicite, jamais silencieux.** Si Caddy ne répond pas (pas encore démarré, réseau...), `pushConfigToCaddy()` lève une erreur explicite (`CaddyPushFailedError`) — mais la mutation locale (création/suppression) a déjà été persistée avant l'appel et reste donc acquise : `POST /api/reverse-proxy/routes` répond quand même `201` avec la route créée (+ `caddyPushError` dans la réponse), `DELETE .../routes/:id` répond quand même `{ ok: true, caddyPushError }`. Un re-push peut être retenté via `POST /api/reverse-proxy/push`.
+
+**Limite assumée — résolution DNS hors périmètre.** La résolution DNS réelle de `*.lecreusot.priv` vers l'hôte Docker qui exécute Caddy (DNS interne de la mairie, ou à défaut un fichier hosts) est une responsabilité de l'infra réseau, **pas** quelque chose que cette fonctionnalité peut garantir depuis l'intérieur de l'app : QUAI configure uniquement le routage HTTP côté Caddy une fois qu'une requête portant le bon en-tête `Host` lui est effectivement parvenue. Documenté explicitement dans l'aide contextuelle de `ReverseProxyPage.tsx` — jamais présenté comme fonctionnant "tout seul".
+
+**TLS interne hors périmètre de ce premier lot.** Caddy sert exclusivement en HTTP (port `80`) pour l'instant ; `auto_https off` dans `deploy/compose/caddy/Caddyfile` empêche toute tentative ACME sur des noms internes non résolubles publiquement. Le port `443` est déjà exposé côté `docker-compose.dev.yml` pour un futur lot (Caddy sait faire du TLS interne auto-signé assez simplement), volontairement non implémenté ici faute de temps — choix documenté plutôt que passé sous silence.
+
+**Service compose** (`deploy/compose/docker-compose.dev.yml`) : `caddy` (image officielle `caddy:2-alpine`), ports `80`/`443` publiés sur l'hôte pour un test réel, API d'admin `:2019` **non** publiée à l'hôte — joignable uniquement depuis les autres conteneurs du réseau `quai-dev` par son nom de service DNS docker-compose (`http://caddy:2019`, utilisé par `quai-dev-api-1`).
 
 ## Assistant de configuration au premier lancement
 
@@ -318,6 +360,13 @@ POST /api/auth/logout
 
 GET  /api/environments
 GET  /api/environments/:id/nodes
+GET  /api/nutanix/vms                       # détail par VM (nom, powerState, vCPUs, mémoire, cluster physique) —
+                                             # distinct de GET /api/environments (un nœud PAR CLUSTER PHYSIQUE,
+                                             # compteur de VMs agrégé). Enfin branché sur services/nutanix.ts#
+                                             # getNutanixVms(), jusque-là du code mort (appelé par aucune route) —
+                                             # [] si Nutanix n'a jamais été configuré ou injoignable, jamais de VM
+                                             # inventée. Consommé par EnvironmentsPage.tsx (section "VMs" de
+                                             # l'environnement Nutanix) et par GET /api/topology ci-dessous.
 
 GET    /api/images?status=update|uptodate   # images Docker réelles de l'hôte (docker.ts), démo en repli
 POST   /api/images/:id/update               # pull réel du dernier tag connu (image locale) ou màj démo
@@ -362,7 +411,11 @@ POST /api/gitops/sync
 
 GET  /api/topology                       # graphe visuel (conteneurs/volumes/networks + relations réelles),
                                           # nœuds "conteneur" enrichis de cpuPercent/memBytes/updateAvailable/drift/
-                                          # vulnCritical/vulnHigh (voir « Contrats de données » ci-dessus)
+                                          # vulnCritical/vulnHigh (voir « Contrats de données » ci-dessus) + nœuds
+                                          # "nutanix-vm" (une VM Nutanix par nœud, GET /api/nutanix/vms ci-dessus) —
+                                          # indépendants de Docker (récupérés même si Docker est injoignable, jamais
+                                          # d'arête vers les nœuds Docker), absents tant que Nutanix n'a jamais été
+                                          # configuré (voir « Graphe de topologie » plus bas)
 POST /api/containers/:id/rename          # { name } — équivalent `docker rename`
 POST /api/networks/:id/connect           # { containerId } — équivalent `docker network connect`
 POST /api/networks/:id/disconnect        # { containerId } — équivalent `docker network disconnect`
@@ -377,6 +430,16 @@ GET  /api/scanners/status                # ScannerStatus[] — présence/version
 GET  /api/notifications?since=<ISO 8601>  # événements détectés par le watchdog (voir « Détection
                                            # proactive » ci-dessus), les plus récents d'abord
 POST /api/notifications/read-all          # marque tous les événements connus comme lus (operator/admin)
+
+GET    /api/reverse-proxy/routes    # liste des routes actives, ouvert à toute session authentifiée
+POST   /api/reverse-proxy/routes    # { subdomain, targetContainerId? | targetHost?, targetPort } — operator/admin.
+                                     # 201 même si le push vers Caddy échoue (route créée quand même, voir
+                                     # « Reverse proxy interne » — réponse enrichie d'un `caddyPushError`)
+DELETE /api/reverse-proxy/routes/:id  # operator/admin, mêmes garanties de persistance que POST ci-dessus
+POST   /api/reverse-proxy/push      # repousse la config complète vers Caddy sans rien changer côté QUAI
+                                     # (utile après un redémarrage de Caddy) — operator/admin
+GET    /api/reverse-proxy/status    # ReverseProxyStatus — Caddy joignable ou non, même pattern que
+                                     # GET /api/scanners/status
 ```
 
 Toutes les routes (sauf `/api/auth/*` et `/api/setup/*`) exigent une session valide. Les routes `POST`/`PATCH`/`DELETE` exigent le rôle `operator` ou `admin`. Les routes `/api/setup/*` sont ouvertes tant que `completed=false` ; une fois `completed=true`, elles répondent `403` sauf pour un utilisateur `admin` authentifié (flux de reconfiguration). Exception plus stricte : les 3 routes mutantes de `/api/secrets/*` exigent explicitement `admin` (voir « Gestionnaire de secrets »), pas seulement `operator`.
@@ -405,15 +468,25 @@ n'est nécessaire côté `apps/api`) :
    (clé `quai:topology:positions`) — elle survit au rafraîchissement périodique (15s) et à un
    rechargement de page. C'est une préférence d'affichage locale à l'utilisateur, pas une donnée
    d'infrastructure : aucune route API dédiée. Un nœud jamais vu (absent du localStorage) reçoit
-   toujours une position par défaut selon le placement en 3 colonnes (volumes / conteneurs /
-   networks) historique. Une `<MiniMap>` (`@xyflow/react`) est ancrée en bas à droite du canevas,
-   stylée comme les autres contrôles React Flow du thème sombre.
+   toujours une position par défaut selon le placement en 4 colonnes (volumes / conteneurs /
+   networks / VMs Nutanix) historique. Une `<MiniMap>` (`@xyflow/react`) est ancrée en bas à droite
+   du canevas, stylée comme les autres contrôles React Flow du thème sombre.
 3. **Zoom sémantique.** Sous un seuil de zoom (`ZOOM_DETAIL_THRESHOLD = 0.6`, lu via
    `useStore((s) => s.transform[2])` à l'intérieur même du composant de nœud), un nœud se réduit à
    son icône et son point de statut — libellé, sous-titre, badges et métriques CPU/mémoire
    s'effacent en fondu (transition CSS 0.15s, désactivée sous `prefers-reduced-motion`, même
    pattern que le reste du site depuis la passe micro-interactions). Au-dessus du seuil, détail
    complet comme avant.
+4. **Nœuds VM Nutanix (`kind: "nutanix-vm"`).** Une VM Nutanix par nœud (id `nutanix-vm:<uuid>`,
+   label = nom de la VM, sous-titre = cluster physique, statut dérivé de `powerState` : `on` →
+   `running`, `off` → `stopped`, `unknown` → `neutral`), colonne dédiée (4e colonne, couleur
+   `--color-success`, icône `IconVm`), `NODE_CAPABILITIES["nutanix-vm"] = []` — pas de port, donc
+   jamais d'arête (ni forcée ni glissée) vers les nœuds Docker : ce sont des nœuds isolés,
+   volontairement indépendants de l'infrastructure Docker locale. Récupérés côté API que Docker
+   soit joignable ou non (`getTopology()`), absents tant que Nutanix n'a jamais été configuré ou
+   si configuré mais injoignable (même garde `isNutanixConfigured()` que le reste du projet) —
+   jamais de VM inventée. Détail complet (vCPUs, mémoire, cluster, état) affiché dans l'Inspector
+   au clic, comme pour les autres types de nœuds.
 
 ## CI/CD
 

@@ -9,12 +9,20 @@ const KIND_LABEL: Record<TopologyNode["kind"], string> = {
   container: "Conteneur",
   volume: "Volume",
   network: "Network",
+  "nutanix-vm": "VM Nutanix",
 };
 
 function formatMem(bytes: number): string {
   const mb = bytes / (1024 * 1024);
   if (mb < 1024) return `${mb.toFixed(0)} Mo`;
   return `${(mb / 1024).toFixed(2)} Go`;
+}
+
+/** VMs Nutanix uniquement : memoryMib est déjà en MiB (pas en octets, contrairement à memBytes
+ * ci-dessus — voir services/nutanix.ts#mapVmEntity, memory_size_mib de Prism Central v3). */
+function formatMib(mib: number): string {
+  if (mib < 1024) return `${mib.toFixed(0)} Mo`;
+  return `${(mib / 1024).toFixed(2)} Go`;
 }
 
 export default function TopologyPage() {
@@ -49,13 +57,22 @@ export default function TopologyPage() {
             <KeyValueList
               rows={[
                 { key: "Type", value: KIND_LABEL[selected.kind] },
-                { key: "Détail", value: selected.subtitle },
+                // "Détail" reprend le subtitle générique (image/driver...) — pour une VM Nutanix,
+                // le subtitle EST déjà le cluster physique, déjà affiché sous "Cluster" ci-dessous.
+                ...(selected.kind !== "nutanix-vm" ? [{ key: "Détail", value: selected.subtitle }] : []),
                 ...(selected.kind === "container" && typeof selected.cpuPercent === "number"
                   ? [
                       { key: "CPU", value: `${selected.cpuPercent.toFixed(0)}%` },
                       { key: "Mémoire", value: formatMem(selected.memBytes ?? 0) },
                       { key: "Mise à jour d'image", value: selected.updateAvailable ? "Disponible" : "À jour" },
                       { key: "Dérive GitOps", value: selected.drift ? "Détectée" : "Aucune" },
+                    ]
+                  : []),
+                ...(selected.kind === "nutanix-vm"
+                  ? [
+                      { key: "Cluster", value: selected.subtitle },
+                      { key: "vCPUs", value: String(selected.numVcpus ?? 0) },
+                      { key: "Mémoire", value: formatMib(selected.memoryMib ?? 0) },
                     ]
                   : []),
               ]}
