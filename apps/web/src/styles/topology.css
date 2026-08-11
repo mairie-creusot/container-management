@@ -498,3 +498,186 @@
   gap: 8px;
   margin-top: 4px;
 }
+
+/* --- Modal de détail complet d'un nœud (clic droit -> "Voir le détail", TopologyNodeDetailModal.tsx)
+   Même famille visuelle que .volume-files-modal/.container-console-modal (console.css) : un enfant
+   plus large que .modal-card, qui grandit automatiquement dessus (min-width auto d'un flex item,
+   voir modal.css) — pas de nouvelle variante de <Modal> à maintenir. --------------------------- */
+.topology-detail-modal {
+  width: 720px;
+  max-width: 94vw;
+  max-height: 86vh;
+  padding: 20px 22px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: hidden;
+}
+
+.topology-detail-modal__header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.topology-detail-modal__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+  flex-shrink: 0;
+}
+
+.topology-detail-modal__icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.topology-detail-modal__icon--container { color: var(--accent-start, #3b6fef); }
+.topology-detail-modal__icon--volume { color: var(--color-warning); }
+.topology-detail-modal__icon--network { color: var(--accent-end, #7c5cfc); }
+.topology-detail-modal__icon--nutanix-vm { color: var(--color-success); }
+
+.topology-detail-modal__heading {
+  flex: 1;
+  min-width: 0;
+}
+
+.topology-detail-modal__title {
+  font-size: 16px;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.topology-detail-modal__subtitle {
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  margin-top: 2px;
+  word-break: break-all;
+}
+
+.topology-detail-modal__body {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-right: 2px;
+}
+
+.topology-detail-modal__hint {
+  font-size: 11.5px;
+  color: var(--color-text-faint);
+  margin: 0;
+}
+
+.topology-detail-modal__scan-cta {
+  margin-top: 10px;
+}
+
+/* Ligne de variable d'environnement avec révélation à la demande (secrets masqués par défaut) —
+   même structure que .kv-row (KeyValueList) plus un bouton "afficher"/"masquer". */
+.env-var-row__value-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.env-var-row__reveal {
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  font-size: 10.5px;
+  padding: 2px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.env-var-row__reveal:hover {
+  background: var(--color-surface-2);
+  color: var(--color-text);
+}
+
+/* --- Sous-graphe de dépendances (double-clic sur un nœud, TopologySubGraphModal.tsx) — plein
+   écran (quasi), même principe d'agrandissement d'un enfant de .modal-card que ci-dessus. Réutilise
+   .topology-node/.topology-edge/etc. tels quels (GraphNode partagé) : pas de nouvelle règle sur ces
+   classes ici, seulement le cadre autour du canevas. ------------------------------------------- */
+.topology-subgraph-modal {
+  width: 96vw;
+  max-width: 1400px;
+  height: 88vh;
+  max-height: 92vh;
+  padding: 16px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.topology-subgraph-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.topology-subgraph-modal__breadcrumb {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  min-width: 0;
+}
+
+.topology-subgraph-modal__crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-muted);
+}
+
+.topology-subgraph-modal__crumb:last-child {
+  color: var(--color-text);
+}
+
+.topology-subgraph-modal__crumb-sep {
+  color: var(--color-text-faint);
+  font-weight: 400;
+}
+
+.topology-subgraph-modal__actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.topology-subgraph-modal__note {
+  font-size: 12.5px;
+  color: var(--color-text-faint);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  flex-shrink: 0;
+}
+
+.topology-subgraph-modal__graph {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.topology-subgraph-modal__graph .react-flow {
+  background: var(--color-surface-1);
+}

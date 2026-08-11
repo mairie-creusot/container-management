@@ -661,6 +661,42 @@ appel Docker additionnel côté API :
    frame) plutôt que le tiret défilant générique conservé côté "network" (plus subtil, `animated:
    true` + `strokeDasharray`, comportement inchangé). Les particules ne sont pas rendues si le
    conteneur est arrêté (rien ne transite réellement) ou sous `prefers-reduced-motion`.
+6. **Modal de détail complet et sous-graphe de dépendances.** Les éléments de rendu du graphe
+   (`GraphNode`, `edgeTypes`/`nodeTypes`, `NODE_CAPABILITIES`/`CAPABILITY_DEFS`, `buildTopologyEdges`,
+   `idWithoutPrefix`, `formatMem`...) ont été extraits de `TopologyGraph.tsx` vers
+   `apps/web/src/components/topologyGraphShared.tsx`, pour être réutilisés à l'identique par deux
+   nouveaux composants :
+   - `TopologyNodeDetailModal.tsx` — ouverte par "Voir le détail" (menu contextuel d'un nœud). Le
+     résumé déjà présent sur `TopologyNode` (ex : `vulnCritical`) ne suffit pas pour cette vue : la
+     modal va chercher le VRAI détail selon le kind — `GET /api/containers/:id` (ports, montages,
+     labels, commande, politique de redémarrage) pour un conteneur, avec ses variables
+     d'environnement masquées par défaut si leur clé ressemble à un secret (heuristique
+     `/PASSWORD|SECRET|TOKEN|KEY/i`, bouton "afficher" par ligne — ce composant n'a aucune idée de ce
+     qui est un vrai secret géré par `secretsStore.ts`, donc prudence par défaut) ; la vraie liste de
+     vulnérabilités du DERNIER SCAN RÉUSSI de l'image du conteneur (`GET /api/images/:id/scans`,
+     rapprochée par nom "name:tag" comme `services/topology.ts#vulnSummaryForImage`), triée par
+     sévérité, avec un message explicite ("Aucun scan effectué" + bouton pour en lancer un si
+     operator/admin) si aucun scan n'a jamais réussi — jamais de liste vide silencieuse ; réutilise
+     le pattern visuel `.scan-summary`/`.scan-vuln-table-wrap` déjà utilisé par `ImagesPage.tsx`,
+     pas un design ad hoc. Pour un volume/network : objets complets `DockerVolume`/`DockerNetwork`
+     déjà exposés par `GET /api/volumes`/`GET /api/networks` (aucune nouvelle route). Pour une VM
+     Nutanix : ce qui est déjà dans `TopologyNode`, présenté proprement.
+   - `TopologySubGraphModal.tsx` — ouverte au double-clic sur un nœud (ou "Visualiser les
+     dépendances" du menu contextuel) : affiche UNIQUEMENT ce nœud + tous les nœuds reliés à lui par
+     au moins une arête du graphe complet déjà chargé côté client (`state.topology.data` — pur
+     calcul dérivé, aucun nouvel appel réseau), en disposition radiale (racine au centre, voisins en
+     cercle). Double-cliquer sur un nœud DANS le sous-graphe re-centre la vue dessus (drill-down
+     récursif à un niveau à la fois, avec fil d'Ariane + bouton "Retour" pour remonter) plutôt que
+     d'empiler des modals. Un nœud isolé (ex : VM Nutanix, ou volume/network jamais monté) affiche
+     un message explicite plutôt qu'un canevas vide silencieux. "Voir le détail" depuis le
+     sous-graphe délègue à l'unique instance de `TopologyNodeDetailModal` montée par
+     `TopologyGraph.tsx` (pas de doublon). Les deux modals réutilisent `<Modal>` (`Modal.tsx`) avec
+     un enfant plus large que `.modal-card` (même pattern que `.volume-files-modal`/
+     `.container-console-modal`, `console.css` — un flex item grandit automatiquement au-delà de son
+     `max-width` si son contenu l'exige, voir `modal.css`).
+   L'Inspector latéral permanent n'est PAS réintroduit sur la Vue d'ensemble (retiré
+   intentionnellement, voir `OverviewPage.tsx`) : ces deux modals ne s'ouvrent qu'à la demande
+   (clic droit / double-clic), jamais affichées en permanence.
 
 ## CI/CD
 
