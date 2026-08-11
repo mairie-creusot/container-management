@@ -255,16 +255,29 @@ p {
   padding: 12px 14px;
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
-  /* Fond glacé (glassmorphism) : assez opaque pour rester lisible par-dessus le graphe qui
-     défile en arrière-plan, assez translucide pour qu'on le devine encore au travers. Les
+  position: relative;
+  /* Fond glacé (glassmorphism) : le graphe derrière est majoritairement sombre lui aussi, donc
+     une transparence trop légère (78% testé d'abord) reste visuellement indiscernable d'un fond
+     plat — poussé nettement plus translucide + flou plus large pour que l'effet se voie
+     vraiment, avec un léger liseré clair en haut pour lire "vitre" plutôt que "carte plate". Les
      variantes --error/--success/--info ci-dessous ne redéfinissent que la teinte, jamais le
      flou (backdrop-filter n'est pas surchargé, donc partagé par les trois). */
-  background: color-mix(in srgb, var(--color-surface-1) 78%, transparent);
-  backdrop-filter: blur(14px) saturate(1.4);
-  -webkit-backdrop-filter: blur(14px) saturate(1.4);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+  background: color-mix(in srgb, var(--color-surface-1) 55%, transparent);
+  backdrop-filter: blur(22px) saturate(1.6);
+  -webkit-backdrop-filter: blur(22px) saturate(1.6);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.45),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
   font-size: 13px;
   animation: toast-in 0.18s ease-out;
+}
+
+/* Firefox ne supporte pas backdrop-filter par défaut (flag utilisateur) : sans lui, 55%
+   d'opacité serait trop transparent pour rester lisible — on retombe sur un fond plus couvrant. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .toast {
+    background: color-mix(in srgb, var(--color-surface-1) 92%, transparent);
+  }
 }
 
 @keyframes toast-in {
@@ -309,21 +322,25 @@ p {
    un fond déjà opaque comme les status-pills) : avec le flou du glassmorphisme, une teinte trop
    faible finit délavée — color-mix() avec la couleur pleine reste cohérent avec le reste du
    thème sans dupliquer de valeur hexa. */
+/* Bug corrigé : color-mix() entre deux couleurs PLEINES (critical 22% + surface-1 78% = 100%)
+   ne produit aucune transparence, quel que soit le ratio — d'où des toasts error/success restés
+   opaques malgré le blur ajouté sur .toast. Un second color-mix() imbriqué ramène le résultat
+   déjà teinté vers `transparent`, au même niveau (55%) que .toast/.toast--info ci-dessous. */
 .toast--error {
   border-color: var(--color-critical);
-  background: color-mix(in srgb, var(--color-critical) 22%, var(--color-surface-1) 78%);
+  background: color-mix(in srgb, color-mix(in srgb, var(--color-critical) 22%, var(--color-surface-1) 78%) 55%, transparent);
   color: var(--color-critical);
 }
 
 .toast--success {
   border-color: var(--color-success);
-  background: color-mix(in srgb, var(--color-success) 22%, var(--color-surface-1) 78%);
+  background: color-mix(in srgb, color-mix(in srgb, var(--color-success) 22%, var(--color-surface-1) 78%) 55%, transparent);
   color: var(--color-success);
 }
 
 .toast--info {
   border-color: var(--color-border);
-  background: color-mix(in srgb, var(--color-surface-2) 78%, transparent);
+  background: color-mix(in srgb, var(--color-surface-2) 55%, transparent);
   color: var(--color-text);
 }
 
