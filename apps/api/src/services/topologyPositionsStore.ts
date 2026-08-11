@@ -63,3 +63,25 @@ export async function savePositionsForUser(username: string, positions: NodePosi
   await writeToDisk(next);
   cache = next;
 }
+
+/**
+ * GET /api/topology/positions — retire silencieusement les entrées dont l'id de nœud n'existe
+ * plus dans le graphe RÉEL actuel (`liveNodeIds`, calculé par l'appelant via getTopology()) avant
+ * de renvoyer/persister la disposition de cet utilisateur : conteneur supprimé, volume/network
+ * nettoyé... rien ne purgeait jamais ces entrées auparavant, elles s'accumulaient indéfiniment
+ * dans le fichier de chaque utilisateur sans jamais fausser l'affichage (une position pour un id
+ * absent n'est simplement jamais consommée par le frontend) mais sans jamais être nettoyées non
+ * plus. Ce n'est PAS une suppression de ressource Docker — seulement une préférence d'affichage
+ * désormais orpheline, qui peut donc être nettoyée silencieusement (contrairement aux
+ * volumes/networks eux-mêmes, jamais retirés sans confirmation explicite de l'utilisateur).
+ * N'écrit sur disque que si au moins une entrée a effectivement été retirée.
+ */
+export async function purgeStalePositions(username: string, liveNodeIds: ReadonlySet<string>): Promise<NodePositions> {
+  const current = await getPositionsForUser(username);
+  const entries = Object.entries(current);
+  const kept = entries.filter(([nodeId]) => liveNodeIds.has(nodeId));
+  if (kept.length === entries.length) return current; // rien à purger, aucune écriture inutile
+  const cleaned: NodePositions = Object.fromEntries(kept);
+  await savePositionsForUser(username, cleaned);
+  return cleaned;
+}

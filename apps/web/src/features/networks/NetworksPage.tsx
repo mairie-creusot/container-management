@@ -16,6 +16,20 @@ function formatDate(iso: string | null): string {
   return new Date(iso).toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+/**
+ * Orphelin = existant sur l'hôte Docker (cette liste vient de GET /api/networks, un vrai
+ * `docker network ls`) mais attaché à AUCUN conteneur (`containerCount`, calculé côté serveur à
+ * partir de `n.Containers`, docker.ts#listNetworks) — SAUF les 3 networks internes par défaut de
+ * Docker (bridge/host/none), jamais des ressources à nettoyer : même exclusion par nom que celle
+ * déjà appliquée pour masquer le bouton "Supprimer" individuel plus bas et dans
+ * TopologyGraph.tsx#nodeMenuItems (menu contextuel réseau du graphe).
+ */
+const DEFAULT_NETWORK_NAMES = ["bridge", "host", "none"];
+
+function isOrphanNetwork(n: { name: string; containerCount: number }): boolean {
+  return n.containerCount === 0 && !DEFAULT_NETWORK_NAMES.includes(n.name);
+}
+
 export default function NetworksPage() {
   const dispatch = useAppDispatch();
   const { items, status, error, selectedId, mutatingId } = useAppSelector((s) => s.networks);
@@ -26,6 +40,8 @@ export default function NetworksPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [name, setName] = useState("");
   const [driver, setDriver] = useState("bridge");
+  const [orphansOnly, setOrphansOnly] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
 
   useEffect(() => {
     dispatch(fetchNetworks());
@@ -53,7 +69,36 @@ export default function NetworksPage() {
     if (ok) dispatch(removeNetwork({ id, name: netName }));
   }
 
-  const visible = items.filter((n) => !searchQuery || n.name.toLowerCase().includes(searchQuery.toLowerCase()));
+  const orphans = items.filter(isOrphanNetwork);
+
+  /** Action groupée "Nettoyer les orphelins" — une seule confirmation explicite pour le lot
+   * entier (jamais de suppression sans confirmation, jamais de purge automatique en tâche de
+   * fond), puis suppressions réelles séquentielles via le même thunk que la suppression
+   * individuelle (removeNetwork, DELETE /api/networks/:id — pas une simulation). */
+  async function handleCleanupOrphans() {
+    if (orphans.length === 0) return;
+    const ok = await confirm({
+      title: "Nettoyer les networks orphelins",
+      description: `Confirmer la suppression définitive de ${orphans.length} network(s) orphelin(s) (aucun conteneur attaché) ?`,
+      confirmLabel: `Nettoyer (${orphans.length})`,
+      variant: "danger",
+    });
+    if (!ok) return;
+    setCleaning(true);
+    try {
+      for (const n of orphans) {
+        await dispatch(removeNetwork({ id: n.id, name: n.name }));
+      }
+    } finally {
+      setCleaning(false);
+    }
+  }
+
+  const visible = items.filter(
+    (n) =>
+      (!searchQuery || n.name.toLowerCase().includes(searchQuery.toLowerCase())) &&
+      (!orphansOnly || isOrphanNetwork(n)),
+  );
   const selected = items.find((n) => n.id === selectedId) ?? null;
   const { page, totalPages, pageItems, setPage, pageSize, setPageSize } = usePagination(visible, 10);
 
@@ -65,12 +110,24 @@ export default function NetworksPage() {
             <h2>Networks</h2>
             <p>Réseaux Docker réels de l'hôte.</p>
           </div>
-          {canOperate(session) && (
-            <button type="button" className="btn btn-primary btn-sm" onClick={() => setFormOpen((o) => !o)}>
-              {formOpen ? "Annuler" : "+ Créer un network"}
-            </button>
-          )}
+          <div className="page-header-actions">
+            {canOperate(session) && orphans.length > 0 && (
+              <button type="button" className="btn btn-danger btn-sm" disabled={cleaning} onClick={handleCleanupOrphans}>
+                {cleaning ? "Nettoyage…" : `Nettoyer les orphelins (${orphans.length})`}
+              </button>
+            )}
+            {canOperate(session) && (
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => setFormOpen((o) => !o)}>
+                {formOpen ? "Annuler" : "+ Créer un network"}
+              </button>
+            )}
+          </div>
         </div>
+
+        <label className="filter-toggle">
+          <input type="checkbox" checked={orphansOnly} onChange={(e) => setOrphansOnly(e.target.checked)} />
+          Orphelins uniquement {orphans.length > 0 && `(${orphans.length})`}
+        </label>
 
         {formOpen && canOperate(session) && (
           <form className="create-container-form" onSubmit={handleCreate}>
@@ -132,10 +189,18 @@ export default function NetworksPage() {
                     <td className="cell-primary cell-mono">{n.name}</td>
                     <td>{n.driver}</td>
                     <td>{n.scope}</td>
-                    <td>{n.containerCount}</td>
+                    <td>
+                      {n.containerCount > 0 ? (
+                        n.containerCount
+                      ) : isOrphanNetwork(n) ? (
+                        <span className="chip chip--danger">Orphelin</span>
+                      ) : (
+                        n.containerCount
+                      )}
+                    </td>
                     <td>{formatDate(n.createdAt)}</td>
                     <td onClick={(e) => e.stopPropagation()}>
-                      {canOperate(session) && !["bridge", "host", "none"].includes(n.name) && (
+                      {canOperate(session) && !DEFAULT_NETWORK_NAMES.includes(n.name) && (
                         <button
                           type="button"
                           className="btn btn-ghost btn-sm"

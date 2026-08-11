@@ -591,9 +591,11 @@ Toutes les routes (sauf `/api/auth/*` et `/api/setup/*`) exigent une session val
 ## Graphe de topologie (`apps/web/src/components/TopologyGraph.tsx`)
 
 Le graphe visuel (React Flow, `GET /api/topology` — voir « Routes API » ci-dessus) a cinq
-particularités, les quatre premières purement côté client (aucune donnée d'infrastructure
-supplémentaire nécessaire côté `apps/api`), la cinquième (santé des conteneurs) nécessitant un
-appel Docker additionnel côté API :
+particularités. Les points 1, 3 et 4 sont purement côté client (aucune donnée d'infrastructure
+supplémentaire nécessaire côté `apps/api`) ; le point 2 (persistance des positions) repose sur
+`apps/api/src/routes/topology.ts`/`topologyPositionsStore.ts` (fichier JSON par utilisateur, pas
+une ressource Docker) ; le point 5 (santé des conteneurs) nécessite un appel Docker additionnel
+côté API :
 
 1. **Connexions par capacité, ports typés.** Chaque type de nœud déclare la liste des « ports »
    qu'il expose dans une table `NODE_CAPABILITIES` (id, capacité, côté source/target, position,
@@ -608,14 +610,38 @@ appel Docker additionnel côté API :
    toucher à cette logique. Chaque port est un `<Handle>` React Flow distinct, visuellement propre
    à sa capacité (couleur idle, pas seulement au survol ; bordure en tirets pour les ports
    informatifs).
-2. **Canevas libre et persistant.** La position d'un nœud déplacé à la main (drag React Flow
-   standard, `onNodesChange`/`onNodeDragStop`) est conservée par id de nœud dans `localStorage`
-   (clé `quai:topology:positions`) — elle survit au rafraîchissement périodique (15s) et à un
-   rechargement de page. C'est une préférence d'affichage locale à l'utilisateur, pas une donnée
-   d'infrastructure : aucune route API dédiée. Un nœud jamais vu (absent du localStorage) reçoit
-   toujours une position par défaut selon le placement en 4 colonnes (volumes / conteneurs /
-   networks / VMs Nutanix) historique. Une `<MiniMap>` (`@xyflow/react`) est ancrée en bas à droite
-   du canevas, stylée comme les autres contrôles React Flow du thème sombre.
+2. **Canevas libre et persistant, PAR UTILISATEUR CONNECTÉ.** La position d'un nœud déplacé à la
+   main (drag React Flow standard, `onNodesChange`/`onNodeDragStop`) est persistée côté serveur
+   (`GET`/`PUT /api/topology/positions`, `apps/api/src/services/topologyPositionsStore.ts` — JSON
+   sur disque, permissions 0600, même dossier/pattern que `secrets.json`), PAS en `localStorage` du
+   navigateur : la disposition suit l'identité (username LDAP), pas l'appareil — un même admin
+   connecté depuis un autre poste, ou deux comptes partageant le même poste, ont un comportement
+   cohérent. Elle survit au rafraîchissement périodique (15s) et à un rechargement de page. Un
+   nœud jamais déplacé (absent de la disposition de l'utilisateur) reçoit toujours une position par
+   défaut selon le placement en 4 colonnes (volumes / conteneurs / networks / VMs Nutanix)
+   historique. Une `<MiniMap>` (`@xyflow/react`) est ancrée en bas à droite du canevas, stylée
+   comme les autres contrôles React Flow du thème sombre.
+   - **Purge silencieuse des positions fantômes.** `GET /api/topology/positions` calcule le graphe
+     RÉEL actuel côté serveur (`getTopology()`) et retire, avant de répondre, toute entrée dont
+     l'id de nœud n'y apparaît plus — conteneur supprimé, volume/network nettoyé... rien ne
+     purgeait jamais ces entrées auparavant, elles s'accumulaient indéfiniment dans le fichier de
+     chaque utilisateur (`purgeStalePositions`, `topologyPositionsStore.ts` — n'écrit sur disque que
+     si au moins une entrée a effectivement été retirée). Ce n'est PAS une suppression de ressource
+     Docker, seulement une préférence d'affichage désormais orpheline : nettoyée silencieusement,
+     contrairement aux volumes/networks eux-mêmes (jamais retirés sans confirmation explicite).
+   - **Garde-fou contre un id de nœud recyclé.** `volume:<nom>` est le seul id de nœud sans
+     identité Docker immuable derrière (contrairement à un conteneur/network, dont l'id est un hash
+     Docker jamais réattribué même en cas de recréation à l'identique) : supprimer un volume puis en
+     recréer un portant EXACTEMENT le même nom reprend le même id de nœud. `TopologyNode` porte donc
+     un `createdAt` optionnel (volumes/networks uniquement, `CreatedAt`/`Created` réel Docker,
+     `services/topology.ts`) que `TopologyGraph.tsx` compare entre l'ancien et le nouveau nœud avant
+     de réutiliser une position héritée de la session en cours — s'ils diffèrent, ce n'est pas la
+     même ressource, la position par défaut est utilisée à la place plutôt qu'une position héritée à
+     tort. Angle mort résiduel assumé : la position persistée côté serveur (`positions[n.id]`) ne
+     porte pas cet horodatage, donc une recréation à l'identique ENTRE deux sessions (rechargement de
+     page) reste indétectable — cas jugé suffisamment rare (il faut recréer le volume/network sous
+     un nom rigoureusement identique) pour ne pas justifier de changer le format d'id ou le schéma de
+     persistance des positions pour le couvrir aussi.
 3. **Zoom sémantique.** Sous un seuil de zoom (`ZOOM_DETAIL_THRESHOLD = 0.6`, lu via
    `useStore((s) => s.transform[2])` à l'intérieur même du composant de nœud), un nœud se réduit à
    son icône et son point de statut — libellé, sous-titre, badges et métriques CPU/mémoire
@@ -697,6 +723,34 @@ appel Docker additionnel côté API :
    L'Inspector latéral permanent n'est PAS réintroduit sur la Vue d'ensemble (retiré
    intentionnellement, voir `OverviewPage.tsx`) : ces deux modals ne s'ouvrent qu'à la demande
    (clic droit / double-clic), jamais affichées en permanence.
+
+## Volumes/networks orphelins (détection + nettoyage)
+
+`GET /api/topology` exclut délibérément du graphe tout volume/network non rattaché à au moins un
+conteneur (voir en-tête de `services/topology.ts`) — un hôte de dev peut avoir des dizaines de
+volumes de cache d'autres projets, tous les montrer noierait le graphe façon Railway. Ça ne les
+rend pas invisibles pour autant : `GET /api/volumes`/`GET /api/networks` (déjà existantes)
+renvoient TOUS les volumes/networks réels de l'hôte, chacun avec un champ `inUseBy`/
+`containerCount` déjà calculé côté serveur à partir des mêmes conteneurs (`docker.ts#listVolumes`/
+`listNetworks`) — exactement la même définition que celle utilisée par `getTopology()` pour son
+filtre, jamais recalculée une seconde fois.
+
+- **Orphelin** = `inUseBy === 0` pour un volume, ou `containerCount === 0` ET nom hors
+  `["bridge", "host", "none"]` pour un network — les 3 networks internes par défaut de Docker ne
+  sont jamais des ressources à nettoyer (même exclusion par nom que `TopologyGraph.tsx#
+  nodeMenuItems` côté suppression individuelle d'un network).
+- **Exposition, choix délibéré.** Pas de route `GET /api/orphans` dédiée : `VolumesPage.tsx`/
+  `NetworksPage.tsx` (déjà existantes, déjà alimentées par ces mêmes champs) portent un badge
+  "Orphelin" par ligne, un filtre "Orphelins uniquement" (case à cocher au-dessus du tableau,
+  compte affiché entre parenthèses) et une action groupée "Nettoyer les orphelins" dans l'en-tête
+  de page — une vue séparée aurait été une pure redite de deux pages déjà existantes et déjà
+  correctement alimentées.
+- **Nettoyage réel, jamais automatique.** L'action groupée déclenche UNE seule confirmation
+  explicite (`useConfirm()`, variante `danger`, décrit le nombre exact de ressources concernées et
+  la perte de données pour un volume) puis des suppressions réelles séquentielles via les MÊMES
+  routes/thunks que la suppression individuelle déjà existante (`DELETE /api/volumes/:name`/
+  `DELETE /api/networks/:id`, `removeVolume`/`removeNetwork` de `docker.ts`) — pas une simulation,
+  jamais de purge en tâche de fond, jamais sans ce clic explicite.
 
 ## CI/CD
 

@@ -363,7 +363,20 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       return data.nodes.map((n) => {
         const row = columnCounters[n.kind]++;
         const defaultPosition = { x: COLUMN_X[n.kind], y: row * ROW_HEIGHT };
-        const position = positions[n.id] ?? prevById.get(n.id)?.position ?? defaultPosition;
+        const prevNode = prevById.get(n.id);
+        // Défense en profondeur contre un id de nœud recyclé DANS LA MÊME SESSION : un volume
+        // (ou network) supprimé puis recréé sous EXACTEMENT le même nom reprend le même id
+        // `volume:<nom>` (Docker n'expose aucun identifiant immuable pour un volume local
+        // au-delà de son nom, contrairement à un conteneur/network dont l'id est un hash Docker
+        // jamais réattribué — voir TopologyNode#createdAt). Si les deux nœuds portent un
+        // horodatage de création et qu'ils diffèrent, ce n'est pas la même ressource : on ignore
+        // la position héritée du nœud précédent plutôt que de la lui appliquer à tort. (La
+        // position persistée côté serveur, `positions[n.id]`, ne porte pas cet horodatage et
+        // reste donc un angle mort résiduel dans le cas plus rare d'une recréation à l'identique
+        // entre deux sessions — voir services/topologyPositionsStore.ts.)
+        const prevCreatedAt = (prevNode?.data as { createdAt?: string } | undefined)?.createdAt;
+        const sameResource = !prevCreatedAt || !n.createdAt || prevCreatedAt === n.createdAt;
+        const position = positions[n.id] ?? (sameResource ? prevNode?.position : undefined) ?? defaultPosition;
         return {
           id: n.id,
           type: "graphNode",

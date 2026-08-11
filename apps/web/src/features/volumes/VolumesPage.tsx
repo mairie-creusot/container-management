@@ -15,6 +15,18 @@ function formatDate(iso: string | null): string {
   return new Date(iso).toLocaleString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+/**
+ * Orphelin = existant sur l'hôte Docker (cette liste vient bien de GET /api/volumes, un vrai
+ * `docker volume ls`) mais monté par AUCUN conteneur — même définition et même champ `inUseBy`
+ * (calculé côté serveur à partir des Mounts réels de tous les conteneurs, docker.ts#listVolumes)
+ * que le graphe de topologie utilise pour décider quels volumes afficher. Pas de route dédiée
+ * GET /api/orphans : cette page liste déjà TOUS les volumes réels avec cette même information,
+ * un badge + un filtre ici est plus cohérent avec l'UX existante qu'une vue séparée redondante.
+ */
+function isOrphanVolume(v: { inUseBy: number }): boolean {
+  return v.inUseBy === 0;
+}
+
 export default function VolumesPage() {
   const dispatch = useAppDispatch();
   const { items, status, error, selectedName, mutatingName } = useAppSelector((s) => s.volumes);
@@ -24,6 +36,8 @@ export default function VolumesPage() {
 
   const [formOpen, setFormOpen] = useState(false);
   const [name, setName] = useState("");
+  const [orphansOnly, setOrphansOnly] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
 
   useEffect(() => {
     dispatch(fetchVolumes());
@@ -54,8 +68,35 @@ export default function VolumesPage() {
     if (ok) dispatch(removeVolume(volumeName));
   }
 
+  const orphanNames = items.filter(isOrphanVolume).map((v) => v.name);
+
+  /** Action groupée "Nettoyer les orphelins" — une seule confirmation explicite pour le lot
+   * entier (jamais de suppression sans confirmation, jamais de purge automatique en tâche de
+   * fond), puis suppressions réelles séquentielles via le même thunk que la suppression
+   * individuelle (removeVolume, DELETE /api/volumes/:name — pas une simulation). */
+  async function handleCleanupOrphans() {
+    if (orphanNames.length === 0) return;
+    const ok = await confirm({
+      title: "Nettoyer les volumes orphelins",
+      description: `Confirmer la suppression définitive de ${orphanNames.length} volume(s) orphelin(s) (non monté par aucun conteneur) ? Les données qu'ils contiennent seront perdues.`,
+      confirmLabel: `Nettoyer (${orphanNames.length})`,
+      variant: "danger",
+    });
+    if (!ok) return;
+    setCleaning(true);
+    try {
+      for (const volumeName of orphanNames) {
+        await dispatch(removeVolume(volumeName));
+      }
+    } finally {
+      setCleaning(false);
+    }
+  }
+
   const visible = items.filter(
-    (v) => !searchQuery || v.name.toLowerCase().includes(searchQuery.toLowerCase()),
+    (v) =>
+      (!searchQuery || v.name.toLowerCase().includes(searchQuery.toLowerCase())) &&
+      (!orphansOnly || isOrphanVolume(v)),
   );
   const selected = items.find((v) => v.name === selectedName) ?? null;
   const { page, totalPages, pageItems, setPage, pageSize, setPageSize } = usePagination(visible, 10);
@@ -68,12 +109,24 @@ export default function VolumesPage() {
             <h2>Volumes</h2>
             <p>Volumes Docker réels de l'hôte.</p>
           </div>
-          {canOperate(session) && (
-            <button type="button" className="btn btn-primary btn-sm" onClick={() => setFormOpen((o) => !o)}>
-              {formOpen ? "Annuler" : "+ Ajouter un volume"}
-            </button>
-          )}
+          <div className="page-header-actions">
+            {canOperate(session) && orphanNames.length > 0 && (
+              <button type="button" className="btn btn-danger btn-sm" disabled={cleaning} onClick={handleCleanupOrphans}>
+                {cleaning ? "Nettoyage…" : `Nettoyer les orphelins (${orphanNames.length})`}
+              </button>
+            )}
+            {canOperate(session) && (
+              <button type="button" className="btn btn-primary btn-sm" onClick={() => setFormOpen((o) => !o)}>
+                {formOpen ? "Annuler" : "+ Ajouter un volume"}
+              </button>
+            )}
+          </div>
         </div>
+
+        <label className="filter-toggle">
+          <input type="checkbox" checked={orphansOnly} onChange={(e) => setOrphansOnly(e.target.checked)} />
+          Orphelins uniquement {orphanNames.length > 0 && `(${orphanNames.length})`}
+        </label>
 
         {formOpen && canOperate(session) && (
           <form className="create-container-form" onSubmit={handleCreate}>
@@ -130,7 +183,7 @@ export default function VolumesPage() {
                       {v.inUseBy > 0 ? (
                         <span className="chip chip--accent">{v.inUseBy} conteneur(s)</span>
                       ) : (
-                        <span className="chip chip--muted">Inutilisé</span>
+                        <span className="chip chip--danger">Orphelin</span>
                       )}
                     </td>
                     <td onClick={(e) => e.stopPropagation()}>

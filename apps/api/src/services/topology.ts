@@ -23,6 +23,21 @@
  * Docker — récupérés et ajoutés au graphe que Docker soit joignable ou non, jamais reliés par une
  * arête aux nœuds Docker (aucune relation réelle entre les deux dans ce projet), [] tant que
  * Nutanix n'a jamais été configuré ou si configuré mais injoignable (nutanix.ts#getNutanixVms).
+ *
+ * Volumes/networks ORPHELINS (existants sur l'hôte Docker mais rattachés à AUCUN conteneur) :
+ * délibérément EXCLUS de ce graphe (voir le filtre juste avant leur construction plus bas) pour
+ * ne pas le noyer — un hôte de dev peut avoir des dizaines de volumes de cache d'autres projets.
+ * Ça ne veut pas dire qu'ils sont invisibles pour l'utilisateur : GET /api/volumes et
+ * GET /api/networks renvoient déjà TOUS les volumes/networks réels de l'hôte avec un champ
+ * `inUseBy`/`containerCount` calculé à partir des mêmes conteneurs (docker.ts#listVolumes/
+ * listNetworks — même logique de rapprochement que referencedVolumeNames/referencedNetworkIds
+ * ci-dessous, pas dupliquée : ce fichier ne recalcule rien, il filtre juste le graphe). Un
+ * volume/network orphelin est donc `inUseBy === 0` / `containerCount === 0` (networks internes
+ * par défaut bridge/host/none exclus de cette notion, jamais des ressources à nettoyer — même
+ * exclusion que TopologyGraph.tsx#nodeMenuItems côté suppression). Choix délibéré plutôt qu'une
+ * route GET /api/orphans dédiée : VolumesPage.tsx/NetworksPage.tsx (déjà existantes, déjà
+ * alimentées par ces mêmes champs) portent le badge "Orphelin" + le filtre + l'action groupée de
+ * nettoyage — une vue séparée aurait été une simple redite de ces deux pages.
  */
 
 import { getClient, isDockerReachable, readContainerHealth, readContainerUsage } from "./docker.js";
@@ -201,12 +216,27 @@ export async function getTopology(): Promise<Topology> {
     // ressources de ton projet.
     for (const v of volumesResponse.Volumes ?? []) {
       if (!referencedVolumeNames.has(v.Name)) continue;
-      nodes.push({ id: `volume:${v.Name}`, kind: "volume", label: v.Name, subtitle: v.Driver, status: "running" });
+      nodes.push({
+        id: `volume:${v.Name}`,
+        kind: "volume",
+        label: v.Name,
+        subtitle: v.Driver,
+        status: "running",
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ...((v as any).CreatedAt ? { createdAt: (v as any).CreatedAt as string } : {}),
+      });
     }
 
     for (const n of networks) {
       if (!referencedNetworkIds.has(n.Id)) continue;
-      nodes.push({ id: `network:${n.Id}`, kind: "network", label: n.Name, subtitle: n.Driver, status: "running" });
+      nodes.push({
+        id: `network:${n.Id}`,
+        kind: "network",
+        label: n.Name,
+        subtitle: n.Driver,
+        status: "running",
+        ...(n.Created ? { createdAt: n.Created } : {}),
+      });
     }
 
     return { nodes: [...nodes, ...nutanixVmNodes], edges, generatedAt: new Date().toISOString() };

@@ -189,6 +189,13 @@ export interface TopologyNode {
   /** VMs Nutanix uniquement (voir apps/api/src/services/nutanix.ts#NutanixVm). */
   numVcpus?: number;
   memoryMib?: number;
+  /**
+   * Volumes/networks uniquement : horodatage de création réel Docker — absent pour les
+   * conteneurs/VMs Nutanix (leur id est déjà un identifiant immuable). Utilisé par
+   * TopologyGraph.tsx comme garde-fou contre un id de nœud recyclé (volume supprimé puis recréé
+   * sous le même nom) : voir apps/api/src/types.ts#TopologyNode pour le détail.
+   */
+  createdAt?: string;
 }
 
 export interface TopologyEdge {

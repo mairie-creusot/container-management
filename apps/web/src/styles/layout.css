@@ -516,6 +516,32 @@
   margin-top: 4px;
 }
 
+/* Groupe d'actions à droite du titre de page (ex: VolumesPage/NetworksPage — "Nettoyer les
+   orphelins" à côté du bouton de création habituel), pour ne pas dupliquer ce flex/gap partout. */
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* Filtre "Orphelins uniquement" (VolumesPage/NetworksPage) — même esprit qu'une case à cocher
+   de formulaire mais en ligne, sans le style lourd d'un `.field`. */
+.filter-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+  margin-bottom: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.filter-toggle input[type="checkbox"] {
+  cursor: pointer;
+}
+
 /* ==========================================================================
    Responsive — coquille principale (sidebar, topbar, workspace/inspector).
    Breakpoints alignés sur ceux déjà utilisés par l'assistant de configuration

@@ -362,6 +362,17 @@ export interface TopologyNode {
   /** VMs Nutanix uniquement (voir services/nutanix.ts#NutanixVm) : nombre de vCPUs et mémoire allouée. */
   numVcpus?: number;
   memoryMib?: number;
+  /**
+   * Volumes/networks uniquement : horodatage de création RÉEL rapporté par Docker (`CreatedAt`/
+   * `Created`). Absent pour les conteneurs/VMs Nutanix (pas nécessaire : leur id EST déjà un
+   * identifiant Docker/Nutanix immuable, jamais recyclé — voir topology.ts en-tête de fichier).
+   * Sert de garde-fou côté frontend (TopologyGraph.tsx) contre le seul cas réel de recyclage
+   * d'id : `volume:<nom>` n'a pas d'autre identité chez Docker que son nom — supprimer un volume
+   * puis en recréer un portant EXACTEMENT le même nom produit un nouveau `createdAt` sous le même
+   * id de nœud, ce qui permet de détecter que ce n'est pas la même ressource plutôt que de lui
+   * appliquer à tort une position héritée de l'ancien nœud.
+   */
+  createdAt?: string;
 }
 
 export interface TopologyEdge {
