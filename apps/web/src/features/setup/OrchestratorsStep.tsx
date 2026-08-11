@@ -2,9 +2,12 @@ import { useAppDispatch, useAppSelector } from "@/hooks";
 import {
   markDockerSkipped,
   markKubernetesSkipped,
+  markNutanixSkipped,
   testDocker,
   testKubernetes,
+  testNutanix,
   updateKubeconfig,
+  updateNutanixForm,
 } from "@/features/setup/setupSlice";
 import StatusPill from "@/components/StatusPill";
 
@@ -12,6 +15,7 @@ export default function OrchestratorsStep() {
   const dispatch = useAppDispatch();
   const docker = useAppSelector((s) => s.setup.docker);
   const kubernetes = useAppSelector((s) => s.setup.kubernetes);
+  const nutanix = useAppSelector((s) => s.setup.nutanix);
 
   return (
     <div>
@@ -97,6 +101,73 @@ export default function OrchestratorsStep() {
               {kubernetes.message ?? "Cluster Kubernetes joignable."}
               {kubernetes.context && ` — contexte ${kubernetes.context}`}
               {kubernetes.nodeCount !== null && ` — ${kubernetes.nodeCount} nœud(s)`}
+            </div>
+          )}
+        </div>
+
+        <div className="setup-block">
+          <div className="setup-block__head">
+            <span className="setup-block__title">Nutanix</span>
+            {nutanix.test === "ok" && <StatusPill status="connected" label="Connecté" />}
+            {nutanix.test === "error" && <StatusPill status="error" />}
+            {nutanix.test === "skipped" && <StatusPill status="unconfigured" label="Configuré plus tard" />}
+            {nutanix.test === "idle" && <StatusPill status="unconfigured" label="Non testé" />}
+          </div>
+          <p style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+            Connexion à Prism Central (API REST v3) pour lister et gérer les VMs du cluster.
+          </p>
+          <div className="setup-form-grid" style={{ marginTop: 8 }}>
+            <div className="field">
+              <label htmlFor="nutanix-url">URL de Prism Central</label>
+              <input
+                id="nutanix-url"
+                value={nutanix.prismCentralUrl}
+                onChange={(e) => dispatch(updateNutanixForm({ prismCentralUrl: e.target.value }))}
+                placeholder="https://prism.lecreusot.fr:9440"
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="nutanix-username">Utilisateur</label>
+              <input
+                id="nutanix-username"
+                value={nutanix.username}
+                onChange={(e) => dispatch(updateNutanixForm({ username: e.target.value }))}
+                placeholder="admin"
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="nutanix-password">Mot de passe</label>
+              <input
+                id="nutanix-password"
+                type="password"
+                value={nutanix.password}
+                onChange={(e) => dispatch(updateNutanixForm({ password: e.target.value }))}
+              />
+            </div>
+          </div>
+          <div className="setup-block__actions">
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              disabled={
+                nutanix.prismCentralUrl.trim() === "" ||
+                nutanix.username.trim() === "" ||
+                nutanix.password.trim() === "" ||
+                nutanix.test === "testing"
+              }
+              onClick={() => dispatch(testNutanix())}
+            >
+              {nutanix.test === "testing" ? "Test en cours…" : "Tester"}
+            </button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => dispatch(markNutanixSkipped())}>
+              Configurer plus tard
+            </button>
+          </div>
+          {nutanix.test === "error" && nutanix.message && <div className="error-banner">{nutanix.message}</div>}
+          {nutanix.test === "ok" && (
+            <div className="setup-success-banner">
+              {nutanix.message ?? "Prism Central joignable."}
+              {nutanix.vmCount !== null && ` — ${nutanix.vmCount} VM(s)`}
             </div>
           )}
         </div>

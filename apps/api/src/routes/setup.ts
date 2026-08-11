@@ -5,6 +5,7 @@
  * POST /api/setup/test/ldap      — teste une config LDAP candidate (body, pas persisté).
  * POST /api/setup/test/docker    — teste un hôte Docker candidat.
  * POST /api/setup/test/kubernetes— teste un kubeconfig candidat (contenu YAML collé).
+ * POST /api/setup/test/nutanix   — teste une config Prism Central candidate (URL + identifiants).
  * POST /api/setup/test/registry  — teste un registry candidat.
  * POST /api/setup/complete       — persiste la config et marque l'assistant terminé.
  * POST /api/setup/reset          — repasse en mode assistant (admin authentifié requis,
@@ -18,6 +19,7 @@ import type { FastifyInstance } from "fastify";
 import { testDockerConnection } from "../services/docker.js";
 import { testKubernetesConnection } from "../services/kubernetes.js";
 import { testLdapConnection } from "../services/ldap.js";
+import { testNutanixConnection } from "../services/nutanix.js";
 import { testRegistryConnection } from "../services/registries/index.js";
 import { completeSetup, getCurrent, resetSetup } from "../services/setupStore.js";
 import type { SetupCandidate } from "../services/setupStore.js";
@@ -43,6 +45,12 @@ interface KubernetesTestBody {
   kubeconfigYaml?: string;
 }
 
+interface NutanixTestBody {
+  prismCentralUrl?: string;
+  username?: string;
+  password?: string;
+}
+
 interface RegistryTestBody {
   kind?: string;
   url?: string;
@@ -57,6 +65,7 @@ export default async function setupRoutes(fastify: FastifyInstance): Promise<voi
       ldapConfigured: current.ldap !== undefined,
       dockerConfigured: current.docker?.host !== undefined,
       kubernetesConfigured: current.kubernetes?.kubeconfigYaml !== undefined,
+      nutanixConfigured: current.nutanix !== undefined,
       registries: current.registries ?? [],
     });
   });
@@ -89,6 +98,15 @@ export default async function setupRoutes(fastify: FastifyInstance): Promise<voi
       return reply.code(400).send({ error: "kubeconfigYaml is required" });
     }
     const result = await testKubernetesConnection(kubeconfigYaml);
+    return reply.send(result);
+  });
+
+  fastify.post<{ Body: NutanixTestBody }>("/api/setup/test/nutanix", async (request, reply) => {
+    const { prismCentralUrl, username, password } = request.body ?? {};
+    if (!prismCentralUrl || !username || !password) {
+      return reply.code(400).send({ error: "prismCentralUrl, username and password are required" });
+    }
+    const result = await testNutanixConnection(prismCentralUrl, username, password);
     return reply.send(result);
   });
 

@@ -13,10 +13,12 @@ Quatre priorités, rien de plus dans ce premier lot :
 
 Ajout validé : **authentification LDAP** (annuaire de la mairie) comme méthode de connexion principale, avec mapping de groupes LDAP → rôles applicatifs.
 
+Ajout validé : **Nutanix** comme troisième type d'environnement géré, au même niveau que Docker/Swarm et Kubernetes — pilotage d'un cluster Nutanix réel via l'API REST v3 de Prism Central (https://www.nutanix.dev/api-reference/), visualisation des VMs.
+
 ## Stack
 
 - **apps/web** — TypeScript, React, Redux Toolkit, Vite.
-- **apps/api** — TypeScript, Node.js (Fastify), pilote Docker Engine/Swarm (dockerode) et Kubernetes (@kubernetes/client-node), clients registries, moteur GitOps, auth LDAP (ldapjs) + session JWT.
+- **apps/api** — TypeScript, Node.js (Fastify), pilote Docker Engine/Swarm (dockerode), Kubernetes (@kubernetes/client-node) et Nutanix (API REST v3 de Prism Central, `node:https`), clients registries, moteur GitOps, auth LDAP (ldapjs) + session JWT.
 - **packages/wasm-core** — Rust compilé en WebAssembly (wasm-pack) : diff de manifestes YAML (état désiré vs état réel) et hachage de comparaison, exposé en TS via un wrapper généré. Utilisé côté `api` (calcul de dérive) et potentiellement côté `web` (aperçu diff instantané).
 - **deploy** — Dockerfiles, docker-compose de dev, manifestes Kubernetes/Swarm d'exemple, pipeline GitHub Actions → GHCR.
 
@@ -90,9 +92,18 @@ interface ClusterNode {
 interface Environment {
   id: string;
   name: string;
-  orchestrator: "swarm" | "kubernetes" | "compose";
+  orchestrator: "swarm" | "kubernetes" | "compose" | "nutanix";
   status: "ok" | "warn";
   nodes: ClusterNode[];
+}
+
+interface NutanixVm {
+  id: string;
+  name: string;
+  powerState: "on" | "off" | "unknown";
+  numVcpus: number;
+  memoryMib: number;
+  cluster: string;              // nom du cluster Nutanix physique hébergeant la VM
 }
 
 interface GitOpsFile {
@@ -146,7 +157,7 @@ interface DiffResult {
 
 ## Secrets au repos
 
-Tout secret persisté dans `config.json` (mot de passe LDAP, kubeconfig, identifiants de registry) est chiffré avec AES-256-GCM avant écriture disque (`apps/api/src/services/crypto.ts`) — la clé vient de `CONFIG_ENCRYPTION_KEY` (jamais stockée dans le même fichier que ce qu'elle protège), obligatoire en production, à défaut d'une clé aléatoire éphémère en développement (avertissement explicite au démarrage). Un `config.json` écrit avant l'introduction de ce chiffrement est migré automatiquement (rechiffré et réécrit) au premier accès suivant. Le fichier est aussi écrit avec des permissions restrictives (`0600`). Voir `apps/api/.env.example` pour la génération de la clé.
+Tout secret persisté dans `config.json` (mot de passe LDAP, kubeconfig, mot de passe Nutanix, identifiants de registry) est chiffré avec AES-256-GCM avant écriture disque (`apps/api/src/services/crypto.ts`) — la clé vient de `CONFIG_ENCRYPTION_KEY` (jamais stockée dans le même fichier que ce qu'elle protège), obligatoire en production, à défaut d'une clé aléatoire éphémère en développement (avertissement explicite au démarrage). Un `config.json` écrit avant l'introduction de ce chiffrement est migré automatiquement (rechiffré et réécrit) au premier accès suivant. Le fichier est aussi écrit avec des permissions restrictives (`0600`). Voir `apps/api/.env.example` pour la génération de la clé.
 
 ## Assistant de configuration au premier lancement
 
@@ -158,7 +169,7 @@ Au tout premier démarrage (aucune configuration persistée), l'API répond "non
 
 1. **Bienvenue** — résumé des étapes à venir.
 2. **Annuaire LDAP** *(obligatoire — c'est le mécanisme d'auth principal, on ne peut pas passer l'étape)* : formulaire URL / Bind DN / mot de passe / base de recherche / filtre / mapping groupe→rôle (éditeur clé-valeur répétable). Bouton **« Tester la connexion »** → `POST /api/setup/test/ldap` avant de pouvoir continuer ; affiche succès/échec avec message clair et, si succès, un aperçu (ex. nombre de groupes résolus, DN de l'utilisateur test).
-3. **Orchestrateurs** *(optionnel, « configurer plus tard » possible)* : bloc Docker/Swarm (détection auto du socket, bouton tester) + bloc Kubernetes (coller un kubeconfig, bouton tester). Chaque bloc a sa propre pastille de statut.
+3. **Orchestrateurs** *(optionnel, « configurer plus tard » possible)* : bloc Docker/Swarm (détection auto du socket, bouton tester) + bloc Kubernetes (coller un kubeconfig, bouton tester) + bloc Nutanix (URL Prism Central, utilisateur, mot de passe, bouton tester). Chaque bloc a sa propre pastille de statut.
 4. **Registries** *(optionnel)* : ajout rapide d'un ou plusieurs registries (Docker Hub, GHCR, GitLab, Harbor) avec test individuel par registry.
 5. **Récapitulatif** : liste de toutes les vérifications avec pastille (vert = validé, ambre = configuré non testé/skippé, gris = non configuré). Bouton **« Terminer la configuration »** → `POST /api/setup/complete`, puis redirection vers l'écran de connexion LDAP normal.
 
@@ -173,6 +184,7 @@ GET  /api/setup/status
 POST /api/setup/test/ldap
 POST /api/setup/test/docker
 POST /api/setup/test/kubernetes
+POST /api/setup/test/nutanix
 POST /api/setup/test/registry
 POST /api/setup/complete
 POST /api/setup/reset            # admin authentifié uniquement

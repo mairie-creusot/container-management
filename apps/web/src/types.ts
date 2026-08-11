@@ -69,10 +69,20 @@ export interface DockerHostInfo {
 export interface Environment {
   id: string;
   name: string;
-  orchestrator: "swarm" | "kubernetes" | "compose";
+  orchestrator: "swarm" | "kubernetes" | "compose" | "nutanix";
   status: "ok" | "warn";
   nodes: ClusterNode[];
   hostInfo?: DockerHostInfo;
+}
+
+/** VM Nutanix (Prism Central API v3) — voir apps/api/src/services/nutanix.ts. */
+export interface NutanixVm {
+  id: string;
+  name: string;
+  powerState: "on" | "off" | "unknown";
+  numVcpus: number;
+  memoryMib: number;
+  cluster: string;
 }
 
 export interface ContainerPortMapping {
@@ -275,6 +285,16 @@ export interface DockerTestResult extends SetupTestResult {
   version?: string;
 }
 
+export interface NutanixConfigInput {
+  prismCentralUrl: string;
+  username: string;
+  password: string;
+}
+
+export interface NutanixTestResult extends SetupTestResult {
+  vmCount?: number;
+}
+
 export interface RegistryConfigInput {
   kind: RegistryKind;
   name: string;
@@ -297,5 +317,6 @@ export interface SetupCompletePayload {
   ldap: LdapConfigInput & { defaultRole: Role };
   docker: { host?: string } | null;
   kubernetes: KubernetesConfigInput | null;
+  nutanix: NutanixConfigInput | null;
   registries: RegistryConfigInput[];
 }

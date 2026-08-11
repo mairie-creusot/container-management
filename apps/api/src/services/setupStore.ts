@@ -45,6 +45,15 @@ export interface SetupKubernetesConfig {
   kubeconfigYaml?: string;
 }
 
+export interface SetupNutanixConfig {
+  // URL de Prism Central (ex: "https://prism.lecreusot.fr:9440").
+  prismCentralUrl: string;
+  username: string;
+  // password : chiffré au repos (voir encryptSecrets ci-dessous), comme le mot de passe LDAP
+  // et le kubeconfig.
+  password: string;
+}
+
 export interface SetupRegistryConfig {
   kind: RegistryKind;
   name: string;
@@ -60,6 +69,7 @@ export interface SetupConfig {
   ldap?: SetupLdapConfig;
   docker?: SetupDockerConfig;
   kubernetes?: SetupKubernetesConfig;
+  nutanix?: SetupNutanixConfig;
   registries?: SetupRegistryConfig[];
 }
 
@@ -108,6 +118,9 @@ function encryptSecrets(cfg: SetupConfig): SetupConfig {
     ...(cfg.kubernetes?.kubeconfigYaml
       ? { kubernetes: { ...cfg.kubernetes, kubeconfigYaml: encryptSecretIfNeeded(cfg.kubernetes.kubeconfigYaml) } }
       : {}),
+    ...(cfg.nutanix?.password
+      ? { nutanix: { ...cfg.nutanix, password: encryptSecretIfNeeded(cfg.nutanix.password) } }
+      : {}),
     ...(cfg.registries
       ? {
           registries: cfg.registries.map((r) => ({
@@ -124,6 +137,7 @@ function encryptSecrets(cfg: SetupConfig): SetupConfig {
 function hasLegacyPlaintextSecret(cfg: SetupConfig): boolean {
   if (cfg.ldap && !isEncrypted(cfg.ldap.bindPassword)) return true;
   if (cfg.kubernetes?.kubeconfigYaml && !isEncrypted(cfg.kubernetes.kubeconfigYaml)) return true;
+  if (cfg.nutanix?.password && !isEncrypted(cfg.nutanix.password)) return true;
   if (cfg.registries?.some((r) => (r.password && !isEncrypted(r.password)) || (r.token && !isEncrypted(r.token)))) {
     return true;
   }
@@ -242,6 +256,18 @@ export async function getEffectiveKubernetesConfig(): Promise<SetupKubernetesCon
   const current = await getCurrent();
   if (!current.kubernetes?.kubeconfigYaml) return current.kubernetes ?? {};
   return { ...current.kubernetes, kubeconfigYaml: decryptSecret(current.kubernetes.kubeconfigYaml) };
+}
+
+/**
+ * Config Nutanix effective (mot de passe déchiffré) : celle persistée par l'assistant, sinon
+ * `null` — contrairement à Docker/Kubernetes, Nutanix n'a pas de mécanisme de bootstrap par
+ * variables d'environnement (il faut toujours une URL Prism Central + des identifiants
+ * explicites, saisis dans l'assistant) : rien à pré-remplir "au mieux" ici.
+ */
+export async function getEffectiveNutanixConfig(): Promise<SetupNutanixConfig | null> {
+  const current = await getCurrent();
+  if (!current.nutanix) return null;
+  return { ...current.nutanix, password: decryptSecret(current.nutanix.password) };
 }
 
 export interface EffectiveRegistryCredentials {

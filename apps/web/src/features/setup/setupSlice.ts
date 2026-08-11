@@ -5,6 +5,7 @@ import type {
   KubernetesTestResult,
   LdapConfigInput,
   LdapTestResult,
+  NutanixTestResult,
   RegistryConfigInput,
   RegistryKind,
   RegistryTestResult,
@@ -59,6 +60,15 @@ interface KubernetesStepState {
   nodeCount: number | null;
 }
 
+interface NutanixStepState {
+  prismCentralUrl: string;
+  username: string;
+  password: string;
+  test: TestStatus;
+  message: string | null;
+  vmCount: number | null;
+}
+
 export interface RegistryDraft {
   tempId: string;
   kind: RegistryKind;
@@ -78,6 +88,7 @@ interface SetupState {
   ldap: LdapStepState;
   docker: DockerStepState;
   kubernetes: KubernetesStepState;
+  nutanix: NutanixStepState;
   registries: RegistryDraft[];
   completeStatus: "idle" | "submitting" | "error";
   completeError: string | null;
@@ -114,6 +125,14 @@ const initialState: SetupState = {
     message: null,
     context: null,
     nodeCount: null,
+  },
+  nutanix: {
+    prismCentralUrl: "",
+    username: "",
+    password: "",
+    test: "idle",
+    message: null,
+    vmCount: null,
   },
   registries: [],
   completeStatus: "idle",
@@ -181,6 +200,23 @@ export const testKubernetes = createAsyncThunk<
   }
 });
 
+export const testNutanix = createAsyncThunk<NutanixTestResult, void, { state: RootState; rejectValue: string }>(
+  "setup/testNutanix",
+  async (_arg, { getState, rejectWithValue }) => {
+    const { nutanix } = getState().setup;
+    try {
+      return await apiPost<NutanixTestResult>("/setup/test/nutanix", {
+        prismCentralUrl: nutanix.prismCentralUrl,
+        username: nutanix.username,
+        password: nutanix.password,
+      });
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : "Test Nutanix impossible.";
+      return rejectWithValue(message);
+    }
+  },
+);
+
 export const testRegistry = createAsyncThunk<
   RegistryTestResult & { tempId: string },
   string,
@@ -225,6 +261,14 @@ export const completeSetup = createAsyncThunk<void, void, { state: RootState; re
       },
       docker: setup.docker.test === "ok" ? {} : null,
       kubernetes: setup.kubernetes.test === "ok" ? { kubeconfigYaml: setup.kubernetes.kubeconfig } : null,
+      nutanix:
+        setup.nutanix.test === "ok"
+          ? {
+              prismCentralUrl: setup.nutanix.prismCentralUrl,
+              username: setup.nutanix.username,
+              password: setup.nutanix.password,
+            }
+          : null,
       registries: setup.registries
         .filter((r) => r.test === "ok")
         .map((r) => ({
@@ -296,6 +340,20 @@ const setupSlice = createSlice({
     markKubernetesSkipped(state) {
       state.kubernetes.test = "skipped";
       state.kubernetes.message = null;
+    },
+    updateNutanixForm(
+      state,
+      action: PayloadAction<Partial<Pick<NutanixStepState, "prismCentralUrl" | "username" | "password">>>,
+    ) {
+      Object.assign(state.nutanix, action.payload);
+      if (state.nutanix.test !== "idle") {
+        state.nutanix.test = "idle";
+        state.nutanix.message = null;
+      }
+    },
+    markNutanixSkipped(state) {
+      state.nutanix.test = "skipped";
+      state.nutanix.message = null;
     },
     addRegistryDraft(state) {
       state.registries.push({
@@ -391,6 +449,19 @@ const setupSlice = createSlice({
         state.kubernetes.test = "error";
         state.kubernetes.message = action.payload ?? "Test Kubernetes impossible.";
       })
+      .addCase(testNutanix.pending, (state) => {
+        state.nutanix.test = "testing";
+        state.nutanix.message = null;
+      })
+      .addCase(testNutanix.fulfilled, (state, action) => {
+        state.nutanix.test = action.payload.ok ? "ok" : "error";
+        state.nutanix.message = action.payload.message;
+        state.nutanix.vmCount = action.payload.vmCount ?? null;
+      })
+      .addCase(testNutanix.rejected, (state, action) => {
+        state.nutanix.test = "error";
+        state.nutanix.message = action.payload ?? "Test Nutanix impossible.";
+      })
       .addCase(testRegistry.pending, (state, action) => {
         const draft = state.registries.find((r) => r.tempId === action.meta.arg);
         if (draft) {
@@ -437,6 +508,8 @@ export const {
   markDockerSkipped,
   updateKubeconfig,
   markKubernetesSkipped,
+  updateNutanixForm,
+  markNutanixSkipped,
   addRegistryDraft,
   updateRegistryDraft,
   removeRegistryDraft,

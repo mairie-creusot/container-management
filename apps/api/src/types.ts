@@ -122,11 +122,22 @@ export interface ClusterNode {
 export interface Environment {
   id: string;
   name: string;
-  orchestrator: "swarm" | "kubernetes" | "compose";
+  orchestrator: "swarm" | "kubernetes" | "compose" | "nutanix";
   status: "ok" | "warn";
   nodes: ClusterNode[];
-  /** Infos hôte du démon Docker (orchestrator "swarm"/"compose" uniquement — absent pour Kubernetes). */
+  /** Infos hôte du démon Docker (orchestrator "swarm"/"compose" uniquement — absent pour Kubernetes/Nutanix). */
   hostInfo?: DockerHostInfo;
+}
+
+/** VM Nutanix (Prism Central API v3) — voir src/services/nutanix.ts. */
+export interface NutanixVm {
+  id: string;
+  name: string;
+  powerState: "on" | "off" | "unknown";
+  numVcpus: number;
+  memoryMib: number;
+  /** Nom du cluster Nutanix physique hébergeant la VM. */
+  cluster: string;
 }
 
 export interface GitOpsFile {

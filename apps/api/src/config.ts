@@ -87,6 +87,16 @@ export const config = {
   kubernetes: {
     kubeconfig: readOptionalString("KUBECONFIG"),
   },
+  nutanix: {
+    // Prism Central utilise très souvent un certificat TLS auto-signé en déploiement on-prem
+    // (pas d'autorité de certification publique) : par défaut on ne vérifie pas la chaîne de
+    // confiance pour CETTE intégration spécifique (aucun impact sur le reste du process,
+    // contrairement à NODE_TLS_REJECT_UNAUTHORIZED=0 qui désactiverait la vérification TLS
+    // globalement). Mettre à `true` si Prism Central présente un certificat signé par une CA
+    // de confiance.
+    tlsRejectUnauthorized: readBoolean("NUTANIX_TLS_REJECT_UNAUTHORIZED", false),
+    requestTimeoutMs: readNumber("NUTANIX_REQUEST_TIMEOUT_MS", 8000),
+  },
   registries: {
     requestTimeoutMs: readNumber("REGISTRY_REQUEST_TIMEOUT_MS", 5000),
     dockerhub: {
