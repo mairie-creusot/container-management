@@ -65,3 +65,8 @@ export function apiPut<T>(path: string, body?: unknown): Promise<T> {
   const init: RequestInit = body !== undefined ? { method: "PUT", body: JSON.stringify(body) } : { method: "PUT" };
   return request<T>(path, init);
 }
+
+export function apiPatch<T>(path: string, body?: unknown): Promise<T> {
+  const init: RequestInit = body !== undefined ? { method: "PATCH", body: JSON.stringify(body) } : { method: "PATCH" };
+  return request<T>(path, init);
+}

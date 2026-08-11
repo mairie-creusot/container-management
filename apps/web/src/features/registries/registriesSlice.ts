@@ -1,11 +1,24 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
-import { apiGet, apiPost, ApiError } from "@/api/client";
+import { apiGet, apiPatch, apiPost, ApiError } from "@/api/client";
 import type { Registry, RegistryKind } from "@/types";
 
 interface NewRegistryInput {
   kind: RegistryKind;
   name: string;
   url: string;
+}
+
+export interface UpdateRegistryInput {
+  id: string;
+  name?: string;
+  url?: string;
+  username?: string;
+  // password/token vides = "conserver le secret existant" côté API (voir setupStore.ts) —
+  // ne pas envoyer de chaîne vide écraserait silencieusement l'identifiant déjà enregistré,
+  // donc ces champs sont omis du corps de la requête tant qu'ils ne sont pas renseignés
+  // (voir handleUpdate dans RegistriesPage.tsx).
+  password?: string;
+  token?: string;
 }
 
 interface RegistriesState {
@@ -61,6 +74,20 @@ export const createRegistry = createAsyncThunk<
   } catch (error) {
     const message =
       error instanceof ApiError ? error.message : "Impossible d'ajouter ce registry.";
+    return rejectWithValue(message);
+  }
+});
+
+export const updateRegistry = createAsyncThunk<
+  Registry,
+  UpdateRegistryInput,
+  { rejectValue: string }
+>("registries/updateRegistry", async ({ id, ...patch }, { rejectWithValue }) => {
+  try {
+    return await apiPatch<Registry>(`/registries/${id}`, patch);
+  } catch (error) {
+    const message =
+      error instanceof ApiError ? error.message : "Impossible de modifier ce registry.";
     return rejectWithValue(message);
   }
 });
@@ -144,6 +171,19 @@ const registriesSlice = createSlice({
       .addCase(createRegistry.rejected, (state, action) => {
         state.creating = false;
         state.error = action.payload ?? "Impossible d'ajouter ce registry.";
+      })
+      .addCase(updateRegistry.pending, (state) => {
+        state.creating = true;
+      })
+      .addCase(updateRegistry.fulfilled, (state, action) => {
+        state.creating = false;
+        const index = state.items.findIndex((r) => r.id === action.payload.id);
+        if (index !== -1) state.items[index] = action.payload;
+        if (state.selectedDetail?.id === action.payload.id) state.selectedDetail = action.payload;
+      })
+      .addCase(updateRegistry.rejected, (state, action) => {
+        state.creating = false;
+        state.error = action.payload ?? "Impossible de modifier ce registry.";
       })
       .addCase(fetchRepositories.pending, (state) => {
         state.reposStatus = "loading";

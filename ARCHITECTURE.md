@@ -125,6 +125,17 @@ interface Session {
   displayName: string;
   roles: ("admin" | "operator" | "viewer")[];
 }
+
+type SystemNotificationKind = "image_update_available" | "integration_unreachable" | "integration_reachable";
+
+interface SystemNotificationEvent {
+  id: string;
+  timestamp: string;            // ISO 8601
+  kind: SystemNotificationKind;
+  level: "error" | "success" | "info";
+  message: string;              // concret et actionnable, ex: "Nouvelle version disponible pour nginx:1.25 -> 1.27"
+  read: boolean;
+}
 ```
 
 ## Authentification LDAP
@@ -201,11 +212,15 @@ POST   /api/images/:id/update               # pull réel du dernier tag connu (i
 DELETE /api/images/:id?force=true           # équivalent `docker rmi`, image locale uniquement
 POST   /api/images/pull                     # { reference } — équivalent `docker pull`, retourne la liste rafraîchie
 
-GET  /api/registries
-POST /api/registries
-GET  /api/registries/:id
-GET  /api/registries/:id/repositories                 # vrai catalogue distant (GHCR/Docker Hub), pas juste le local
-GET  /api/registries/:id/repositories/:repo/tags       # tags d'un dépôt du catalogue (:repo encodé)
+GET   /api/registries
+POST  /api/registries
+GET   /api/registries/:id
+PATCH /api/registries/:id                              # { name?, url?, username?, password?, token? } — password/token
+                                                         # omis ou vides = identifiant déjà enregistré conservé (voir
+                                                         # setupStore.ts#updateRegistryAt). Icône engrenage sur chaque
+                                                         # carte de RegistriesPage.tsx (admin uniquement).
+GET   /api/registries/:id/repositories                 # vrai catalogue distant (GHCR/Docker Hub), pas juste le local
+GET   /api/registries/:id/repositories/:repo/tags       # tags d'un dépôt du catalogue (:repo encodé)
 
 GET  /api/containers
 POST /api/containers   # { image, name?, ports? } — équivalent `docker run -d`, flux minimal

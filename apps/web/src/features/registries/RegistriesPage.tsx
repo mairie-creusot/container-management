@@ -6,17 +6,19 @@ import {
   fetchRegistryDetail,
   selectRegistry,
   startExploring,
+  updateRegistry,
 } from "@/features/registries/registriesSlice";
 import { canAdminister } from "@/features/auth/authSlice";
 import { setCurrentView, setUnsavedFormActive } from "@/features/ui/uiSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import Inspector from "@/components/Inspector";
+import Modal from "@/components/Modal";
 import StatusPill from "@/components/StatusPill";
 import KeyValueList from "@/components/KeyValueList";
 import { SkeletonCard } from "@/components/Skeleton";
 import { registryMeta } from "@/components/RegistryBadge";
-import { IconPlus } from "@/components/icons";
-import type { RegistryKind } from "@/types";
+import { IconPlus, IconSettings } from "@/components/icons";
+import type { Registry, RegistryKind } from "@/types";
 
 const KINDS: { id: RegistryKind; label: string }[] = [
   { id: "dockerhub", label: "Docker Hub" },
@@ -39,6 +41,10 @@ export default function RegistriesPage() {
   const session = useAppSelector((s) => s.auth.session);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ kind: "dockerhub" as RegistryKind, name: "", url: "" });
+  const [editing, setEditing] = useState<Registry | null>(null);
+  const [editForm, setEditForm] = useState({ name: "", url: "", username: "", password: "", token: "" });
+  const [updating, setUpdating] = useState(false);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const confirm = useConfirm();
   const isDirty = showForm && (form.name.trim() !== "" || form.url.trim() !== "");
 
@@ -79,6 +85,48 @@ export default function RegistriesPage() {
         resetForm();
       }
     });
+  }
+
+  function openEdit(registry: Registry) {
+    setEditing(registry);
+    setEditForm({ name: registry.name, url: registry.url, username: "", password: "", token: "" });
+    setUpdateError(null);
+  }
+
+  function closeEdit() {
+    setEditing(null);
+    setUpdateError(null);
+  }
+
+  async function handleUpdate(event: FormEvent) {
+    event.preventDefault();
+    if (!editing) return;
+    const name = editForm.name.trim();
+    const url = editForm.url.trim();
+    if (!name || !url) return;
+    setUpdating(true);
+    setUpdateError(null);
+    const username = editForm.username.trim();
+    const password = editForm.password.trim();
+    const token = editForm.token.trim();
+    const result = await dispatch(
+      updateRegistry({
+        id: editing.id,
+        name,
+        url,
+        // Champs identifiants omis tant qu'ils sont vides — l'API conserve alors le secret déjà
+        // enregistré (voir registriesSlice.ts#UpdateRegistryInput).
+        ...(username ? { username } : {}),
+        ...(password ? { password } : {}),
+        ...(token ? { token } : {}),
+      }),
+    );
+    setUpdating(false);
+    if (updateRegistry.fulfilled.match(result)) {
+      closeEdit();
+    } else {
+      setUpdateError(result.payload ?? "Impossible de modifier ce registry.");
+    }
   }
 
   async function handleCancelForm() {
@@ -186,7 +234,23 @@ export default function RegistriesPage() {
                     <div className="registry-card__icon" style={{ background: meta.color }}>
                       {meta.label.slice(0, 2).toUpperCase()}
                     </div>
-                    <StatusPill status={registry.status} />
+                    <div className="registry-card__head-actions">
+                      <StatusPill status={registry.status} />
+                      {canAdminister(session) && (
+                        <button
+                          type="button"
+                          className="icon-btn"
+                          title="Modifier les paramètres du registry"
+                          aria-label="Modifier les paramètres du registry"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openEdit(registry);
+                          }}
+                        >
+                          <IconSettings />
+                        </button>
+                      )}
+                    </div>
                   </div>
                   <div className="registry-card__name">{registry.name}</div>
                   <div className="registry-card__url">{registry.url}</div>
@@ -229,6 +293,80 @@ export default function RegistriesPage() {
           </>
         )}
       </Inspector>
+
+      <Modal open={editing !== null} onClose={closeEdit} labelledBy="registry-edit-title">
+        {editing && (
+          <form className="confirm-dialog" onSubmit={handleUpdate}>
+            <h2 id="registry-edit-title" className="confirm-dialog__title">
+              Modifier {editing.name}
+            </h2>
+            <div className="field">
+              <label htmlFor="registry-edit-name">Nom</label>
+              <input
+                id="registry-edit-name"
+                value={editForm.name}
+                onChange={(event) => setEditForm((f) => ({ ...f, name: event.target.value }))}
+                disabled={updating}
+                autoFocus
+                required
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="registry-edit-url">URL</label>
+              <input
+                id="registry-edit-url"
+                value={editForm.url}
+                onChange={(event) => setEditForm((f) => ({ ...f, url: event.target.value }))}
+                disabled={updating}
+                required
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="registry-edit-username">Nom d'utilisateur</label>
+              <input
+                id="registry-edit-username"
+                value={editForm.username}
+                onChange={(event) => setEditForm((f) => ({ ...f, username: event.target.value }))}
+                placeholder="laisser vide pour conserver l'actuel"
+                disabled={updating}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="registry-edit-password">Mot de passe</label>
+              <input
+                id="registry-edit-password"
+                type="password"
+                value={editForm.password}
+                onChange={(event) => setEditForm((f) => ({ ...f, password: event.target.value }))}
+                placeholder="laisser vide pour conserver l'actuel"
+                disabled={updating}
+                autoComplete="new-password"
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="registry-edit-token">Jeton d'accès</label>
+              <input
+                id="registry-edit-token"
+                type="password"
+                value={editForm.token}
+                onChange={(event) => setEditForm((f) => ({ ...f, token: event.target.value }))}
+                placeholder="laisser vide pour conserver l'actuel"
+                disabled={updating}
+                autoComplete="new-password"
+              />
+            </div>
+            {updateError && <p className="graph-popover__error">{updateError}</p>}
+            <div className="confirm-dialog__actions">
+              <button type="button" className="btn btn-ghost" onClick={closeEdit} disabled={updating}>
+                Annuler
+              </button>
+              <button type="submit" className="btn btn-primary" disabled={updating || !editForm.name.trim() || !editForm.url.trim()}>
+                {updating ? "Enregistrement…" : "Enregistrer"}
+              </button>
+            </div>
+          </form>
+        )}
+      </Modal>
     </div>
   );
 }

@@ -221,6 +221,47 @@ export async function addRegistry(input: SetupRegistryConfig): Promise<SetupConf
   return next;
 }
 
+export interface RegistryPatch {
+  name?: string;
+  url?: string;
+  username?: string;
+  // password/token vides ou absents = "conserver le secret existant" — seule une valeur non
+  // vide déclenche un remplacement (voir updateRegistryAt) : sinon rouvrir le formulaire pour
+  // ne changer que le nom effacerait silencieusement l'identifiant déjà enregistré.
+  password?: string;
+  token?: string;
+}
+
+/**
+ * Met à jour le registry à l'index `index` du tableau persisté (même indexation que l'id de
+ * vue "reg-<kind>-<index>" construit par registriesStore.ts). `password`/`token` ne sont
+ * remplacés que si une valeur non vide est fournie ; le reste écrase toujours (name/url/username
+ * vides sont des choix valides de l'utilisateur, contrairement aux secrets).
+ */
+export async function updateRegistryAt(index: number, patch: RegistryPatch): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const registries = current.registries ?? [];
+  const existing = registries[index];
+  if (!existing) {
+    throw new Error(`No registry at index ${index}`);
+  }
+  const merged: SetupRegistryConfig = {
+    ...existing,
+    ...(patch.name !== undefined ? { name: patch.name } : {}),
+    ...(patch.url !== undefined ? { url: patch.url } : {}),
+    ...(patch.username !== undefined ? { username: patch.username } : {}),
+    ...(patch.password ? { password: patch.password } : {}),
+    ...(patch.token ? { token: patch.token } : {}),
+  };
+  const next: SetupConfig = encryptSecrets({
+    ...current,
+    registries: registries.map((r, i) => (i === index ? merged : r)),
+  });
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
 /** Config LDAP effective (secret déchiffré) : celle de l'assistant si persistée, sinon les valeurs d'environnement. */
 export async function getEffectiveLdapConfig(): Promise<SetupLdapConfig> {
   const current = await getCurrent();

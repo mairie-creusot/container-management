@@ -450,6 +450,12 @@
   margin-bottom: 10px;
 }
 
+.registry-card__head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .registry-card__icon {
   width: 34px;
   height: 34px;

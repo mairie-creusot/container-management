@@ -1,13 +1,20 @@
 /**
- * GET  /api/registries                          — liste des registries suivis.
- * POST /api/registries                          — ajoute un registry (rôle operator/admin requis, cf. hook global).
- * GET  /api/registries/:id                      — détail d'un registry.
- * GET  /api/registries/:id/repositories          — vrai catalogue distant (pas juste le local).
- * GET  /api/registries/:id/repositories/:repo/tags — tags d'un dépôt du catalogue (:repo encodé, cf. gitops.ts).
+ * GET   /api/registries                          — liste des registries suivis.
+ * POST  /api/registries                          — ajoute un registry (rôle operator/admin requis, cf. hook global).
+ * GET   /api/registries/:id                      — détail d'un registry.
+ * PATCH /api/registries/:id                      — modifie nom/URL/identifiants (rôle operator/admin requis).
+ * GET   /api/registries/:id/repositories          — vrai catalogue distant (pas juste le local).
+ * GET   /api/registries/:id/repositories/:repo/tags — tags d'un dépôt du catalogue (:repo encodé, cf. gitops.ts).
  */
 
 import type { FastifyInstance } from "fastify";
-import { createRegistry, getPersistedRegistryConfig, getRegistry, listRegistries } from "../services/registriesStore.js";
+import {
+  createRegistry,
+  getPersistedRegistryConfig,
+  getRegistry,
+  listRegistries,
+  updateRegistry,
+} from "../services/registriesStore.js";
 import { listRegistryRepositories, listTagsForImage } from "../services/registries/index.js";
 import type { RegistryKind } from "../types.js";
 
@@ -17,6 +24,14 @@ interface CreateRegistryBody {
   kind?: string;
   name?: string;
   url?: string;
+}
+
+interface UpdateRegistryBody {
+  name?: string;
+  url?: string;
+  username?: string;
+  password?: string;
+  token?: string;
 }
 
 export default async function registriesRoutes(fastify: FastifyInstance): Promise<void> {
@@ -43,6 +58,24 @@ export default async function registriesRoutes(fastify: FastifyInstance): Promis
     }
     return reply.send(registry);
   });
+
+  fastify.patch<{ Params: { id: string }; Body: UpdateRegistryBody }>(
+    "/api/registries/:id",
+    async (request, reply) => {
+      const { name, url, username, password, token } = request.body ?? {};
+      const updated = await updateRegistry(request.params.id, {
+        ...(name !== undefined ? { name } : {}),
+        ...(url !== undefined ? { url } : {}),
+        ...(username !== undefined ? { username } : {}),
+        ...(password !== undefined ? { password } : {}),
+        ...(token !== undefined ? { token } : {}),
+      });
+      if (!updated) {
+        return reply.code(404).send({ error: `Registry "${request.params.id}" not found` });
+      }
+      return reply.send(updated);
+    },
+  );
 
   fastify.get<{ Params: { id: string } }>("/api/registries/:id/repositories", async (request, reply) => {
     const persisted = await getPersistedRegistryConfig(request.params.id);

@@ -10,8 +10,13 @@
  * pendant l'assistant de configuration.
  */
 
-import { addRegistry as persistRegistry, getCurrent, getEffectiveRegistryCredentials } from "./setupStore.js";
-import type { SetupRegistryConfig } from "./setupStore.js";
+import {
+  addRegistry as persistRegistry,
+  getCurrent,
+  getEffectiveRegistryCredentials,
+  updateRegistryAt,
+} from "./setupStore.js";
+import type { RegistryPatch, SetupRegistryConfig } from "./setupStore.js";
 import { getLocalDockerImages } from "./docker.js";
 import type { LocalDockerImage } from "./docker.js";
 import { registryKindFromImageName, testRegistryConnection } from "./registries/index.js";
@@ -103,4 +108,18 @@ export async function createRegistry(input: CreateRegistryInput): Promise<Regist
   const created = [...all].reverse().find((r) => r.kind === input.kind && r.name === input.name);
   if (!created) throw new Error("Failed to create registry");
   return created;
+}
+
+/**
+ * Met à jour un registry existant (nom/URL/identifiants) — permet notamment d'ajouter des
+ * identifiants après coup à un registry créé sans (POST /api/registries n'en demande pas),
+ * seul cas où il restait bloqué en statut "unconfigured" sans passer par tout l'assistant.
+ */
+export async function updateRegistry(id: string, patch: RegistryPatch): Promise<Registry | undefined> {
+  const current = await getCurrent();
+  const persisted = current.registries ?? [];
+  const index = persisted.findIndex((r, i) => `reg-${r.kind}-${i}` === id);
+  if (index === -1) return undefined;
+  await updateRegistryAt(index, patch);
+  return getRegistry(id);
 }
