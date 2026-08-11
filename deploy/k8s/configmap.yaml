@@ -1,0 +1,17 @@
+# Configuration non sensible de @quai/api. Les valeurs ci-dessous sont des
+# exemples pour un annuaire LDAP réel (à adapter à l'environnement cible) ;
+# les identifiants/secrets correspondants vivent dans secret.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: quai-api-config
+  namespace: quai
+data:
+  NODE_ENV: "production"
+  PORT: "3000"
+  LDAP_URL: "ldaps://ldap.lecreusot.fr:636"
+  LDAP_SEARCH_BASE: "ou=people,dc=lecreusot,dc=fr"
+  LDAP_SEARCH_FILTER: "(uid={{username}})"
+  LDAP_GROUP_ROLE_MAP: >-
+    {"cn=dsi-admins,ou=groupes,dc=lecreusot,dc=fr":"admin",
+    "cn=dsi-operators,ou=groupes,dc=lecreusot,dc=fr":"operator"}

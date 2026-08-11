@@ -1,0 +1,20 @@
+[package]
+name = "quai-wasm-core"
+version = "0.1.0"
+edition = "2021"
+description = "QUAI — moteur de diff de manifestes YAML (Rust/WASM) pour la détection de dérive GitOps."
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+serde_yaml = "0.9"
+
+[profile.release]
+opt-level = "s"
+lto = true

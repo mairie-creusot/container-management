@@ -1,0 +1,43 @@
+{
+  "name": "@quai/api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QUAI API — serveur Fastify pilotant Docker/Swarm, Kubernetes, registries d'images, GitOps et l'authentification LDAP.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "nodemon --legacy-watch --delay 1 --watch src --ext ts,json --exec tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^9.4.0",
+    "@fastify/cors": "^9.0.1",
+    "@kubernetes/client-node": "^0.21.0",
+    "@quai/wasm-core": "workspace:*",
+    "dockerode": "^4.0.2",
+    "fastify": "^4.28.1",
+    "fastify-plugin": "^4.5.1",
+    "js-yaml": "^4.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "ldapjs": "^3.0.7",
+    "pino": "^9.3.2",
+    "pino-pretty": "^11.2.2",
+    "simple-git": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/dockerode": "^3.3.31",
+    "@types/js-yaml": "^4.0.9",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/ldapjs": "^3.0.6",
+    "@types/node": "^20.14.13",
+    "nodemon": "^3.1.14",
+    "tsx": "^4.16.5",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  }
+}

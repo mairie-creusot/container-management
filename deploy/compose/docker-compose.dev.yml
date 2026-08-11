@@ -1,0 +1,155 @@
+# Environnement de développement local complet pour QUAI : api + web + LDAP
+# de test.
+#
+# Lancement (depuis n'importe où, le fichier référence le repo via
+# chemins relatifs) :
+#
+#   docker compose -f deploy/compose/docker-compose.dev.yml up
+#
+# Pour reconstruire après un changement de dépendances :
+#
+#   docker compose -f deploy/compose/docker-compose.dev.yml up --build
+#
+# Pour repartir d'un annuaire LDAP vierge (les données de bootstrap ne sont
+# chargées qu'au tout premier démarrage du volume ldap_data) :
+#
+#   docker compose -f deploy/compose/docker-compose.dev.yml down -v
+#
+# NOTE : les services api/web tournent ici en mode dev (bind-mount +
+# `pnpm dev`, hot-reload), PAS via les Dockerfile.api/Dockerfile.web de
+# production (voir deploy/docker/). Le premier `pnpm install` dans chaque
+# conteneur peut prendre un moment ; les volumes *_node_modules le
+# mémorisent d'un `up` à l'autre.
+#
+# On suppose que le script `dev` de @quai/api sait rebuilder
+# packages/wasm-core si besoin (watch mode) ; sinon, lancer une fois avant :
+#   pnpm --filter @quai/wasm-core build
+
+name: quai-dev
+
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.api.dev
+    working_dir: /workspace
+    command: >
+      sh -c "corepack enable &&
+             corepack prepare pnpm@9.1.0 --activate &&
+             pnpm install --frozen-lockfile &&
+             pnpm --filter @quai/api dev"
+    volumes:
+      - ../../:/workspace
+      - api_node_modules:/workspace/node_modules
+      # Donne à l'API le même accès qu'un Portainer classique au démon Docker de l'hôte
+      # (Docker Desktop l'expose sur ce socket même sous Windows, via sa VM Linux interne).
+      # Sans ce mount, dockerode ne peut jamais joindre le démon depuis le conteneur.
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      LDAP_URL: ldap://ldap:389
+      LDAP_BIND_DN: cn=admin,dc=lecreusot,dc=fr
+      LDAP_BIND_PASSWORD: admin
+      LDAP_SEARCH_BASE: ou=people,dc=lecreusot,dc=fr
+      LDAP_SEARCH_FILTER: "(uid={{username}})"
+      LDAP_GROUP_ROLE_MAP: >-
+        {"cn=dsi-admins,ou=groupes,dc=lecreusot,dc=fr":"admin",
+        "cn=dsi-operators,ou=groupes,dc=lecreusot,dc=fr":"operator"}
+      # Clé de dev fixe (générée une fois avec `openssl rand -hex 32`) : uniquement pour que
+      # config.json reste déchiffrable d'un `docker compose up` à l'autre en local. À générer
+      # à nouveau et à sortir du compose (secret réel) pour tout déploiement partagé.
+      CONFIG_ENCRYPTION_KEY: edca4c79b65e64d809fc5ca48fa1e5fe90e2dc8605e11710c285ea9adc66196e
+    # env_file: ../../apps/api/.env.example  # décommenter si l'app fournit
+    #   un .env.example à la racine d'apps/api avec d'autres variables
+    #   (JWT_SECRET, config registries, etc.)
+    depends_on:
+      ldap:
+        condition: service_healthy
+      ldap-init:
+        condition: service_completed_successfully
+    networks:
+      - quai-dev
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  web:
+    image: node:22-slim
+    working_dir: /workspace
+    command: >
+      sh -c "corepack enable &&
+             corepack prepare pnpm@9.1.0 --activate &&
+             pnpm install --frozen-lockfile &&
+             pnpm --filter @quai/web exec vite --host 0.0.0.0"
+    volumes:
+      - ../../:/workspace
+      - web_node_modules:/workspace/node_modules
+    ports:
+      - "5173:5173"
+    environment:
+      NODE_ENV: development
+      # Doit correspondre à apps/web/.env.example (préfixe /api inclus).
+      VITE_API_BASE_URL: http://localhost:3000/api
+    depends_on:
+      - api
+    networks:
+      - quai-dev
+
+  ldap:
+    image: osixia/openldap:1.5.0
+    environment:
+      LDAP_ORGANISATION: "Ville du Creusot"
+      LDAP_DOMAIN: "lecreusot.fr"
+      LDAP_BASE_DN: "dc=lecreusot,dc=fr"
+      LDAP_ADMIN_PASSWORD: admin
+      LDAP_TLS: "false"
+    # PAS de bind-mount dans /container/service/slapd/assets/config/bootstrap/ldif/custom :
+    # l'entrypoint de cette image supprime et recrée ce dossier au démarrage (désactivation de
+    # la réplication), ce qui échoue avec "Device or resource busy" dès qu'un volume y est
+    # monté (fichier ou dossier). Les données de test sont chargées après coup par le service
+    # ldap-init ci-dessous, via ldapadd sur le réseau — aucun mount dans ce dossier interne.
+    volumes:
+      - ldap_data:/var/lib/ldap
+      - ldap_config:/etc/ldap/slapd.d
+    ports:
+      - "389:389"
+    networks:
+      - quai-dev
+    healthcheck:
+      test: ["CMD", "ldapsearch", "-x", "-H", "ldap://localhost:389", "-b", "dc=lecreusot,dc=fr", "-D", "cn=admin,dc=lecreusot,dc=fr", "-w", "admin"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # Charge les données de test (dsi-admins/dsi-operators) une fois le serveur LDAP prêt.
+  # Conteneur à usage unique : tourne, applique le LDIF, s'arrête (`|| true` pour tolérer un
+  # rerun sur un `up` où les entrées existent déjà — ldapadd renvoie une erreur dans ce cas).
+  ldap-init:
+    image: osixia/openldap:1.5.0
+    entrypoint: []
+    command: >
+      sh -c "ldapadd -x -H ldap://ldap:389 -D cn=admin,dc=lecreusot,dc=fr -w admin -f /bootstrap.ldif || true"
+    volumes:
+      - ./ldap/bootstrap.ldif:/bootstrap.ldif:ro
+    depends_on:
+      ldap:
+        condition: service_healthy
+    networks:
+      - quai-dev
+
+networks:
+  quai-dev:
+    driver: bridge
+
+volumes:
+  ldap_data:
+  ldap_config:
+  api_node_modules:
+  web_node_modules:

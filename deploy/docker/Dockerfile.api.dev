@@ -1,0 +1,51 @@
+# syntax=docker/dockerfile:1
+#
+# Image de DÉVELOPPEMENT pour @quai/api — PAS l'image de production (voir Dockerfile.api).
+# Code applicatif bind-monté depuis l'hôte (docker-compose.dev.yml), donc pas de COPY/build
+# ici : ce Dockerfile installe uniquement les outils système dont l'API a besoin à l'exécution
+# (git pour GitOps, OpenTofu/Ansible/Packer pour l'intégration infra-as-code — voir
+# apps/api/src/services/iac/*) sur node:22-slim, une fois pour toutes via le cache de layers
+# Docker plutôt que réinstallés à chaque démarrage de conteneur (c'était le cas avant, via une
+# commande shell inline dans docker-compose.dev.yml — lent et fragile).
+#
+# Reconstruire après modification : docker compose -f deploy/compose/docker-compose.dev.yml build api
+
+FROM node:22-slim
+
+ARG TARGETARCH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git \
+        curl \
+        ca-certificates \
+        unzip \
+        python3 \
+        python3-pip \
+        openssh-client \
+        gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ansible : paquet Debian trop ancien pour les modules récents — installé via pip, dans un
+# environnement dédié (--break-system-packages requis sur Debian 12+ qui protège le python
+# système par défaut ; sans risque ici, l'image ne sert qu'au conteneur dev).
+RUN pip3 install --no-cache-dir --break-system-packages ansible-core
+
+# OpenTofu : script d'installation officiel (gère l'architecture cible automatiquement).
+RUN curl -fsSL https://get.opentofu.org/install-opentofu.sh -o /tmp/install-opentofu.sh \
+    && chmod +x /tmp/install-opentofu.sh \
+    && /tmp/install-opentofu.sh --install-method standalone \
+    && rm -f /tmp/install-opentofu.sh
+
+# Packer : binaire statique HashiCorp officiel (dépôt apt HashiCorp non ajouté pour rester
+# minimal — un seul binaire à récupérer). Usage interne (mairie), pas de revente d'un service
+# hébergé concurrent : la licence BUSL de Packer ne pose pas de problème dans ce contexte.
+RUN PACKER_VERSION=1.11.2 \
+    && ARCH=$(if [ "$TARGETARCH" = "arm64" ]; then echo "arm64"; else echo "amd64"; fi) \
+    && curl -fsSL "https://releases.hashicorp.com/packer/${PACKER_VERSION}/packer_${PACKER_VERSION}_linux_${ARCH}.zip" -o /tmp/packer.zip \
+    && unzip -q /tmp/packer.zip -d /usr/local/bin \
+    && chmod +x /usr/local/bin/packer \
+    && rm -f /tmp/packer.zip
+
+RUN corepack enable && corepack prepare pnpm@9.1.0 --activate
+
+WORKDIR /workspace

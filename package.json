@@ -1,0 +1,18 @@
+{
+  "name": "quai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QUAI — console de gestion de conteneurs (registries, images, GitOps, Swarm/Kubernetes).",
+  "packageManager": "pnpm@9.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "pnpm --filter @quai/api dev",
+    "dev:web": "pnpm --filter @quai/web dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "lint": "pnpm -r lint"
+  }
+}

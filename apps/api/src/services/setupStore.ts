@@ -1,0 +1,268 @@
+/**
+ * Assistant de configuration au premier lancement (cf. ARCHITECTURE.md, chapitre
+ * "Assistant de configuration au premier lancement").
+ *
+ * Persistance JSON sur disque (CONFIG_PATH, défaut ./data/config.json en dev). Chargé une
+ * fois au premier accès puis mis en cache en mémoire process ; toute écriture (complete/
+ * reset) met à jour le cache et le fichier de façon synchrone l'un avec l'autre.
+ *
+ * Les variables d'environnement (LDAP_*, DOCKER_HOST, KUBECONFIG) restent un mécanisme de
+ * bootstrap pour un déploiement scripté : si présentes au tout premier démarrage et
+ * qu'aucun config.json n'existe encore, elles pré-remplissent la config candidate
+ * (`completed: false`) sans jamais marquer l'assistant terminé automatiquement — seul un
+ * appel explicite à POST /api/setup/complete (après test) fait passer `completed` à true.
+ *
+ * Secrets au repos : le mot de passe LDAP, le kubeconfig et les identifiants de registry
+ * sont chiffrés (AES-256-GCM, voir crypto.ts) avant d'être écrits sur disque — le fichier
+ * ne contient jamais de secret en clair. Un ancien config.json écrit avant l'introduction de
+ * ce chiffrement est migré automatiquement (déchiffré transparemment, rechiffré et réécrit)
+ * au premier accès suivant le déploiement de cette version. Aucun secret n'est journalisé
+ * par ce module, chiffré ou non.
+ */
+
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { config } from "../config.js";
+import { decryptSecret, encryptSecretIfNeeded, isEncrypted } from "./crypto.js";
+import type { RegistryKind, Role } from "../types.js";
+
+export interface SetupLdapConfig {
+  url: string;
+  bindDn: string;
+  bindPassword: string;
+  searchBase: string;
+  searchFilter: string;
+  groupRoleMap: Record<string, Role>;
+  defaultRole: Role;
+}
+
+export interface SetupDockerConfig {
+  host?: string;
+}
+
+export interface SetupKubernetesConfig {
+  // Contenu YAML brut du kubeconfig collé dans l'assistant (pas un chemin de fichier).
+  kubeconfigYaml?: string;
+}
+
+export interface SetupRegistryConfig {
+  kind: RegistryKind;
+  name: string;
+  url: string;
+  username?: string;
+  // password/token : chiffrés au repos (voir encryptSecrets/decryptRegistry ci-dessous).
+  password?: string;
+  token?: string;
+}
+
+export interface SetupConfig {
+  completed: boolean;
+  ldap?: SetupLdapConfig;
+  docker?: SetupDockerConfig;
+  kubernetes?: SetupKubernetesConfig;
+  registries?: SetupRegistryConfig[];
+}
+
+let cache: SetupConfig | null = null;
+
+function resolvedConfigPath(): string {
+  return path.resolve(config.setup.configPath);
+}
+
+/** Pré-remplissage best-effort depuis les variables d'environnement (mécanisme de bootstrap). */
+function defaultCandidate(): SetupConfig {
+  const hasLdapEnv = process.env.LDAP_URL !== undefined || process.env.LDAP_BIND_DN !== undefined;
+
+  return {
+    completed: false,
+    ...(hasLdapEnv
+      ? {
+          ldap: {
+            url: config.ldap.url,
+            bindDn: config.ldap.bindDn,
+            bindPassword: config.ldap.bindPassword,
+            searchBase: config.ldap.searchBase,
+            searchFilter: config.ldap.searchFilter,
+            groupRoleMap: config.ldap.groupRoleMap,
+            defaultRole: config.ldap.defaultRole,
+          },
+        }
+      : {}),
+    ...(config.docker.host ? { docker: { host: config.docker.host } } : {}),
+    // KUBECONFIG (env) est un chemin de fichier, pas un contenu collé : non pré-rempli.
+  };
+}
+
+/**
+ * Chiffre (si besoin) tous les champs secrets d'une config avant écriture disque.
+ * Utilise des spreads conditionnels (pas `champ: cfg.champ && {...}`) car exactOptionalPropertyTypes
+ * interdit d'assigner explicitement `undefined` à une propriété optionnelle — il faut omettre
+ * la clé plutôt que la mettre à `undefined`.
+ */
+function encryptSecrets(cfg: SetupConfig): SetupConfig {
+  return {
+    ...cfg,
+    ...(cfg.ldap
+      ? { ldap: { ...cfg.ldap, bindPassword: encryptSecretIfNeeded(cfg.ldap.bindPassword) } }
+      : {}),
+    ...(cfg.kubernetes?.kubeconfigYaml
+      ? { kubernetes: { ...cfg.kubernetes, kubeconfigYaml: encryptSecretIfNeeded(cfg.kubernetes.kubeconfigYaml) } }
+      : {}),
+    ...(cfg.registries
+      ? {
+          registries: cfg.registries.map((r) => ({
+            ...r,
+            ...(r.password !== undefined ? { password: encryptSecretIfNeeded(r.password) } : {}),
+            ...(r.token !== undefined ? { token: encryptSecretIfNeeded(r.token) } : {}),
+          })),
+        }
+      : {}),
+  };
+}
+
+/** true si la config chargée depuis le disque contient encore un secret en clair (ancien format). */
+function hasLegacyPlaintextSecret(cfg: SetupConfig): boolean {
+  if (cfg.ldap && !isEncrypted(cfg.ldap.bindPassword)) return true;
+  if (cfg.kubernetes?.kubeconfigYaml && !isEncrypted(cfg.kubernetes.kubeconfigYaml)) return true;
+  if (cfg.registries?.some((r) => (r.password && !isEncrypted(r.password)) || (r.token && !isEncrypted(r.token)))) {
+    return true;
+  }
+  return false;
+}
+
+async function readFromDisk(): Promise<SetupConfig | null> {
+  try {
+    const raw = await fs.readFile(resolvedConfigPath(), "utf-8");
+    return JSON.parse(raw) as SetupConfig;
+  } catch {
+    return null;
+  }
+}
+
+async function writeToDisk(next: SetupConfig): Promise<void> {
+  const filePath = resolvedConfigPath();
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  // mode 0o600 : lisible/écrivable uniquement par le compte qui fait tourner le process —
+  // le fichier contient des secrets chiffrés, mais autant limiter aussi l'accès au fichier.
+  await fs.writeFile(filePath, JSON.stringify(next, null, 2), { encoding: "utf-8", mode: 0o600 });
+}
+
+export async function getCurrent(): Promise<SetupConfig> {
+  if (cache) return cache;
+
+  const fromDisk = await readFromDisk();
+  if (fromDisk) {
+    if (hasLegacyPlaintextSecret(fromDisk)) {
+      // Migration transparente d'un config.json écrit avant l'introduction du chiffrement au
+      // repos : on rechiffre et on réécrit immédiatement, une seule fois.
+      const migrated = encryptSecrets(fromDisk);
+      await writeToDisk(migrated);
+      cache = migrated;
+      return cache;
+    }
+    cache = fromDisk;
+    return cache;
+  }
+
+  cache = defaultCandidate();
+  return cache;
+}
+
+export async function isSetupCompleted(): Promise<boolean> {
+  return (await getCurrent()).completed;
+}
+
+export type SetupCandidate = Omit<SetupConfig, "completed">;
+
+/** POST /api/setup/complete — persiste la config candidate (secrets chiffrés) et marque l'assistant terminé. */
+export async function completeSetup(candidate: SetupCandidate): Promise<SetupConfig> {
+  const next: SetupConfig = encryptSecrets({ ...candidate, completed: true });
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/** POST /api/setup/reset — repasse en mode assistant (les valeurs déjà saisies restent pré-remplies). */
+export async function resetSetup(): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const next: SetupConfig = { ...current, completed: false };
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/**
+ * Ajoute un registry en dehors de l'assistant (POST /api/registries) sans toucher au reste de
+ * la config (LDAP/Docker/K8s/autres registries) — utilisé par registriesStore.ts, seule source
+ * de vérité pour la liste des registries (voir ARCHITECTURE.md).
+ */
+export async function addRegistry(input: SetupRegistryConfig): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const next: SetupConfig = encryptSecrets({
+    ...current,
+    registries: [...(current.registries ?? []), input],
+  });
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/** Config LDAP effective (secret déchiffré) : celle de l'assistant si persistée, sinon les valeurs d'environnement. */
+export async function getEffectiveLdapConfig(): Promise<SetupLdapConfig> {
+  const current = await getCurrent();
+  if (!current.ldap) {
+    return {
+      url: config.ldap.url,
+      bindDn: config.ldap.bindDn,
+      bindPassword: config.ldap.bindPassword,
+      searchBase: config.ldap.searchBase,
+      searchFilter: config.ldap.searchFilter,
+      groupRoleMap: config.ldap.groupRoleMap,
+      defaultRole: config.ldap.defaultRole,
+    };
+  }
+  return { ...current.ldap, bindPassword: decryptSecret(current.ldap.bindPassword) };
+}
+
+/**
+ * Config Docker effective : celle persistée par l'assistant si présente (même un objet vide
+ * {} — "testé, hôte par défaut"), sinon DOCKER_HOST. Même principe que getEffectiveLdapConfig :
+ * sans ceci, un hôte Docker candidat saisi dans l'assistant serait sauvegardé mais jamais
+ * réellement utilisé par src/services/docker.ts. (Rien à déchiffrer ici : un hôte Docker
+ * n'est pas un secret.)
+ */
+export async function getEffectiveDockerConfig(): Promise<SetupDockerConfig> {
+  const current = await getCurrent();
+  if (current.docker) return current.docker;
+  return config.docker.host ? { host: config.docker.host } : {};
+}
+
+/** Config Kubernetes effective (kubeconfig déchiffré) : celui de l'assistant si présent, sinon KUBECONFIG (chemin de fichier). */
+export async function getEffectiveKubernetesConfig(): Promise<SetupKubernetesConfig> {
+  const current = await getCurrent();
+  if (!current.kubernetes?.kubeconfigYaml) return current.kubernetes ?? {};
+  return { ...current.kubernetes, kubeconfigYaml: decryptSecret(current.kubernetes.kubeconfigYaml) };
+}
+
+export interface EffectiveRegistryCredentials {
+  username?: string;
+  password?: string;
+  token?: string;
+}
+
+/**
+ * Identifiants effectifs (déchiffrés) du premier registry persisté correspondant à `kind`,
+ * ou `null` si aucun n'est configuré via l'assistant — dans ce cas les clients registries
+ * (src/services/registries/*) retombent sur les variables d'environnement globales
+ * (DOCKERHUB_TOKEN, GHCR_TOKEN, GITLAB_TOKEN).
+ */
+export async function getEffectiveRegistryCredentials(kind: RegistryKind): Promise<EffectiveRegistryCredentials | null> {
+  const current = await getCurrent();
+  const match = current.registries?.find((r) => r.kind === kind);
+  if (!match) return null;
+  return {
+    ...(match.username !== undefined ? { username: match.username } : {}),
+    ...(match.password !== undefined ? { password: decryptSecret(match.password) } : {}),
+    ...(match.token !== undefined ? { token: decryptSecret(match.token) } : {}),
+  };
+}

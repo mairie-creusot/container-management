@@ -1,0 +1,625 @@
+/**
+ * Intégration Docker Engine / Swarm via dockerode.
+ *
+ * IMPORTANT — repli de développement : si le démon Docker n'est pas joignable (pas de
+ * DOCKER_HOST configuré et pas de socket par défaut disponible, timeout, erreur réseau...),
+ * ce module retombe proprement sur le jeu de données de démonstration en mémoire
+ * (src/services/demoData.ts). Ce n'est PAS un mock permanent : dès qu'un démon Docker
+ * répond, les données réelles sont utilisées.
+ */
+
+import Docker from "dockerode";
+import type { ContainerInfo } from "dockerode";
+import { demoStore } from "./demoData.js";
+import { getEffectiveDockerConfig } from "./setupStore.js";
+import { withTimeout } from "../utils/async.js";
+import type {
+  ClusterNode,
+  ContainerDetail,
+  ContainerMount,
+  ContainerPortMapping,
+  ContainerRef,
+  DockerHostInfo,
+  DockerNetwork,
+  DockerVolume,
+  Environment,
+} from "../types.js";
+
+const PING_TIMEOUT_MS = 2000;
+const STATS_TIMEOUT_MS = 2000;
+
+function buildDockerClient(host: string | undefined): Docker {
+  if (host) {
+    // dockerode/docker-modem parses host/port/protocol from a DOCKER_HOST-style URL when
+    // passed explicitly; simplest robust path is to set it on process.env for the duration
+    // of the client construction and let the Docker constructor read it (it does not persist
+    // this globally — the previous value, if any, is restored right after).
+    const previousHost = process.env.DOCKER_HOST;
+    process.env.DOCKER_HOST = host;
+    try {
+      return new Docker();
+    } finally {
+      if (previousHost === undefined) delete process.env.DOCKER_HOST;
+      else process.env.DOCKER_HOST = previousHost;
+    }
+  }
+  if (process.platform === "win32") {
+    return new Docker({ socketPath: "//./pipe/docker_engine" });
+  }
+  return new Docker({ socketPath: "/var/run/docker.sock" });
+}
+
+/**
+ * Construit un client à partir de la config effective (assistant si persisté, sinon
+ * DOCKER_HOST). Pas de cache : dockerode ne maintient pas de connexion persistante tant
+ * qu'on n'appelle pas de méthode, donc reconstruire le client à chaque appel est bon marché
+ * et évite d'avoir à invalider un cache quand la config change (via l'assistant, un reset...).
+ */
+export async function getClient(): Promise<Docker> {
+  const effective = await getEffectiveDockerConfig();
+  return buildDockerClient(effective.host);
+}
+
+export async function isDockerReachable(docker: Docker): Promise<boolean> {
+  try {
+    await withTimeout(docker.ping(), PING_TIMEOUT_MS, "docker ping");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Utilisé par l'assistant de configuration (POST /api/setup/test/docker) : teste un hôte
+ * Docker candidat (pas encore persisté) sans jamais modifier l'état applicatif ni le
+ * client (reconstruit à chaque appel, voir getClient()).
+ */
+export async function testDockerConnection(host?: string): Promise<{ ok: boolean; message: string }> {
+  const previousHost = process.env.DOCKER_HOST;
+  try {
+    if (host) process.env.DOCKER_HOST = host;
+    else delete process.env.DOCKER_HOST;
+
+    const candidateClient =
+      host || process.platform !== "win32"
+        ? new Docker()
+        : new Docker({ socketPath: "//./pipe/docker_engine" });
+
+    const reachable = await isDockerReachable(candidateClient);
+    return reachable
+      ? { ok: true, message: "Docker daemon is reachable" }
+      : { ok: false, message: "Docker daemon did not respond (ping timed out or connection refused)" };
+  } finally {
+    if (previousHost === undefined) delete process.env.DOCKER_HOST;
+    else process.env.DOCKER_HOST = previousHost;
+  }
+}
+
+export interface LocalDockerImage {
+  /** Id de couche Docker (sha256:...) — plusieurs tags peuvent partager le même id. */
+  id: string;
+  /** Nom du repo sans le tag, ex: "nginx", "ghcr.io/ville-lecreusot/portail-citoyen". */
+  name: string;
+  tag: string;
+  digest: string;
+  sizeBytes: number;
+}
+
+/**
+ * Images Docker réellement présentes sur l'hôte (équivalent de `docker images`) — PAS le
+ * jeu de démonstration. Utilisé par src/services/images.ts pour bâtir la liste "Images" à
+ * partir de ce qui est vraiment sur la machine plutôt que d'un jeu figé.
+ */
+export async function getLocalDockerImages(): Promise<LocalDockerImage[]> {
+  const docker = await getClient();
+  if (!(await isDockerReachable(docker))) return [];
+
+  try {
+    const images = await docker.listImages();
+    const results: LocalDockerImage[] = [];
+    for (const image of images) {
+      const repoTags = (image.RepoTags ?? []).filter((t) => t !== "<none>:<none>");
+      if (repoTags.length === 0) continue; // couches intermédiaires/sans tag : pas des images "suivables"
+      for (const repoTag of repoTags) {
+        const separator = repoTag.lastIndexOf(":");
+        results.push({
+          id: image.Id,
+          name: repoTag.slice(0, separator),
+          tag: repoTag.slice(separator + 1),
+          digest: image.RepoDigests?.[0] ?? image.Id,
+          sizeBytes: image.Size,
+        });
+      }
+    }
+    return results;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Tire une image depuis son registry (équivalent `docker pull`), en suivant le flux de
+ * progression jusqu'à la fin. Lève une erreur explicite si le démon Docker n'est pas
+ * joignable ou si le pull échoue (tag inexistant, dépôt privé sans authentification...).
+ */
+export async function pullImage(reference: string): Promise<void> {
+  const docker = await getClient();
+  if (!(await isDockerReachable(docker))) {
+    throw new Error("Docker daemon is not reachable");
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    docker.pull(reference, (err: Error | null, stream?: NodeJS.ReadableStream) => {
+      if (err || !stream) {
+        reject(err ?? new Error("docker.pull returned no stream"));
+        return;
+      }
+      docker.modem.followProgress(stream, (progressErr: Error | null) => {
+        if (progressErr) reject(progressErr);
+        else resolve();
+      });
+    });
+  });
+}
+
+/**
+ * Supprime une image locale (équivalent `docker rmi <reference>`). `reference` peut être un
+ * "repo:tag" ou un ID d'image. Lève si un conteneur (même arrêté) l'utilise encore, sauf
+ * `force: true`.
+ */
+export async function removeDockerImage(reference: string, force = false): Promise<void> {
+  const docker = await requireReachableClient();
+  await docker.getImage(reference).remove({ force });
+}
+
+export interface CreateContainerOptions {
+  image: string;
+  /** Optionnel : nom Docker (lettres/chiffres/./-/_) ; laissé à Docker (nom aléatoire) si omis. */
+  name?: string;
+  /** Mappings de ports façon CLI, ex: ["8080:80", "127.0.0.1:5432:5432/tcp"]. */
+  ports?: string[];
+  /** Variables d'environnement façon CLI, ex: ["POSTGRES_PASSWORD=secret"]. */
+  env?: string[];
+  /** Montages façon `docker run -v`, ex: ["pgdata:/var/lib/postgresql/data", "/host/path:/container/path:ro"]. */
+  volumes?: string[];
+  /** Réseau Docker à attacher (doit déjà exister — voir createNetwork ci-dessous) ; par défaut "bridge". */
+  network?: string;
+}
+
+/** Parse un mapping de port façon `docker run -p` : [host_ip:]host_port:container_port[/proto]. */
+function parsePortMapping(mapping: string): { hostIp?: string; hostPort: string; containerPort: string; proto: string } {
+  const [portsPart, proto = "tcp"] = mapping.split("/");
+  const segments = portsPart!.split(":");
+  if (segments.length === 2) {
+    return { hostPort: segments[0]!, containerPort: segments[1]!, proto };
+  }
+  if (segments.length === 3) {
+    return { hostIp: segments[0]!, hostPort: segments[1]!, containerPort: segments[2]!, proto };
+  }
+  throw new Error(`Invalid port mapping "${mapping}" (expected "host:container" or "ip:host:container")`);
+}
+
+/**
+ * Parse un montage façon `docker run -v source:target[:ro]`. `source` est soit un nom de
+ * volume Docker nommé, soit un chemin hôte absolu (bind mount) — dockerode/l'API Engine ne
+ * distinguent pas les deux dans `HostConfig.Binds`, le démon tranche lui-même à la création.
+ */
+function parseVolumeMapping(mapping: string): { source: string; target: string; readOnly: boolean } {
+  const segments = mapping.split(":");
+  if (segments.length < 2 || segments.length > 3) {
+    throw new Error(`Invalid volume mapping "${mapping}" (expected "source:target" or "source:target:ro")`);
+  }
+  const [source, target, mode] = segments;
+  return { source: source!, target: target!, readOnly: mode === "ro" };
+}
+
+/**
+ * Crée puis démarre un conteneur (équivalent `docker run -d [--name] [-p ...] <image>`).
+ * L'image doit déjà être présente localement (faire un pull d'abord si besoin — voir pullImage
+ * ci-dessus) ; dockerode ne la tire pas automatiquement.
+ */
+export async function createAndStartContainer(options: CreateContainerOptions): Promise<{ id: string }> {
+  const docker = await getClient();
+  if (!(await isDockerReachable(docker))) {
+    throw new Error("Docker daemon is not reachable");
+  }
+
+  const exposedPorts: Record<string, Record<string, never>> = {};
+  const portBindings: Record<string, Array<{ HostIp?: string; HostPort: string }>> = {};
+  for (const mapping of options.ports ?? []) {
+    const { hostIp, hostPort, containerPort, proto } = parsePortMapping(mapping);
+    const key = `${containerPort}/${proto}`;
+    exposedPorts[key] = {};
+    portBindings[key] = [{ ...(hostIp ? { HostIp: hostIp } : {}), HostPort: hostPort }];
+  }
+
+  const binds = (options.volumes ?? []).map((mapping) => {
+    const { source, target, readOnly } = parseVolumeMapping(mapping);
+    return `${source}:${target}${readOnly ? ":ro" : ""}`;
+  });
+
+  const container = await docker.createContainer({
+    Image: options.image,
+    ...(options.name ? { name: options.name } : {}),
+    ...(options.env && options.env.length > 0 ? { Env: options.env } : {}),
+    ExposedPorts: exposedPorts,
+    HostConfig: {
+      PortBindings: portBindings,
+      Binds: binds,
+      NetworkMode: options.network || "bridge",
+    },
+  });
+  await container.start();
+  return { id: container.id };
+}
+
+/** Calcule un cpuPercent/memBytes approximatif à partir d'un snapshot unique de stats. */
+async function readContainerUsage(docker: Docker, containerId: string): Promise<{ cpuPercent: number; memBytes: number }> {
+  try {
+    const container = docker.getContainer(containerId);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stats: any = await withTimeout(container.stats({ stream: false }), STATS_TIMEOUT_MS, "docker stats");
+
+    const cpuDelta = (stats.cpu_stats?.cpu_usage?.total_usage ?? 0) - (stats.precpu_stats?.cpu_usage?.total_usage ?? 0);
+    const systemDelta = (stats.cpu_stats?.system_cpu_usage ?? 0) - (stats.precpu_stats?.system_cpu_usage ?? 0);
+    const onlineCpus: number = stats.cpu_stats?.online_cpus ?? stats.cpu_stats?.cpu_usage?.percpu_usage?.length ?? 1;
+    const cpuPercent = systemDelta > 0 && cpuDelta > 0 ? (cpuDelta / systemDelta) * onlineCpus * 100 : 0;
+    const memBytes: number = stats.memory_stats?.usage ?? 0;
+
+    return { cpuPercent: Math.round(cpuPercent * 10) / 10, memBytes };
+  } catch {
+    return { cpuPercent: 0, memBytes: 0 };
+  }
+}
+
+function mapDockerState(state: string): ContainerRef["state"] {
+  if (state === "running") return "running";
+  if (state === "restarting") return "restarting";
+  return "stopped";
+}
+
+function primaryContainerName(container: ContainerInfo): string {
+  const name = container.Names?.[0] ?? container.Id.slice(0, 12);
+  return name.startsWith("/") ? name.slice(1) : name;
+}
+
+/**
+ * Liste les conteneurs Docker/Swarm réels, avec repli sur les données de démonstration
+ * si le démon est injoignable. `environmentLabel`/`nodeLabel` par défaut sont utilisés
+ * quand aucune information Swarm plus précise n'est disponible (mode standalone/compose).
+ */
+export async function getDockerContainers(): Promise<ContainerRef[]> {
+  const docker = await getClient();
+  if (!(await isDockerReachable(docker))) {
+    return demoStore.containers.filter((c) => c.environment === "Prod" || c.environment === "Dev local");
+  }
+
+  try {
+    const info = await docker.info();
+    const isSwarmActive = info.Swarm?.LocalNodeState === "active";
+    const environmentLabel = isSwarmActive ? "Prod" : "Dev local";
+    const nodeLabel = isSwarmActive ? "swarm-node" : "dev-local-1";
+
+    const containers = await docker.listContainers({ all: true });
+    return await Promise.all(
+      containers.map(async (c): Promise<ContainerRef> => {
+        const usage = await readContainerUsage(docker, c.Id);
+        return {
+          id: c.Id,
+          name: primaryContainerName(c),
+          image: c.Image,
+          environment: environmentLabel,
+          node: c.Labels?.["com.docker.swarm.node.id"] ?? nodeLabel,
+          state: mapDockerState(c.State),
+          cpuPercent: usage.cpuPercent,
+          memBytes: usage.memBytes,
+        };
+      }),
+    );
+  } catch {
+    return demoStore.containers.filter((c) => c.environment === "Prod" || c.environment === "Dev local");
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// Cycle de vie d'un conteneur existant (start/stop/restart/remove) — équivalent `docker
+// {start,stop,restart,rm} <id>`. Toutes lèvent si le démon est injoignable ou si l'appel
+// dockerode échoue (conteneur déjà dans l'état demandé, en cours d'utilisation...) ; les
+// routes appelantes traduisent en 502 avec le message d'erreur.
+// ---------------------------------------------------------------------------------------
+
+async function requireReachableClient(): Promise<Docker> {
+  const docker = await getClient();
+  if (!(await isDockerReachable(docker))) {
+    throw new Error("Docker daemon is not reachable");
+  }
+  return docker;
+}
+
+export async function startContainer(id: string): Promise<void> {
+  const docker = await requireReachableClient();
+  await docker.getContainer(id).start();
+}
+
+export async function stopContainer(id: string): Promise<void> {
+  const docker = await requireReachableClient();
+  await docker.getContainer(id).stop();
+}
+
+export async function restartContainer(id: string): Promise<void> {
+  const docker = await requireReachableClient();
+  await docker.getContainer(id).restart();
+}
+
+export async function removeContainer(id: string, force: boolean): Promise<void> {
+  const docker = await requireReachableClient();
+  await docker.getContainer(id).remove({ force });
+}
+
+/** Détail complet d'un conteneur (équivalent `docker inspect`) — chargé à la demande par l'Inspector. */
+export async function inspectDockerContainer(id: string): Promise<ContainerDetail | null> {
+  const docker = await getClient();
+  if (!(await isDockerReachable(docker))) return null;
+
+  try {
+    const container = docker.getContainer(id);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const data: any = await container.inspect();
+    const usage = await readContainerUsage(docker, id);
+    const info = await docker.info();
+    const isSwarmActive = info.Swarm?.LocalNodeState === "active";
+
+    const ports: ContainerPortMapping[] = Object.entries(data.NetworkSettings?.Ports ?? {}).flatMap(
+      ([key, bindings]): ContainerPortMapping[] => {
+        const [containerPort, proto] = key.split("/");
+        const list = bindings as Array<{ HostIp: string; HostPort: string }> | null;
+        if (!list || list.length === 0) return [{ containerPort: containerPort!, hostPort: null, proto: proto ?? "tcp" }];
+        return list.map((b) => ({ containerPort: containerPort!, hostPort: b.HostPort, proto: proto ?? "tcp" }));
+      },
+    );
+
+    const mounts: ContainerMount[] = (data.Mounts ?? []).map(
+      (m: { Source: string; Destination: string; Type: string; RW: boolean }) => ({
+        source: m.Source,
+        destination: m.Destination,
+        type: m.Type,
+        readOnly: !m.RW,
+      }),
+    );
+
+    return {
+      id: data.Id,
+      fullId: data.Id,
+      name: data.Name?.startsWith("/") ? data.Name.slice(1) : (data.Name ?? id),
+      image: data.Config?.Image ?? "",
+      environment: isSwarmActive ? "Prod" : "Dev local",
+      node: data.Config?.Labels?.["com.docker.swarm.node.id"] ?? (isSwarmActive ? "swarm-node" : "dev-local-1"),
+      state: mapDockerState(data.State?.Status ?? "stopped"),
+      cpuPercent: usage.cpuPercent,
+      memBytes: usage.memBytes,
+      createdAt: data.Created ?? "",
+      command: Array.isArray(data.Config?.Cmd) ? data.Config.Cmd.join(" ") : "",
+      restartPolicy: data.HostConfig?.RestartPolicy?.Name || "no",
+      networkMode: data.HostConfig?.NetworkMode ?? "default",
+      ports,
+      mounts,
+      env: data.Config?.Env ?? [],
+      labels: data.Config?.Labels ?? {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// Volumes (équivalent `docker volume ls/create/rm`).
+// ---------------------------------------------------------------------------------------
+
+export async function listVolumes(): Promise<DockerVolume[]> {
+  const docker = await getClient();
+  if (!(await isDockerReachable(docker))) return [];
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const [{ Volumes }, containers]: [any, ContainerInfo[]] = await Promise.all([
+      docker.listVolumes(),
+      docker.listContainers({ all: true }),
+    ]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return (Volumes ?? []).map((v: any) => ({
+      name: v.Name,
+      driver: v.Driver,
+      mountpoint: v.Mountpoint,
+      createdAt: v.CreatedAt ?? null,
+      labels: v.Labels ?? {},
+      scope: v.Scope ?? "local",
+      inUseBy: containers.filter((c) => c.Mounts?.some((m) => m.Name === v.Name)).length,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export async function createVolume(name: string): Promise<DockerVolume> {
+  const docker = await requireReachableClient();
+  // dockerode: createVolume() renvoie en réalité un handle avec .inspect() à l'exécution
+  // (vérifié manuellement) même si @types/dockerode déclare VolumeCreateResponse sans cette
+  // méthode — d'où le `any` plutôt qu'un mauvais typage qui masquerait une vraie régression.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handle: any = await docker.createVolume({ Name: name });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data: any = await handle.inspect();
+  return {
+    name: data.Name,
+    driver: data.Driver,
+    mountpoint: data.Mountpoint,
+    createdAt: data.CreatedAt ?? null,
+    labels: data.Labels ?? {},
+    scope: data.Scope ?? "local",
+    inUseBy: 0,
+  };
+}
+
+export async function removeVolume(name: string): Promise<void> {
+  const docker = await requireReachableClient();
+  await docker.getVolume(name).remove();
+}
+
+// ---------------------------------------------------------------------------------------
+// Networks (équivalent `docker network ls/create/rm`).
+// ---------------------------------------------------------------------------------------
+
+export async function listNetworks(): Promise<DockerNetwork[]> {
+  const docker = await getClient();
+  if (!(await isDockerReachable(docker))) return [];
+
+  try {
+    const networks = await docker.listNetworks();
+    return networks.map((n) => ({
+      id: n.Id,
+      name: n.Name,
+      driver: n.Driver,
+      scope: n.Scope,
+      containerCount: n.Containers ? Object.keys(n.Containers).length : 0,
+      createdAt: n.Created ?? null,
+      internal: n.Internal ?? false,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export async function createNetwork(name: string, driver: string): Promise<DockerNetwork> {
+  const docker = await requireReachableClient();
+  const network = await docker.createNetwork({ Name: name, Driver: driver });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const data: any = await network.inspect();
+  return {
+    id: data.Id,
+    name: data.Name,
+    driver: data.Driver,
+    scope: data.Scope,
+    containerCount: 0,
+    createdAt: data.Created ?? null,
+    internal: data.Internal ?? false,
+  };
+}
+
+export async function removeNetwork(id: string): Promise<void> {
+  const docker = await requireReachableClient();
+  await docker.getNetwork(id).remove();
+}
+
+// ---------------------------------------------------------------------------------------
+// Infos hôte du démon (équivalent `docker info`) — CPU/RAM totaux, version, socket, pour la
+// carte "environnement" façon Portainer sur la page Environnements.
+// ---------------------------------------------------------------------------------------
+
+export async function getDockerHostInfo(): Promise<DockerHostInfo | null> {
+  const docker = await getClient();
+  if (!(await isDockerReachable(docker))) return null;
+
+  try {
+    const [info, version, volumes] = await Promise.all([docker.info(), docker.version(), docker.listVolumes()]);
+    const effective = await getEffectiveDockerConfig();
+    return {
+      serverVersion: version.Version ?? info.ServerVersion ?? "unknown",
+      apiVersion: version.ApiVersion ?? "unknown",
+      os: info.OperatingSystem ?? "unknown",
+      kernelVersion: info.KernelVersion ?? "unknown",
+      architecture: info.Architecture ?? "unknown",
+      cpus: info.NCPU ?? 0,
+      totalMemBytes: info.MemTotal ?? 0,
+      containersRunning: info.ContainersRunning ?? 0,
+      containersStopped: info.ContainersStopped ?? 0,
+      imagesCount: info.Images ?? 0,
+      storageDriver: info.Driver ?? "unknown",
+      dockerRootDir: info.DockerRootDir ?? "",
+      endpoint: effective.host ?? (process.platform === "win32" ? "npipe:////./pipe/docker_engine" : "unix:///var/run/docker.sock"),
+      swarmActive: info.Swarm?.LocalNodeState === "active",
+      volumesCount: (volumes.Volumes ?? []).length,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Liste les environnements pilotés par Docker (Swarm en Prod, Compose/standalone en Dev
+ * local). L'environnement Kubernetes est géré séparément par src/services/kubernetes.ts.
+ */
+export async function getDockerEnvironments(): Promise<Environment[]> {
+  const docker = await getClient();
+  if (!(await isDockerReachable(docker))) {
+    return demoStore.environments.filter((e) => e.orchestrator === "swarm" || e.orchestrator === "compose");
+  }
+
+  try {
+    const info = await docker.info();
+    const isSwarmActive = info.Swarm?.LocalNodeState === "active";
+    const containers = await docker.listContainers({ all: true });
+    const hostInfo = await getDockerHostInfo();
+
+    if (isSwarmActive) {
+      const swarmNodes = await docker.listNodes();
+      const nodes: ClusterNode[] = swarmNodes.map((n) => {
+        const nodeContainerCount = containers.filter(
+          (c) => c.Labels?.["com.docker.swarm.node.id"] === n.ID,
+        ).length;
+        const state = n.Status?.State === "ready" ? "ok" : "warn";
+        return {
+          id: n.ID,
+          environmentId: "prod-swarm",
+          role: n.Spec?.Role ?? "worker",
+          cpuPercent: 0, // dockerode ne fournit pas d'agrégat CPU par nœud Swarm sans stats par conteneur
+          memPercent: 0,
+          status: state,
+          containerCount: nodeContainerCount,
+        };
+      });
+      return [
+        {
+          id: "prod-swarm",
+          name: "Prod",
+          orchestrator: "swarm",
+          status: nodes.every((n) => n.status === "ok") ? "ok" : "warn",
+          nodes,
+          ...(hostInfo ? { hostInfo } : {}),
+        },
+      ];
+    }
+
+    // Agrégat réel (pas 0 en dur) : somme du CPU/mem de chaque conteneur en cours d'exécution,
+    // rapportée à la RAM totale de l'hôte (hostInfo). cpuPercent peut légitimement dépasser
+    // 100 (plusieurs conteneurs saturant plusieurs cœurs) — même convention que `docker stats` ;
+    // le graphique (AreaChart) clampe déjà l'affichage à son échelle 0-100.
+    const runningContainers = await Promise.all(
+      containers.filter((c) => c.State === "running").map((c) => readContainerUsage(docker, c.Id)),
+    );
+    const totalMemBytes = runningContainers.reduce((sum, c) => sum + c.memBytes, 0);
+    const totalCpuPercent = runningContainers.reduce((sum, c) => sum + c.cpuPercent, 0);
+    const memPercent = hostInfo?.totalMemBytes ? Math.min(100, (totalMemBytes / hostInfo.totalMemBytes) * 100) : 0;
+
+    const node: ClusterNode = {
+      id: "dev-local-1",
+      environmentId: "dev-compose",
+      role: "standalone",
+      cpuPercent: Math.round(Math.min(100, totalCpuPercent) * 10) / 10,
+      memPercent: Math.round(memPercent * 10) / 10,
+      status: "ok",
+      containerCount: containers.length,
+    };
+    return [
+      {
+        id: "dev-compose",
+        name: "Dev local",
+        orchestrator: "compose",
+        status: "ok",
+        nodes: [node],
+        ...(hostInfo ? { hostInfo } : {}),
+      },
+    ];
+  } catch {
+    return demoStore.environments.filter((e) => e.orchestrator === "swarm" || e.orchestrator === "compose");
+  }
+}

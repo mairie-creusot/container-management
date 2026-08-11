@@ -1,0 +1,45 @@
+# Données de test pour l'environnement de dev QUAI (docker-compose.dev.yml).
+# Chargées par le service ldap-init via `ldapadd` après démarrage du serveur LDAP —
+# PAS montées directement dans le conteneur openldap (voir commentaire dans le compose).
+#
+# Cohérent avec LDAP_SEARCH_BASE=ou=people,dc=lecreusot,dc=fr, LDAP_SEARCH_FILTER=(uid={{username}})
+# et LDAP_GROUP_ROLE_MAP de docker-compose.dev.yml.
+#
+# Comptes de test : uid=ybanas / mot de passe "admin1234" (groupe dsi-admins -> rôle admin)
+#                    uid=jdupont / mot de passe "operator1234" (groupe dsi-operators -> rôle operator)
+
+dn: ou=people,dc=lecreusot,dc=fr
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groupes,dc=lecreusot,dc=fr
+objectClass: organizationalUnit
+ou: groupes
+
+dn: uid=ybanas,ou=people,dc=lecreusot,dc=fr
+objectClass: inetOrgPerson
+uid: ybanas
+cn: Yann Banas
+sn: Banas
+displayName: Yann Banas
+mail: yannbanas@gmail.com
+userPassword: admin1234
+
+dn: uid=jdupont,ou=people,dc=lecreusot,dc=fr
+objectClass: inetOrgPerson
+uid: jdupont
+cn: Jean Dupont
+sn: Dupont
+displayName: Jean Dupont
+mail: jdupont@lecreusot.fr
+userPassword: operator1234
+
+dn: cn=dsi-admins,ou=groupes,dc=lecreusot,dc=fr
+objectClass: groupOfNames
+cn: dsi-admins
+member: uid=ybanas,ou=people,dc=lecreusot,dc=fr
+
+dn: cn=dsi-operators,ou=groupes,dc=lecreusot,dc=fr
+objectClass: groupOfNames
+cn: dsi-operators
+member: uid=jdupont,ou=people,dc=lecreusot,dc=fr

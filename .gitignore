@@ -1,0 +1,23 @@
+node_modules/
+.pnpm-store/
+dist/
+build/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+
+# données de dev locales (config assistant, clone GitOps)
+apps/api/data/
+data/
+
+# rust / wasm-pack
+target/
+packages/wasm-core/pkg/
+
+# editors
+.vscode/*
+!.vscode/extensions.json
+.idea/

@@ -1,0 +1,57 @@
+# Remplacer ghcr.io/OWNER/quai-api par le chemin réel de l'image publiée
+# par .github/workflows/build.yml (ghcr.io/<repository_owner>/quai-api).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: quai-api
+  namespace: quai
+  labels:
+    app: quai-api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: quai-api
+  template:
+    metadata:
+      labels:
+        app: quai-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+        - name: api
+          image: ghcr.io/OWNER/quai-api:latest # TODO: remplacer OWNER
+          ports:
+            - name: http
+              containerPort: 3000
+          envFrom:
+            - configMapRef:
+                name: quai-api-config
+            - secretRef:
+                name: quai-api-secrets
+          # NOTE : suppose une route GET /health exposée par @quai/api
+          # (à confirmer/implémenter côté backend — non inventée ici).
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false # Fastify peut nécessiter d'écrire des fichiers temporaires

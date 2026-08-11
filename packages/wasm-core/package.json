@@ -1,0 +1,17 @@
+{
+  "name": "@quai/wasm-core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QUAI — moteur de diff de manifestes YAML (Rust/WASM) pour la détection de dérive GitOps.",
+  "type": "module",
+  "main": "./index.ts",
+  "types": "./index.ts",
+  "files": [
+    "index.ts",
+    "pkg"
+  ],
+  "scripts": {
+    "build": "wasm-pack build --target bundler --out-dir pkg",
+    "test": "cargo test"
+  }
+}

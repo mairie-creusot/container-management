@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1
+#
+# Image de production pour @quai/web (React/Redux Toolkit, Vite).
+#
+# Contexte de build : la RACINE DU MONOREPO (pas deploy/docker/), pour les
+# mêmes raisons que Dockerfile.api (résolution du workspace pnpm).
+#
+# Construire depuis la racine du repo :
+#   docker build -f deploy/docker/Dockerfile.web -t quai-web .
+#
+# ---------------------------------------------------------------------------
+# Stage 1 : install workspace pnpm + build Vite de @quai/web
+# ---------------------------------------------------------------------------
+FROM node:22-slim AS build
+
+RUN corepack enable \
+    && corepack prepare pnpm@9.1.0 --activate
+
+WORKDIR /workspace
+
+COPY . .
+
+RUN pnpm install --frozen-lockfile
+
+# "..." inclut les dépendances de workspace de @quai/web. ARCHITECTURE.md
+# évoque un usage potentiel (non confirmé) de @quai/wasm-core côté web pour
+# un aperçu de diff instantané ; si ce cas se concrétise, ce Dockerfile
+# devra gagner un stage rust-builder identique à celui de Dockerfile.api
+# pour fournir packages/wasm-core/pkg avant ce build.
+RUN pnpm --filter @quai/web... build
+
+# Résultat : /workspace/apps/web/dist (assets statiques, noms hashés)
+
+# ---------------------------------------------------------------------------
+# Stage 2 : image finale nginx minimale
+# ---------------------------------------------------------------------------
+FROM nginx:1.27-alpine AS runtime
+
+# Choix : nginx écoute sur le port 8080 en tant qu'utilisateur non-root
+# "nginx" (déjà présent dans l'image officielle, uid 101), plutôt que sur le
+# port 80 en root. Cela évite CAP_NET_BIND_SERVICE et s'aligne avec les
+# contraintes runAsNonRoot habituelles des orchestrateurs (K8s/Swarm).
+COPY deploy/docker/nginx.web.conf /etc/nginx/conf.d/default.conf
+
+COPY --from=build /workspace/apps/web/dist /usr/share/nginx/html
+
+# Permissions + directive "user" : l'image nginx:alpine officielle démarre
+# en root par défaut pour pouvoir écrire dans /var/cache/nginx, /var/run,
+# etc. On ajuste tout pour pouvoir tourner en "USER nginx".
+RUN sed -i '/^user  *nginx;/d' /etc/nginx/nginx.conf \
+    && touch /var/run/nginx.pid \
+    && chown -R nginx:nginx \
+        /usr/share/nginx/html \
+        /var/cache/nginx \
+        /var/log/nginx \
+        /etc/nginx/conf.d \
+        /var/run/nginx.pid
+
+USER nginx
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:8080/ >/dev/null || exit 1
+
+CMD ["nginx", "-g", "daemon off;"]

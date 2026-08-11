@@ -1,0 +1,96 @@
+# syntax=docker/dockerfile:1
+#
+# Image de production pour @quai/api (Fastify, TypeScript).
+#
+# Contexte de build : la RACINE DU MONOREPO (pas deploy/docker/), car pnpm
+# workspace a besoin de voir apps/*, packages/* et les fichiers de workspace
+# à la racine pour résoudre les dépendances internes (@quai/wasm-core).
+#
+# Construire depuis la racine du repo :
+#   docker build -f deploy/docker/Dockerfile.api -t quai-api .
+#
+# ---------------------------------------------------------------------------
+# Stage 1 : compilation du crate Rust packages/wasm-core en WebAssembly
+# ---------------------------------------------------------------------------
+FROM rust:1-slim AS rust-builder
+
+# curl/ca-certificates/pkg-config nécessaires pour installer wasm-pack et
+# compiler les éventuelles dépendances natives du crate.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        ca-certificates \
+        pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+WORKDIR /workspace/packages/wasm-core
+
+# On ne copie que le crate : ce stage n'a besoin de rien d'autre du monorepo.
+COPY packages/wasm-core/ ./
+
+# NOTE: --target nodejs car le binding généré est consommé côté serveur par
+# @quai/api (Node.js), pas par un bundler navigateur. Si l'équipe wasm-core
+# expose son propre script `pnpm build` (ex: `wasm-pack build --target ...`
+# avec des flags différents), remplacer la ligne ci-dessous par cet appel
+# pour rester la seule source de vérité sur les flags de build wasm-pack.
+RUN wasm-pack build --release --target nodejs --out-dir pkg
+
+# Résultat exploité par le stage suivant : /workspace/packages/wasm-core/pkg
+
+# ---------------------------------------------------------------------------
+# Stage 2 : install workspace pnpm + build TypeScript de @quai/api
+# ---------------------------------------------------------------------------
+FROM node:22-slim AS build
+
+RUN corepack enable \
+    && corepack prepare pnpm@9.1.0 --activate
+
+WORKDIR /workspace
+
+# Le workspace complet est nécessaire : pnpm doit voir tous les
+# package.json (apps/*, packages/*) pour résoudre les dépendances internes
+# du monorepo, même si seul @quai/api est construit ici.
+COPY . .
+
+# On remplace le contenu de packages/wasm-core/pkg (absent du dépôt, généré)
+# par le binding compilé au stage précédent.
+COPY --from=rust-builder /workspace/packages/wasm-core/pkg ./packages/wasm-core/pkg
+
+RUN pnpm install --frozen-lockfile
+
+# "..." inclut les dépendances de workspace de @quai/api (dont
+# @quai/wasm-core) dans l'ordre de build correct.
+RUN pnpm --filter @quai/api... build
+
+# Bundle de déploiement autonome : ne garde que les deps de prod de
+# @quai/api, avec les dépendances de workspace "dé-symlinkées" (fichiers
+# réels), ce qui simplifie beaucoup le stage final ci-dessous.
+RUN pnpm --filter @quai/api deploy --prod /workspace/out/api
+
+# ---------------------------------------------------------------------------
+# Stage 3 : image finale minimale
+# ---------------------------------------------------------------------------
+FROM node:22-slim AS runtime
+
+ENV NODE_ENV=production \
+    PORT=3000
+
+WORKDIR /app
+
+# node:22-slim fournit déjà un utilisateur non-root "node" (uid 1000) prêt
+# à l'emploi — inutile d'en recréer un.
+COPY --from=build --chown=node:node /workspace/out/api/ ./
+
+USER node
+
+EXPOSE 3000
+
+# NOTE pour l'agent backend : cette healthcheck suppose l'existence d'une
+# route GET /health répondant 200 quand le service est opérationnel. Cette
+# route n'est PAS implémentée ici — à exposer côté @quai/api (hors périmètre
+# de ce Dockerfile).
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||3000)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["node", "dist/index.js"]

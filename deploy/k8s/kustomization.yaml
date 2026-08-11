@@ -1,0 +1,14 @@
+# Permet `kubectl apply -k deploy/k8s/` pour appliquer l'ensemble des
+# manifestes d'exemple en une seule commande.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: quai
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - secret.yaml
+  - api-deployment.yaml
+  - api-service.yaml
+  - web-deployment.yaml
+  - web-service.yaml
+  - ingress.yaml

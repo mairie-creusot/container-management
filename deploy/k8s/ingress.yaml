@@ -1,0 +1,36 @@
+# Ingress d'exemple, suppose un ingress-controller nginx déjà installé
+# dans le cluster. Adapter `ingressClassName`, `host` et le TLS au cluster
+# cible.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: quai
+  namespace: quai
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: quai.example.org # TODO: remplacer par le domaine réel
+      http:
+        paths:
+          # /api/* → backend Fastify (voir routes documentées dans
+          # ARCHITECTURE.md, section "Routes API").
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: quai-api
+                port:
+                  number: 3000
+          # Tout le reste → SPA React servie par nginx.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: quai-web
+                port:
+                  number: 8080
+  # tls:
+  #   - hosts: ["quai.example.org"]
+  #     secretName: quai-tls

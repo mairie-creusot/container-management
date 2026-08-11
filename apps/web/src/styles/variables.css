@@ -1,0 +1,46 @@
+:root {
+  /* Fond & surfaces */
+  --color-bg: #0b0c10;
+  --color-sidebar: #0e0f14;
+  --color-surface-1: #15161d;
+  --color-surface-2: #1c1e27;
+  --color-surface-3: #23252f;
+  --color-border: #262836;
+
+  /* Texte */
+  --color-text: #f1f2f6;
+  --color-text-muted: #8b8fa3;
+  --color-text-faint: #565a6c;
+
+  /* Accent (dégradé de marque) */
+  --accent-start: #3b6fef;
+  --accent-end: #7c5cfc;
+  --gradient-accent: linear-gradient(135deg, var(--accent-start), var(--accent-end));
+
+  /* Sémantique (distincte de l'accent) */
+  --color-success: #22c55e;
+  --color-success-bg: rgba(34, 197, 94, 0.14);
+  --color-warning: #f5a524;
+  --color-warning-bg: rgba(245, 165, 36, 0.14);
+  --color-critical: #ef4444;
+  --color-critical-bg: rgba(239, 68, 68, 0.14);
+
+  /* Couleurs de marque par registry */
+  --registry-dockerhub: #2496ed;
+  --registry-ghcr: #a371f7;
+  --registry-gitlab: #fc6d26;
+  --registry-harbor: #2dd4bf;
+
+  /* Typographie */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+    sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "JetBrains Mono", monospace;
+
+  /* Dimensions layout */
+  --sidebar-width: 250px;
+  --topbar-height: 60px;
+  --inspector-width: 380px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+}

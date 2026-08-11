@@ -1,0 +1,103 @@
+# Stack Docker Swarm d'exemple pour QUAI.
+#
+# Préparation (une fois) :
+#   docker swarm init                       # si pas déjà en mode Swarm
+#   echo "CHANGE_ME" | docker secret create quai_ldap_bind_password -
+#   echo "CHANGE_ME" | docker secret create quai_jwt_secret -
+#
+# Déploiement :
+#   docker stack deploy -c deploy/swarm/stack.yml quai
+#
+# Mise à jour (nouvelle image poussée par .github/workflows/build.yml) :
+#   docker service update --image ghcr.io/OWNER/quai-api:latest quai_api
+#   docker service update --image ghcr.io/OWNER/quai-web:latest quai_web
+#
+# Remplacer ghcr.io/OWNER/quai-api et quai-web par le chemin réel publié
+# (ghcr.io/<repository_owner>/quai-api|quai-web).
+#
+# NOTE sur les secrets : les services Swarm montent les secrets en fichiers
+# sous /run/secrets/<nom>, pas en variables d'environnement. Le tableau
+# ci-dessous suppose que @quai/api sait lire une variable "*_FILE" (ex.
+# LDAP_BIND_PASSWORD_FILE) en plus de la variable directe — convention
+# courante mais NON confirmée côté backend. Si ce n'est pas le cas, adapter
+# via un petit script d'entrée qui lit le fichier et exporte la variable
+# avant `node dist/index.js` (à faire côté image/API, pas inventé ici).
+
+version: "3.9"
+
+services:
+  api:
+    image: ghcr.io/OWNER/quai-api:latest # TODO: remplacer OWNER
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      LDAP_URL: "ldaps://ldap.lecreusot.fr:636"
+      LDAP_BIND_DN: "cn=svc-quai,ou=services,dc=lecreusot,dc=fr"
+      LDAP_BIND_PASSWORD_FILE: /run/secrets/quai_ldap_bind_password
+      LDAP_SEARCH_BASE: "ou=people,dc=lecreusot,dc=fr"
+      LDAP_SEARCH_FILTER: "(uid={{username}})"
+      LDAP_GROUP_ROLE_MAP: >-
+        {"cn=dsi-admins,ou=groupes,dc=lecreusot,dc=fr":"admin",
+        "cn=dsi-operators,ou=groupes,dc=lecreusot,dc=fr":"operator"}
+      JWT_SECRET_FILE: /run/secrets/quai_jwt_secret
+    secrets:
+      - quai_ldap_bind_password
+      - quai_jwt_secret
+    networks:
+      - quai-net
+    ports:
+      - target: 3000
+        published: 3000
+        mode: ingress
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+      update_config:
+        order: start-first
+        parallelism: 1
+        delay: 10s
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 512M
+        reservations:
+          cpus: "0.10"
+          memory: 128M
+
+  web:
+    image: ghcr.io/OWNER/quai-web:latest # TODO: remplacer OWNER
+    networks:
+      - quai-net
+    ports:
+      - target: 8080
+        published: 8080
+        mode: ingress
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+      update_config:
+        order: start-first
+        parallelism: 1
+        delay: 10s
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 128M
+        reservations:
+          cpus: "0.05"
+          memory: 32M
+
+networks:
+  quai-net:
+    driver: overlay
+    attachable: true
+
+secrets:
+  quai_ldap_bind_password:
+    external: true
+  quai_jwt_secret:
+    external: true

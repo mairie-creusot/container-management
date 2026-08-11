@@ -1,0 +1,118 @@
+/**
+ * Lecture typée des variables d'environnement, avec valeurs par défaut sûres pour le
+ * développement local. Voir .env.example pour la liste documentée de toutes les variables.
+ *
+ * Aucune valeur secrète n'est codée en dur pour un usage production : les défauts fournis
+ * ici (JWT_SECRET, identifiants LDAP de démo, ...) sont volontairement non-sécurisés et
+ * doivent être remplacés via l'environnement avant tout déploiement réel.
+ */
+
+export type Role = "admin" | "operator" | "viewer";
+
+function readString(name: string, fallback: string): string {
+  const value = process.env[name];
+  return value === undefined || value === "" ? fallback : value;
+}
+
+function readOptionalString(name: string): string | undefined {
+  const value = process.env[name];
+  return value === undefined || value === "" ? undefined : value;
+}
+
+function readNumber(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function readBoolean(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
+  return raw.toLowerCase() === "true" || raw === "1";
+}
+
+function readGroupRoleMap(name: string): Record<string, Role> {
+  const raw = process.env[name];
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return {};
+    const result: Record<string, Role> = {};
+    for (const [groupDn, role] of Object.entries(parsed as Record<string, unknown>)) {
+      if (role === "admin" || role === "operator" || role === "viewer") {
+        result[groupDn.toLowerCase()] = role;
+      }
+    }
+    return result;
+  } catch {
+    // eslint-disable-next-line no-console
+    console.warn(`[config] LDAP_GROUP_ROLE_MAP is not valid JSON, ignoring it`);
+    return {};
+  }
+}
+
+function readDefaultRole(name: string, fallback: Role): Role {
+  const raw = process.env[name];
+  if (raw === "admin" || raw === "operator" || raw === "viewer") return raw;
+  return fallback;
+}
+
+export const config = {
+  server: {
+    port: readNumber("PORT", 3000),
+    nodeEnv: readString("NODE_ENV", "development"),
+    logLevel: readString("LOG_LEVEL", "info"),
+    corsOrigin: readString("CORS_ORIGIN", "http://localhost:5173"),
+  },
+  session: {
+    jwtSecret: readString("JWT_SECRET", "dev-insecure-secret-change-me"),
+    jwtExpiresIn: readString("JWT_EXPIRES_IN", "15m"),
+    jwtRefreshExpiresIn: readString("JWT_REFRESH_EXPIRES_IN", "7d"),
+    cookieName: readString("COOKIE_NAME", "quai_session"),
+    cookieSecure: readBoolean("COOKIE_SECURE", false),
+  },
+  ldap: {
+    url: readString("LDAP_URL", "ldap://localhost:389"),
+    bindDn: readString("LDAP_BIND_DN", "cn=admin,dc=lecreusot,dc=fr"),
+    bindPassword: readString("LDAP_BIND_PASSWORD", "admin"),
+    searchBase: readString("LDAP_SEARCH_BASE", "ou=people,dc=lecreusot,dc=fr"),
+    searchFilter: readString("LDAP_SEARCH_FILTER", "(uid={{username}})"),
+    groupRoleMap: readGroupRoleMap("LDAP_GROUP_ROLE_MAP"),
+    defaultRole: readDefaultRole("LDAP_DEFAULT_ROLE", "viewer"),
+  },
+  docker: {
+    host: readOptionalString("DOCKER_HOST"),
+  },
+  kubernetes: {
+    kubeconfig: readOptionalString("KUBECONFIG"),
+  },
+  registries: {
+    requestTimeoutMs: readNumber("REGISTRY_REQUEST_TIMEOUT_MS", 5000),
+    dockerhub: {
+      username: readOptionalString("DOCKERHUB_USERNAME"),
+      token: readOptionalString("DOCKERHUB_TOKEN"),
+    },
+    ghcr: {
+      token: readOptionalString("GHCR_TOKEN"),
+    },
+    gitlab: {
+      token: readOptionalString("GITLAB_TOKEN"),
+    },
+  },
+  gitops: {
+    repoPath: readString("GITOPS_REPO_PATH", "./data/gitops"),
+    repoUrl: readOptionalString("GITOPS_REPO_URL"),
+    branch: readString("GITOPS_BRANCH", "main"),
+    gitUsername: readOptionalString("GITOPS_GIT_USERNAME"),
+    gitToken: readOptionalString("GITOPS_GIT_TOKEN"),
+  },
+  setup: {
+    // Persistance de l'assistant de configuration au premier lancement (cf. ARCHITECTURE.md,
+    // chapitre "Assistant de configuration au premier lancement"). Défaut dev : fichier local
+    // ; en conteneur, pointer vers un volume monté (ex: /data/quai/config.json).
+    configPath: readString("CONFIG_PATH", "./data/config.json"),
+  },
+} as const;
+
+export type Config = typeof config;

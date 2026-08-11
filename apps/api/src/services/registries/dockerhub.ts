@@ -1,0 +1,94 @@
+/**
+ * Client Docker Hub — Hub API publique (hub.docker.com/v2).
+ *
+ * Pour un dépôt privé, l'API Docker Hub exige un jeton JWT obtenu via
+ * POST /v2/users/login/ (identifiant + mot de passe, ou un Personal Access Token utilisé
+ * comme mot de passe) — pas un simple en-tête PRIVATE-TOKEN comme GitLab. Les identifiants
+ * viennent du registry Docker Hub configuré via l'assistant (identifiant + jeton/mot de
+ * passe), sinon de DOCKERHUB_USERNAME/DOCKERHUB_TOKEN (env). Sans identifiants, seul l'accès
+ * anonyme (dépôts publics) est utilisé.
+ *
+ * IMPORTANT — repli de développement : si l'appel réseau échoue (pas d'accès Internet en
+ * environnement de dev, timeout, 404...), listTags retombe sur une liste de démonstration
+ * basée sur le jeu de données de src/services/demoData.ts. Ce n'est PAS un mock permanent.
+ */
+
+import { config } from "../../config.js";
+import { demoStore } from "../demoData.js";
+import { getEffectiveRegistryCredentials } from "../setupStore.js";
+import { fetchJson, RegistryHttpError } from "./http.js";
+
+interface DockerHubLoginResponse {
+  token: string;
+}
+
+interface DockerHubTagsResponse {
+  results: Array<{ name: string }>;
+  next: string | null;
+}
+
+function splitImageName(image: string): { namespace: string; repository: string } {
+  const parts = image.split("/");
+  if (parts.length === 1) {
+    return { namespace: "library", repository: parts[0]! };
+  }
+  const [namespace, repository] = parts;
+  return { namespace: namespace!, repository: repository! };
+}
+
+function demoFallbackTags(image: string): string[] {
+  const demoImage = demoStore.images.find((i) => i.name === image && i.registry === "dockerhub");
+  if (!demoImage) return [];
+  return Array.from(new Set([demoImage.currentTag, demoImage.latestTag]));
+}
+
+/** Identifiants effectifs : ceux du registry Docker Hub configuré via l'assistant, sinon les variables d'environnement. */
+async function resolveCredentials(): Promise<{ username: string; password: string } | null> {
+  const persisted = await getEffectiveRegistryCredentials("dockerhub");
+  const persistedPassword = persisted?.password ?? persisted?.token;
+  if (persisted?.username && persistedPassword) {
+    return { username: persisted.username, password: persistedPassword };
+  }
+  if (config.registries.dockerhub.username && config.registries.dockerhub.token) {
+    return { username: config.registries.dockerhub.username, password: config.registries.dockerhub.token };
+  }
+  return null;
+}
+
+/** En-tête Authorization Bearer via le flux de login JWT, ou {} pour un accès anonyme. */
+async function resolveAuthHeaders(): Promise<Record<string, string>> {
+  const credentials = await resolveCredentials();
+  if (!credentials) return {};
+
+  try {
+    const login = await fetchJson<DockerHubLoginResponse>("https://hub.docker.com/v2/users/login/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(credentials),
+    });
+    return { Authorization: `Bearer ${login.token}` };
+  } catch {
+    // Identifiants invalides ou service de login injoignable : on retombe sur un accès
+    // anonyme plutôt que de faire échouer tout l'appel — au pire un dépôt privé restera
+    // sur les données de démonstration, ce qui est déjà le comportement de repli standard.
+    return {};
+  }
+}
+
+/** Liste les tags disponibles pour une image Docker Hub (ex: "nginx", "postgres"). */
+export async function listTags(image: string): Promise<string[]> {
+  const { namespace, repository } = splitImageName(image);
+  const url = `https://hub.docker.com/v2/repositories/${encodeURIComponent(namespace)}/${encodeURIComponent(repository)}/tags?page_size=100&ordering=last_updated`;
+
+  try {
+    const headers = await resolveAuthHeaders();
+    const data = await fetchJson<DockerHubTagsResponse>(url, { headers });
+    return data.results.map((r) => r.name);
+  } catch (err) {
+    if (err instanceof RegistryHttpError) {
+      // eslint-disable-next-line no-console
+      console.warn(`[dockerhub] listTags("${image}") failed (${err.message}), falling back to demo data`);
+    }
+    return demoFallbackTags(image);
+  }
+}
