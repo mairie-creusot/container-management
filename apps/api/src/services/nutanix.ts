@@ -142,6 +142,28 @@ function mapVmEntity(entity: NutanixVmEntity): NutanixVm {
 }
 
 /**
+ * true si Nutanix a été explicitement configuré via l'assistant (URL + identifiants complets)
+ * — même principe que kubernetes.ts#isKubernetesConfigured, utilisé par le watchdog
+ * (services/watchdog.ts) pour ne jamais surveiller/notifier une intégration qui n'a jamais été
+ * configurée.
+ */
+export async function isNutanixConfigured(): Promise<boolean> {
+  return (await loadNutanixConfig()) !== null;
+}
+
+/**
+ * Sonde de joignabilité utilisée par le watchdog : true si Prism Central répond avec la config
+ * effective persistée. Ne jamais appeler sans avoir vérifié isNutanixConfigured() d'abord
+ * (sinon false serait renvoyé pour "jamais configuré", pas pour "injoignable").
+ */
+export async function isNutanixReachable(): Promise<boolean> {
+  const effective = await loadNutanixConfig();
+  if (!effective) return false;
+  const result = await testNutanixConnection(effective.prismCentralUrl, effective.username, effective.password);
+  return result.ok;
+}
+
+/**
  * Utilisé par l'assistant de configuration (POST /api/setup/test/nutanix) : teste une config
  * Nutanix candidate (pas encore persistée) sans jamais modifier l'état applicatif.
  */

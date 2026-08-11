@@ -21,11 +21,13 @@ import gitopsRoutes from "./routes/gitops.js";
 import iacRoutes from "./routes/iac.js";
 import imagesRoutes from "./routes/images.js";
 import networksRoutes from "./routes/networks.js";
+import notificationsRoutes from "./routes/notifications.js";
 import registriesRoutes from "./routes/registries.js";
 import scanRoutes from "./routes/scan.js";
 import setupRoutes from "./routes/setup.js";
 import topologyRoutes from "./routes/topology.js";
 import volumesRoutes from "./routes/volumes.js";
+import { startWatchdog } from "./services/watchdog.js";
 
 function buildLoggerOptions(): NonNullable<FastifyServerOptions["logger"]> {
   if (config.server.nodeEnv === "development") {
@@ -63,6 +65,7 @@ export function buildServer() {
   void fastify.register(auditRoutes);
   void fastify.register(iacRoutes);
   void fastify.register(topologyRoutes);
+  void fastify.register(notificationsRoutes);
 
   // /health : chemin attendu par les healthchecks Docker et les probes Kubernetes (voir deploy/).
   // /healthz : alias conservé au cas où un outil externe le suppose (convention courante).
@@ -82,12 +85,19 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Détection proactive en tâche de fond (nouvelle version d'image, intégration devenue
+  // injoignable/de nouveau joignable — voir services/watchdog.ts) : démarré seulement ici,
+  // jamais depuis buildServer(), pour ne pas déclencher de vrais appels réseau pendant les
+  // tests qui construisent le serveur avec `app.inject` sans jamais appeler main().
+  const stopWatchdog = startWatchdog();
+
   // Sans ceci, un SIGTERM (docker stop, ou nodemon qui redémarre le process en dev) tue le
   // process sans libérer explicitement le port avant que le suivant ne démarre — source
   // d'EADDRINUSE intermittents observés avec `nodemon --legacy-watch` (voir package.json,
   // nécessaire pour que le hot-reload fonctionne à travers le bind mount Windows -> Docker).
   const shutdown = (signal: string) => {
     fastify.log.info(`${signal} received, closing server`);
+    stopWatchdog();
     void fastify.close().then(() => process.exit(0));
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));

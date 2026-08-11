@@ -285,3 +285,24 @@ export interface ScanResult {
   vulnerabilities: Vulnerability[];
   summary: Record<VulnSeverity, number>;
 }
+
+// --- Notifications système (watchdog proactif) — voir apps/api/src/services/watchdog.ts ---
+// Événements détectés tout seuls en tâche de fond (PAS déclenchés par une action utilisateur,
+// contrairement aux notifications d'erreur d'action côté web) : nouvelle version d'image
+// disponible, intégration qui devient injoignable ou de nouveau joignable. Émis une seule fois
+// par transition (edge-triggered), jamais répétés en boucle tant que l'état ne change pas.
+
+export type SystemNotificationKind =
+  | "image_update_available"
+  | "integration_unreachable"
+  | "integration_reachable";
+
+export interface SystemNotificationEvent {
+  id: string;
+  timestamp: string; // ISO 8601
+  kind: SystemNotificationKind;
+  level: "error" | "success" | "info";
+  /** Message concret et actionnable, ex: "Nouvelle version disponible pour nginx:1.25 -> 1.27". */
+  message: string;
+  read: boolean;
+}

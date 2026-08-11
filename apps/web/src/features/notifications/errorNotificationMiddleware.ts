@@ -8,9 +8,19 @@ import { pushNotification } from "@/features/notifications/notificationsSlice";
  *
  * Exclusions volontaires : rejets attendus/silencieux qui ne sont pas des erreurs pour
  * l'utilisateur (vérifications de session/config au chargement) ou déjà affichés inline
- * ailleurs (échec de login, montré directement sur LoginScreen).
+ * ailleurs (échec de login, montré directement sur LoginScreen). "notifications/fetchSystem"
+ * et "notifications/markServerRead" sont également silencieux : un poll de notifications qui
+ * échoue (ou un marquage "lu" refusé pour un viewer, cf. notificationsSlice.ts) ne doit pas
+ * lui-même produire une notification d'erreur — ce serait ironique pour une fonctionnalité
+ * censée rendre les notifications utiles, pas bruyantes.
  */
-const SILENT_PREFIXES = ["auth/fetchSession", "setup/fetchStatus", "auth/login"];
+const SILENT_PREFIXES = [
+  "auth/fetchSession",
+  "setup/fetchStatus",
+  "auth/login",
+  "notifications/fetchSystem",
+  "notifications/markServerRead",
+];
 
 function extractMessage(action: UnknownAction & { payload?: unknown; error?: { message?: string } }): string {
   if (typeof action.payload === "string" && action.payload.trim() !== "") return action.payload;

@@ -341,6 +341,23 @@ export interface ScanResult {
   summary: Record<VulnSeverity, number>;
 }
 
+// --- Notifications système (watchdog proactif) — voir ARCHITECTURE.md
+// § "Détection proactive (watchdog)" et apps/api/src/services/watchdog.ts ---
+
+export type SystemNotificationKind =
+  | "image_update_available"
+  | "integration_unreachable"
+  | "integration_reachable";
+
+export interface SystemNotificationEvent {
+  id: string;
+  timestamp: string; // ISO 8601
+  kind: SystemNotificationKind;
+  level: "error" | "success" | "info";
+  message: string;
+  read: boolean;
+}
+
 export interface SetupCompletePayload {
   // API : POST /api/setup/complete attend { ldap: SetupLdapConfig, ... } où
   // SetupLdapConfig inclut defaultRole (rôle appliqué quand aucun groupe LDAP

@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import { fetchSession } from "@/features/auth/authSlice";
 import { fetchSetupStatus } from "@/features/setup/setupSlice";
+import { fetchSystemNotifications } from "@/features/notifications/notificationsSlice";
 import LoginScreen from "@/features/auth/LoginScreen";
 import SetupWizard from "@/features/setup/SetupWizard";
 import Sidebar from "@/components/Sidebar";
@@ -20,6 +21,13 @@ import AuditPage from "@/features/audit/AuditPage";
 import TopologyPage from "@/features/topology/TopologyPage";
 import IacPage from "@/features/iac/IacPage";
 import ToastStack from "@/components/ToastStack";
+
+// Notifications système (watchdog proactif côté API — nouvelle version d'image, intégration
+// devenue injoignable/de nouveau joignable) : câblé ici plutôt que dans une page précise, pour
+// rester actif quelle que soit la vue affichée (même principe que la cloche du Topbar, toujours
+// visible). Intervalle volontairement plus lâche que le dashboard (voir OverviewPage.tsx) :
+// ces événements sont eux-mêmes émis par un cycle serveur de 60-90s, inutile de poller plus vite.
+const NOTIFICATIONS_REFRESH_INTERVAL_MS = 20_000;
 
 function renderView(view: string) {
   switch (view) {
@@ -71,6 +79,18 @@ export default function App() {
       dispatch(fetchSession());
     }
   }, [dispatch, setupCompleted, authStatus]);
+
+  // Poll des notifications système une fois une session active — pas avant (sinon 401 en
+  // boucle tant que l'utilisateur n'est pas connecté, cf. SILENT_PREFIXES dans
+  // errorNotificationMiddleware.ts qui les rend silencieux mais autant ne pas les déclencher).
+  useEffect(() => {
+    if (!session) return;
+    dispatch(fetchSystemNotifications());
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") dispatch(fetchSystemNotifications());
+    }, NOTIFICATIONS_REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [dispatch, session]);
 
   if (setupCompleted === null) {
     return (

@@ -4,7 +4,7 @@ import { pageTitle, setCurrentView, setSearchQuery, setSelectedEnvironmentId } f
 import { fetchEnvironments } from "@/features/clusters/clustersSlice";
 import { canAdminister, logout } from "@/features/auth/authSlice";
 import { resetSetup } from "@/features/setup/setupSlice";
-import { markAllRead } from "@/features/notifications/notificationsSlice";
+import { markAllRead, markServerNotificationsRead } from "@/features/notifications/notificationsSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import { IconBell, IconSearch } from "@/components/icons";
 
@@ -120,6 +120,10 @@ export default function Topbar() {
         onClick={() => {
           dispatch(setCurrentView("notifications"));
           dispatch(markAllRead());
+          // Persiste le "tout lu" côté serveur pour les notifications système (watchdog) —
+          // silencieux en cas d'échec (viewer sans droit, réseau...), voir
+          // errorNotificationMiddleware.ts.
+          void dispatch(markServerNotificationsRead());
         }}
       >
         <IconBell />

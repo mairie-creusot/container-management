@@ -26,7 +26,7 @@ const API_TIMEOUT_MS = 3000;
  * et /api/containers — alors même que l'assistant de configuration marque
  * `kubernetesConfigured: false`. Voir getKubernetesEnvironment/getKubernetesContainers.
  */
-async function isKubernetesConfigured(): Promise<boolean> {
+export async function isKubernetesConfigured(): Promise<boolean> {
   const effective = await getEffectiveKubernetesConfig();
   return Boolean(effective.kubeconfigYaml) || Boolean(config.kubernetes.kubeconfig);
 }
@@ -77,6 +77,25 @@ export async function testKubernetesConnection(kubeconfigYaml: string): Promise<
     return { ok: true, message: "Kubernetes cluster is reachable", nodeCount: nodeItems.length };
   } catch (err) {
     return { ok: false, message: `Cluster is not reachable: ${err instanceof Error ? err.message : String(err)}` };
+  }
+}
+
+/**
+ * Sonde de joignabilité légère utilisée par le watchdog (services/watchdog.ts) : true si le
+ * cluster configuré via l'assistant (ou KUBECONFIG) répond, false sinon — jamais appelée sans
+ * avoir d'abord vérifié isKubernetesConfigured(), sans quoi loadKubeConfig() renverrait `null`
+ * et cette fonction retournerait toujours false pour un cluster qui n'a simplement jamais été
+ * configuré (pas une vraie coupure à notifier).
+ */
+export async function isKubernetesReachable(): Promise<boolean> {
+  const kc = await loadKubeConfig();
+  if (!kc) return false;
+  try {
+    const api = kc.makeApiClient(CoreV1Api);
+    await withTimeout(api.listNode(), API_TIMEOUT_MS, "kubernetes listNode");
+    return true;
+  } catch {
+    return false;
   }
 }
 
