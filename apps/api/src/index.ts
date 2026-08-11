@@ -22,10 +22,12 @@ import environmentsRoutes from "./routes/environments.js";
 import gitopsRoutes from "./routes/gitops.js";
 import iacRoutes from "./routes/iac.js";
 import imagesRoutes from "./routes/images.js";
+import lxcRoutes from "./routes/lxc.js";
 import networksRoutes from "./routes/networks.js";
 import notificationsRoutes from "./routes/notifications.js";
 import nutanixRoutes from "./routes/nutanix.js";
 import registriesRoutes from "./routes/registries.js";
+import remoteEnvironmentsRoutes from "./routes/remoteEnvironments.js";
 import reverseProxyRoutes from "./routes/reverseProxy.js";
 import scanRoutes from "./routes/scan.js";
 import secretsRoutes from "./routes/secrets.js";
@@ -75,6 +77,8 @@ export function buildServer() {
   void fastify.register(topologyRoutes);
   void fastify.register(notificationsRoutes);
   void fastify.register(nutanixRoutes);
+  void fastify.register(remoteEnvironmentsRoutes);
+  void fastify.register(lxcRoutes);
   void fastify.register(reverseProxyRoutes);
   void fastify.register(consoleRoutes);
 

@@ -1,5 +1,11 @@
 /**
  * GET    /api/containers               — conteneurs Docker/Swarm + pods Kubernetes, vue unifiée.
+ *                                         `?environmentId=remote-docker:<id>` cible un environnement
+ *                                         Docker distant persisté (voir remoteDockerStore.ts) au lieu
+ *                                         du démon local — CÂBLÉ BOUT-EN-BOUT, voir ARCHITECTURE.md
+ *                                         § "Environnements Docker distants". Tout autre id (environnement
+ *                                         local, Kubernetes, Nutanix, LXC, absent) retombe sur le
+ *                                         comportement historique (démon local + pods Kubernetes).
  * POST   /api/containers               — crée puis démarre un conteneur Docker (équivalent `docker run -d`).
  *                                         L'image doit déjà être locale (POST /api/images/pull d'abord si besoin).
  * GET    /api/containers/:id           — détail complet (équivalent `docker inspect`), Docker uniquement.
@@ -23,6 +29,7 @@ import {
 } from "../services/docker.js";
 import { getKubernetesContainers } from "../services/kubernetes.js";
 import { getDecryptedSecretValue } from "../services/secretsStore.js";
+import { remoteDockerIdFromEnvironmentId } from "../utils/environmentId.js";
 
 interface SecretEnvRef {
   key?: string;
@@ -56,10 +63,13 @@ function sendDockerActionError(reply: import("fastify").FastifyReply, err: unkno
 }
 
 export default async function containersRoutes(fastify: FastifyInstance): Promise<void> {
-  fastify.get("/api/containers", async (_request, reply) => {
+  fastify.get<{ Querystring: { environmentId?: string } }>("/api/containers", async (request, reply) => {
+    const remoteEnvironmentId = remoteDockerIdFromEnvironmentId(request.query?.environmentId);
+    // Un environnement Docker distant n'a pas de pods Kubernetes : on n'interroge Kubernetes que
+    // pour la vue par défaut (local), jamais pour un hôte distant précis.
     const [dockerContainers, kubernetesContainers] = await Promise.all([
-      getDockerContainers(),
-      getKubernetesContainers(),
+      getDockerContainers(remoteEnvironmentId),
+      remoteEnvironmentId ? Promise.resolve([]) : getKubernetesContainers(),
     ]);
     return reply.send([...dockerContainers, ...kubernetesContainers]);
   });

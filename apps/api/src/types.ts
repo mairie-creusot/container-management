@@ -150,11 +150,46 @@ export interface ClusterNode {
 export interface Environment {
   id: string;
   name: string;
-  orchestrator: "swarm" | "kubernetes" | "compose" | "nutanix";
+  orchestrator: "swarm" | "kubernetes" | "compose" | "nutanix" | "docker-remote" | "lxc";
   status: "ok" | "warn";
   nodes: ClusterNode[];
-  /** Infos hôte du démon Docker (orchestrator "swarm"/"compose" uniquement — absent pour Kubernetes/Nutanix). */
+  /** Infos hôte du démon Docker (orchestrator "swarm"/"compose"/"docker-remote" — absent pour Kubernetes/Nutanix/LXC). */
   hostInfo?: DockerHostInfo;
+}
+
+// --- Environnements Docker distants (cf. ARCHITECTURE.md, chapitre "Environnements Docker
+// distants") — voir apps/api/src/services/remoteDockerStore.ts. ca/cert/key ne transitent
+// JAMAIS par ce contrat une fois enregistrés (write-only, comme SecretRef ci-dessus) : la vue
+// publique n'expose que `hasTls` (les identifiants existent) et jamais leur contenu.
+
+export interface RemoteDockerEnvironmentRef {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  hasTls: boolean;
+  createdAt: string; // ISO 8601
+  updatedAt: string; // ISO 8601
+}
+
+/** Résultat d'un test de connectivité (GET /api/remote-environments/:id/test) — même forme que SetupTestResult côté web. */
+export interface RemoteDockerTestResult {
+  ok: boolean;
+  message: string;
+}
+
+// --- Support LXC (via LXD) — cf. ARCHITECTURE.md, chapitre "Support LXC". LXD (démon de
+// gestion LXC de Canonical) est piloté via sa vraie API REST (unix socket local ou HTTPS +
+// certificat client à distance, https://documentation.ubuntu.com/lxd/en/latest/rest-api/) —
+// voir apps/api/src/services/lxc.ts. Jamais de conteneur LXC fabriqué : [] si LXD n'a jamais
+// été configuré ou si configuré mais injoignable.
+
+export interface LxcContainer {
+  name: string;
+  status: string; // ex: "Running", "Stopped" — reflète tel quel le champ "status" de l'API LXD
+  architecture: string;
+  createdAt: string; // ISO 8601
+  type: string; // "container" | "virtual-machine" (LXD gère les deux avec la même API)
 }
 
 /** VM Nutanix (Prism Central API v3) — voir src/services/nutanix.ts. */

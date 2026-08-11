@@ -129,6 +129,22 @@ export const config = {
     // sont chiffrées au repos (crypto.ts) avant écriture, comme le reste des secrets persistés.
     storePath: readString("SECRETS_PATH", "./data/secrets.json"),
   },
+  remoteDocker: {
+    // Persistance des environnements Docker distants (cf. ARCHITECTURE.md, chapitre
+    // "Environnements Docker distants"). Même pattern que secrets.json : fichier JSON séparé,
+    // identifiants TLS (ca/cert/key) chiffrés au repos (crypto.ts) avant écriture.
+    storePath: readString("REMOTE_DOCKER_PATH", "./data/remote-docker.json"),
+  },
+  lxc: {
+    // Persistance de la config LXD (cf. ARCHITECTURE.md, chapitre "Support LXC (via LXD)").
+    // Même pattern que remoteDocker ci-dessus : un seul endpoint LXD, certificat client
+    // chiffré au repos.
+    storePath: readString("LXC_PATH", "./data/lxc.json"),
+    // LXD présente très souvent un certificat auto-signé (généré à l'installation) : même
+    // principe que nutanix.tlsRejectUnauthorized ci-dessus, limité à cette intégration.
+    tlsRejectUnauthorized: readBoolean("LXC_TLS_REJECT_UNAUTHORIZED", false),
+    requestTimeoutMs: readNumber("LXC_REQUEST_TIMEOUT_MS", 8000),
+  },
   reverseProxy: {
     // Persistance des routes du reverse proxy interne (cf. ARCHITECTURE.md, chapitre "Reverse
     // proxy interne"). Même répertoire/pattern que secrets.json — aucune valeur sensible dans

@@ -1,6 +1,9 @@
 /**
  * GET    /api/networks             — networks Docker réels de l'hôte (équivalent `docker network ls`).
- * POST   /api/networks             — crée un network (équivalent `docker network create`).
+ *                                     `?environmentId=remote-docker:<id>` cible un environnement
+ *                                     Docker distant persisté (voir ARCHITECTURE.md §
+ *                                     "Environnements Docker distants"), comme GET /api/containers.
+ * POST   /api/networks             — crée un network (équivalent `docker network create`), démon local uniquement.
  * DELETE /api/networks/:id         — supprime un network.
  * POST   /api/networks/:id/connect    — attache un conteneur au network (équivalent `docker network connect`).
  * POST   /api/networks/:id/disconnect — détache un conteneur du network (équivalent `docker network disconnect`).
@@ -15,6 +18,7 @@ import {
   listNetworks,
   removeNetwork,
 } from "../services/docker.js";
+import { remoteDockerIdFromEnvironmentId } from "../utils/environmentId.js";
 
 interface CreateNetworkBody {
   name?: string;
@@ -33,8 +37,8 @@ function sendNetworkMembershipError(reply: import("fastify").FastifyReply, err: 
 }
 
 export default async function networksRoutes(fastify: FastifyInstance): Promise<void> {
-  fastify.get("/api/networks", async (_request, reply) => {
-    return reply.send(await listNetworks());
+  fastify.get<{ Querystring: { environmentId?: string } }>("/api/networks", async (request, reply) => {
+    return reply.send(await listNetworks(remoteDockerIdFromEnvironmentId(request.query?.environmentId)));
   });
 
   fastify.post<{ Body: CreateNetworkBody }>("/api/networks", async (request, reply) => {

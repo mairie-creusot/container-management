@@ -50,7 +50,9 @@ export default function ReverseProxyPage() {
   useEffect(() => {
     dispatch(fetchRoutes());
     dispatch(fetchCaddyStatus());
-    dispatch(fetchContainers());
+    // Toujours le démon local ici (le reverse proxy interne ne cible que des conteneurs gérés
+    // localement par QUAI, voir ARCHITECTURE.md § "Reverse proxy interne").
+    dispatch(fetchContainers(null));
   }, [dispatch]);
 
   useEffect(() => {

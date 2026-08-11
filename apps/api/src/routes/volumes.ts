@@ -1,20 +1,24 @@
 /**
  * GET    /api/volumes             — volumes Docker réels de l'hôte (équivalent `docker volume ls`).
- * POST   /api/volumes             — crée un volume nommé (équivalent `docker volume create`).
+ *                                    `?environmentId=remote-docker:<id>` cible un environnement
+ *                                    Docker distant persisté (voir ARCHITECTURE.md §
+ *                                    "Environnements Docker distants"), comme GET /api/containers.
+ * POST   /api/volumes             — crée un volume nommé (équivalent `docker volume create`), démon local uniquement.
  * DELETE /api/volumes/:name       — supprime un volume (échoue si utilisé par un conteneur, sauf ?force=true).
  * GET    /api/volumes/:name/files — explorateur de fichiers en lecture seule (voir services/docker.ts#listVolumeFiles).
  */
 
 import type { FastifyInstance } from "fastify";
 import { createVolume, listVolumeFiles, listVolumes, removeVolume } from "../services/docker.js";
+import { remoteDockerIdFromEnvironmentId } from "../utils/environmentId.js";
 
 interface CreateVolumeBody {
   name?: string;
 }
 
 export default async function volumesRoutes(fastify: FastifyInstance): Promise<void> {
-  fastify.get("/api/volumes", async (_request, reply) => {
-    return reply.send(await listVolumes());
+  fastify.get<{ Querystring: { environmentId?: string } }>("/api/volumes", async (request, reply) => {
+    return reply.send(await listVolumes(remoteDockerIdFromEnvironmentId(request.query?.environmentId)));
   });
 
   fastify.post<{ Body: CreateVolumeBody }>("/api/volumes", async (request, reply) => {

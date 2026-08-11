@@ -76,10 +76,28 @@ export interface DockerHostInfo {
 export interface Environment {
   id: string;
   name: string;
-  orchestrator: "swarm" | "kubernetes" | "compose" | "nutanix";
+  orchestrator: "swarm" | "kubernetes" | "compose" | "nutanix" | "docker-remote" | "lxc";
   status: "ok" | "warn";
   nodes: ClusterNode[];
   hostInfo?: DockerHostInfo;
+}
+
+// --- Environnements Docker distants — voir apps/api/src/services/remoteDockerStore.ts.
+// ca/cert/key ne transitent jamais par ce contrat (write-only), seul `hasTls` indique leur présence.
+
+export interface RemoteDockerEnvironmentRef {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  hasTls: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RemoteDockerTestResult {
+  ok: boolean;
+  message: string;
 }
 
 /** VM Nutanix (Prism Central API v3) — voir apps/api/src/services/nutanix.ts. */

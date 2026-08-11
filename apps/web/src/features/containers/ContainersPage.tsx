@@ -75,9 +75,13 @@ export default function ContainersPage() {
   const nextSecretRowId = useRef(0);
   const [consoleTarget, setConsoleTarget] = useState<{ id: string; name: string } | null>(null);
 
+  // Re-fetch quand l'environnement sélectionné dans le Topbar change — voir
+  // apps/api/src/utils/environmentId.ts : seul un id "remote-docker:<id>" change réellement le
+  // démon interrogé (voir ARCHITECTURE.md § "Environnements Docker distants"), tout autre id
+  // retombe sur le comportement historique (démon local).
   useEffect(() => {
-    dispatch(fetchContainers());
-  }, [dispatch]);
+    dispatch(fetchContainers(selectedEnvironmentId));
+  }, [dispatch, selectedEnvironmentId]);
 
   // Chargé pour peupler le sélecteur "Secrets" du formulaire de création — n'affiche jamais de
   // valeur, seulement les noms référençables (voir features/secrets/secretsSlice.ts).

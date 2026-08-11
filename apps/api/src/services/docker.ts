@@ -14,6 +14,8 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import { demoStore } from "./demoData.js";
 import { getEffectiveDockerConfig } from "./setupStore.js";
+import { getEffectiveRemoteDockerConfig, getRemoteDockerEnvironmentRef } from "./remoteDockerStore.js";
+import type { EffectiveRemoteDockerConfig } from "./remoteDockerStore.js";
 import { withTimeout } from "../utils/async.js";
 import type {
   ClusterNode,
@@ -54,12 +56,50 @@ function buildDockerClient(host: string | undefined): Docker {
 }
 
 /**
+ * Client TCP+TLS vers un démon Docker distant persisté (services/remoteDockerStore.ts) —
+ * dockerode/docker-modem acceptent `host`/`port`/`ca`/`cert`/`key` directement dans leur
+ * constructeur, c'est LA méthode standard pour joindre un démon Docker exposé sur le réseau
+ * (https://docs.docker.com/engine/security/protect-access/). Sans `tls`, connexion TCP en
+ * clair (déploiement de test uniquement — voir ARCHITECTURE.md).
+ *
+ * `protocol: "https"` est fixé EXPLICITEMENT dès que cert+key sont fournis : docker-modem
+ * (lib/modem.js) ne bascule en https tout seul que si `ca` ET `cert` ET `key` sont TOUS LES
+ * TROIS présents (vérifié dans ses sources) — un déploiement avec seulement cert+key (CA
+ * système déjà approuvée, cas courant) retomberait sinon silencieusement en HTTP en clair.
+ */
+function buildRemoteDockerClient(remote: EffectiveRemoteDockerConfig): Docker {
+  const hasTls = Boolean(remote.tls?.ca || remote.tls?.cert || remote.tls?.key);
+  return new Docker({
+    host: remote.host,
+    port: remote.port,
+    ...(remote.tls?.ca ? { ca: remote.tls.ca } : {}),
+    ...(remote.tls?.cert ? { cert: remote.tls.cert } : {}),
+    ...(remote.tls?.key ? { key: remote.tls.key } : {}),
+    ...(hasTls ? { protocol: "https" as const } : {}),
+  });
+}
+
+/**
  * Construit un client à partir de la config effective (assistant si persisté, sinon
  * DOCKER_HOST). Pas de cache : dockerode ne maintient pas de connexion persistante tant
  * qu'on n'appelle pas de méthode, donc reconstruire le client à chaque appel est bon marché
  * et évite d'avoir à invalider un cache quand la config change (via l'assistant, un reset...).
+ *
+ * `remoteEnvironmentId` (optionnel, cf. ARCHITECTURE.md § "Environnements Docker distants") :
+ * quand fourni, résout à la place un client TCP+TLS vers CET hôte distant persisté (voir
+ * remoteDockerStore.ts) — le démon local n'est alors jamais contacté. Omis (comportement
+ * historique, INCHANGÉ) : résout toujours le démon local/DOCKER_HOST comme avant. Lève si l'id
+ * ne correspond à aucun environnement distant persisté (l'appelant — une route — traduit en 404,
+ * jamais un 502 "injoignable" trompeur pour un id qui n'existe simplement pas).
  */
-export async function getClient(): Promise<Docker> {
+export async function getClient(remoteEnvironmentId?: string): Promise<Docker> {
+  if (remoteEnvironmentId) {
+    const remote = await getEffectiveRemoteDockerConfig(remoteEnvironmentId);
+    if (!remote) {
+      throw new Error(`Remote Docker environment "${remoteEnvironmentId}" not found`);
+    }
+    return buildRemoteDockerClient(remote);
+  }
   const effective = await getEffectiveDockerConfig();
   return buildDockerClient(effective.host);
 }
@@ -323,18 +363,38 @@ function primaryContainerName(container: ContainerInfo): string {
  * Liste les conteneurs Docker/Swarm réels, avec repli sur les données de démonstration
  * si le démon est injoignable. `environmentLabel`/`nodeLabel` par défaut sont utilisés
  * quand aucune information Swarm plus précise n'est disponible (mode standalone/compose).
+ *
+ * `remoteEnvironmentId` (optionnel) : voir getClient() ci-dessus — quand fourni, interroge CET
+ * hôte Docker distant persisté au lieu du démon local. Contrairement au démon local, un hôte
+ * distant injoignable/jamais configuré ne retombe JAMAIS sur le jeu de démonstration ([] à la
+ * place) : faire croire qu'un environnement distant qu'on vient d'ajouter tourne déjà le jeu de
+ * données de démo serait trompeur (même principe que nutanix.ts/lxc.ts).
  */
-export async function getDockerContainers(): Promise<ContainerRef[]> {
-  const docker = await getClient();
+export async function getDockerContainers(remoteEnvironmentId?: string): Promise<ContainerRef[]> {
+  let docker: Docker;
+  try {
+    docker = await getClient(remoteEnvironmentId);
+  } catch {
+    return [];
+  }
   if (!(await isDockerReachable(docker))) {
+    if (remoteEnvironmentId) return [];
     return demoStore.containers.filter((c) => c.environment === "Prod" || c.environment === "Dev local");
   }
 
   try {
     const info = await docker.info();
     const isSwarmActive = info.Swarm?.LocalNodeState === "active";
-    const environmentLabel = isSwarmActive ? "Prod" : "Dev local";
-    const nodeLabel = isSwarmActive ? "swarm-node" : "dev-local-1";
+    const environmentLabel = remoteEnvironmentId
+      ? ((await getRemoteDockerEnvironmentRef(remoteEnvironmentId))?.name ?? remoteEnvironmentId)
+      : isSwarmActive
+        ? "Prod"
+        : "Dev local";
+    const nodeLabel = remoteEnvironmentId
+      ? `remote-docker:${remoteEnvironmentId}`
+      : isSwarmActive
+        ? "swarm-node"
+        : "dev-local-1";
 
     const containers = await docker.listContainers({ all: true });
     return await Promise.all(
@@ -353,6 +413,7 @@ export async function getDockerContainers(): Promise<ContainerRef[]> {
       }),
     );
   } catch {
+    if (remoteEnvironmentId) return [];
     return demoStore.containers.filter((c) => c.environment === "Prod" || c.environment === "Dev local");
   }
 }
@@ -522,8 +583,13 @@ export async function inspectDockerContainer(id: string): Promise<ContainerDetai
 // Volumes (équivalent `docker volume ls/create/rm`).
 // ---------------------------------------------------------------------------------------
 
-export async function listVolumes(): Promise<DockerVolume[]> {
-  const docker = await getClient();
+export async function listVolumes(remoteEnvironmentId?: string): Promise<DockerVolume[]> {
+  let docker: Docker;
+  try {
+    docker = await getClient(remoteEnvironmentId);
+  } catch {
+    return [];
+  }
   if (!(await isDockerReachable(docker))) return [];
 
   try {
@@ -768,8 +834,13 @@ export async function listVolumeFiles(volumeName: string, subPath: string): Prom
 // Networks (équivalent `docker network ls/create/rm`).
 // ---------------------------------------------------------------------------------------
 
-export async function listNetworks(): Promise<DockerNetwork[]> {
-  const docker = await getClient();
+export async function listNetworks(remoteEnvironmentId?: string): Promise<DockerNetwork[]> {
+  let docker: Docker;
+  try {
+    docker = await getClient(remoteEnvironmentId);
+  } catch {
+    return [];
+  }
   if (!(await isDockerReachable(docker))) return [];
 
   try {
@@ -829,13 +900,21 @@ export async function disconnectContainerFromNetwork(networkId: string, containe
 // carte "environnement" façon Portainer sur la page Environnements.
 // ---------------------------------------------------------------------------------------
 
-export async function getDockerHostInfo(): Promise<DockerHostInfo | null> {
-  const docker = await getClient();
+export async function getDockerHostInfo(remoteEnvironmentId?: string): Promise<DockerHostInfo | null> {
+  let docker: Docker;
+  try {
+    docker = await getClient(remoteEnvironmentId);
+  } catch {
+    return null;
+  }
   if (!(await isDockerReachable(docker))) return null;
 
   try {
     const [info, version, volumes] = await Promise.all([docker.info(), docker.version(), docker.listVolumes()]);
-    const effective = await getEffectiveDockerConfig();
+    const endpoint = remoteEnvironmentId
+      ? `tcp://${(await getRemoteDockerEnvironmentRef(remoteEnvironmentId))?.host ?? remoteEnvironmentId}`
+      : ((await getEffectiveDockerConfig()).host ??
+        (process.platform === "win32" ? "npipe:////./pipe/docker_engine" : "unix:///var/run/docker.sock"));
     return {
       serverVersion: version.Version ?? info.ServerVersion ?? "unknown",
       apiVersion: version.ApiVersion ?? "unknown",
@@ -849,7 +928,7 @@ export async function getDockerHostInfo(): Promise<DockerHostInfo | null> {
       imagesCount: info.Images ?? 0,
       storageDriver: info.Driver ?? "unknown",
       dockerRootDir: info.DockerRootDir ?? "",
-      endpoint: effective.host ?? (process.platform === "win32" ? "npipe:////./pipe/docker_engine" : "unix:///var/run/docker.sock"),
+      endpoint,
       swarmActive: info.Swarm?.LocalNodeState === "active",
       volumesCount: (volumes.Volumes ?? []).length,
     };

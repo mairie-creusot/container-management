@@ -50,9 +50,18 @@ const initialState: ContainersState = {
   actionError: null,
 };
 
-export const fetchContainers = createAsyncThunk<ContainerRef[]>(
+/**
+ * `environmentId` (optionnel) : id sélectionné dans le Topbar (state.ui.selectedEnvironmentId,
+ * voir Topbar.tsx). Transmis tel quel en querystring — l'API ne réagit qu'aux id préfixés
+ * "remote-docker:" (voir apps/api/src/utils/environmentId.ts), tout le reste (environnement
+ * local, Kubernetes, Nutanix, LXC, absent) retombe sur le comportement historique.
+ */
+export const fetchContainers = createAsyncThunk<ContainerRef[], string | null | undefined>(
   "containers/fetchContainers",
-  async () => apiGet<ContainerRef[]>("/containers"),
+  async (environmentId) =>
+    apiGet<ContainerRef[]>(
+      `/containers${environmentId ? `?environmentId=${encodeURIComponent(environmentId)}` : ""}`,
+    ),
 );
 
 export const fetchContainerDetail = createAsyncThunk<ContainerDetail, string>(

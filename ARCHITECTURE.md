@@ -15,6 +15,8 @@ Ajout validé : **authentification LDAP** (annuaire de la mairie) comme méthode
 
 Ajout validé : **Nutanix** comme troisième type d'environnement géré, au même niveau que Docker/Swarm et Kubernetes — pilotage d'un cluster Nutanix réel via l'API REST v3 de Prism Central (https://www.nutanix.dev/api-reference/), visualisation des VMs.
 
+Ajout validé (en cours, voir « Environnements Docker distants »/« Support LXC (via LXD) ») : **environnements Docker distants** (TCP+TLS, un ou plusieurs, en plus du démon local) et **LXC via LXD** comme quatrième/cinquième types d'environnement gérés — la lecture des conteneurs/volumes/networks d'un hôte Docker distant précis est câblée bout-en-bout ; les actions d'écriture distantes, la topologie complète et l'UI LXC restent à faire (chantier volontairement non fini à 100% dans cette passe, voir les deux chapitres dédiés pour le détail précis de la frontière).
+
 ## Stack
 
 - **apps/web** — TypeScript, React, Redux Toolkit, Vite. Terminal interactif : [xterm.js](https://xtermjs.org/) (`@xterm/xterm` + `@xterm/addon-fit`) pour la console conteneur.
@@ -101,7 +103,7 @@ interface ClusterNode {
 interface Environment {
   id: string;
   name: string;
-  orchestrator: "swarm" | "kubernetes" | "compose" | "nutanix";
+  orchestrator: "swarm" | "kubernetes" | "compose" | "nutanix" | "docker-remote" | "lxc";
   status: "ok" | "warn";
   nodes: ClusterNode[];
 }
@@ -113,6 +115,33 @@ interface NutanixVm {
   numVcpus: number;
   memoryMib: number;
   cluster: string;              // nom du cluster Nutanix physique hébergeant la VM
+}
+
+// Environnements Docker distants — voir « Environnements Docker distants » plus bas.
+// ca/cert/key ne transitent JAMAIS par ce contrat une fois enregistrés (write-only) :
+// seul `hasTls` indique leur présence.
+interface RemoteDockerEnvironmentRef {
+  id: string;
+  name: string;
+  host: string;
+  port: number;
+  hasTls: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface RemoteDockerTestResult {
+  ok: boolean;
+  message: string;
+}
+
+// Support LXC (via LXD) — voir « Support LXC (via LXD) » plus bas.
+interface LxcContainer {
+  name: string;
+  status: string;                // reflète tel quel le champ "status" de l'API LXD (ex: "Running")
+  architecture: string;
+  createdAt: string;
+  type: string;                  // "container" | "virtual-machine"
 }
 
 interface GitOpsFile {
@@ -346,6 +375,43 @@ Un utilisateur `admin` déjà authentifié peut rouvrir cet assistant depuis Par
 
 **Nouvelles routes** (voir liste complète ci-dessous) : chacune des routes `test/*` prend la config candidate dans le corps de la requête (pas la config déjà persistée) pour permettre de tester avant de sauvegarder, et ne modifie jamais l'état persisté.
 
+## Environnements Docker distants
+
+QUAI pilote un ou plusieurs démons Docker **distants** (TCP+TLS), en plus du démon local piloté par défaut — sélectionnables depuis le sélecteur d'environnement du Topbar. Chantier volontairement traité en profondeur sur UN chemin de lecture plutôt qu'en largeur sur dix routes à moitié câblées (voir « Ce qui reste à faire » ci-dessous).
+
+**Persistance** (`apps/api/src/services/remoteDockerStore.ts`, `apps/api/data/remote-docker.json`, chemin `REMOTE_DOCKER_PATH`) : liste nommée `{ id, name, host, port, tls?: { ca, cert, key } }`, même pattern que `secretsStore.ts` — cache mémoire process invalidé à chaque écriture, fichier `0600`, `ca`/`cert`/`key` chiffrés au repos champ par champ (`crypto.ts`, réutilisé tel quel). `GET /api/remote-environments` ne renvoie jamais `ca`/`cert`/`key`, seulement `hasTls` (write-only, même principe que `SecretRef`).
+
+**Connexion — dockerode natif, aucune réimplémentation.** `docker-modem` (la lib HTTP sous-jacente de dockerode) accepte `host`/`port`/`ca`/`cert`/`key` directement dans son constructeur pour une connexion TCP+TLS — c'est la méthode standard documentée par Docker Engine (https://docs.docker.com/engine/security/protect-access/). **Piège vérifié dans ses sources** (`docker-modem/lib/modem.js`) : le protocole ne bascule automatiquement en `https` que si `ca` **ET** `cert` **ET** `key` sont **tous les trois** présents — un déploiement avec seulement `cert`+`key` (CA système déjà approuvée, cas courant) retomberait sinon silencieusement en HTTP en clair. `docker.ts#buildRemoteDockerClient` fixe donc `protocol: "https"` explicitement dès que `cert`+`key` sont fournis.
+
+**`docker.ts#getClient(remoteEnvironmentId?)`** : signature étendue avec un paramètre optionnel, **comportement inchangé sans argument** (démon local/`DOCKER_HOST`, exactement comme avant). Avec un id, résout un client dockerode dédié à cet hôte distant persisté — lève une erreur explicite si l'id n'existe pas (traduite en `404` par les routes, jamais un `502` trompeur). Étendu de la même façon (même paramètre optionnel, même règle) sur `getDockerContainers`, `listVolumes`, `listNetworks`, `getDockerHostInfo` — toutes utilisables avec ou sans id distant.
+
+**Câblé bout-en-bout (vérifié réellement, voir « Vérifications effectuées ») :**
+- `GET /api/containers?environmentId=remote-docker:<id>` — liste RÉELLE des conteneurs de l'hôte distant (`environment` = nom de l'environnement distant, `node` = `remote-docker:<id>`). Tout autre `environmentId` (environnement local, Kubernetes, Nutanix, LXC, absent) retombe sur le comportement historique.
+- `GET /api/volumes?environmentId=...` / `GET /api/networks?environmentId=...` — même mécanisme, résolution `getClient(id)` partagée.
+- `GET /api/environments` agrège un `Environment` (`orchestrator: "docker-remote"`) par hôte distant persisté, avec `hostInfo` réel (`docker info`/`docker version`) si joignable — rend chaque environnement distant sélectionnable depuis le Topbar.
+- Frontend : section « Environnements Docker distants » sur `EnvironmentsPage.tsx` (ajout nom/host/port, test de connectivité réel, suppression — admin pour les mutations) + `ContainersPage.tsx` re-fetch réellement `GET /api/containers` avec l'`environmentId` sélectionné dans le Topbar à chaque changement.
+- `GET /api/remote-environments/:id/test` : résout le VRAI client dockerode pour cet hôte et appelle `docker.ping()` dessus (pas une simple validation de forme).
+
+**Un hôte distant injoignable ou jamais configuré ne retombe JAMAIS sur le jeu de données de démonstration** (contrairement au démon local) : `[]` honnête, comme Nutanix/LXC — faire croire qu'un environnement distant qu'on vient d'ajouter fait déjà tourner le jeu de démo serait trompeur.
+
+**Rôle requis** : CRUD (`POST`/`PATCH`/`DELETE /api/remote-environments*`) réservé à `admin`, comme `/api/secrets/*` — un environnement Docker distant est un point d'accès administratif à un démon Docker entier. `GET` (liste, détail, test) ouvert à toute session authentifiée.
+
+**Ce qui reste à faire (non câblé dans cette passe)** : les routes d'écriture (créer/démarrer/arrêter un conteneur, créer un volume/network, `POST /api/containers`...) restent démon local uniquement — étendre `createAndStartContainer`/`startContainer`/etc. avec le même paramètre optionnel suivrait exactement le même pattern, non fait faute de temps dans cette passe. La construction de topologie (`services/topology.ts`) ignore aussi les environnements distants pour l'instant (nœuds/arêtes Docker uniquement pour le démon local). Le formulaire d'ajout minimal du Topbar ne saisit pas encore `ca`/`cert`/`key` (à passer via `PATCH /api/remote-environments/:id` pour l'instant).
+
+## Support LXC (via LXD)
+
+LXC seul n'a pas d'API réseau standard (techno de conteneurisation bas niveau, pilotée localement via `lxc-*`) — **LXD**, le démon de gestion LXC de Canonical (largement utilisé, notamment indirectement par Proxmox), **EST** la façon standard de piloter des conteneurs LXC à distance, via une vraie API REST (unix socket local ou HTTPS + certificat client à distance, https://documentation.ubuntu.com/lxd/en/latest/rest-api/). QUAI cible LXD — pas une réimplémentation de `lxc-*` en sous-processus distant (aucun sens pour un accès distant).
+
+**`apps/api/src/services/lxc.ts`** : même pattern **exact** que `nutanix.ts` — `isLxcConfigured()`, `isLxcReachable()`, `getLxcContainers()` (liste réelle via `GET /1.0/instances?recursion=1`), `getLxcEnvironment()` (agrégé dans `environments.ts#getAllEnvironments`, `orchestrator: "lxc"`). **Jamais de donnée fabriquée** : `[]`/`null` si LXD n'a jamais été configuré, idem si configuré mais injoignable — jamais mélangé aux vraies données Docker/Kubernetes/Nutanix.
+
+**Authentification — mTLS, comme documenté pour tout accès distant à LXD.** `apps/api/src/services/lxcStore.ts` persiste UN endpoint LXD (`https://host:port`) + certificat client (`clientCert`/`clientKey`, chiffrés au repos champ par champ comme `remoteDockerStore.ts`) — pas une liste nommée comme les environnements Docker distants : LXD n'a, dans ce premier lot, pas de notion de plusieurs intégrations LXC côté QUAI (même principe qu'une seule config Nutanix).
+
+**Route branchée dès sa création** — `GET /api/lxc/containers` (comme `GET /api/nutanix/vms`, resté du code mort un temps avant d'être branché) : câblée dans `index.ts` dans le même commit que sa création, jamais laissée orpheline. `GET/PUT/DELETE /api/lxc/config` (admin pour les mutations) + `GET /api/lxc/config/test` (test réel contre la config persistée, `GET /1.0/instances` authentifié par certificat client) complètent le CRUD minimal nécessaire pour rendre l'intégration testable sans passer par l'assistant de configuration (pas de nouvelle étape LXC ajoutée à `SetupWizard.tsx` dans cette passe).
+
+**Reporté explicitement — nœuds LXC dans la topologie.** Un nouveau `kind: "lxc-container"` dans `TopologyNode["kind"]` (même traitement que `"nutanix-vm"` : nœuds isolés, pas d'arête forcée vers Docker) n'a pas été ajouté dans cette passe, faute de temps après la profondeur donnée aux environnements Docker distants — la mécanique serait strictement identique à celle déjà en place pour les VMs Nutanix dans `services/topology.ts`.
+
+**Reporté explicitement — frontend LXC.** Aucune UI dédiée (le sujet demandait une UI minimale pour les environnements Docker distants, pas pour LXC) : `GET /api/lxc/containers` et le CRUD de config sont câblés côté API et vérifiables via l'API/tests, mais pas encore consommés par `apps/web`.
+
 ## Détection proactive (watchdog)
 
 Le reste de l'app ne notifie qu'en réaction à une action utilisateur (ex: une mise à jour d'image qui échoue). Le watchdog (`apps/api/src/services/watchdog.ts`) fait l'inverse : il détecte tout seul, en tâche de fond, sans qu'aucun utilisateur n'ait rien demandé.
@@ -398,7 +464,10 @@ GET  /api/session
 POST /api/auth/login
 POST /api/auth/logout
 
-GET  /api/environments
+GET  /api/environments                      # inclut désormais un Environment par environnement Docker distant
+                                             # persisté (orchestrator "docker-remote") et, si LXD est configuré,
+                                             # un Environment "lxc" — voir « Environnements Docker distants »/
+                                             # « Support LXC (via LXD) »
 GET  /api/environments/:id/nodes
 GET  /api/nutanix/vms                       # détail par VM (nom, powerState, vCPUs, mémoire, cluster physique) —
                                              # distinct de GET /api/environments (un nœud PAR CLUSTER PHYSIQUE,
@@ -407,6 +476,27 @@ GET  /api/nutanix/vms                       # détail par VM (nom, powerState, v
                                              # [] si Nutanix n'a jamais été configuré ou injoignable, jamais de VM
                                              # inventée. Consommé par EnvironmentsPage.tsx (section "VMs" de
                                              # l'environnement Nutanix) et par GET /api/topology ci-dessous.
+
+GET    /api/remote-environments             # liste des environnements Docker distants persistés — jamais
+                                             # ca/cert/key, seulement `hasTls` (voir « Environnements Docker
+                                             # distants »). Ouvert à toute session authentifiée.
+POST   /api/remote-environments             # { name, host, port, tls? } — admin uniquement.
+GET    /api/remote-environments/:id
+PATCH  /api/remote-environments/:id         # { name?, host?, port?, tls?, clearTls? } — admin uniquement.
+DELETE /api/remote-environments/:id         # admin uniquement.
+GET    /api/remote-environments/:id/test    # test de connectivité RÉEL — docker.ping() sur le client dockerode
+                                             # résolu pour cet hôte précis (services/docker.ts#getClient).
+
+GET    /api/lxc/containers                  # instances LXD réelles (nom, statut, architecture, type) — []
+                                             # si LXD n'a jamais été configuré ou injoignable, jamais de conteneur
+                                             # LXC inventé (voir « Support LXC (via LXD) »). Branchée dès sa
+                                             # création (contrairement à GET /api/nutanix/vms, resté du code mort
+                                             # un temps).
+GET    /api/lxc/config                      # { configured, endpoint?, updatedAt? } — jamais le certificat/la clé.
+PUT    /api/lxc/config                      # { endpoint, clientCert, clientKey } — admin uniquement.
+DELETE /api/lxc/config                      # admin uniquement.
+GET    /api/lxc/config/test                 # test de connectivité RÉEL contre la config persistée (GET
+                                             # /1.0/instances authentifié par certificat client mTLS).
 
 GET    /api/images?status=update|uptodate   # images Docker réelles de l'hôte (docker.ts), démo en repli
 POST   /api/images/:id/update               # pull réel du dernier tag connu (image locale) ou màj démo
@@ -435,7 +525,9 @@ PATCH  /api/secrets/:id   # { name?, value?, description? } — value omise/vide
                            # admin uniquement.
 DELETE /api/secrets/:id   # admin uniquement.
 
-GET  /api/containers
+GET  /api/containers    # ?environmentId=remote-docker:<id> cible un environnement Docker distant persisté
+                        # au lieu du démon local — câblé bout-en-bout (voir « Environnements Docker
+                        # distants »). GET /api/volumes et GET /api/networks acceptent le même paramètre.
 POST /api/containers   # { image, name?, ports?, env?, secretEnv?, volumes?, network? } — équivalent
                         # `docker run -d`. L'image doit déjà être locale : faire POST /api/images/pull
                         # avant si besoin. `env` : texte brut ("CLE=valeur"). `secretEnv` :
@@ -494,7 +586,7 @@ GET    /api/reverse-proxy/status    # ReverseProxyStatus — Caddy joignable ou 
                                      # GET /api/scanners/status
 ```
 
-Toutes les routes (sauf `/api/auth/*` et `/api/setup/*`) exigent une session valide. Les routes `POST`/`PATCH`/`DELETE` exigent le rôle `operator` ou `admin`. Les routes `/api/setup/*` sont ouvertes tant que `completed=false` ; une fois `completed=true`, elles répondent `403` sauf pour un utilisateur `admin` authentifié (flux de reconfiguration). Exception plus stricte : les 3 routes mutantes de `/api/secrets/*` exigent explicitement `admin` (voir « Gestionnaire de secrets »), pas seulement `operator`. Autre exception, dans l'autre sens : `GET /api/console/:id` (upgrade WebSocket, donc une méthode `GET`) exige quand même explicitement `operator`/`admin` — ajouté par un hook `preHandler` propre à `routes/console.ts` car le hook global ne restreint par rôle que les méthodes mutantes (voir « Console interactive dans un conteneur »).
+Toutes les routes (sauf `/api/auth/*` et `/api/setup/*`) exigent une session valide. Les routes `POST`/`PATCH`/`DELETE` exigent le rôle `operator` ou `admin`. Les routes `/api/setup/*` sont ouvertes tant que `completed=false` ; une fois `completed=true`, elles répondent `403` sauf pour un utilisateur `admin` authentifié (flux de reconfiguration). Exception plus stricte : les 3 routes mutantes de `/api/secrets/*` exigent explicitement `admin` (voir « Gestionnaire de secrets »), pas seulement `operator` — même exception pour les routes mutantes de `/api/remote-environments/*` et `/api/lxc/config`. Autre exception, dans l'autre sens : `GET /api/console/:id` (upgrade WebSocket, donc une méthode `GET`) exige quand même explicitement `operator`/`admin` — ajouté par un hook `preHandler` propre à `routes/console.ts` car le hook global ne restreint par rôle que les méthodes mutantes (voir « Console interactive dans un conteneur »).
 
 ## Graphe de topologie (`apps/web/src/components/TopologyGraph.tsx`)
 
