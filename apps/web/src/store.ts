@@ -5,6 +5,7 @@ import uiReducer from "@/features/ui/uiSlice";
 import overviewReducer from "@/features/overview/overviewSlice";
 import imagesReducer from "@/features/images/imagesSlice";
 import registriesReducer from "@/features/registries/registriesSlice";
+import secretsReducer from "@/features/secrets/secretsSlice";
 import containersReducer from "@/features/containers/containersSlice";
 import gitopsReducer from "@/features/gitops/gitopsSlice";
 import clustersReducer from "@/features/clusters/clustersSlice";
@@ -24,6 +25,7 @@ export const store = configureStore({
     overview: overviewReducer,
     images: imagesReducer,
     registries: registriesReducer,
+    secrets: secretsReducer,
     containers: containersReducer,
     gitops: gitopsReducer,
     clusters: clustersReducer,

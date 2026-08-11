@@ -232,3 +232,15 @@ export function IconSettings({ className }: IconProps) {
     className,
   );
 }
+
+export function IconKey({ className }: IconProps) {
+  return base(
+    <>
+      <circle cx="8" cy="15" r="4" />
+      <path d="M11 12l9-9" />
+      <path d="M17 6l3 3" />
+      <path d="M14 9l3 3" />
+    </>,
+    className,
+  );
+}

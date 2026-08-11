@@ -16,6 +16,7 @@ import {
   IconClusters,
   IconBell,
   IconHistory,
+  IconKey,
 } from "@/components/icons";
 
 const ICONS: Partial<Record<ViewId, (props: { className?: string }) => JSX.Element>> = {
@@ -82,6 +83,20 @@ export default function Sidebar() {
             </button>
           );
         })}
+
+        {canAdminister(session) && (
+          <button
+            type="button"
+            className={`sidebar__item${currentView === "secrets" ? " is-active" : ""}`}
+            onClick={() => handleNavigate("secrets")}
+            title={pageTitle("secrets")}
+          >
+            <span className="sidebar__icon">
+              <IconKey />
+            </span>
+            {pageTitle("secrets")}
+          </button>
+        )}
 
         {canAdminister(session) && (
           <button

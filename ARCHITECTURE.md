@@ -120,6 +120,16 @@ interface GitCommit {
   date: string;                 // ISO 8601
 }
 
+// Gestionnaire de secrets nommés (façon Vault/GitHub Actions secrets) — voir chapitre
+// "Gestionnaire de secrets" plus bas. La valeur elle-même n'apparaît JAMAIS dans ce contrat.
+interface SecretRef {
+  id: string;
+  name: string;                 // clé de référence unique, utilisée par secretEnv à la création d'un conteneur
+  description?: string;
+  createdAt: string;            // ISO 8601
+  updatedAt: string;            // ISO 8601
+}
+
 interface Session {
   username: string;
   displayName: string;
@@ -169,6 +179,18 @@ interface DiffResult {
 ## Secrets au repos
 
 Tout secret persisté dans `config.json` (mot de passe LDAP, kubeconfig, mot de passe Nutanix, identifiants de registry) est chiffré avec AES-256-GCM avant écriture disque (`apps/api/src/services/crypto.ts`) — la clé vient de `CONFIG_ENCRYPTION_KEY` (jamais stockée dans le même fichier que ce qu'elle protège), obligatoire en production, à défaut d'une clé aléatoire éphémère en développement (avertissement explicite au démarrage). Un `config.json` écrit avant l'introduction de ce chiffrement est migré automatiquement (rechiffré et réécrit) au premier accès suivant. Le fichier est aussi écrit avec des permissions restrictives (`0600`). Voir `apps/api/.env.example` pour la génération de la clé.
+
+## Gestionnaire de secrets
+
+Console de secrets nommés façon Vault/GitHub Actions secrets (`apps/api/src/services/secretsStore.ts`, `apps/api/src/routes/secrets.ts`, `apps/web/src/features/secrets/`) : un admin définit une valeur une seule fois sous un nom unique, cette valeur est ensuite référencée **par nom** lors de la création d'un conteneur — jamais retapée, jamais exposée dans le navigateur après sa saisie initiale.
+
+**Persistance** : `apps/api/data/secrets.json` (chemin `SECRETS_PATH`, même répertoire et même pattern que `config.json` — cache mémoire process invalidé à chaque écriture, fichier `0600`). Réutilise **exactement** le mécanisme de chiffrement au repos ci-dessus (`crypto.ts`, AES-256-GCM, `CONFIG_ENCRYPTION_KEY`) — aucun nouveau mécanisme introduit. `name` sert de clé de référence : unique, vérifié à la création et au renommage (`409` en cas de collision).
+
+**Write-only côté API** : `GET /api/secrets` (liste) ne renvoie jamais la valeur, seulement `id/name/description/createdAt/updatedAt` (`SecretRef`, voir « Contrats de données »). Aucune route ne l'expose jamais, sous aucune forme — seule une fonction interne non exposée (`getDecryptedSecretValue(name)`) la déchiffre, réservée à la résolution serveur lors de la création d'un conteneur. `PATCH /api/secrets/:id` avec `value` omise ou vide conserve la valeur déjà enregistrée (même convention que `password`/`token` sur `PATCH /api/registries/:id`).
+
+**Rôle requis** : un secret est plus sensible qu'un registry — les 3 routes mutantes (`POST`/`PATCH`/`DELETE`) exigent explicitement le rôle `admin` (403 sinon), au-delà du operator/admin déjà exigé par le hook global pour toute méthode mutante. `GET /api/secrets` reste ouvert à toute session authentifiée (nécessaire pour peupler le sélecteur de secrets du formulaire de création de conteneur, y compris pour un `operator`).
+
+**Intégration à la création de conteneur** : `POST /api/containers` accepte, en plus de `env?: string[]` (texte brut, inchangé), un champ optionnel `secretEnv?: { key: string; secretName: string }[]`. Résolu **côté serveur uniquement**, avant tout appel Docker : chaque `secretName` est déchiffré et fusionné en `"${key}=${valeur}"` dans l'`Env` final. Un `secretName` introuvable fait échouer toute la requête en `400` (`Secret "X" not found`) — jamais de conteneur créé avec un environnement partiellement résolu. Aucune valeur de secret n'est jamais journalisée (audit log, console) : `plugins/audit.ts` ne trace que method/path/statusCode/acteur, jamais le corps de la requête.
 
 ## Assistant de configuration au premier lancement
 
@@ -250,12 +272,21 @@ GET   /api/registries/:id/repositories                 # { repositories, diagnos
                                                          # sur RegistryExplorerPage.tsx.
 GET   /api/registries/:id/repositories/:repo/tags       # tags d'un dépôt du catalogue (:repo encodé)
 
+GET    /api/secrets       # id/name/description/createdAt/updatedAt — JAMAIS la valeur (voir « Gestionnaire
+                           # de secrets » ci-dessus). Ouvert à toute session authentifiée.
+POST   /api/secrets       # { name, value, description? } — admin uniquement (403 sinon).
+PATCH  /api/secrets/:id   # { name?, value?, description? } — value omise/vide = valeur conservée,
+                           # admin uniquement.
+DELETE /api/secrets/:id   # admin uniquement.
+
 GET  /api/containers
-POST /api/containers   # { image, name?, ports? } — équivalent `docker run -d`, flux minimal
-                        # (pas de volumes/env/réseau/restart policy). L'image doit déjà être
-                        # locale : faire POST /api/images/pull avant si besoin. Volontairement
-                        # minimal — la gestion déclarative passe par GitOps (voir plus bas) ;
-                        # ceci ne sert qu'à tester vite en local.
+POST /api/containers   # { image, name?, ports?, env?, secretEnv?, volumes?, network? } — équivalent
+                        # `docker run -d`. L'image doit déjà être locale : faire POST /api/images/pull
+                        # avant si besoin. `env` : texte brut ("CLE=valeur"). `secretEnv` :
+                        # { key, secretName }[], résolu côté serveur via le gestionnaire de secrets
+                        # ci-dessus et fusionné dans l'Env final — secretName introuvable = 400 avant
+                        # toute création. La gestion déclarative complète passe par GitOps (voir plus
+                        # bas) ; ceci reste pensé pour tester vite en local.
 
 GET  /api/gitops/files
 GET  /api/gitops/files/:path/diff
@@ -273,7 +304,7 @@ GET  /api/notifications?since=<ISO 8601>  # événements détectés par le watch
 POST /api/notifications/read-all          # marque tous les événements connus comme lus (operator/admin)
 ```
 
-Toutes les routes (sauf `/api/auth/*` et `/api/setup/*`) exigent une session valide. Les routes `POST` exigent le rôle `operator` ou `admin`. Les routes `/api/setup/*` sont ouvertes tant que `completed=false` ; une fois `completed=true`, elles répondent `403` sauf pour un utilisateur `admin` authentifié (flux de reconfiguration).
+Toutes les routes (sauf `/api/auth/*` et `/api/setup/*`) exigent une session valide. Les routes `POST`/`PATCH`/`DELETE` exigent le rôle `operator` ou `admin`. Les routes `/api/setup/*` sont ouvertes tant que `completed=false` ; une fois `completed=true`, elles répondent `403` sauf pour un utilisateur `admin` authentifié (flux de reconfiguration). Exception plus stricte : les 3 routes mutantes de `/api/secrets/*` exigent explicitement `admin` (voir « Gestionnaire de secrets »), pas seulement `operator`.
 
 ## Graphe de topologie (`apps/web/src/components/TopologyGraph.tsx`)
 

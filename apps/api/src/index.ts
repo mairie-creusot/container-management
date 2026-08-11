@@ -24,6 +24,7 @@ import networksRoutes from "./routes/networks.js";
 import notificationsRoutes from "./routes/notifications.js";
 import registriesRoutes from "./routes/registries.js";
 import scanRoutes from "./routes/scan.js";
+import secretsRoutes from "./routes/secrets.js";
 import setupRoutes from "./routes/setup.js";
 import topologyRoutes from "./routes/topology.js";
 import volumesRoutes from "./routes/volumes.js";
@@ -58,6 +59,7 @@ export function buildServer() {
   void fastify.register(imagesRoutes);
   void fastify.register(scanRoutes);
   void fastify.register(registriesRoutes);
+  void fastify.register(secretsRoutes);
   void fastify.register(containersRoutes);
   void fastify.register(volumesRoutes);
   void fastify.register(networksRoutes);

@@ -231,6 +231,19 @@ export interface GitCommit {
   date: string; // ISO 8601
 }
 
+// --- Gestionnaire de secrets nommés (façon Vault/GitHub Actions secrets) — voir
+// apps/api/src/services/secretsStore.ts. La valeur elle-même n'apparaît JAMAIS dans ce
+// contrat : elle est chiffrée au repos et write-only côté API (jamais renvoyée par un GET
+// liste/détail), référencée par `name` lors de la création d'un conteneur.
+
+export interface SecretRef {
+  id: string;
+  name: string;
+  description?: string;
+  createdAt: string; // ISO 8601
+  updatedAt: string; // ISO 8601
+}
+
 export type Role = "admin" | "operator" | "viewer";
 
 export interface Session {

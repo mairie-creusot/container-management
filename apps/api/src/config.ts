@@ -123,6 +123,12 @@ export const config = {
     // ; en conteneur, pointer vers un volume monté (ex: /data/quai/config.json).
     configPath: readString("CONFIG_PATH", "./data/config.json"),
   },
+  secrets: {
+    // Persistance du gestionnaire de secrets nommés (cf. ARCHITECTURE.md, chapitre "Gestionnaire
+    // de secrets"). Même répertoire que CONFIG_PATH par défaut, fichier séparé — les valeurs
+    // sont chiffrées au repos (crypto.ts) avant écriture, comme le reste des secrets persistés.
+    storePath: readString("SECRETS_PATH", "./data/secrets.json"),
+  },
 } as const;
 
 export type Config = typeof config;

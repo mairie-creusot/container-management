@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import {
   createContainer,
@@ -7,7 +7,9 @@ import {
   runContainerAction,
   selectContainer,
   type LifecycleAction,
+  type SecretEnvEntry,
 } from "@/features/containers/containersSlice";
+import { fetchSecrets } from "@/features/secrets/secretsSlice";
 import { canOperate } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import { usePagination } from "@/hooks/usePagination";
@@ -18,6 +20,14 @@ import KeyValueList from "@/components/KeyValueList";
 import Pagination from "@/components/Pagination";
 import { SkeletonTable } from "@/components/Skeleton";
 import { IconPlay, IconRestart, IconStop, IconTrash } from "@/components/icons";
+
+/** Une ligne du formulaire "Secrets" — id local (pas de valeur réelle stockée côté client, voir
+ * plus bas) le temps de l'édition, avant conversion en SecretEnvEntry[] pour le payload. */
+interface SecretEnvRow {
+  rowId: number;
+  key: string;
+  secretName: string;
+}
 
 function formatMem(bytes: number): string {
   const mb = bytes / (1024 * 1024);
@@ -50,6 +60,7 @@ export default function ContainersPage() {
   const selectedEnvironmentId = useAppSelector((s) => s.ui.selectedEnvironmentId);
   const environments = useAppSelector((s) => s.clusters.environments);
   const session = useAppSelector((s) => s.auth.session);
+  const availableSecrets = useAppSelector((s) => s.secrets.items);
   const confirm = useConfirm();
 
   const [formOpen, setFormOpen] = useState(false);
@@ -59,14 +70,37 @@ export default function ContainersPage() {
   const [envInput, setEnvInput] = useState("");
   const [volumesInput, setVolumesInput] = useState("");
   const [network, setNetwork] = useState("");
+  const [secretEnvRows, setSecretEnvRows] = useState<SecretEnvRow[]>([]);
+  const nextSecretRowId = useRef(0);
 
   useEffect(() => {
     dispatch(fetchContainers());
   }, [dispatch]);
 
+  // Chargé pour peupler le sélecteur "Secrets" du formulaire de création — n'affiche jamais de
+  // valeur, seulement les noms référençables (voir features/secrets/secretsSlice.ts).
+  useEffect(() => {
+    dispatch(fetchSecrets());
+  }, [dispatch]);
+
   useEffect(() => {
     if (selectedId) dispatch(fetchContainerDetail(selectedId));
   }, [dispatch, selectedId]);
+
+  function addSecretEnvRow() {
+    setSecretEnvRows((rows) => [
+      ...rows,
+      { rowId: nextSecretRowId.current++, key: "", secretName: availableSecrets[0]?.name ?? "" },
+    ]);
+  }
+
+  function updateSecretEnvRow(rowId: number, patch: Partial<Pick<SecretEnvRow, "key" | "secretName">>) {
+    setSecretEnvRows((rows) => rows.map((row) => (row.rowId === rowId ? { ...row, ...patch } : row)));
+  }
+
+  function removeSecretEnvRow(rowId: number) {
+    setSecretEnvRows((rows) => rows.filter((row) => row.rowId !== rowId));
+  }
 
   function handleCreate(event: FormEvent) {
     event.preventDefault();
@@ -77,12 +111,16 @@ export default function ContainersPage() {
     const volumes = volumesInput.split(",").map((v) => v.trim()).filter(Boolean);
     const trimmedName = name.trim();
     const trimmedNetwork = network.trim();
+    const secretEnv: SecretEnvEntry[] = secretEnvRows
+      .map((row) => ({ key: row.key.trim(), secretName: row.secretName.trim() }))
+      .filter((row) => row.key && row.secretName);
     dispatch(
       createContainer({
         image: trimmedImage,
         ...(trimmedName ? { name: trimmedName } : {}),
         ports,
         env,
+        ...(secretEnv.length > 0 ? { secretEnv } : {}),
         volumes,
         ...(trimmedNetwork ? { network: trimmedNetwork } : {}),
       }),
@@ -95,6 +133,7 @@ export default function ContainersPage() {
         setEnvInput("");
         setVolumesInput("");
         setNetwork("");
+        setSecretEnvRows([]);
       }
     });
   }
@@ -211,6 +250,63 @@ export default function ContainersPage() {
                 rows={3}
               />
             </div>
+
+            <div className="field" style={{ flexBasis: "100%" }}>
+              <label>Secrets (optionnel)</label>
+              {availableSecrets.length === 0 ? (
+                <p className="create-container-hint">
+                  Aucun secret configuré, voir la page Secrets.
+                </p>
+              ) : (
+                <>
+                  {secretEnvRows.map((row) => (
+                    <div key={row.rowId} style={{ display: "flex", gap: 8, marginBottom: 8, alignItems: "center" }}>
+                      <input
+                        type="text"
+                        placeholder="ex : DB_PASSWORD"
+                        value={row.key}
+                        onChange={(e) => updateSecretEnvRow(row.rowId, { key: e.target.value })}
+                        disabled={createStatus === "creating"}
+                        style={{ flex: 1 }}
+                      />
+                      <span>=</span>
+                      <select
+                        className="topbar__env-select"
+                        value={row.secretName}
+                        onChange={(e) => updateSecretEnvRow(row.rowId, { secretName: e.target.value })}
+                        disabled={createStatus === "creating"}
+                        style={{ flex: 1 }}
+                      >
+                        {availableSecrets.map((secret) => (
+                          <option key={secret.id} value={secret.name}>
+                            {secret.name}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className="icon-btn icon-btn--danger"
+                        title="Retirer cette ligne"
+                        aria-label="Retirer cette ligne"
+                        onClick={() => removeSecretEnvRow(row.rowId)}
+                        disabled={createStatus === "creating"}
+                      >
+                        <IconTrash />
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    onClick={addSecretEnvRow}
+                    disabled={createStatus === "creating"}
+                  >
+                    + Référencer un secret
+                  </button>
+                </>
+              )}
+            </div>
+
             <button type="submit" className="btn btn-primary" disabled={createStatus === "creating" || !image.trim()}>
               {createStatus === "creating" ? "Création…" : "Créer et démarrer"}
             </button>

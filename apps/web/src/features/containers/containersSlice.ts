@@ -3,11 +3,20 @@ import { apiDelete, apiGet, apiPost, ApiError } from "@/api/client";
 import type { ContainerDetail, ContainerRef } from "@/types";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
 
+/** Référence par nom vers un secret défini dans le gestionnaire de secrets (features/secrets) —
+ * résolue côté serveur uniquement (voir POST /api/containers, routes/containers.ts) : la
+ * valeur réelle ne transite jamais par ce payload. */
+export interface SecretEnvEntry {
+  key: string;
+  secretName: string;
+}
+
 export interface CreateContainerInput {
   image: string;
   name?: string;
   ports?: string[];
   env?: string[];
+  secretEnv?: SecretEnvEntry[];
   volumes?: string[];
   network?: string;
 }

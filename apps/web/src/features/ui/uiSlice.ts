@@ -13,7 +13,8 @@ export type ViewId =
   | "gitops"
   | "clusters"
   | "notifications"
-  | "audit";
+  | "audit"
+  | "secrets";
 
 interface UiState {
   currentView: ViewId;
@@ -76,6 +77,7 @@ const PAGE_TITLES: Partial<Record<ViewId, string>> = {
   notifications: "Notifications",
   audit: "Traçabilité",
   "registry-explorer": "Explorateur de registry",
+  secrets: "Secrets",
 };
 
 export function pageTitle(view: ViewId): string {

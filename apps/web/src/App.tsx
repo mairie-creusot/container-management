@@ -11,6 +11,7 @@ import OverviewPage from "@/features/overview/OverviewPage";
 import ImagesPage from "@/features/images/ImagesPage";
 import RegistriesPage from "@/features/registries/RegistriesPage";
 import RegistryExplorerPage from "@/features/registries/RegistryExplorerPage";
+import SecretsPage from "@/features/secrets/SecretsPage";
 import ContainersPage from "@/features/containers/ContainersPage";
 import VolumesPage from "@/features/volumes/VolumesPage";
 import NetworksPage from "@/features/networks/NetworksPage";
@@ -39,6 +40,8 @@ function renderView(view: string) {
       return <RegistriesPage />;
     case "registry-explorer":
       return <RegistryExplorerPage />;
+    case "secrets":
+      return <SecretsPage />;
     case "containers":
       return <ContainersPage />;
     case "volumes":

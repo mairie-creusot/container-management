@@ -22,12 +22,22 @@ import {
   stopContainer,
 } from "../services/docker.js";
 import { getKubernetesContainers } from "../services/kubernetes.js";
+import { getDecryptedSecretValue } from "../services/secretsStore.js";
+
+interface SecretEnvRef {
+  key?: string;
+  secretName?: string;
+}
 
 interface CreateContainerBody {
   image?: string;
   name?: string;
   ports?: string[];
   env?: string[];
+  // Références par nom vers des secrets définis dans le gestionnaire de secrets (voir
+  // services/secretsStore.ts) — résolues côté serveur ci-dessous, jamais côté client :
+  // la valeur réelle ne transite jamais vers/depuis le navigateur après sa saisie initiale.
+  secretEnv?: SecretEnvRef[];
   volumes?: string[];
   network?: string;
 }
@@ -65,12 +75,29 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
     const volumes = (request.body?.volumes ?? []).map((v) => v.trim()).filter(Boolean);
     const network = request.body?.network?.trim() || undefined;
 
+    // Résolution des secrets référencés par nom (jamais côté client) — TOUJOURS avant l'appel
+    // à createAndStartContainer : un secretName introuvable doit faire échouer la requête
+    // entière en 400, jamais créer le conteneur avec un env partiellement résolu.
+    const secretEnv: string[] = [];
+    for (const ref of request.body?.secretEnv ?? []) {
+      const key = ref.key?.trim();
+      const secretName = ref.secretName?.trim();
+      if (!key || !secretName) {
+        return reply.code(400).send({ error: "secretEnv entries require both key and secretName" });
+      }
+      const value = await getDecryptedSecretValue(secretName);
+      if (value === null) {
+        return reply.code(400).send({ error: `Secret "${secretName}" not found` });
+      }
+      secretEnv.push(`${key}=${value}`);
+    }
+
     try {
       const created = await createAndStartContainer({
         image,
         ...(name ? { name } : {}),
         ports,
-        env,
+        env: [...env, ...secretEnv],
         volumes,
         ...(network ? { network } : {}),
       });
