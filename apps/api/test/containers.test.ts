@@ -82,4 +82,58 @@ describe("POST /api/containers", () => {
     expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({ error: 'Secret "does-not-exist-in-this-test" not found' });
   });
+
+  // Limites de ressources optionnelles (HostConfig.Memory/NanoCpus) — voir parseResourceLimits
+  // (routes/containers.ts). Ces requêtes doivent échouer AVANT tout appel Docker : un memoryLimitBytes
+  // en dessous du minimum réel de Docker (~6 Mo) ou un nanoCpus absurde ne doivent jamais atteindre
+  // createAndStartContainer, exactement comme la résolution de secretEnv ci-dessus.
+  it("rejects a memoryLimitBytes below Docker's own minimum (6 Mo) with 400, before touching Docker", async () => {
+    app = buildServer();
+    const token = signSessionToken({ username: "demo", displayName: "Demo User", roles: ["operator"] });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/containers",
+      cookies: { [config.session.cookieName]: token },
+      payload: { image: "redis:7-alpine", memoryLimitBytes: 1024 },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: expect.stringContaining("memoryLimitBytes") });
+  });
+
+  it("rejects a non-integer/negative memoryLimitBytes with 400", async () => {
+    app = buildServer();
+    const token = signSessionToken({ username: "demo", displayName: "Demo User", roles: ["operator"] });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/containers",
+      cookies: { [config.session.cookieName]: token },
+      payload: { image: "redis:7-alpine", memoryLimitBytes: -5 },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects a zero/negative nanoCpus with 400, before touching Docker", async () => {
+    app = buildServer();
+    const token = signSessionToken({ username: "demo", displayName: "Demo User", roles: ["operator"] });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/containers",
+      cookies: { [config.session.cookieName]: token },
+      payload: { image: "redis:7-alpine", nanoCpus: 0 },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ error: expect.stringContaining("nanoCpus") });
+  });
+
+  it("rejects an absurdly large nanoCpus (sanity guard) with 400", async () => {
+    app = buildServer();
+    const token = signSessionToken({ username: "demo", displayName: "Demo User", roles: ["operator"] });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/containers",
+      cookies: { [config.session.cookieName]: token },
+      payload: { image: "redis:7-alpine", nanoCpus: 999_000_000_000_000 },
+    });
+    expect(response.statusCode).toBe(400);
+  });
 });

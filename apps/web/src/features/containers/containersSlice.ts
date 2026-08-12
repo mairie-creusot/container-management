@@ -19,6 +19,11 @@ export interface CreateContainerInput {
   secretEnv?: SecretEnvEntry[];
   volumes?: string[];
   network?: string;
+  // Limites de ressources optionnelles (HostConfig.Memory/NanoCpus côté API) — absentes = pas de
+  // limite, comportement Docker natif inchangé. Voir ContainersPage.tsx pour la conversion
+  // Mo/Go -> octets et cœurs -> NanoCpus faite côté formulaire.
+  memoryLimitBytes?: number;
+  nanoCpus?: number;
 }
 
 export type LifecycleAction = "start" | "stop" | "restart" | "remove";

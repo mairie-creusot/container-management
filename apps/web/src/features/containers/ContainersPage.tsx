@@ -20,7 +20,8 @@ import KeyValueList from "@/components/KeyValueList";
 import Pagination from "@/components/Pagination";
 import { SkeletonTable } from "@/components/Skeleton";
 import ContainerConsole from "@/components/ContainerConsole";
-import { IconPlay, IconRestart, IconStop, IconTerminal, IconTrash } from "@/components/icons";
+import ContainerLogs from "@/features/containers/ContainerLogs";
+import { IconHistory, IconPlay, IconRestart, IconStop, IconTerminal, IconTrash } from "@/components/icons";
 
 /** Une ligne du formulaire "Secrets" — id local (pas de valeur réelle stockée côté client, voir
  * plus bas) le temps de l'édition, avant conversion en SecretEnvEntry[] pour le payload. */
@@ -74,6 +75,13 @@ export default function ContainersPage() {
   const [secretEnvRows, setSecretEnvRows] = useState<SecretEnvRow[]>([]);
   const nextSecretRowId = useRef(0);
   const [consoleTarget, setConsoleTarget] = useState<{ id: string; name: string } | null>(null);
+  const [logsTarget, setLogsTarget] = useState<{ id: string; name: string } | null>(null);
+  // Limites de ressources optionnelles (converties vers les unités Docker natives — octets/
+  // NanoCpus — juste avant l'envoi, voir handleCreate) : absentes = pas de limite, comportement
+  // Docker natif inchangé (voir POST /api/containers, aucune valeur par défaut fabriquée).
+  const [memoryLimitValue, setMemoryLimitValue] = useState("");
+  const [memoryLimitUnit, setMemoryLimitUnit] = useState<"Mo" | "Go">("Mo");
+  const [cpuLimitCores, setCpuLimitCores] = useState("");
 
   // Re-fetch quand l'environnement sélectionné dans le Topbar change — voir
   // apps/api/src/utils/environmentId.ts : seul un id "remote-docker:<id>" change réellement le
@@ -120,6 +128,20 @@ export default function ContainersPage() {
     const secretEnv: SecretEnvEntry[] = secretEnvRows
       .map((row) => ({ key: row.key.trim(), secretName: row.secretName.trim() }))
       .filter((row) => row.key && row.secretName);
+
+    // Conversion Mo/Go -> octets et cœurs -> NanoCpus (unités Docker natives, voir
+    // HostConfig.Memory/NanoCpus côté API) — un champ vide ou invalide reste `undefined`, jamais
+    // une limite fabriquée par défaut.
+    const memoryLimitTrimmed = memoryLimitValue.trim();
+    const memoryLimitParsed = memoryLimitTrimmed ? Number(memoryLimitTrimmed) : NaN;
+    const memoryLimitBytes =
+      Number.isFinite(memoryLimitParsed) && memoryLimitParsed > 0
+        ? Math.round(memoryLimitParsed * (memoryLimitUnit === "Go" ? 1024 * 1024 * 1024 : 1024 * 1024))
+        : undefined;
+    const cpuLimitTrimmed = cpuLimitCores.trim();
+    const cpuLimitParsed = cpuLimitTrimmed ? Number(cpuLimitTrimmed) : NaN;
+    const nanoCpus = Number.isFinite(cpuLimitParsed) && cpuLimitParsed > 0 ? Math.round(cpuLimitParsed * 1_000_000_000) : undefined;
+
     dispatch(
       createContainer({
         image: trimmedImage,
@@ -129,6 +151,8 @@ export default function ContainersPage() {
         ...(secretEnv.length > 0 ? { secretEnv } : {}),
         volumes,
         ...(trimmedNetwork ? { network: trimmedNetwork } : {}),
+        ...(memoryLimitBytes !== undefined ? { memoryLimitBytes } : {}),
+        ...(nanoCpus !== undefined ? { nanoCpus } : {}),
       }),
     ).then((result) => {
       if (createContainer.fulfilled.match(result)) {
@@ -140,6 +164,9 @@ export default function ContainersPage() {
         setVolumesInput("");
         setNetwork("");
         setSecretEnvRows([]);
+        setMemoryLimitValue("");
+        setMemoryLimitUnit("Mo");
+        setCpuLimitCores("");
       }
     });
   }
@@ -242,6 +269,45 @@ export default function ContainersPage() {
                 placeholder="bridge"
                 value={network}
                 onChange={(e) => setNetwork(e.target.value)}
+                disabled={createStatus === "creating"}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="create-memory-limit">Limite mémoire (optionnel)</label>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  id="create-memory-limit"
+                  type="number"
+                  min="1"
+                  step="any"
+                  placeholder="ex : 512"
+                  value={memoryLimitValue}
+                  onChange={(e) => setMemoryLimitValue(e.target.value)}
+                  disabled={createStatus === "creating"}
+                  style={{ flex: 1 }}
+                />
+                <select
+                  className="topbar__env-select"
+                  value={memoryLimitUnit}
+                  onChange={(e) => setMemoryLimitUnit(e.target.value === "Go" ? "Go" : "Mo")}
+                  disabled={createStatus === "creating"}
+                  aria-label="Unité de la limite mémoire"
+                >
+                  <option value="Mo">Mo</option>
+                  <option value="Go">Go</option>
+                </select>
+              </div>
+            </div>
+            <div className="field">
+              <label htmlFor="create-cpu-limit">Limite CPU en cœurs (optionnel)</label>
+              <input
+                id="create-cpu-limit"
+                type="number"
+                min="0.05"
+                step="0.05"
+                placeholder="ex : 0.5"
+                value={cpuLimitCores}
+                onChange={(e) => setCpuLimitCores(e.target.value)}
                 disabled={createStatus === "creating"}
               />
             </div>
@@ -473,15 +539,28 @@ export default function ContainersPage() {
               </div>
             )}
 
-            {canOperate(session) && selected.state === "running" && (
+            {selected.environment !== "Kubernetes" && (
               <div className="inspector-actions">
+                {/* Logs : lecture seule, ouvert à tout rôle authentifié (viewer inclus) — voir
+                    routes/containerLogs.ts, contrairement à la console ci-dessous qui ouvre un
+                    vrai shell et reste réservée operator/admin. Utile même sur un conteneur
+                    arrêté (comprendre pourquoi il s'est arrêté), donc pas conditionné à `running`. */}
                 <button
                   type="button"
                   className="btn btn-secondary btn-sm"
-                  onClick={() => setConsoleTarget({ id: selected.id, name: selected.name })}
+                  onClick={() => setLogsTarget({ id: selected.id, name: selected.name })}
                 >
-                  <IconTerminal /> Console
+                  <IconHistory /> Logs
                 </button>
+                {canOperate(session) && selected.state === "running" && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setConsoleTarget({ id: selected.id, name: selected.name })}
+                  >
+                    <IconTerminal /> Console
+                  </button>
+                )}
               </div>
             )}
 
@@ -511,6 +590,15 @@ export default function ContainersPage() {
                     { key: "Commande", value: detail.command || "—" },
                     { key: "Politique de redémarrage", value: detail.restartPolicy },
                     { key: "Network", value: detail.networkMode },
+                    // Limites réellement configurées (docker inspect HostConfig.Memory/NanoCpus) —
+                    // n'apparaissent QUE si effectivement fixées à la création, jamais une valeur
+                    // fabriquée pour un conteneur sans limite (voir services/docker.ts#inspectDockerContainer).
+                    ...(detail.memoryLimitBytes !== undefined
+                      ? [{ key: "Limite mémoire", value: formatMem(detail.memoryLimitBytes) }]
+                      : []),
+                    ...(detail.nanoCpus !== undefined
+                      ? [{ key: "Limite CPU", value: `${(detail.nanoCpus / 1_000_000_000).toFixed(2)} cœur(s)` }]
+                      : []),
                   ]}
                 />
 
@@ -559,6 +647,12 @@ export default function ContainersPage() {
         containerId={consoleTarget?.id ?? null}
         containerName={consoleTarget?.name ?? ""}
         onClose={() => setConsoleTarget(null)}
+      />
+
+      <ContainerLogs
+        containerId={logsTarget?.id ?? null}
+        containerName={logsTarget?.name ?? ""}
+        onClose={() => setLogsTarget(null)}
       />
     </div>
   );

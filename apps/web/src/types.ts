@@ -133,6 +133,17 @@ export interface ContainerDetail extends ContainerRef {
   mounts: ContainerMount[];
   env: string[];
   labels: Record<string, string>;
+  // Limites CPU/mémoire réellement configurées (HostConfig.Memory/NanoCpus, `docker inspect`) —
+  // absentes si aucune limite n'a été fixée à la création, jamais une valeur fabriquée.
+  memoryLimitBytes?: number;
+  nanoCpus?: number;
+}
+
+/** Snapshot instantané des logs d'un conteneur (équivalent `docker logs --tail <n>`) — voir
+ * GET /api/containers/:id/logs. Le flux temps réel (WebSocket, .../logs/stream) envoie du texte
+ * brut chunk par chunk, sans passer par ce contrat JSON. */
+export interface ContainerLogsSnapshot {
+  logs: string;
 }
 
 /**
@@ -587,6 +598,63 @@ export interface SystemNotificationEvent {
   level: "error" | "success" | "info";
   message: string;
   read: boolean;
+}
+
+// --- Canaux de notification sortants (webhook générique/Slack/Discord/email SMTP) — voir
+// apps/api/src/services/notificationChannelsStore.ts et apps/api/src/services/
+// notificationDispatch.ts. Chaque SystemNotificationEvent émis par recordNotificationEvent()
+// (watchdog + réconciliateur GitOps + scanScheduler) est aussi routé, en fire-and-forget, vers
+// chaque canal actif dont le filtre matche — jamais bloquant, jamais d'exception remontée.
+
+export type NotificationChannelKind = "webhook" | "slack" | "discord" | "email";
+
+/** Filtre optionnel appliqué à un canal — absent/vide = tous les niveaux/types d'événement. */
+export interface NotificationChannelFilter {
+  levels?: SystemNotificationEvent["level"][];
+  kinds?: SystemNotificationKind[];
+}
+
+/** Vue "safe" par type — jamais de secret en clair (l'URL webhook/le mot de passe SMTP peuvent
+ * porter un jeton d'authentification, donc jamais renvoyés par GET, même convention que
+ * remoteDockerStore.ts#toRef pour ca/cert/key). */
+export interface NotificationChannelWebhookRef {
+  hasUrl: boolean;
+}
+export interface NotificationChannelSlackRef {
+  hasWebhookUrl: boolean;
+}
+export interface NotificationChannelDiscordRef {
+  hasWebhookUrl: boolean;
+}
+export interface NotificationChannelEmailRef {
+  smtpHost: string;
+  smtpPort: number;
+  smtpUsername?: string;
+  smtpSecure: boolean; // true = TLS implicite (port 465 typiquement), false = STARTTLS/clair
+  fromAddress: string;
+  toAddress: string;
+  hasSmtpPassword: boolean;
+}
+
+/** GET /api/notification-channels — jamais de secret en clair, voir les Ref par type ci-dessus. */
+export interface NotificationChannelRef {
+  id: string;
+  kind: NotificationChannelKind;
+  name: string;
+  enabled: boolean;
+  filter?: NotificationChannelFilter;
+  webhook?: NotificationChannelWebhookRef;
+  slack?: NotificationChannelSlackRef;
+  discord?: NotificationChannelDiscordRef;
+  email?: NotificationChannelEmailRef;
+  createdAt: string; // ISO 8601
+  updatedAt: string; // ISO 8601
+}
+
+/** POST /api/notification-channels/:id/test — envoi RÉEL au canal, jamais persisté dans le journal. */
+export interface NotificationChannelTestResult {
+  ok: boolean;
+  message: string;
 }
 
 export interface SetupCompletePayload {

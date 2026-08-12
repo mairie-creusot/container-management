@@ -199,6 +199,63 @@ export const config = {
     // par scanScheduler.ts pour attendre la fin d'un scan automatique (10 min).
     timeoutMs: readNumber("SCAN_TIMEOUT_MS", 600_000),
   },
+  backups: {
+    // Persistance des définitions de sauvegarde (cf. ARCHITECTURE.md, chapitre "Sauvegardes
+    // automatiques") — même pattern que remoteDocker/lxc ci-dessus : fichier JSON séparé,
+    // identifiants S3 (access key/secret key) chiffrés au repos (crypto.ts) avant écriture.
+    storePath: readString("BACKUPS_PATH", "./data/backups.json"),
+    // Délai max accordé à chaque étape réseau/sous-processus d'une sauvegarde ou d'une
+    // restauration (tar d'un volume, dump/restore dans un conteneur via docker exec, upload/
+    // download S3) — même raison que scan.timeoutMs/iac.runTimeoutMs : un stockage S3 injoignable
+    // ou un dump qui ne se termine jamais ne doit jamais bloquer indéfiniment le scheduler.
+    // Généreux par défaut : un tar de gros volume ou un dump de grosse base peut prendre du temps.
+    runTimeoutMs: readNumber("BACKUP_RUN_TIMEOUT_MS", 900_000), // 15 min
+  },
+  notificationChannels: {
+    // Délai max accordé à chaque envoi vers un canal de notification sortant (webhook générique/
+    // Slack/Discord : fetch ; email : connexion SMTP + envoi, services/notificationDispatch.ts) —
+    // même principe que adDns.requestTimeoutMs/reverseProxy.requestTimeoutMs : un canal externe
+    // injoignable ne doit jamais faire traîner ni bloquer l'émission d'un événement système.
+    requestTimeoutMs: readNumber("NOTIFICATION_CHANNELS_TIMEOUT_MS", 8000),
+  },
+  metrics: {
+    // Persistance de la série temporelle CPU/mémoire par conteneur (cf. ARCHITECTURE.md,
+    // priorité #5 du rapport concurrentiel — services/metricsCollector.ts). Chemin dédié plutôt
+    // que le dossier de CONFIG_PATH (contrairement à notifications-log.jsonl/scans.jsonl) : ce
+    // fichier grossit ET se purge en continu (fenêtre glissante), un chemin explicitement
+    // configurable a plus de sens ici que pour un simple journal d'événements rares.
+    storePath: readString("METRICS_PATH", "./data/metrics.jsonl"),
+    // Cadence du scrape (docker.ts#readContainerUsage pour tous les conteneurs `running`) — 30s
+    // par défaut : assez fin pour un graphique lisible sans interroger `docker stats` en boucle
+    // serrée sur potentiellement des dizaines de conteneurs.
+    intervalMs: readNumber("METRICS_INTERVAL_MS", 30_000),
+    // Fenêtre glissante : tout point plus vieux que cette rétention est purgé au fil des cycles
+    // (contrairement à notifications-log.jsonl/scans.jsonl, qui restent rares et ne sont jamais
+    // purgés) — sinon le fichier grossirait indéfiniment vu la cadence bien plus élevée de ce
+    // scrape. 7 jours par défaut, cohérent avec un usage de diagnostic récent plutôt qu'un
+    // entrepôt de données longue durée (pas l'ambition de ce premier lot).
+    retentionMs: readNumber("METRICS_RETENTION_MS", 7 * 24 * 60 * 60 * 1000),
+  },
+  cronJobs: {
+    // Persistance des définitions de cron jobs (cf. ARCHITECTURE.md, priorité #6 du rapport
+    // concurrentiel — services/cronJobsStore.ts) — même pattern que reverse-proxy.json : JSON
+    // simple sur disque, aucune valeur sensible à chiffrer au repos (une commande shell n'est pas
+    // un secret au sens de secretsStore.ts, même si elle peut en référencer un via l'environnement
+    // déjà présent dans le conteneur cible).
+    storePath: readString("CRON_JOBS_PATH", "./data/cron-jobs.json"),
+    // Historique d'exécution — JSON Lines append-only, même pattern que scans.jsonl (plusieurs
+    // lignes par run : "running" puis l'état final, la plus récente par id de run fait foi).
+    historyPath: readString("CRON_JOBS_HISTORY_PATH", "./data/cron-jobs-history.jsonl"),
+    // Cadence du tick du scheduler (services/cronJobsScheduler.ts) — volontairement plus fin que
+    // watchdog.ts (75s) : une expression cron se raisonne à la minute, un tick plus large que 60s
+    // risquerait de sauter une minute qui matche brièvement (aucun repli de rattrapage n'est
+    // implémenté dans ce premier lot, cf. cronJobsScheduler.ts en-tête de fichier).
+    tickIntervalMs: readNumber("CRON_JOBS_TICK_INTERVAL_MS", 20_000),
+    // Délai max accordé à une commande de cron job exécutée via `docker exec` (même raison que
+    // scan.timeoutMs/iac.runTimeoutMs : une commande qui ne termine jamais ne doit jamais bloquer
+    // indéfiniment le run, ni bloquer le slot d'anti-chevauchement du job pour toujours).
+    execTimeoutMs: readNumber("CRON_JOBS_EXEC_TIMEOUT_MS", 300_000),
+  },
 } as const;
 
 export type Config = typeof config;

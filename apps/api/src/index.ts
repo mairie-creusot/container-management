@@ -17,15 +17,20 @@ import authPlugin from "./plugins/auth.js";
 import adDnsRoutes from "./routes/adDns.js";
 import auditRoutes from "./routes/audit.js";
 import authRoutes from "./routes/auth.js";
+import backupsRoutes from "./routes/backups.js";
 import consoleRoutes from "./routes/console.js";
+import containerLogsRoutes from "./routes/containerLogs.js";
 import containersRoutes from "./routes/containers.js";
+import cronJobsRoutes from "./routes/cronJobs.js";
 import environmentsRoutes from "./routes/environments.js";
 import githubRoutes from "./routes/github.js";
 import gitopsRoutes from "./routes/gitops.js";
 import iacRoutes from "./routes/iac.js";
 import imagesRoutes from "./routes/images.js";
 import lxcRoutes from "./routes/lxc.js";
+import metricsRoutes from "./routes/metrics.js";
 import networksRoutes from "./routes/networks.js";
+import notificationChannelsRoutes from "./routes/notificationChannels.js";
 import notificationsRoutes from "./routes/notifications.js";
 import nutanixRoutes from "./routes/nutanix.js";
 import registriesRoutes from "./routes/registries.js";
@@ -36,7 +41,10 @@ import secretsRoutes from "./routes/secrets.js";
 import setupRoutes from "./routes/setup.js";
 import topologyRoutes from "./routes/topology.js";
 import volumesRoutes from "./routes/volumes.js";
+import { startBackupScheduler } from "./services/backupScheduler.js";
+import { startCronJobsScheduler } from "./services/cronJobsScheduler.js";
 import { startGitopsReconciler } from "./services/gitopsReconciler.js";
+import { startMetricsCollector } from "./services/metricsCollector.js";
 import { startScanScheduler } from "./services/scanScheduler.js";
 import { startWatchdog } from "./services/watchdog.js";
 
@@ -86,6 +94,11 @@ export function buildServer() {
   void fastify.register(adDnsRoutes);
   void fastify.register(consoleRoutes);
   void fastify.register(githubRoutes);
+  void fastify.register(containerLogsRoutes);
+  void fastify.register(notificationChannelsRoutes);
+  void fastify.register(metricsRoutes);
+  void fastify.register(cronJobsRoutes);
+  void fastify.register(backupsRoutes);
 
   // /health : chemin attendu par les healthchecks Docker et les probes Kubernetes (voir deploy/).
   // /healthz : alias conservé au cas où un outil externe le suppose (convention courante).
@@ -123,6 +136,24 @@ async function main(): Promise<void> {
   // scan Grype/OSV-Scanner pendant les tests qui construisent juste le serveur avec `app.inject`.
   const stopScanScheduler = startScanScheduler();
 
+  // Scrape périodique des métriques CPU/mémoire de tous les conteneurs `running` (voir
+  // services/metricsCollector.ts, priorité #5 du rapport concurrentiel) : même câblage que les
+  // schedulers ci-dessus, démarré seulement ici pour ne jamais taper `docker stats` en boucle
+  // pendant les tests qui construisent juste le serveur avec `app.inject`.
+  const stopMetricsCollector = startMetricsCollector();
+
+  // Tick périodique des cron jobs (voir services/cronJobsScheduler.ts, priorité #6 du rapport
+  // concurrentiel) : même câblage, démarré seulement ici pour ne jamais déclencher de vrai
+  // `docker exec` pendant les tests.
+  const stopCronJobsScheduler = startCronJobsScheduler();
+
+  // Sauvegardes automatiques de volumes/bases de données vers un stockage S3-compatible (voir
+  // services/backupScheduler.ts, priorité #4 du rapport concurrentiel) : cron minimal évalué
+  // toutes les minutes, exécution réelle (tar/pg_dump/mysqldump/mongodump + upload S3) — même
+  // câblage que les schedulers ci-dessus, démarré seulement ici pour ne jamais déclencher de
+  // vraie sauvegarde réseau pendant les tests qui construisent juste le serveur avec `app.inject`.
+  const stopBackupScheduler = startBackupScheduler();
+
   // Sans ceci, un SIGTERM (docker stop, ou nodemon qui redémarre le process en dev) tue le
   // process sans libérer explicitement le port avant que le suivant ne démarre — source
   // d'EADDRINUSE intermittents observés avec `nodemon --legacy-watch` (voir package.json,
@@ -132,6 +163,9 @@ async function main(): Promise<void> {
     stopWatchdog();
     stopGitopsReconciler();
     stopScanScheduler();
+    stopMetricsCollector();
+    stopCronJobsScheduler();
+    stopBackupScheduler();
     void fastify.close().then(() => process.exit(0));
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));

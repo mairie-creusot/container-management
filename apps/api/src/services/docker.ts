@@ -264,6 +264,14 @@ export interface CreateContainerOptions {
   volumes?: string[];
   /** Réseau Docker à attacher (doit déjà exister — voir createNetwork ci-dessous) ; par défaut "bridge". */
   network?: string;
+  /** Limite mémoire (`HostConfig.Memory`, en octets) — équivalent `docker run --memory`. Absent =
+   * pas de limite (comportement Docker natif inchangé), jamais de valeur par défaut fabriquée ici :
+   * la validation (borne min/max raisonnable) est faite côté route (routes/containers.ts), ce
+   * module se contente de la transmettre telle quelle à Docker. */
+  memoryLimitBytes?: number;
+  /** Limite CPU (`HostConfig.NanoCpus`, en milliardièmes de cœur — ex: 500000000 = 0.5 cœur) —
+   * équivalent `docker run --cpus`. Mêmes règles que memoryLimitBytes ci-dessus. */
+  nanoCpus?: number;
 }
 
 /** Parse un mapping de port façon `docker run -p` : [host_ip:]host_port:container_port[/proto]. */
@@ -327,6 +335,8 @@ export async function createAndStartContainer(options: CreateContainerOptions): 
       PortBindings: portBindings,
       Binds: binds,
       NetworkMode: options.network || "bridge",
+      ...(options.memoryLimitBytes !== undefined ? { Memory: options.memoryLimitBytes } : {}),
+      ...(options.nanoCpus !== undefined ? { NanoCpus: options.nanoCpus } : {}),
     },
   });
   await container.start();
@@ -560,6 +570,101 @@ export async function openContainerConsole(id: string): Promise<ContainerExecSes
   return { stream, exec };
 }
 
+// ---------------------------------------------------------------------------------------
+// Logs de conteneur (équivalent `docker logs [-f] <id>`) — voir routes/containerLogs.ts. Un
+// VRAI appel dockerode (container.logs()), jamais réimplémenté, sur le même principe que la
+// console ci-dessus : cette fonction ouvre le flux, routes/containerLogs.ts le relaie tel quel
+// au WebSocket du navigateur.
+// ---------------------------------------------------------------------------------------
+
+const DEFAULT_LOG_TAIL = 200;
+
+/**
+ * Les logs Docker sont multiplexés stdout/stderr (en-tête de 8 octets par frame, format
+ * documenté par l'API Engine) SAUF si le conteneur a été créé avec `Tty: true` (flux texte brut,
+ * comme la console interactive ci-dessus) — vérifié via `Config.Tty` de l'inspect, jamais
+ * supposé : démultiplexer un flux qui n'est pas réellement mux corromprait la sortie affichée
+ * (les en-têtes binaires seraient interprétés comme du texte).
+ */
+async function containerHasTty(container: Docker.Container): Promise<boolean> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const info: any = await container.inspect();
+  return Boolean(info?.Config?.Tty);
+}
+
+export interface ContainerLogStreamSession {
+  /** Texte déjà démultiplexé si nécessaire (voir containerHasTty ci-dessus) — prêt à être
+   * relayé chunk par chunk vers le socket du navigateur sans traitement supplémentaire. */
+  stream: NodeJS.ReadableStream;
+}
+
+/**
+ * Ouvre un flux de logs temps réel (équivalent `docker logs -f --timestamps --tail <n> <id>`).
+ * Lève si le démon est injoignable ou si le conteneur n'existe pas (jamais un flux vide
+ * silencieux) — l'appelant (routes/containerLogs.ts) traduit en message honnête avant de fermer
+ * le WebSocket, même principe que openContainerConsole ci-dessus.
+ */
+export async function streamContainerLogs(id: string, options: { tail?: number } = {}): Promise<ContainerLogStreamSession> {
+  const docker = await requireReachableClient();
+  const container = docker.getContainer(id);
+  const tty = await containerHasTty(container);
+  const tail = options.tail !== undefined && options.tail >= 0 ? options.tail : DEFAULT_LOG_TAIL;
+
+  const rawStream = await container.logs({
+    follow: true,
+    stdout: true,
+    stderr: true,
+    timestamps: true,
+    tail,
+  });
+
+  if (tty) return { stream: rawStream };
+
+  // Démultiplexage — même mécanisme que listVolumeFiles ci-dessus (docker.modem.demuxStream),
+  // les deux sinks (stdout/stderr) pointent volontairement vers le MÊME PassThrough : l'ordre
+  // d'écriture suit l'ordre réel des frames dans le flux source, donc stdout/stderr restent
+  // chronologiquement entrelacés comme le ferait `docker logs` en CLI.
+  const output = new PassThrough();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (docker.modem as any).demuxStream(rawStream, output, output);
+  rawStream.on("end", () => output.end());
+  rawStream.on("error", (err: Error) => output.destroy(err));
+  return { stream: output };
+}
+
+/**
+ * Snapshot instantané des derniers logs (équivalent `docker logs --timestamps --tail <n> <id>`,
+ * SANS follow) — utilisé pour un premier affichage immédiat avant que le flux WebSocket
+ * ci-dessus ne prenne le relais (voir routes/containerLogs.ts#GET /api/containers/:id/logs).
+ */
+export async function getContainerLogs(id: string, tail = DEFAULT_LOG_TAIL): Promise<string> {
+  const docker = await requireReachableClient();
+  const container = docker.getContainer(id);
+  const tty = await containerHasTty(container);
+
+  const buffer = await container.logs({
+    follow: false,
+    stdout: true,
+    stderr: true,
+    timestamps: true,
+    tail,
+  });
+
+  if (tty) return buffer.toString("utf8");
+
+  return new Promise<string>((resolve, reject) => {
+    const input = new PassThrough();
+    const output = new PassThrough();
+    const chunks: Buffer[] = [];
+    output.on("data", (chunk: Buffer) => chunks.push(chunk));
+    output.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    output.on("error", reject);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (docker.modem as any).demuxStream(input, output, output);
+    input.end(buffer);
+  });
+}
+
 /** Détail complet d'un conteneur (équivalent `docker inspect`) — chargé à la demande par l'Inspector. */
 export async function inspectDockerContainer(id: string): Promise<ContainerDetail | null> {
   const docker = await getClient();
@@ -591,6 +696,15 @@ export async function inspectDockerContainer(id: string): Promise<ContainerDetai
       }),
     );
 
+    // Limites réellement configurées (équivalent `docker inspect` HostConfig.Memory/NanoCpus) —
+    // 0 est la valeur native Docker pour "pas de limite" (jamais fabriquée : un conteneur créé
+    // avant cette fonctionnalité, ou sans limite explicite, renvoie honnêtement `undefined` ici,
+    // pas un 0 qui laisserait croire à une vraie limite nulle).
+    const memoryLimitBytes =
+      typeof data.HostConfig?.Memory === "number" && data.HostConfig.Memory > 0 ? data.HostConfig.Memory : undefined;
+    const nanoCpus =
+      typeof data.HostConfig?.NanoCpus === "number" && data.HostConfig.NanoCpus > 0 ? data.HostConfig.NanoCpus : undefined;
+
     return {
       id: data.Id,
       fullId: data.Id,
@@ -609,6 +723,8 @@ export async function inspectDockerContainer(id: string): Promise<ContainerDetai
       mounts,
       env: data.Config?.Env ?? [],
       labels: data.Config?.Labels ?? {},
+      ...(memoryLimitBytes !== undefined ? { memoryLimitBytes } : {}),
+      ...(nanoCpus !== undefined ? { nanoCpus } : {}),
     };
   } catch {
     return null;

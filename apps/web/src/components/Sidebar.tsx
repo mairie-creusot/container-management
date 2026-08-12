@@ -126,6 +126,20 @@ export default function Sidebar() {
             {pageTitle("ad-dns")}
           </button>
         )}
+
+        {canAdminister(session) && (
+          <button
+            type="button"
+            className={`sidebar__item${currentView === "notification-channels" ? " is-active" : ""}`}
+            onClick={() => handleNavigate("notification-channels")}
+            title={pageTitle("notification-channels")}
+          >
+            <span className="sidebar__icon">
+              <IconBell />
+            </span>
+            {pageTitle("notification-channels")}
+          </button>
+        )}
       </div>
       <div className="sidebar__spacer" />
       <div className="sidebar__footer">© 2026 - Mairie Le Creusot</div>

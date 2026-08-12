@@ -20,6 +20,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
+import { dispatchNotificationEvent } from "./notificationDispatch.js";
 import type { SystemNotificationEvent, SystemNotificationKind } from "../types.js";
 
 const MAX_EVENTS_RETURNED = 300;
@@ -46,6 +47,13 @@ export async function recordNotificationEvent(entry: RecordNotificationInput): P
     const filePath = resolvedNotificationsLogPath();
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.appendFile(filePath, `${JSON.stringify(event)}\n`, { encoding: "utf-8", mode: 0o600 });
+
+    // Dispatch sortant vers les canaux externes configurés (webhook/Slack/Discord/email — voir
+    // services/notificationDispatch.ts) : fire-and-forget APRÈS l'écriture JSONL réussie ci-dessus,
+    // jamais attendu (`void`) et jamais capable de faire échouer ce cycle — dispatchNotificationEvent
+    // avale déjà toutes ses propres erreurs, mais on ne laisse même pas une exception synchrone
+    // improbable remonter jusqu'ici.
+    void dispatchNotificationEvent(event).catch(() => {});
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(`[notifications] failed to record event: ${err instanceof Error ? err.message : String(err)}`);

@@ -63,6 +63,46 @@ interface CreateContainerBody {
   secretEnv?: SecretEnvRef[];
   volumes?: string[];
   network?: string;
+  // Limites de ressources optionnelles (HostConfig.Memory/NanoCpus côté dockerode) — voir
+  // parseResourceLimits ci-dessous. Absentes = pas de limite, comportement Docker natif
+  // inchangé, jamais de valeur par défaut fabriquée ici.
+  memoryLimitBytes?: number;
+  nanoCpus?: number;
+}
+
+// Docker refuse de créer un conteneur avec une limite mémoire trop basse pour qu'un processus
+// puisse seulement démarrer (contrainte du démon lui-même, pas une règle QUAI inventée — vérifié
+// dans la doc Docker Engine : `--memory` doit être >= 6 Mo). Rejeter ici en 400 avec un message
+// clair plutôt que de laisser Docker renvoyer une erreur générique en 502 après coup.
+const MIN_MEMORY_LIMIT_BYTES = 6 * 1024 * 1024;
+// Pas une vraie limite Docker (NanoCpus n'a pas de plafond documenté au-delà du nombre de cœurs
+// réellement disponibles sur l'hôte, que Docker valide lui-même) — simple garde-fou de bon sens
+// contre une saisie absurde (ex: un zéro oublié) avant même d'atteindre Docker. 256 cœurs dépasse
+// largement tout hôte réaliste pour ce projet.
+const MAX_NANO_CPUS = 256 * 1_000_000_000;
+
+/**
+ * Valide les limites de ressources optionnelles du body de POST /api/containers. Lève un message
+ * prêt à renvoyer en 400 si une valeur est fournie mais invalide/déraisonnable — ne fabrique
+ * jamais de valeur par défaut quand un champ est absent (voir CreateContainerBody ci-dessus).
+ */
+function parseResourceLimits(body: CreateContainerBody): { memoryLimitBytes?: number; nanoCpus?: number } | { error: string } {
+  const result: { memoryLimitBytes?: number; nanoCpus?: number } = {};
+  if (body.memoryLimitBytes !== undefined) {
+    const value = body.memoryLimitBytes;
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value < MIN_MEMORY_LIMIT_BYTES) {
+      return { error: `memoryLimitBytes must be an integer >= ${MIN_MEMORY_LIMIT_BYTES} bytes (Docker's own minimum, ~6 Mo)` };
+    }
+    result.memoryLimitBytes = value;
+  }
+  if (body.nanoCpus !== undefined) {
+    const value = body.nanoCpus;
+    if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0 || value > MAX_NANO_CPUS) {
+      return { error: `nanoCpus must be a positive integer, max ${MAX_NANO_CPUS} (${MAX_NANO_CPUS / 1_000_000_000} cœurs)` };
+    }
+    result.nanoCpus = value;
+  }
+  return result;
 }
 
 interface RenameContainerBody {
@@ -131,6 +171,11 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
     const volumes = (request.body?.volumes ?? []).map((v) => v.trim()).filter(Boolean);
     const network = request.body?.network?.trim() || undefined;
 
+    const resourceLimits = parseResourceLimits(request.body ?? {});
+    if ("error" in resourceLimits) {
+      return reply.code(400).send({ error: resourceLimits.error });
+    }
+
     // Résolution des secrets référencés par nom (jamais côté client) — TOUJOURS avant l'appel
     // à createAndStartContainer : un secretName introuvable doit faire échouer la requête
     // entière en 400, jamais créer le conteneur avec un env partiellement résolu. `resolvedSecretRefs`
@@ -169,6 +214,7 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
         env: [...env, ...secretEnv],
         volumes,
         ...(network ? { network } : {}),
+        ...resourceLimits,
       });
       const containers = await getDockerContainers();
       if (resolvedSecretRefs.length > 0) {
