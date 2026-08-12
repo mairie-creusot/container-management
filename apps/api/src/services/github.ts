@@ -321,6 +321,30 @@ async function deployViaIacWorkspace(
   await updateDeploymentRecord(deploymentId, { kind: "iac-workspace", iacWorkspaceId: workspace.id });
 }
 
+/**
+ * Prépare un `GIT_ASKPASS` TEMPORAIRE portant le jeton PAT — jamais interpolé dans l'URL de
+ * clone (qui finirait en argument de ligne de commande du process `git` réellement exécuté,
+ * visible via `ps aux`/`/proc/<pid>/cmdline` par tout utilisateur/processus disposant de ces
+ * droits d'observation locale sur l'hôte/le conteneur API — voir finding E4,
+ * docs/reports/security-audit-2026-08-12.md). Le jeton ne transite QUE par une variable
+ * d'environnement du sous-processus `git` (GIT_QUAI_TOKEN, jamais journalisée) : le script
+ * d'aide se contente de la relayer sur stdout quand `git` la lui demande (protocole GIT_ASKPASS
+ * standard — invoqué UNIQUEMENT pour le mot de passe, l'utilisateur "x-access-token" étant déjà
+ * dans l'URL, voir cloneUrl ci-dessous), jamais écrite dans le script lui-même ni conservée
+ * au-delà du clone (dossier temporaire supprimé dans le `finally` de l'appelant).
+ */
+async function prepareGitAskPass(token: string): Promise<{ env: NodeJS.ProcessEnv; cleanup: () => Promise<void> }> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "quai-github-askpass-"));
+  const scriptPath = path.join(dir, "askpass.sh");
+  await fs.writeFile(scriptPath, `#!/bin/sh\nprintf '%s' "$GIT_QUAI_TOKEN"\n`, { encoding: "utf-8", mode: 0o700 });
+  return {
+    env: { ...process.env, GIT_ASKPASS: scriptPath, GIT_TERMINAL_PROMPT: "0", GIT_QUAI_TOKEN: token },
+    cleanup: async () => {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    },
+  };
+}
+
 async function runDeployment(
   deploymentId: string,
   owner: string,
@@ -331,13 +355,17 @@ async function runDeployment(
   startedBy: string,
 ): Promise<void> {
   const cloneDir = path.join(os.tmpdir(), `quai-github-deploy-${deploymentId}`);
+  // Préparé AVANT le try (pour être nettoyé dans tous les cas via le `finally` ci-dessous) —
+  // `null` si aucun jeton (repo public) : clone anonyme inchangé, sans GIT_ASKPASS.
+  const askPass = token ? await prepareGitAskPass(token) : null;
   try {
-    const cloneUrl = token
-      ? `https://x-access-token:${encodeURIComponent(token)}@github.com/${owner}/${repo}.git`
-      : `https://github.com/${owner}/${repo}.git`;
+    // "x-access-token" seul dans l'URL (convention GitHub PAT pour l'auth HTTPS) : JAMAIS le
+    // jeton lui-même, fourni séparément via GIT_ASKPASS (askPass ci-dessus) — voir finding E4.
+    const cloneUrl = token ? `https://x-access-token@github.com/${owner}/${repo}.git` : `https://github.com/${owner}/${repo}.git`;
     await appendDeploymentLog(deploymentId, `$ git clone --depth 1 --branch ${ref} https://github.com/${owner}/${repo}.git\n`);
+    const cloner = askPass ? simpleGit().env(askPass.env) : simpleGit();
     await withTimeout(
-      simpleGit().clone(cloneUrl, cloneDir, ["--depth", "1", "--branch", ref, "--single-branch"]),
+      cloner.clone(cloneUrl, cloneDir, ["--depth", "1", "--branch", ref, "--single-branch"]),
       config.github.cloneTimeoutMs,
       "git clone",
     );
@@ -368,6 +396,7 @@ async function runDeployment(
     await updateDeploymentRecord(deploymentId, { status: "failed", finishedAt: new Date().toISOString() });
   } finally {
     await fs.rm(cloneDir, { recursive: true, force: true }).catch(() => undefined);
+    await askPass?.cleanup();
   }
 }
 

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import { fetchSession } from "@/features/auth/authSlice";
 import { fetchSetupStatus } from "@/features/setup/setupSlice";
@@ -7,22 +7,28 @@ import LoginScreen from "@/features/auth/LoginScreen";
 import SetupWizard from "@/features/setup/SetupWizard";
 import Sidebar from "@/components/Sidebar";
 import Topbar from "@/components/Topbar";
-import OverviewPage from "@/features/overview/OverviewPage";
-import ImagesPage from "@/features/images/ImagesPage";
-import RegistriesPage from "@/features/registries/RegistriesPage";
-import RegistryExplorerPage from "@/features/registries/RegistryExplorerPage";
-import SecretsPage from "@/features/secrets/SecretsPage";
-import ContainersPage from "@/features/containers/ContainersPage";
-import VolumesPage from "@/features/volumes/VolumesPage";
-import NetworksPage from "@/features/networks/NetworksPage";
-import ReverseProxyPage from "@/features/reverseProxy/ReverseProxyPage";
-import AdDnsPage from "@/features/adDns/AdDnsPage";
-import GitOpsPage from "@/features/gitops/GitOpsPage";
-import EnvironmentsPage from "@/features/clusters/EnvironmentsPage";
-import NotificationsPage from "@/features/notifications/NotificationsPage";
-import AuditPage from "@/features/audit/AuditPage";
-import IacPage from "@/features/iac/IacPage";
 import ToastStack from "@/components/ToastStack";
+
+// Code-splitting par page (docs/reports/optimization-audit-2026-08-12.md §É7) : sans lazy(),
+// les 17 pages de renderView() ci-dessous (dont @xyflow/react pour la Vue d'ensemble et
+// @xterm/xterm via ContainersPage/ContainerConsole) finissaient TOUTES dans le même bundle
+// initial (~1,02 Mo mesuré) quelle que soit la page réellement visitée. Chaque import() dynamique
+// devient son propre chunk, chargé au premier accès à la vue puis mis en cache par le navigateur.
+const OverviewPage = lazy(() => import("@/features/overview/OverviewPage"));
+const ImagesPage = lazy(() => import("@/features/images/ImagesPage"));
+const RegistriesPage = lazy(() => import("@/features/registries/RegistriesPage"));
+const RegistryExplorerPage = lazy(() => import("@/features/registries/RegistryExplorerPage"));
+const SecretsPage = lazy(() => import("@/features/secrets/SecretsPage"));
+const ContainersPage = lazy(() => import("@/features/containers/ContainersPage"));
+const VolumesPage = lazy(() => import("@/features/volumes/VolumesPage"));
+const NetworksPage = lazy(() => import("@/features/networks/NetworksPage"));
+const ReverseProxyPage = lazy(() => import("@/features/reverseProxy/ReverseProxyPage"));
+const AdDnsPage = lazy(() => import("@/features/adDns/AdDnsPage"));
+const GitOpsPage = lazy(() => import("@/features/gitops/GitOpsPage"));
+const EnvironmentsPage = lazy(() => import("@/features/clusters/EnvironmentsPage"));
+const NotificationsPage = lazy(() => import("@/features/notifications/NotificationsPage"));
+const AuditPage = lazy(() => import("@/features/audit/AuditPage"));
+const IacPage = lazy(() => import("@/features/iac/IacPage"));
 
 // Notifications système (watchdog proactif côté API — nouvelle version d'image, intégration
 // devenue injoignable/de nouveau joignable) : câblé ici plutôt que dans une page précise, pour
@@ -30,6 +36,19 @@ import ToastStack from "@/components/ToastStack";
 // visible). Intervalle volontairement plus lâche que le dashboard (voir OverviewPage.tsx) :
 // ces événements sont eux-mêmes émis par un cycle serveur de 60-90s, inutile de poller plus vite.
 const NOTIFICATIONS_REFRESH_INTERVAL_MS = 20_000;
+
+/** Fallback de <Suspense> pendant le chargement du chunk d'une page — même silhouette
+ * (spinner + libellé) que les écrans de chargement déjà présents plus bas dans ce fichier
+ * (vérification de session/config), pour rester cohérent avec le reste du design system plutôt
+ * que d'introduire un nouveau pattern de chargement. */
+function PageLoadingFallback() {
+  return (
+    <div className="center-screen">
+      <div className="spinner" />
+      <span>Chargement…</span>
+    </div>
+  );
+}
 
 function renderView(view: string) {
   switch (view) {
@@ -129,7 +148,7 @@ export default function App() {
       <Sidebar />
       <div className="main-column">
         <Topbar />
-        {renderView(currentView)}
+        <Suspense fallback={<PageLoadingFallback />}>{renderView(currentView)}</Suspense>
       </div>
       <ToastStack />
     </div>

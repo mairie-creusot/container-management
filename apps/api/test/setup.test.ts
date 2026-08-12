@@ -50,6 +50,9 @@ describe("setup wizard (/api/setup/*)", () => {
           groupRoleMap: {},
           defaultRole: "viewer",
         },
+        registries: [
+          { kind: "dockerhub", name: "Docker Hub", url: "https://hub.docker.com", username: "alice", password: "s3cret" },
+        ],
       },
     });
     expect(completeResponse.statusCode).toBe(200);
@@ -68,7 +71,15 @@ describe("setup wizard (/api/setup/*)", () => {
       cookies: { [config.session.cookieName]: viewerToken },
     });
     expect(asViewer.statusCode).toBe(200);
-    expect(asViewer.json()).toMatchObject({ completed: true });
+    const statusBody = asViewer.json();
+    expect(statusBody).toMatchObject({ completed: true, registriesConfigured: true });
+    // finding M5 : le tableau `registries` complet (username en clair, password/token chiffrés
+    // mais présents) ne doit plus jamais apparaître dans cette réponse — seul un booléen résume
+    // l'état, cohérent avec les autres champs `xConfigured` de cette même route.
+    expect(statusBody).not.toHaveProperty("registries");
+    const rawBody = JSON.stringify(statusBody);
+    expect(rawBody).not.toContain("alice");
+    expect(rawBody).not.toContain("s3cret");
 
     // En revanche, reconfigurer (POST /api/setup/complete, /reset) reste réservé aux admins.
     const resetAsViewer = await app.inject({

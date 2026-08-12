@@ -75,9 +75,26 @@ describe("POST /api/registries", () => {
     expect(response.statusCode).toBe(403);
   });
 
-  it("accepts an operator", async () => {
+  // La gestion des registries (identifiants inclus, via PATCH) est documentée « admin uniquement »
+  // dans ARCHITECTURE.md — un simple operator ne doit plus pouvoir créer/modifier un registry
+  // (voir docs/reports/security-audit-2026-08-12.md, finding M4).
+  it("rejects an operator (403) — registry management is admin-only", async () => {
     app = buildServer();
     const token = signSessionToken({ username: "demo", displayName: "Demo User", roles: ["operator"] });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/registries",
+      cookies: { [config.session.cookieName]: token },
+      payload: { kind: "dockerhub", name: "Docker Hub (test)", url: "https://hub.docker.com" },
+    });
+
+    expect(response.statusCode).toBe(403);
+  });
+
+  it("accepts an admin", async () => {
+    app = buildServer();
+    const token = signSessionToken({ username: "demo", displayName: "Demo Admin", roles: ["admin"] });
 
     const response = await app.inject({
       method: "POST",
@@ -90,5 +107,29 @@ describe("POST /api/registries", () => {
     const body = response.json() as { id: string; status: string };
     expect(body.id).toBeTruthy();
     expect(body.status).toBe("unconfigured");
+  });
+});
+
+describe("PATCH /api/registries/:id", () => {
+  it("rejects an operator (403) — registry management is admin-only (finding M4)", async () => {
+    app = buildServer();
+    const adminToken = signSessionToken({ username: "admin", displayName: "Admin", roles: ["admin"] });
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/registries",
+      cookies: { [config.session.cookieName]: adminToken },
+      payload: { kind: "dockerhub", name: "Docker Hub (patch test)", url: "https://hub.docker.com" },
+    });
+    const { id } = created.json() as { id: string };
+
+    const operatorToken = signSessionToken({ username: "demo", displayName: "Demo User", roles: ["operator"] });
+    const response = await app.inject({
+      method: "PATCH",
+      url: `/api/registries/${id}`,
+      cookies: { [config.session.cookieName]: operatorToken },
+      payload: { name: "Renamed by operator" },
+    });
+
+    expect(response.statusCode).toBe(403);
   });
 });

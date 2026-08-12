@@ -644,9 +644,23 @@ POST   /api/reverse-proxy/push      # repousse la config complète vers Caddy sa
                                      # (utile après un redémarrage de Caddy) — operator/admin
 GET    /api/reverse-proxy/status    # ReverseProxyStatus — Caddy joignable ou non, même pattern que
                                      # GET /api/scanners/status
+
+GET    /api/ad-dns/config           # config DNS AD courante, REDACTÉE (jamais le mot de passe) +
+                                     # dernier résultat de synchronisation connu — ouvert à toute
+                                     # session authentifiée.
+PUT    /api/ad-dns/config           # { realm, kdcHost, zone, serviceAccount, targetIp, password? }
+                                     # — admin uniquement (403 sinon, même garde que /api/secrets/*
+                                     # et /api/lxc/config) — un `operator` compromis pourrait
+                                     # sinon rediriger `kinit` vers un KDC Kerberos qu'il contrôle
+                                     # (rogue-KDC). `targetIp` validé comme IPv4 strict. `password`
+                                     # omis/vide = conserve le mot de passe déjà enregistré (même
+                                     # convention que PATCH /api/registries/:id).
+DELETE /api/ad-dns/config           # désactive la synchronisation automatique — admin uniquement.
+POST   /api/ad-dns/test             # valide une config candidate (kinit uniquement, aucun
+                                     # enregistrement DNS écrit) — operator/admin, ne mute rien.
 ```
 
-Toutes les routes (sauf `/api/auth/*` et `/api/setup/*`) exigent une session valide. Les routes `POST`/`PATCH`/`DELETE` exigent le rôle `operator` ou `admin`. Les routes `/api/setup/*` ne sont ouvertes SANS session que lors d'un vrai premier démarrage (`completed=false` ET l'assistant n'a jamais été terminé une seule fois, `everCompleted=false`) ; dès que l'assistant a été terminé au moins une fois — y compris temporairement rouvert par un admin (`completed` repasse à `false` via `POST /api/setup/reset`, mais `everCompleted` reste `true`) — elles répondent `403` sauf pour un utilisateur `admin` authentifié (flux de reconfiguration). Exception plus stricte : les 3 routes mutantes de `/api/secrets/*` exigent explicitement `admin` (voir « Gestionnaire de secrets »), pas seulement `operator` — même exception pour les routes mutantes de `/api/remote-environments/*` et `/api/lxc/config`. Autre exception, dans l'autre sens : `GET /api/console/:id` (upgrade WebSocket, donc une méthode `GET`) exige quand même explicitement `operator`/`admin` — ajouté par un hook `preHandler` propre à `routes/console.ts` car le hook global ne restreint par rôle que les méthodes mutantes (voir « Console interactive dans un conteneur »).
+Toutes les routes (sauf `/api/auth/*` et `/api/setup/*`) exigent une session valide. Les routes `POST`/`PATCH`/`DELETE` exigent le rôle `operator` ou `admin`. Les routes `/api/setup/*` ne sont ouvertes SANS session que lors d'un vrai premier démarrage (`completed=false` ET l'assistant n'a jamais été terminé une seule fois, `everCompleted=false`) ; dès que l'assistant a été terminé au moins une fois — y compris temporairement rouvert par un admin (`completed` repasse à `false` via `POST /api/setup/reset`, mais `everCompleted` reste `true`) — elles répondent `403` sauf pour un utilisateur `admin` authentifié (flux de reconfiguration). Exception plus stricte : les 3 routes mutantes de `/api/secrets/*` exigent explicitement `admin` (voir « Gestionnaire de secrets »), pas seulement `operator` — même exception pour les routes mutantes de `/api/remote-environments/*`, `/api/lxc/config`, `PUT`/`DELETE /api/ad-dns/config` et `POST`/`PATCH /api/registries*` (gestion des registries, y compris leurs identifiants — voir « Rôles » ci-dessus, « admin : + gestion des registries et des accès »). Autre exception, dans l'autre sens : `GET /api/console/:id` (upgrade WebSocket, donc une méthode `GET`) exige quand même explicitement `operator`/`admin` — ajouté par un hook `preHandler` propre à `routes/console.ts` car le hook global ne restreint par rôle que les méthodes mutantes (voir « Console interactive dans un conteneur »).
 
 ## Graphe de topologie (`apps/web/src/components/TopologyGraph.tsx`)
 

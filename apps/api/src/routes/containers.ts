@@ -39,6 +39,7 @@ import {
 import { getKubernetesContainers } from "../services/kubernetes.js";
 import {
   getDecryptedSecretValue,
+  listSecrets,
   recordSecretUsage,
   removeSecretUsagesForContainer,
   renameSecretUsageContainer,
@@ -78,6 +79,33 @@ function sendDockerActionError(reply: import("fastify").FastifyReply, err: unkno
   // (conflit d'état), un message plus honnête qu'un 502 générique pour ce cas très courant.
   const notRunning = /is not running/i.test(message);
   reply.code(notFound ? 404 : notRunning ? 409 : 502).send({ error: message });
+}
+
+/**
+ * GET /api/containers/:id ne doit JAMAIS renvoyer en clair la valeur d'une variable d'env
+ * injectée via `secretEnv` (voir POST /api/containers ci-dessus) — `docker inspect` (donc
+ * `services/docker.ts#inspectDockerContainer`, source de `detail.env`) ne fait bien sûr aucune
+ * distinction entre une variable "normale" et un secret résolu côté serveur : c'est cette route
+ * qui doit la faire elle-même. Masquage SYSTÉMATIQUE (aucun rôle, y compris admin, n'y échappe) —
+ * même principe que GET /api/secrets qui ne renvoie jamais `value` (routes/secrets.ts) : la seule
+ * façon d'obtenir une valeur de secret en clair reste POST /api/secrets/:id/reveal (admin
+ * uniquement, une fois par appel, déjà journalisé dans l'audit log). Avant ce correctif, un
+ * simple `viewer` pouvait lire n'importe quel secret injecté dans un conteneur via cette route,
+ * en contradiction directe avec le contrat "write-only" documenté du gestionnaire de secrets
+ * (voir finding E1, docs/reports/security-audit-2026-08-12.md).
+ *
+ * `secretKeys` vient de `usedBy` (secretsStore.ts#recordSecretUsage, déjà exposé publiquement
+ * par GET /api/secrets) : la clé d'env est une METADONNÉE non sensible, seule la valeur l'est.
+ * Repose sur une correspondance de CLÉ (pas de valeur) : robuste même si la valeur du secret a
+ * changé depuis (rotation) sans que le conteneur n'ait été recréé.
+ */
+export function maskSecretEnvValues(env: readonly string[], secretKeys: ReadonlySet<string>): string[] {
+  if (secretKeys.size === 0) return [...env];
+  return env.map((entry) => {
+    const eq = entry.indexOf("=");
+    const key = eq >= 0 ? entry.slice(0, eq) : entry;
+    return secretKeys.has(key) ? `${key}=***` : entry;
+  });
 }
 
 export default async function containersRoutes(fastify: FastifyInstance): Promise<void> {
@@ -166,7 +194,13 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
     if (!detail) {
       return reply.code(404).send({ error: `Container "${request.params.id}" not found` });
     }
-    return reply.send(detail);
+    // Voir maskSecretEnvValues ci-dessus (finding E1) — `usedBy` (déjà public via GET /api/secrets)
+    // donne les clés d'env réellement issues de secretEnv pour CE conteneur, tous secrets confondus.
+    const allSecrets = await listSecrets();
+    const secretKeys = new Set(
+      allSecrets.flatMap((secret) => secret.usedBy.filter((u) => u.containerId === detail.id).map((u) => u.key)),
+    );
+    return reply.send({ ...detail, env: maskSecretEnvValues(detail.env, secretKeys) });
   });
 
   fastify.get<{ Params: { id: string } }>("/api/containers/:id/processes", async (request, reply) => {

@@ -90,21 +90,36 @@ import type { NutanixVm, ScanResult, Topology, TopologyEdge, TopologyEdgePort, T
  * qui trouve une faille que l'autre a manquée reste visible), pas besoin de fusionner les listes
  * de CVE elles-mêmes puisque seul le compte par sévérité est affiché sur le badge.
  */
-function vulnSummaryForImage(image: string, scans: ScanResult[]): { vulnCritical: number; vulnHigh: number } | null {
-  const latestByScanner = new Map<string, ScanResult>();
+/**
+ * Construit en UNE SEULE passe O(S) sur tout l'historique de scans une Map "name:tag" -> résumé
+ * Critical/High, au lieu de reparcourir `scans` en entier pour CHAQUE conteneur (O(C×S) — voir
+ * docs/reports/optimization-audit-2026-08-12.md §É2, `getTopology()` est pollée toutes les ~9s).
+ * Même règle de rapprochement qu'avant (dernier scan RÉUSSI de chaque scanner, MAX des comptes
+ * Critical/High entre scanners) — comportement strictement identique, juste précalculé une fois.
+ */
+function buildVulnSummaryByImage(scans: ScanResult[]): Map<string, { vulnCritical: number; vulnHigh: number }> {
+  const latestByImageAndScanner = new Map<string, Map<string, ScanResult>>();
   for (const scan of scans) {
-    if (scan.image !== image || scan.status !== "success") continue;
-    const current = latestByScanner.get(scan.scanner);
-    if (!current || scan.startedAt > current.startedAt) latestByScanner.set(scan.scanner, scan);
+    if (scan.status !== "success") continue;
+    let byScanner = latestByImageAndScanner.get(scan.image);
+    if (!byScanner) {
+      byScanner = new Map<string, ScanResult>();
+      latestByImageAndScanner.set(scan.image, byScanner);
+    }
+    const current = byScanner.get(scan.scanner);
+    if (!current || scan.startedAt > current.startedAt) byScanner.set(scan.scanner, scan);
   }
-  if (latestByScanner.size === 0) return null;
-  let vulnCritical = 0;
-  let vulnHigh = 0;
-  for (const scan of latestByScanner.values()) {
-    vulnCritical = Math.max(vulnCritical, scan.summary.Critical);
-    vulnHigh = Math.max(vulnHigh, scan.summary.High);
+  const result = new Map<string, { vulnCritical: number; vulnHigh: number }>();
+  for (const [image, byScanner] of latestByImageAndScanner) {
+    let vulnCritical = 0;
+    let vulnHigh = 0;
+    for (const scan of byScanner.values()) {
+      vulnCritical = Math.max(vulnCritical, scan.summary.Critical);
+      vulnHigh = Math.max(vulnHigh, scan.summary.High);
+    }
+    result.set(image, { vulnCritical, vulnHigh });
   }
-  return { vulnCritical, vulnHigh };
+  return result;
 }
 
 function primaryContainerName(names: string[] | undefined, id: string): string {
@@ -248,12 +263,15 @@ export async function getTopology(): Promise<Topology> {
     // containerNodeId -> ports RÉELLEMENT publiés (docker.listContainers()[].Ports, déjà dans le
     // résumé) — voir TopologyEdge#ports (apps/api/src/types.ts) pour la limite d'honnêteté du champ.
     const containerPorts = new Map<string, TopologyEdgePort[]>();
+    // Une seule passe O(S) sur tout l'historique de scans (voir buildVulnSummaryByImage ci-dessus),
+    // consultée en O(1) par conteneur ci-dessous plutôt que reparcourue C fois.
+    const vulnSummaryByImage = buildVulnSummaryByImage(allScans);
 
     containers.forEach((c, index) => {
       const containerNodeId = `container:${c.Id}`;
       const name = primaryContainerName(c.Names, c.Id);
       const usage = usages[index]!;
-      const vulnSummary = vulnSummaryForImage(c.Image, allScans);
+      const vulnSummary = vulnSummaryByImage.get(c.Image) ?? null;
       nodes.push({
         id: containerNodeId,
         kind: "container",

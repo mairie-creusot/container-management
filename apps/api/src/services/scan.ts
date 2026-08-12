@@ -383,9 +383,28 @@ export async function startScan(
   execFile(
     spec.bin,
     spec.buildArgs(imageReference),
-    { maxBuffer: 1024 * 1024 * 64 }, // un rapport JSON de vulnérabilités peut être volumineux sur une image avec beaucoup de couches
+    {
+      maxBuffer: 1024 * 1024 * 64, // un rapport JSON de vulnérabilités peut être volumineux sur une image avec beaucoup de couches
+      // Timeout configurable (config.scan.timeoutMs) — sans lui, un scan dont le téléchargement
+      // de base de vulnérabilités (première exécution) ne se termine jamais tournerait
+      // indéfiniment, sans aucune route d'annulation pour le rattraper (voir finding M3,
+      // docs/reports/security-audit-2026-08-12.md). `execFile` tue le process avec `killSignal`
+      // (SIGTERM par défaut) dès ce délai dépassé et retourne une erreur (`err.killed === true`)
+      // exploitée ci-dessous exactement comme un vrai échec d'exécution.
+      timeout: config.scan.timeoutMs,
+    },
     (err, stdout) => {
       const exitCode = execFileExitCode(err);
+      if (err?.killed) {
+        // eslint-disable-next-line no-console
+        console.warn(`[scan] ${scanner} scan of ${imageReference} timed out after ${config.scan.timeoutMs}ms, killed`);
+        void appendScanEvent({
+          ...scan,
+          status: "failed",
+          finishedAt: new Date().toISOString(),
+        });
+        return;
+      }
       if (exitCode === null || !spec.isSuccessExitCode(exitCode)) {
         void appendScanEvent({
           ...scan,

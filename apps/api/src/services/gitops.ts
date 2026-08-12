@@ -21,10 +21,12 @@
  */
 
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import yaml from "js-yaml";
 import simpleGit, { CheckRepoActions, type SimpleGit } from "simple-git";
 import { config } from "../config.js";
+import { withTimeout } from "../utils/async.js";
 import { demoStore } from "./demoData.js";
 import { getDockerContainers } from "./docker.js";
 import { getKubernetesContainers } from "./kubernetes.js";
@@ -100,13 +102,44 @@ function repoAbsolutePath(): string {
   return path.resolve(config.gitops.repoPath);
 }
 
-function authenticatedRemoteUrl(): string | undefined {
+/**
+ * URL du remote SANS jamais y interpoler le jeton (voir prepareGitAskPass ci-dessous et finding
+ * E4, docs/reports/security-audit-2026-08-12.md) — seul le nom d'utilisateur y figure quand un
+ * jeton est configuré, pour que `git` sache qu'une authentification est nécessaire (il
+ * n'invoquera alors GIT_ASKPASS que pour le mot de passe, jamais pour redemander un nom
+ * d'utilisateur déjà connu).
+ */
+function remoteUrlForGit(): string | undefined {
   const { repoUrl, gitUsername, gitToken } = config.gitops;
   if (!repoUrl) return undefined;
   if (!gitToken || !repoUrl.startsWith("https://")) return repoUrl;
   const withoutProtocol = repoUrl.slice("https://".length);
   const user = gitUsername ? encodeURIComponent(gitUsername) : "oauth2";
-  return `https://${user}:${encodeURIComponent(gitToken)}@${withoutProtocol}`;
+  return `https://${user}@${withoutProtocol}`;
+}
+
+/**
+ * Prépare un `GIT_ASKPASS` TEMPORAIRE portant le jeton — jamais interpolé dans l'URL du remote
+ * (qui finirait en argument de ligne de commande du process `git` réellement exécuté, visible
+ * via `ps aux`/`/proc/<pid>/cmdline` par tout utilisateur/processus disposant de ces droits
+ * d'observation locale sur l'hôte/le conteneur API — voir finding E4,
+ * docs/reports/security-audit-2026-08-12.md, et services/github.ts#prepareGitAskPass, le même
+ * mécanisme appliqué à l'autre intégration Git du projet). Le jeton ne transite QUE par une
+ * variable d'environnement du sous-processus `git` (GIT_QUAI_TOKEN, jamais journalisée) : le
+ * script d'aide se contente de la relayer sur stdout quand `git` la lui demande, jamais écrite
+ * dans le script lui-même ni conservée au-delà de l'opération Git en cours (dossier temporaire
+ * supprimé dans le `finally` de l'appelant).
+ */
+async function prepareGitAskPass(token: string): Promise<{ env: NodeJS.ProcessEnv; cleanup: () => Promise<void> }> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "quai-gitops-askpass-"));
+  const scriptPath = path.join(dir, "askpass.sh");
+  await fs.writeFile(scriptPath, `#!/bin/sh\nprintf '%s' "$GIT_QUAI_TOKEN"\n`, { encoding: "utf-8", mode: 0o700 });
+  return {
+    env: { ...process.env, GIT_ASKPASS: scriptPath, GIT_TERMINAL_PROMPT: "0", GIT_QUAI_TOKEN: token },
+    cleanup: async () => {
+      await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    },
+  };
 }
 
 /**
@@ -175,8 +208,14 @@ async function bootstrapLocalRepo(repoPath: string): Promise<SimpleGit | null> {
  * quel GITOPS_REPO_PATH — amorcé automatiquement s'il est vide, voir bootstrapLocalRepo).
  * Retourne `null` si aucun dépôt Git exploitable n'est disponible (les appelants retombent
  * alors sur les données de démonstration).
+ *
+ * Opérations réseau (clone/fetch/pull) bornées par `config.gitops.requestTimeoutMs` — `git`
+ * n'a aucun timeout par défaut, un dépôt distant qui ne répond jamais (pare-feu qui droppe les
+ * paquets, proxy muet) bloquerait sinon indéfiniment (voir finding É4,
+ * docs/reports/optimization-audit-2026-08-12.md ; même correctif déjà appliqué à
+ * services/github.ts#runDeployment pour son propre clone).
  */
-async function ensureRepoReady(): Promise<SimpleGit | null> {
+async function doEnsureRepoReady(): Promise<SimpleGit | null> {
   const repoPath = repoAbsolutePath();
 
   try {
@@ -193,9 +232,13 @@ async function ensureRepoReady(): Promise<SimpleGit | null> {
   // clone/amorçage de se déclencher : readManifestsFromDisk ne trouvait ensuite jamais aucun
   // fichier dans le dossier réellement vide, d'où un repli permanent sur les données de démo.
   const isRepo = await git.checkIsRepo(CheckRepoActions.IS_REPO_ROOT).catch(() => false);
-  const remoteUrl = authenticatedRemoteUrl();
+  const remoteUrl = remoteUrlForGit();
 
   if (remoteUrl) {
+    // Préparé une seule fois pour les deux branches ci-dessous (clone OU fetch+checkout+pull),
+    // nettoyé dans tous les cas via `finally` — voir prepareGitAskPass (finding E4).
+    const { gitToken } = config.gitops;
+    const askPass = gitToken ? await prepareGitAskPass(gitToken) : null;
     try {
       if (!isRepo) {
         const entries = await fs.readdir(repoPath);
@@ -204,17 +247,33 @@ async function ensureRepoReady(): Promise<SimpleGit | null> {
           console.warn(`[gitops] GITOPS_REPO_PATH (${repoPath}) is not empty and not a git repo, skipping clone`);
           return null;
         }
-        await simpleGit().clone(remoteUrl, repoPath, ["--branch", config.gitops.branch, "--single-branch"]);
+        const cloner = askPass ? simpleGit().env(askPass.env) : simpleGit();
+        await withTimeout(
+          cloner.clone(remoteUrl, repoPath, ["--branch", config.gitops.branch, "--single-branch"]),
+          config.gitops.requestTimeoutMs,
+          "gitops git clone",
+        );
         return simpleGit(repoPath);
       }
-      await git.fetch("origin", config.gitops.branch);
-      await git.checkout(config.gitops.branch).catch(() => undefined);
-      await git.pull("origin", config.gitops.branch);
+      const authenticatedGit = askPass ? git.env(askPass.env) : git;
+      await withTimeout(
+        authenticatedGit.fetch("origin", config.gitops.branch),
+        config.gitops.requestTimeoutMs,
+        "gitops git fetch",
+      );
+      await authenticatedGit.checkout(config.gitops.branch).catch(() => undefined);
+      await withTimeout(
+        authenticatedGit.pull("origin", config.gitops.branch),
+        config.gitops.requestTimeoutMs,
+        "gitops git pull",
+      );
       return git;
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn(`[gitops] failed to sync remote repository (${err instanceof Error ? err.message : String(err)})`);
       return isRepo ? git : null;
+    } finally {
+      await askPass?.cleanup();
     }
   }
 
@@ -227,6 +286,31 @@ async function ensureRepoReady(): Promise<SimpleGit | null> {
     return null;
   }
   return bootstrapLocalRepo(repoPath);
+}
+
+/** Appel en cours de doEnsureRepoReady(), partagé par tout appelant concurrent — voir ensureRepoReady(). */
+let inFlightEnsureRepoReady: Promise<SimpleGit | null> | null = null;
+
+/**
+ * Garde ANTI-CHEVAUCHEMENT : listGitOpsFiles() (donc ensureRepoReady) est appelée à la fois par
+ * le réconciliateur GitOps en tâche de fond (gitopsReconciler.ts, cycle 90s) ET par toute requête
+ * HTTP utilisateur sur /api/gitops/* qui atterrit au même moment — sans garde, un `git fetch`/
+ * `pull` un peu lent (réseau capricieux) laisserait un second appel concurrent relancer un
+ * DEUXIÈME process `git` sur le même dépôt local pendant que le premier tourne encore : écritures
+ * concurrentes sur l'index/les refs Git, "lost update" potentiel (voir finding M7,
+ * docs/reports/optimization-audit-2026-08-12.md — le réconciliateur GitOps est explicitement visé
+ * par ce finding, ici traité au niveau de la fonction qui fait RÉELLEMENT l'I/O réseau plutôt que
+ * dans le `setInterval` de gitopsReconciler.ts, pour protéger aussi les appels concurrents
+ * déclenchés par l'UI, pas seulement les cycles du scheduler entre eux). Un appel concurrent
+ * REJOINT l'opération déjà en cours (jamais démarré une deuxième fois, jamais un "skip" silencieux
+ * qui renverrait `null` à tort) plutôt que d'être ignoré.
+ */
+async function ensureRepoReady(): Promise<SimpleGit | null> {
+  if (inFlightEnsureRepoReady) return inFlightEnsureRepoReady;
+  inFlightEnsureRepoReady = doEnsureRepoReady().finally(() => {
+    inFlightEnsureRepoReady = null;
+  });
+  return inFlightEnsureRepoReady;
 }
 
 interface DiskManifest {

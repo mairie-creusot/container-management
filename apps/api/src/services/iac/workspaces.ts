@@ -21,7 +21,27 @@ function indexPath(): string {
   return path.join(iacRootPath(), "workspaces.json");
 }
 
+/**
+ * Format STRICT d'un id de workspace — toujours un `randomUUID()` généré par createWorkspace()
+ * ci-dessous, jamais saisi par un utilisateur. Validé explicitement ici, en plus de la
+ * vérification d'existence côté route (getWorkspace(), voir routes/iac.ts) : défense en
+ * profondeur pour qu'aucun chemin dérivé de cet id (workspaceFilesPath, et donc le `cwd` du
+ * sous-processus tofu/ansible-playbook/packer lancé par iac/runner.ts#startRun) ne puisse
+ * JAMAIS contenir un séparateur de chemin ou un `..`, même dans l'hypothèse où un appelant
+ * oublierait de vérifier l'existence en amont — même esprit que assertValidVolumeName dans
+ * services/docker.ts. Voir finding E2, docs/reports/security-audit-2026-08-12.md.
+ */
+const WORKSPACE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function isValidWorkspaceId(id: string): boolean {
+  return WORKSPACE_ID_PATTERN.test(id);
+}
+
 export function workspaceFilesPath(workspaceId: string): string {
+  if (!isValidWorkspaceId(workspaceId)) {
+    // Erreur nette plutôt qu'un chemin construit à l'aveugle — voir isValidWorkspaceId ci-dessus.
+    throw new Error(`Invalid workspace id "${workspaceId}"`);
+  }
   return path.join(iacRootPath(), workspaceId, "files");
 }
 

@@ -168,8 +168,22 @@ async function checkReachability(previous: WatchdogState, isFirstRun: boolean, n
   }
 }
 
+// Garde anti-chevauchement (voir docs/reports/optimization-audit-2026-08-12.md §M7) : sans elle,
+// un cycle plus long que DEFAULT_INTERVAL_MS (75s — plausible si checkReachability traîne sur un
+// registry injoignable, voir F1) ferait démarrer un second cycle concurrent avant la fin du
+// premier, avec deux loadState()/saveState() concurrents sur watchdog-state.json (dernière
+// écriture gagne, une transition détectée par le premier cycle peut être silencieusement écrasée
+// par le second qui a chargé un état déjà obsolète).
+let cycleInFlight = false;
+
 /** Un cycle complet de détection — exporté pour les tests et pour un déclenchement manuel éventuel. */
 export async function runWatchdogCycle(): Promise<void> {
+  if (cycleInFlight) {
+    // eslint-disable-next-line no-console
+    console.warn("[watchdog] cycle précédent encore en cours — ce tick est ignoré plutôt que de démarrer un second cycle concurrent");
+    return;
+  }
+  cycleInFlight = true;
   try {
     const { state: previous, isFirstRun } = await loadState();
     const next: WatchdogState = { imagesWithUpdate: [], reachability: { ...previous.reachability } };
@@ -183,6 +197,8 @@ export async function runWatchdogCycle(): Promise<void> {
     // simplement retentée au prochain tick.
     // eslint-disable-next-line no-console
     console.warn(`[watchdog] cycle failed: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    cycleInFlight = false;
   }
 }
 

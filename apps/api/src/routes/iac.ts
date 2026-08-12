@@ -14,12 +14,13 @@
  * GET    /api/iac/workspaces/:id/runs/:runId         — statut + log complet d'un run (à poller pendant qu'il tourne).
  */
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply } from "fastify";
 import { listEngineStatuses } from "../services/iac/engines.js";
 import {
   createWorkspace,
   deleteFile,
   deleteWorkspace,
+  getWorkspace,
   listFiles,
   listWorkspaces,
   readFile,
@@ -30,6 +31,19 @@ import { getRun, listRuns, readRunLog, startRun } from "../services/iac/runner.j
 import type { IacEngine } from "../types.js";
 
 const VALID_ENGINES: readonly IacEngine[] = ["tofu", "ansible", "packer"];
+
+/**
+ * Vérifie que le workspace existe RÉELLEMENT (index workspaces.json) avant toute opération
+ * fichier ou tout run — répond 404 et renvoie `false` sinon. Sans ce garde, un `workspaceId`
+ * inventé (jamais créé par createWorkspace, donc jamais un vrai UUID généré côté serveur)
+ * pourrait atteindre workspaceFilesPath()/le `cwd` d'un sous-processus IaC sans jamais être
+ * rejeté proprement en amont (voir finding E2, docs/reports/security-audit-2026-08-12.md).
+ */
+async function requireWorkspace(id: string, reply: FastifyReply): Promise<boolean> {
+  if (await getWorkspace(id)) return true;
+  reply.code(404).send({ error: `Workspace "${id}" not found` });
+  return false;
+}
 
 export default async function iacRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get("/api/iac/engines", async (_request, reply) => {
@@ -65,12 +79,14 @@ export default async function iacRoutes(fastify: FastifyInstance): Promise<void>
   });
 
   fastify.get<{ Params: { id: string } }>("/api/iac/workspaces/:id/files", async (request, reply) => {
+    if (!(await requireWorkspace(request.params.id, reply))) return;
     return reply.send(await listFiles(request.params.id));
   });
 
   fastify.get<{ Params: { id: string; path: string } }>(
     "/api/iac/workspaces/:id/files/:path",
     async (request, reply) => {
+      if (!(await requireWorkspace(request.params.id, reply))) return;
       try {
         const content = await readFile(request.params.id, request.params.path);
         return reply.send({ path: request.params.path, content });
@@ -83,6 +99,7 @@ export default async function iacRoutes(fastify: FastifyInstance): Promise<void>
   fastify.put<{ Params: { id: string; path: string }; Body: { content?: string } }>(
     "/api/iac/workspaces/:id/files/:path",
     async (request, reply) => {
+      if (!(await requireWorkspace(request.params.id, reply))) return;
       const content = request.body?.content;
       if (content === undefined) return reply.code(400).send({ error: "content is required" });
       await writeFile(request.params.id, request.params.path, content);
@@ -93,6 +110,7 @@ export default async function iacRoutes(fastify: FastifyInstance): Promise<void>
   fastify.delete<{ Params: { id: string; path: string } }>(
     "/api/iac/workspaces/:id/files/:path",
     async (request, reply) => {
+      if (!(await requireWorkspace(request.params.id, reply))) return;
       await deleteFile(request.params.id, request.params.path);
       return reply.send({ ok: true });
     },
@@ -104,9 +122,13 @@ export default async function iacRoutes(fastify: FastifyInstance): Promise<void>
       const { action, engine } = request.body ?? {};
       if (!action || !engine) return reply.code(400).send({ error: "action and engine are required" });
       try {
+        // startRun() revérifie lui-même l'existence du workspace (WorkspaceNotFoundError -> 404
+        // ci-dessous) — cf. runner.ts#startRun, appelé aussi indirectement par d'éventuels futurs
+        // appelants qui ne passeraient pas par cette route.
         const run = await startRun(request.params.id, engine as IacEngine, action, request.authSession!.username);
         return reply.code(201).send(run);
       } catch (err) {
+        if (err instanceof WorkspaceNotFoundError) return reply.code(404).send({ error: err.message });
         const message = err instanceof Error ? err.message : String(err);
         return reply.code(400).send({ error: message });
       }
@@ -114,12 +136,14 @@ export default async function iacRoutes(fastify: FastifyInstance): Promise<void>
   );
 
   fastify.get<{ Params: { id: string } }>("/api/iac/workspaces/:id/runs", async (request, reply) => {
+    if (!(await requireWorkspace(request.params.id, reply))) return;
     return reply.send(await listRuns(request.params.id));
   });
 
   fastify.get<{ Params: { id: string; runId: string } }>(
     "/api/iac/workspaces/:id/runs/:runId",
     async (request, reply) => {
+      if (!(await requireWorkspace(request.params.id, reply))) return;
       const run = await getRun(request.params.id, request.params.runId);
       if (!run) return reply.code(404).send({ error: `Run "${request.params.runId}" not found` });
       const log = await readRunLog(request.params.id, request.params.runId);

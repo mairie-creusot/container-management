@@ -12,7 +12,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { config } from "../../config.js";
-import { workspaceFilesPath } from "./workspaces.js";
+import { getWorkspace, workspaceFilesPath, WorkspaceNotFoundError } from "./workspaces.js";
 import type { IacEngine, IacRun } from "../../types.js";
 
 function iacRootPath(): string {
@@ -102,6 +102,14 @@ async function buildCommand(engine: IacEngine, action: string, workspaceDir: str
  * cette fonction ; voir getRun()/tailRunLog() pour suivre sa progression.
  */
 export async function startRun(workspaceId: string, engine: IacEngine, action: string, startedBy: string): Promise<IacRun> {
+  // Vérifie que le workspace existe RÉELLEMENT (index workspaces.json) avant tout usage de son
+  // chemin de fichiers ou tout `spawn` — jamais construire un `cwd` de sous-processus à partir
+  // d'un id non vérifié, même si workspaceFilesPath() valide déjà son FORMAT ci-dessous (défense
+  // en profondeur, voir finding E2, docs/reports/security-audit-2026-08-12.md).
+  if (!(await getWorkspace(workspaceId))) {
+    throw new WorkspaceNotFoundError(`Workspace "${workspaceId}" not found`);
+  }
+
   if (!ENGINE_ACTIONS[engine].includes(action)) {
     throw new Error(`Unsupported action "${action}" for engine "${engine}" (allowed: ${ENGINE_ACTIONS[engine].join(", ")})`);
   }
@@ -137,16 +145,37 @@ export async function startRun(workspaceId: string, engine: IacEngine, action: s
   child.stdout?.on("data", appendToLog);
   child.stderr?.on("data", appendToLog);
 
+  // Timeout configurable (config.iac.runTimeoutMs) — sans lui, un `tofu apply`/`ansible-playbook`/
+  // `packer build` qui bloque (attente réseau, provisioner qui hang) tournerait indéfiniment,
+  // sans aucune route d'annulation pour le rattraper (voir finding M3,
+  // docs/reports/security-audit-2026-08-12.md). SIGTERM d'abord (laisse une chance au process de
+  // nettoyer proprement, ex: verrou d'état tofu), SIGKILL de secours si toujours vivant après un
+  // court délai de grâce — même esprit que services/adDns.ts#runWithStdin, qui tue déjà ses
+  // sous-processus `kinit`/`nsupdate` de cette façon sur timeout.
+  let timedOut = false;
+  const timeoutTimer = setTimeout(() => {
+    timedOut = true;
+    appendToLog(
+      Buffer.from(`\n[quai] run timed out after ${config.iac.runTimeoutMs}ms, killing process (SIGTERM)\n`),
+    );
+    child.kill("SIGTERM");
+    setTimeout(() => {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }, 5_000);
+  }, config.iac.runTimeoutMs);
+
   child.on("close", (exitCode) => {
+    clearTimeout(timeoutTimer);
     void upsertRun(workspaceId, {
       ...run,
-      status: exitCode === 0 ? "success" : "failed",
+      status: !timedOut && exitCode === 0 ? "success" : "failed",
       finishedAt: new Date().toISOString(),
       exitCode,
     });
   });
 
   child.on("error", (err) => {
+    clearTimeout(timeoutTimer);
     appendToLog(Buffer.from(`\n[quai] failed to start process: ${err.message}\n`));
     void upsertRun(workspaceId, { ...run, status: "failed", finishedAt: new Date().toISOString(), exitCode: null });
   });

@@ -1,5 +1,6 @@
 import { createAsyncThunk, createSlice, nanoid, type PayloadAction } from "@reduxjs/toolkit";
 import { apiGet, apiPost } from "@/api/client";
+import type { RootState } from "@/store";
 import type { SystemNotificationEvent } from "@/types";
 
 export type NotificationLevel = "error" | "success" | "info";
@@ -16,11 +17,18 @@ export interface AppNotification {
 
 interface NotificationsState {
   items: AppNotification[];
+  /** Timestamp (ISO 8601) de l'événement système le plus récent déjà vu — envoyé comme `since`
+   * au poll suivant (voir fetchSystemNotifications ci-dessous) pour que le serveur ne renvoie que
+   * les événements nouveaux au lieu de reparser tout notifications-log.jsonl à chaque poll de 20s
+   * (voir docs/reports/optimization-audit-2026-08-12.md §É5 — le paramètre `since` existe déjà
+   * côté route, seul le frontend ne l'envoyait jamais). `null` tant qu'aucun événement n'a jamais
+   * été reçu (premier poll = pas de `since`, comportement identique à avant). */
+  lastEventTimestamp: string | null;
 }
 
 const MAX_ITEMS = 200;
 
-const initialState: NotificationsState = { items: [] };
+const initialState: NotificationsState = { items: [], lastEventTimestamp: null };
 
 /**
  * Notifications système détectées côté serveur par le watchdog (nouvelle version d'image,
@@ -28,10 +36,20 @@ const initialState: NotificationsState = { items: [] };
  * : persistées, partagées entre tous les admins. Repollées comme le reste de l'app (voir
  * REFRESH_INTERVAL_MS dans overview/TopologyGraph), câblé depuis App.tsx pour rester actif
  * quelle que soit la vue affichée.
+ *
+ * Envoie `since` (dernier timestamp système connu, voir NotificationsState#lastEventTimestamp)
+ * dès qu'on en a un : le serveur filtre alors côté disque plutôt que de renvoyer tout l'historique
+ * à chaque poll (voir routes/notifications.ts). Lu directement depuis le state via `getState()`
+ * plutôt que passé en argument par l'appelant : évite un `since` figé dans une closure de
+ * `setInterval` (App.tsx) qui ne se mettrait jamais à jour entre deux polls.
  */
-export const fetchSystemNotifications = createAsyncThunk<SystemNotificationEvent[]>(
+export const fetchSystemNotifications = createAsyncThunk<SystemNotificationEvent[], void, { state: RootState }>(
   "notifications/fetchSystem",
-  () => apiGet<SystemNotificationEvent[]>("/notifications"),
+  (_arg, { getState }) => {
+    const since = getState().notifications.lastEventTimestamp;
+    const query = since ? `?since=${encodeURIComponent(since)}` : "";
+    return apiGet<SystemNotificationEvent[]>(`/notifications${query}`);
+  },
 );
 
 /**
@@ -108,6 +126,16 @@ const notificationsSlice = createSlice({
       state.items = Array.from(byId.values())
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))
         .slice(0, MAX_ITEMS);
+      // Avance le curseur `since` au plus récent timestamp système vu dans CETTE réponse (jamais
+      // en arrière : une réponse filtrée par `since` ne contient par construction que des
+      // événements postérieurs au curseur actuel, donc le max de action.payload est déjà >= au
+      // curseur existant — mais on protège quand même contre un événement système horodaté dans
+      // le passé qui ferait régresser le curseur).
+      for (const event of action.payload) {
+        if (!state.lastEventTimestamp || event.timestamp > state.lastEventTimestamp) {
+          state.lastEventTimestamp = event.timestamp;
+        }
+      }
     });
   },
 });

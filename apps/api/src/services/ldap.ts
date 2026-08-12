@@ -9,6 +9,20 @@
  *
  * Aucun mot de passe ni donnée LDAP n'est journalisé ni mis en cache au-delà de la requête
  * de login (ou de test de connexion) en cours.
+ *
+ * RISQUE CONNU — `ldapjs@3.0.7` (composant critique de l'authentification) est marqué
+ * "decommissioned" sur le registre npm, ainsi que TOUS ses sous-paquets `@ldapjs/*` dont il
+ * dépend (`@ldapjs/asn1`, `@ldapjs/dn`, `@ldapjs/filter`...) — organisation entière archivée, plus
+ * de correctifs de sécurité à attendre (voir docs/reports/security-audit-2026-08-12.md, finding
+ * F1). Vérifié à cette date : AUCUN fork officiellement maintenu à l'API compatible n'existe —
+ * `@ldapjs/client` n'existe pas sur le registre npm (404), et le README de décommission du dépôt
+ * (github.com/ldapjs/node-ldapjs) ne recommande pas de successeur Node.js mais une réécriture de
+ * la logique LDAP dans un autre langage ("write a gateway in a language that is more suited...
+ * I'd suggest Go"), hors périmètre de ce projet. Les seules alternatives npm trouvées (ex.
+ * `ldapjs-promise`) sont de simples wrappers non éprouvés, mono-mainteneur, sans historique de
+ * confiance suffisant pour remplacer un composant d'authentification sans risque de régression
+ * plus grand que celui qu'on cherche à corriger. Décision : NE PAS migrer maintenant — à
+ * réévaluer périodiquement (`pnpm audit`, veille sur une éventuelle reprise de maintenance).
  */
 
 import ldap from "ldapjs";

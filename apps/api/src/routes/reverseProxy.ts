@@ -2,8 +2,12 @@
  * GET    /api/reverse-proxy/routes      — liste des routes actives, ouvert à toute session
  *                                          authentifiée (cf. plugins/auth.ts).
  * POST   /api/reverse-proxy/routes      — { subdomain, targetContainerId? | targetHost?, targetPort }
- *                                          — operator/admin (hook global, aucune restriction
- *                                          supplémentaire ici contrairement à /api/secrets/*).
+ *                                          — operator/admin (hook global, aucune restriction de
+ *                                          rôle supplémentaire ici contrairement à /api/secrets/*
+ *                                          : `targetHost` arbitraire reste une fonctionnalité
+ *                                          assumée par conception, voir services/reverseProxy.ts
+ *                                          #isForbiddenProxyTarget pour le risque SSRF documenté
+ *                                          et le correctif minimal appliqué, finding M1).
  * DELETE /api/reverse-proxy/routes/:id  — operator/admin.
  * POST   /api/reverse-proxy/push        — repousse la config complète vers Caddy sans rien
  *                                          changer côté QUAI (utile après un redémarrage de
@@ -29,9 +33,11 @@ import {
   CaddyPushFailedError,
   createRoute,
   deleteRoute,
+  ForbiddenProxyTargetError,
   getCaCertificate,
   getReverseProxyStatus,
   InvalidSubdomainError,
+  isForbiddenProxyTarget,
   isValidSubdomain,
   listRoutes,
   pushConfigToCaddy,
@@ -75,6 +81,15 @@ export default async function reverseProxyRoutes(fastify: FastifyInstance): Prom
     if (!targetContainerId && !targetHost) {
       return reply.code(400).send({ error: "targetContainerId or targetHost is required" });
     }
+    // Rejette ici les cibles évidemment dangereuses (loopback, link-local, l'API d'admin Caddy
+    // elle-même) — défense en profondeur EN PLUS de la validation dans le service (voir
+    // services/reverseProxy.ts#isForbiddenProxyTarget), même pattern que la validation de
+    // `subdomain` ci-dessus (docs/reports/security-audit-2026-08-12.md, finding M1).
+    if (targetHost && isForbiddenProxyTarget(targetHost)) {
+      return reply.code(400).send({
+        error: `"${targetHost}" is not allowed as a reverse-proxy target (loopback/link-local addresses and the Caddy admin API itself are blocked)`,
+      });
+    }
     if (!isValidPort(targetPort)) {
       return reply.code(400).send({ error: "targetPort must be a valid port number (1-65535)" });
     }
@@ -92,6 +107,9 @@ export default async function reverseProxyRoutes(fastify: FastifyInstance): Prom
         return reply.code(409).send({ error: err.message });
       }
       if (err instanceof InvalidSubdomainError) {
+        return reply.code(400).send({ error: err.message });
+      }
+      if (err instanceof ForbiddenProxyTargetError) {
         return reply.code(400).send({ error: err.message });
       }
       if (err instanceof CaddyPushFailedError) {

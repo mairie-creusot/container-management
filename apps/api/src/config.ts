@@ -68,7 +68,9 @@ export const config = {
   session: {
     jwtSecret: readString("JWT_SECRET", "dev-insecure-secret-change-me"),
     jwtExpiresIn: readString("JWT_EXPIRES_IN", "15m"),
-    jwtRefreshExpiresIn: readString("JWT_REFRESH_EXPIRES_IN", "7d"),
+    // Pas de jwtRefreshExpiresIn : aucun flux de refresh token n'existe (code mort supprimé, voir
+    // services/session.ts et docs/reports/security-audit-2026-08-12.md, finding I3) — une session
+    // expirée force simplement une reconnexion LDAP.
     cookieName: readString("COOKIE_NAME", "quai_session"),
     cookieSecure: readBoolean("COOKIE_SECURE", false),
   },
@@ -116,6 +118,12 @@ export const config = {
     branch: readString("GITOPS_BRANCH", "main"),
     gitUsername: readOptionalString("GITOPS_GIT_USERNAME"),
     gitToken: readOptionalString("GITOPS_GIT_TOKEN"),
+    // Délai max accordé à chaque opération Git réseau (clone/fetch/pull) du réconciliateur GitOps
+    // (services/gitops.ts#ensureRepoReady, cycle 90s) — même principe que adDns.requestTimeoutMs/
+    // nutanix.requestTimeoutMs : `simple-git`/`git` n'a aucun timeout par défaut, un dépôt distant
+    // qui ne répond jamais (pare-feu qui droppe les paquets, proxy muet) bloquerait sinon
+    // indéfiniment (voir finding É4, docs/reports/optimization-audit-2026-08-12.md).
+    requestTimeoutMs: readNumber("GITOPS_GIT_TIMEOUT_MS", 15_000),
   },
   setup: {
     // Persistance de l'assistant de configuration au premier lancement (cf. ARCHITECTURE.md,
@@ -173,6 +181,23 @@ export const config = {
     // rapide (shallow), un build d'image peut prendre plusieurs minutes selon le Dockerfile.
     cloneTimeoutMs: readNumber("GITHUB_CLONE_TIMEOUT_MS", 30_000),
     buildTimeoutMs: readNumber("GITHUB_BUILD_TIMEOUT_MS", 300_000),
+  },
+  iac: {
+    // Délai max accordé à une commande OpenTofu/Ansible/Packer lancée par services/iac/runner.ts
+    // (spawn) avant d'être tuée (SIGTERM puis SIGKILL de secours) et le run marqué "failed" —
+    // sans ça, un `tofu apply`/`ansible-playbook` qui bloque (attente réseau, provisioner qui
+    // hang) tourne indéfiniment, sans aucune route d'annulation pour le rattraper (voir finding
+    // M3, docs/reports/security-audit-2026-08-12.md). Généreux par défaut (les scaffolds de
+    // démo prennent quelques secondes, un vrai plan/apply peut prendre plusieurs minutes).
+    runTimeoutMs: readNumber("IAC_RUN_TIMEOUT_MS", 900_000),
+  },
+  scan: {
+    // Délai max accordé à un scan Grype/OSV-Scanner (services/scan.ts, execFile) — même raison
+    // que iac.runTimeoutMs : le téléchargement de la base de vulnérabilités à la première
+    // exécution peut être lent, mais doit rester borné plutôt que de tourner indéfiniment (voir
+    // finding M3, docs/reports/security-audit-2026-08-12.md). Aligné sur MAX_WAIT_MS déjà utilisé
+    // par scanScheduler.ts pour attendre la fin d'un scan automatique (10 min).
+    timeoutMs: readNumber("SCAN_TIMEOUT_MS", 600_000),
   },
 } as const;
 

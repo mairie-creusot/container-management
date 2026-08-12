@@ -150,12 +150,25 @@ async function runWithConcurrencyLimit<T>(items: readonly T[], limit: number, wo
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => runNext()));
 }
 
+// Garde anti-chevauchement (voir docs/reports/optimization-audit-2026-08-12.md §M7) : la garde
+// fonctionnelle existante (isScanDue() ignore une image+scanner déjà "running") protège déjà
+// contre un DOUBLE SCAN, mais pas contre deux CYCLES entiers concurrents qui relisent listAllScans()
+// et recalculent `due` en même temps — un cycle peut légitimement dépasser DEFAULT_INTERVAL_MS
+// (jusqu'à MAX_WAIT_MS=10min par scan, plusieurs due en attente derrière MAX_CONCURRENT_SCANS=2).
+let cycleInFlight = false;
+
 /**
  * Un cycle complet — exporté pour les tests et pour un déclenchement manuel éventuel (même
  * pattern que watchdog.ts#runWatchdogCycle). `staleAfterMs` paramétrable pour les tests
  * (éviter d'attendre 24h réelles pour vérifier qu'une image redevient "due").
  */
 export async function runScanSchedulerCycle(staleAfterMs: number = DEFAULT_STALE_AFTER_MS): Promise<void> {
+  if (cycleInFlight) {
+    // eslint-disable-next-line no-console
+    console.warn("[scan-scheduler] cycle précédent encore en cours — ce tick est ignoré plutôt que de démarrer un second cycle concurrent");
+    return;
+  }
+  cycleInFlight = true;
   try {
     const deployedImages = await listDeployedImages();
     if (deployedImages.length === 0) return;
@@ -183,6 +196,8 @@ export async function runScanSchedulerCycle(staleAfterMs: number = DEFAULT_STALE
     // est journalisée puis simplement retentée au prochain tick.
     // eslint-disable-next-line no-console
     console.warn(`[scan-scheduler] cycle failed: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    cycleInFlight = false;
   }
 }
 

@@ -46,10 +46,25 @@
  * toute première seconde avant le premier /load (empêche Caddy de tenter une émission ACME sur un
  * nom qu'il ne connaît pas encore) ; une fois ce fichier ci poussé au moins une fois, c'est LUI qui
  * fait autorité sur la config TLS réelle (POST /load remplace tout, y compris `apps.tls`).
+ *
+ * SÉCURITÉ DE L'API D'ADMIN CADDY (`:2019`) — risque de mouvement latéral ACCEPTÉ, documenté ici
+ * plutôt que « corrigé » (finding M2, docs/reports/security-audit-2026-08-12.md) : la seule
+ * protection de cette API est la liste blanche `admin.origins` (anti-CSRF navigateur, PAS une
+ * authentification — voir pushConfigToCaddy() plus bas), donc tout process du réseau `quai-dev`
+ * capable d'émettre une requête HTTP avec l'en-tête `Origin` attendu en prend le contrôle total.
+ * Vérifié inoffensif depuis l'extérieur : le port `2019` n'est PAS publié à l'hôte
+ * (deploy/compose/docker-compose.dev.yml), donc l'exposition réelle se limite à un mouvement
+ * latéral DEPUIS un autre conteneur déjà compromis du même réseau Docker — un scénario qui suppose
+ * une compromission préalable, hors périmètre d'une simple validation d'input applicative. Ajouter
+ * une couche mTLS (certificat client entre `api` et `caddy`) ou un jeton partagé nécessiterait de
+ * modifier `deploy/compose/caddy/Caddyfile`/`docker-compose.dev.yml`, hors périmètre de ce lot de
+ * correctifs (dépend entièrement de la segmentation réseau du déploiement réel) — à envisager si
+ * l'isolation réseau de `quai-dev` ne peut pas être garantie en production.
  */
 
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
+import { isIPv4 } from "node:net";
 import path from "node:path";
 import { config } from "../config.js";
 import { getContainerNetworkAddress } from "./docker.js";
@@ -61,6 +76,9 @@ export class SubdomainConflictError extends Error {}
 
 /** `subdomain` refusé : caractères hors d'un nom DNS valide (voir SUBDOMAIN_PATTERN ci-dessous). */
 export class InvalidSubdomainError extends Error {}
+
+/** `targetHost` refusé : cible interne évidemment dangereuse (voir isForbiddenProxyTarget ci-dessous). */
+export class ForbiddenProxyTargetError extends Error {}
 
 /**
  * Le push vers l'API d'admin Caddy a échoué (Caddy pas encore démarré, réseau...) : ÉCHEC
@@ -176,6 +194,37 @@ export function isValidSubdomain(value: string): boolean {
 }
 
 /**
+ * `targetHost` reste par conception une cible libre (`host:port` arbitraire, « cas générique, hors
+ * conteneurs QUAI » — voir ARCHITECTURE.md, chapitre « Reverse proxy interne ») : QUAI est un outil
+ * d'administration interne où un `operator` dispose déjà d'un accès large (conteneurs, volumes,
+ * GitOps...), router un sous-domaine vers un service interne quelconque est une fonctionnalité
+ * assumée, pas une régression à corriger en restreignant tout accès réseau interne — voir
+ * docs/reports/security-audit-2026-08-12.md, finding M1 (SSRF interne via Caddy, risque documenté
+ * et accepté par conception). Seule restriction concrète retenue ici, la recommandation « au
+ * minimum » du rapport : interdire les cibles qui n'ont AUCUNE raison légitime d'être un upstream
+ * de reverse proxy — loopback, link-local, et l'autorité de l'API d'admin Caddy elle-même (`:2019`,
+ * qui n'a aucune authentification réelle au-delà d'une liste blanche d'Origin, voir finding M2) :
+ * un `operator` malveillant ne doit pas pouvoir exposer publiquement (*.lecreusot.priv) l'API qui
+ * pilote intégralement le routage HTTP/HTTPS de l'instance.
+ */
+const FORBIDDEN_TARGET_HOSTS = new Set(["localhost", "0.0.0.0"]);
+
+export function isForbiddenProxyTarget(targetHost: string): boolean {
+  const host = targetHost.trim().toLowerCase();
+  if (FORBIDDEN_TARGET_HOSTS.has(host)) return true;
+  if (host === "::1" || host.startsWith("fe80:")) return true; // loopback/link-local IPv6
+  if (isIPv4(host)) {
+    const [firstOctet, secondOctet] = host.split(".").map(Number);
+    if (firstOctet === 127) return true; // 127.0.0.0/8 (loopback)
+    if (firstOctet === 169 && secondOctet === 254) return true; // 169.254.0.0/16 (link-local)
+  }
+  // Autorité (hostname, sans port) de CADDY_ADMIN_URL, ex. "caddy" — empêche de router un
+  // sous-domaine public directement vers l'API d'admin Caddy elle-même.
+  const caddyAuthority = new URL(config.reverseProxy.caddyAdminUrl).hostname.toLowerCase();
+  return host === caddyAuthority;
+}
+
+/**
  * POST /api/reverse-proxy/routes — `subdomain` doit être unique (409 via SubdomainConflictError
  * sinon). Persiste d'abord, pousse ensuite la config complète vers Caddy : si ce push échoue, la
  * route reste malgré tout créée (voir CaddyPushFailedError ci-dessus) — un re-push peut être
@@ -192,6 +241,11 @@ export async function createRoute(input: CreateRouteInput): Promise<ReverseProxy
   }
   if (!input.targetContainerId && !input.targetHost) {
     throw new Error("targetContainerId or targetHost is required");
+  }
+  if (input.targetHost && isForbiddenProxyTarget(input.targetHost)) {
+    throw new ForbiddenProxyTargetError(
+      `"${input.targetHost}" is not allowed as a reverse-proxy target (loopback/link-local addresses and the Caddy admin API itself are blocked, see docs/reports/security-audit-2026-08-12.md, finding M1)`,
+    );
   }
   if (all.some((route) => route.subdomain === subdomain)) {
     throw new SubdomainConflictError(`A route for "${subdomain}" already exists`);

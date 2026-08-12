@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   BaseEdge,
   EdgeLabelRenderer,
@@ -359,7 +359,62 @@ export function attachmentToTopologyNode(attachment: TopologyNodeAttachment): To
   return { id: attachment.id, kind: attachment.kind, label: attachment.label, subtitle: attachment.subtitle, status: "running" };
 }
 
-export function GraphNode({ data, selected }: NodeProps) {
+/** `attachments` (voir TopologyNode#attachments) compte comme égal entre deux rendus si chaque
+ * brique affichée (id/label/subtitle/destination/readOnly — les seuls champs rendus par
+ * GraphNode) est identique, même si le tableau lui-même a été recréé par le parent. */
+function attachmentsEqual(a: TopologyNodeAttachment[] | undefined, b: TopologyNodeAttachment[] | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every((att, index) => {
+    const other = b[index];
+    return (
+      !!other &&
+      att.id === other.id &&
+      att.label === other.label &&
+      att.subtitle === other.subtitle &&
+      att.destination === other.destination &&
+      att.readOnly === other.readOnly
+    );
+  });
+}
+
+/**
+ * Comparateur `React.memo` de GraphNode — voir docs/reports/optimization-audit-2026-08-12.md §É9 :
+ * `data` est reconstruit avec une NOUVELLE référence à chaque poll réussi de la topologie
+ * (TopologyGraph.tsx#flowNodes, `data: {...n, ...callbacks}`), y compris quand aucun champ
+ * réellement affiché n'a changé — un `React.memo` par défaut (comparaison par référence) serait
+ * donc inefficace pour ce cas précis. On compare ici directement les champs que GraphNode rend
+ * VRAIMENT (voir le corps du composant plus bas) plutôt que la référence de `data` : les
+ * callbacks (`onOpenAttachment`/`onAttachmentContextMenu`) sont volontairement IGNORÉS de cette
+ * comparaison — ils sont recréés à chaque render côté parent mais ferment uniquement sur des
+ * arguments passés à l'appel (jamais sur un état de rendu figé) et sur des setters React (stables
+ * par nature), donc réutiliser l'ancienne fermeture le temps qu'un vrai champ affiché change ne
+ * change aucun comportement observable. `selected` (posé par React Flow à côté de `data`, pas
+ * dedans) reste comparé en premier : c'est lui qui doit encore déclencher le re-render des 1-2
+ * nœuds concernés par un clic de sélection.
+ */
+function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
+  if (prev.selected !== next.selected) return false;
+  if (prev.data === next.data) return true;
+  const a = prev.data as unknown as TopologyNode;
+  const b = next.data as unknown as TopologyNode;
+  return (
+    a.kind === b.kind &&
+    a.label === b.label &&
+    a.subtitle === b.subtitle &&
+    a.status === b.status &&
+    a.updateAvailable === b.updateAvailable &&
+    a.drift === b.drift &&
+    a.vulnCritical === b.vulnCritical &&
+    a.vulnHigh === b.vulnHigh &&
+    a.healthStatus === b.healthStatus &&
+    a.cpuPercent === b.cpuPercent &&
+    a.memBytes === b.memBytes &&
+    attachmentsEqual(a.attachments, b.attachments)
+  );
+}
+
+function GraphNodeImpl({ data, selected }: NodeProps) {
   const node = data as unknown as TopologyNode & GraphNodeCallbacks;
   const Icon = KIND_ICON[node.kind];
   const isContainer = node.kind === "container";
@@ -509,6 +564,11 @@ export function GraphNode({ data, selected }: NodeProps) {
     </div>
   );
 }
+
+/** Voir graphNodePropsEqual ci-dessus — élimine le re-render des nœuds non affectés par un clic
+ * de sélection ou par un poll dont les champs affichés n'ont pas bougé (docs/reports/
+ * optimization-audit-2026-08-12.md §É9). */
+export const GraphNode = memo(GraphNodeImpl, graphNodePropsEqual);
 
 /**
  * Rayon (px) du cercle de nœuds voisins autour d'un nœud racine — disposition "hub and spoke",

@@ -60,13 +60,20 @@ interface RegistryTestBody {
 export default async function setupRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get("/api/setup/status", async (_request, reply) => {
     const current = await getCurrent();
+    // Ouvert à TOUTE session authentifiée (voir plugins/auth.ts) — le commentaire d'origine
+    // promettait « aucun secret », mais `registries: current.registries ?? []` renvoyait bel et
+    // bien le tableau complet (username en clair, password/token chiffrés mais présents), alors
+    // que ce endpoint ne sert qu'à savoir quoi afficher dans l'UI (booléens, comme les autres
+    // champs `xConfigured` ci-dessous). Remplacé par un simple booléen, cohérent avec le reste de
+    // cette réponse — le frontend (apps/web/src/features/setup/setupSlice.ts) ne consommait de
+    // toute façon que `completed` — voir docs/reports/security-audit-2026-08-12.md, finding M5.
     return reply.send({
       completed: current.completed,
       ldapConfigured: current.ldap !== undefined,
       dockerConfigured: current.docker?.host !== undefined,
       kubernetesConfigured: current.kubernetes?.kubeconfigYaml !== undefined,
       nutanixConfigured: current.nutanix !== undefined,
-      registries: current.registries ?? [],
+      registriesConfigured: (current.registries?.length ?? 0) > 0,
     });
   });
 
