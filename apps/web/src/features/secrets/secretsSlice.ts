@@ -1,11 +1,12 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import { apiDelete, apiGet, apiPatch, apiPost, ApiError } from "@/api/client";
-import type { SecretRef } from "@/types";
+import type { SecretRef, SecretVersionMeta } from "@/types";
 
 interface NewSecretInput {
   name: string;
   value: string;
   description?: string;
+  expiresAt?: string;
 }
 
 export interface UpdateSecretInput {
@@ -16,6 +17,8 @@ export interface UpdateSecretInput {
   // même principe que registriesSlice.ts#UpdateRegistryInput pour password/token.
   value?: string;
   description?: string;
+  // undefined = inchangée ; null = efface l'expiration ; chaîne = nouvelle date (voir secretsStore.ts).
+  expiresAt?: string | null;
 }
 
 interface SecretsState {
@@ -72,6 +75,46 @@ export const deleteSecret = createAsyncThunk<string, string, { rejectValue: stri
     }
   },
 );
+
+/**
+ * POST /api/secrets/:id/reveal — déchiffre et renvoie la valeur UNE FOIS. Volontairement SANS
+ * `.addCase` dans extraReducers ci-dessous : la valeur en clair ne doit JAMAIS atterrir dans le
+ * state Redux global (persistant, visible des devtools) — SecretsPage.tsx la garde uniquement
+ * dans un state React local, via `dispatch(revealSecret(...)).unwrap()`, effacé au
+ * démontage/à la fermeture. `version` optionnelle révèle une version passée (voir
+ * fetchSecretVersions) plutôt que la version courante.
+ */
+export const revealSecret = createAsyncThunk<
+  string,
+  { id: string; version?: number },
+  { rejectValue: string }
+>("secrets/revealSecret", async ({ id, version }, { rejectWithValue }) => {
+  try {
+    const { value } = await apiPost<{ value: string }>(
+      `/secrets/${id}/reveal`,
+      version !== undefined ? { version } : undefined,
+    );
+    return value;
+  } catch (error) {
+    const message = error instanceof ApiError ? error.message : "Impossible de révéler ce secret.";
+    return rejectWithValue(message);
+  }
+});
+
+/** GET /api/secrets/:id/versions — métadonnées seules (jamais de valeur), même principe de non-
+ * persistance que revealSecret : consommé directement par SecretsPage.tsx via `.unwrap()`. */
+export const fetchSecretVersions = createAsyncThunk<
+  SecretVersionMeta[],
+  string,
+  { rejectValue: string }
+>("secrets/fetchSecretVersions", async (id, { rejectWithValue }) => {
+  try {
+    return await apiGet<SecretVersionMeta[]>(`/secrets/${id}/versions`);
+  } catch (error) {
+    const message = error instanceof ApiError ? error.message : "Impossible de charger l'historique de ce secret.";
+    return rejectWithValue(message);
+  }
+});
 
 const secretsSlice = createSlice({
   name: "secrets",

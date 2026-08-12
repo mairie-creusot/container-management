@@ -155,6 +155,16 @@ export const config = {
     caddyAdminUrl: readString("CADDY_ADMIN_URL", "http://caddy:2019"),
     requestTimeoutMs: readNumber("CADDY_REQUEST_TIMEOUT_MS", 5000),
   },
+  github: {
+    // Intégration GitOps GitHub (cf. ARCHITECTURE.md, chapitre "Intégration GitHub") : jeton
+    // (PAT) persisté chiffré au repos, même pattern/répertoire que secrets.json.
+    storePath: readString("GITHUB_STORE_PATH", "./data/github.json"),
+    apiBaseUrl: readString("GITHUB_API_BASE_URL", "https://api.github.com"),
+    // Clone réel (git clone --depth 1) puis build/run réel — timeouts distincts : un clone est
+    // rapide (shallow), un build d'image peut prendre plusieurs minutes selon le Dockerfile.
+    cloneTimeoutMs: readNumber("GITHUB_CLONE_TIMEOUT_MS", 30_000),
+    buildTimeoutMs: readNumber("GITHUB_BUILD_TIMEOUT_MS", 300_000),
+  },
 } as const;
 
 export type Config = typeof config;

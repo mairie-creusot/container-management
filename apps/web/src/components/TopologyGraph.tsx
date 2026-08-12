@@ -23,6 +23,7 @@ import {
   connectContainerToNetwork,
   createNetwork,
   disconnectContainerFromNetwork,
+  fetchNetworks,
   removeNetwork,
 } from "@/features/networks/networksSlice";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
@@ -30,12 +31,13 @@ import { canOperate } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import Skeleton from "@/components/Skeleton";
-import TopologyNodeDetailModal from "@/components/TopologyNodeDetailModal";
+import TopologyNodeDetailPanel from "@/components/TopologyNodeDetailPanel";
 import TopologySubGraphPanel from "@/components/TopologySubGraphPanel";
 import {
   CAPABILITY_DEFS,
   MINIMAP_NODE_COLOR,
   NODE_CAPABILITIES,
+  attachmentToTopologyNode,
   buildTopologyEdges,
   edgeTypes,
   idWithoutPrefix,
@@ -43,9 +45,10 @@ import {
   useDismiss,
   usePrefersReducedMotion,
   type CapabilityDef,
+  type GraphNodeCallbacks,
   type PortSpec,
 } from "@/components/topologyGraphShared";
-import type { TopologyNode } from "@/types";
+import type { TopologyNode, TopologyNodeAttachment } from "@/types";
 
 /** Nombre de nœuds squelettes par colonne (volumes / conteneurs / networks) pendant le premier
  * chargement — silhouette approximative, pas besoin de coller exactement au nombre réel. */
@@ -302,6 +305,101 @@ function RenamePopover({ containerId, initialName, x, y, onClose }: RenamePopove
   );
 }
 
+interface NetworkConnectPopoverProps {
+  containerId: string;
+  /** Ids Docker bruts (pas "network:<id>") des networks déjà connectés à ce conteneur — retirés du
+   * choix, qu'ils soient restés un vrai nœud (partagé/par défaut) ou devenus une brique. */
+  excludeNetworkIds: Set<string>;
+  x: number;
+  y: number;
+  onClose: () => void;
+}
+
+/**
+ * Popover "Connecter à un network…" (menu contextuel d'un nœud conteneur) — depuis l'introduction
+ * des "briques" (voir services/topology.ts § "Briques"), un network attaché à un seul conteneur
+ * n'est plus un nœud du graphe : le glisser-connecter historique (container -> network, toujours
+ * fonctionnel pour les networks restés de vrais nœuds, partagés/par défaut) n'a alors plus de
+ * cible à viser. Cette action, disponible pour TOUT network existant (brique ou nœud), couvre ce
+ * cas sans exiger de point de connexion dédié sur chaque brique — POST /api/networks/:id/connect
+ * comme le glisser-connecter, résultat strictement identique.
+ */
+function NetworkConnectPopover({ containerId, excludeNetworkIds, x, y, onClose }: NetworkConnectPopoverProps) {
+  const dispatch = useAppDispatch();
+  const ref = useDismiss(onClose);
+  const networks = useAppSelector((s) => s.networks.items);
+  const [networkId, setNetworkId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    dispatch(fetchNetworks());
+  }, [dispatch]);
+
+  const options = networks.filter((n) => !excludeNetworkIds.has(n.id));
+
+  useEffect(() => {
+    if (!networkId && options.length > 0) setNetworkId(options[0]!.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options.length]);
+
+  async function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (!networkId) return;
+    setBusy(true);
+    setError(null);
+    const result = await dispatch(connectContainerToNetwork({ networkId, containerId }));
+    setBusy(false);
+    if (connectContainerToNetwork.fulfilled.match(result)) {
+      dispatch(fetchTopology());
+      onClose();
+    } else {
+      setError(result.payload ?? "Échec de la connexion au network.");
+    }
+  }
+
+  return (
+    <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+      <div className="graph-popover__title">Connecter à un network</div>
+      <form onSubmit={handleSubmit}>
+        {options.length === 0 ? (
+          <p className="graph-popover__error" style={{ color: "var(--color-text-faint)" }}>
+            Aucun network disponible à connecter (déjà tous connectés, ou aucun n'existe encore).
+          </p>
+        ) : (
+          <div className="field">
+            <label htmlFor="graph-network-connect-select">Network</label>
+            <select
+              id="graph-network-connect-select"
+              value={networkId}
+              onChange={(e) => setNetworkId(e.target.value)}
+              disabled={busy}
+              required
+            >
+              {options.map((n) => (
+                <option key={n.id} value={n.id}>
+                  {n.name} ({n.driver})
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        {error && <p className="graph-popover__error">{error}</p>}
+
+        <div className="graph-popover__actions">
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={busy}>
+            Annuler
+          </button>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !networkId || options.length === 0}>
+            {busy ? "…" : "Connecter"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 interface TopologyGraphProps {
   height?: number;
   onSelectNode?: (node: TopologyNode | null) => void;
@@ -324,11 +422,28 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [renamePopover, setRenamePopover] = useState<{ containerId: string; initialName: string; x: number; y: number } | null>(
     null,
   );
+  // Menu contextuel d'une "brique" (volume/network monté par un seul conteneur, voir
+  // TopologyNode#attachments et GraphNode dans topologyGraphShared.tsx) — clic droit sur une
+  // brique plutôt que sur un nœud/une arête, distinct de `nodeMenu`/`edgeMenu` (une brique n'est
+  // ni l'un ni l'autre : pas de nœud top-level, pas d'arête, voir services/topology.ts).
+  const [attachmentMenu, setAttachmentMenu] = useState<{
+    x: number;
+    y: number;
+    containerNodeId: string;
+    attachment: TopologyNodeAttachment;
+  } | null>(null);
+  // Popover "Connecter à un network…" (menu contextuel d'un conteneur) — voir NetworkConnectPopover
+  // ci-dessus : chemin de connexion qui fonctionne même quand le network visé est une brique (donc
+  // sans nœud à glisser-déposer dessus).
+  const [networkConnectPopover, setNetworkConnectPopover] = useState<{ containerId: string; x: number; y: number } | null>(
+    null,
+  );
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
-  // Modal de détail complet (clic droit sur un nœud -> "Voir le détail") — voir
-  // TopologyNodeDetailModal.tsx. Distincte de `selectedId` (simple surbrillance visuelle du nœud,
-  // conservée) : ce n'est plus l'Inspector latéral (retiré de la Vue d'ensemble) qui affiche quoi
-  // que ce soit ici, uniquement cette modal ouverte à la demande.
+  // Panneau de détail complet, ancré en overlay sur le canevas (clic droit sur un nœud ou une
+  // brique -> "Voir le détail") — voir TopologyNodeDetailPanel.tsx. Distincte de `selectedId`
+  // (simple surbrillance visuelle du nœud, conservée) : ce n'est plus l'Inspector latéral (retiré
+  // de la Vue d'ensemble) qui affiche quoi que ce soit ici, uniquement ce panneau ouvert à la
+  // demande.
   const [detailNode, setDetailNode] = useState<TopologyNode | null>(null);
   // Sous-graphe de dépendances/composition interne (double-clic sur un nœud, ou "Visualiser les
   // dépendances" du menu contextuel) — voir TopologySubGraphPanel.tsx. Ne stocke que l'id racine :
@@ -387,11 +502,22 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         const prevCreatedAt = (prevNode?.data as { createdAt?: string } | undefined)?.createdAt;
         const sameResource = !prevCreatedAt || !n.createdAt || prevCreatedAt === n.createdAt;
         const position = positions[n.id] ?? (sameResource ? prevNode?.position : undefined) ?? defaultPosition;
+        // Briques (voir GraphNode, topologyGraphShared.tsx) : callbacks posés UNIQUEMENT sur les
+        // nœuds conteneur (seul kind qui en rend), liés par fermeture à CE nœud précis — une
+        // brique elle-même ne porte aucun id de nœud top-level, ces callbacks sont son seul moyen
+        // d'ouvrir son détail / son menu contextuel.
+        const callbacks: GraphNodeCallbacks =
+          n.kind === "container"
+            ? {
+                onOpenAttachment: (attachment) => handleOpenAttachment(attachment),
+                onAttachmentContextMenu: (event, attachment) => handleAttachmentContextMenu(event, n.id, attachment),
+              }
+            : {};
         return {
           id: n.id,
           type: "graphNode",
           position,
-          data: n as unknown as Record<string, unknown>,
+          data: { ...n, ...callbacks } as unknown as Record<string, unknown>,
         };
       });
     });
@@ -551,13 +677,74 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     if (disconnectContainerFromNetwork.fulfilled.match(result)) dispatch(fetchTopology());
   }
 
-  /** "Voir le détail" ouvre TopologyNodeDetailModal (contenu complet — env/ports/mounts/
+  /** "Voir le détail" ouvre TopologyNodeDetailPanel (contenu complet — env/ports/mounts/
    * vulnérabilités réelles selon le kind) ; `selectNode` reste appelé en plus pour la surbrillance
    * visuelle du nœud sur le graphe (déjà utilisée ailleurs via `selected`), les deux ne s'excluent
-   * pas. */
+   * pas. Pour une brique (id synthétique, jamais un nœud top-level réel — voir
+   * attachmentToTopologyNode), `selectNode` est un no-op visuel inoffensif : aucun flowNode ne
+   * porte cet id, rien ne se met en surbrillance, mais rien ne casse non plus. */
   function openNodeDetail(node: TopologyNode) {
     selectNode(node.id);
     setDetailNode(node);
+  }
+
+  /** Clic sur une brique (volume/network monté par un seul conteneur, voir GraphNode) -> ouvre le
+   * MÊME panneau de détail qu'un vrai nœud, avec un TopologyNode synthétique reconstruit depuis
+   * l'attachment (le panneau va chercher lui-même le détail complet réel via GET /api/volumes ou
+   * GET /api/networks, il n'a besoin que de id/kind pour ça). */
+  function handleOpenAttachment(attachment: TopologyNodeAttachment) {
+    openNodeDetail(attachmentToTopologyNode(attachment));
+  }
+
+  function handleAttachmentContextMenu(event: React.MouseEvent, containerNodeId: string, attachment: TopologyNodeAttachment) {
+    setAttachmentMenu({ x: event.clientX, y: event.clientY, containerNodeId, attachment });
+  }
+
+  function attachmentMenuItems(containerNodeId: string, attachment: TopologyNodeAttachment): ContextMenuItem[] {
+    const items: ContextMenuItem[] = [{ label: "Voir le détail", onClick: () => handleOpenAttachment(attachment) }];
+    // Un volume ne peut pas être détaché sans recréer le conteneur (identique à .edgeMenu "mount"
+    // ci-dessous) — seule la déconnexion d'un network briqué a un sens réel ici.
+    if (operate && attachment.kind === "network") {
+      items.push({
+        label: "Déconnecter du network",
+        danger: true,
+        onClick: () => handleDisconnectAttachment(containerNodeId, attachment),
+      });
+    }
+    return items;
+  }
+
+  async function handleDisconnectAttachment(containerNodeId: string, attachment: TopologyNodeAttachment) {
+    const containerId = idWithoutPrefix(containerNodeId);
+    const networkId = idWithoutPrefix(attachment.id);
+    const ok = await confirm({
+      title: "Déconnecter du network",
+      description: `Le conteneur sera détaché du network "${attachment.label}".`,
+      confirmLabel: "Déconnecter",
+      variant: "danger",
+    });
+    if (!ok) return;
+    const result = await dispatch(disconnectContainerFromNetwork({ networkId, containerId }));
+    if (disconnectContainerFromNetwork.fulfilled.match(result)) dispatch(fetchTopology());
+  }
+
+  /** Ids Docker bruts (pas "network:<id>") de TOUS les networks déjà connectés au conteneur
+   * `containerNodeId` — partagés/par défaut (vrais nœuds, via les arêtes) ET briqués (via
+   * node.attachments) — pour ne pas les reproposer dans NetworkConnectPopover. Ensemble vide si le
+   * nœud n'existe plus (course avec un rafraîchissement entre l'ouverture du menu et son usage). */
+  function connectedNetworkIds(containerNodeId: string): Set<string> {
+    const ids = new Set<string>();
+    const node = data?.nodes.find((n) => n.id === containerNodeId);
+    if (!node) return ids;
+    for (const a of node.attachments ?? []) if (a.kind === "network") ids.add(idWithoutPrefix(a.id));
+    if (data) {
+      for (const e of data.edges) {
+        if (e.kind !== "network") continue;
+        if (e.source === node.id) ids.add(idWithoutPrefix(e.target));
+        else if (e.target === node.id) ids.add(idWithoutPrefix(e.source));
+      }
+    }
+    return ids;
   }
 
   /** Ouvre le panneau de sous-graphe sur `nodeId`, avec une transition "on rentre dans le nœud" —
@@ -626,6 +813,13 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       items.push({
         label: "Renommer",
         onClick: () => setRenamePopover({ containerId: id, initialName: node.label, x, y }),
+      });
+      // Depuis les "briques" (voir GraphNode/services/topology.ts), un network mono-conteneur
+      // n'est plus un nœud du graphe à viser au glisser-déposer — cette action couvre ce cas (et
+      // reste disponible aussi pour un network resté un vrai nœud, résultat identique).
+      items.push({
+        label: "Connecter à un network…",
+        onClick: () => setNetworkConnectPopover({ containerId: id, x, y }),
       });
       items.push({ label: "Supprimer", danger: true, onClick: () => handleContainerAction(id, node.label, "remove") });
     } else if (node.kind === "volume") {
@@ -762,6 +956,15 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         />
       )}
 
+      {attachmentMenu && (
+        <ContextMenu
+          x={attachmentMenu.x}
+          y={attachmentMenu.y}
+          onClose={() => setAttachmentMenu(null)}
+          items={attachmentMenuItems(attachmentMenu.containerNodeId, attachmentMenu.attachment)}
+        />
+      )}
+
       {popover && <CreatePopover kind={popover.kind} x={popover.x} y={popover.y} onClose={() => setPopover(null)} />}
 
       {renamePopover && (
@@ -771,6 +974,16 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           x={renamePopover.x}
           y={renamePopover.y}
           onClose={() => setRenamePopover(null)}
+        />
+      )}
+
+      {networkConnectPopover && (
+        <NetworkConnectPopover
+          containerId={networkConnectPopover.containerId}
+          excludeNetworkIds={connectedNetworkIds(`container:${networkConnectPopover.containerId}`)}
+          x={networkConnectPopover.x}
+          y={networkConnectPopover.y}
+          onClose={() => setNetworkConnectPopover(null)}
         />
       )}
 
@@ -795,9 +1008,17 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         />
       )}
 
-      {/* Modal de détail complet — clic droit sur un nœud -> "Voir le détail" (voir nodeMenuItems
-          ci-dessus), ou depuis l'intérieur du sous-graphe via onOpenDetail. */}
-      <TopologyNodeDetailModal node={detailNode} onClose={() => setDetailNode(null)} />
+      {/* Panneau de détail complet — ANCRÉ en overlay sur le bord droit du canevas (voir
+          TopologyNodeDetailPanel.tsx, même pattern d'ancrage que .topology-subgraph-panel
+          ci-dessus), rendu EN DERNIER dans le DOM pour rester au-dessus du sous-graphe quand il
+          est ouvert depuis l'intérieur de celui-ci (onOpenDetail). Clic droit sur un nœud ou une
+          brique -> "Voir le détail" (voir nodeMenuItems/attachmentMenuItems ci-dessus). */}
+      <TopologyNodeDetailPanel
+        node={detailNode}
+        topology={data ?? null}
+        onClose={() => setDetailNode(null)}
+        onNavigate={openNodeDetail}
+      />
     </div>
   );
 }

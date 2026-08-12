@@ -10,12 +10,14 @@
 
 import Docker from "dockerode";
 import type { ContainerInfo } from "dockerode";
+import type http from "node:http";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { demoStore } from "./demoData.js";
 import { getEffectiveDockerConfig } from "./setupStore.js";
 import { getEffectiveRemoteDockerConfig, getRemoteDockerEnvironmentRef } from "./remoteDockerStore.js";
 import type { EffectiveRemoteDockerConfig } from "./remoteDockerStore.js";
+import { getSshDockerAgent } from "./sshTunnel.js";
 import { withTimeout } from "../utils/async.js";
 import type {
   ClusterNode,
@@ -58,18 +60,49 @@ function buildDockerClient(host: string | undefined): Docker {
 }
 
 /**
- * Client TCP+TLS vers un démon Docker distant persisté (services/remoteDockerStore.ts) —
- * dockerode/docker-modem acceptent `host`/`port`/`ca`/`cert`/`key` directement dans leur
- * constructeur, c'est LA méthode standard pour joindre un démon Docker exposé sur le réseau
- * (https://docs.docker.com/engine/security/protect-access/). Sans `tls`, connexion TCP en
- * clair (déploiement de test uniquement — voir ARCHITECTURE.md).
+ * @types/dockerode ne déclare pas `agent` dans `DockerOptions` alors que docker-modem
+ * (lib/modem.js — vérifié dans ses sources : `if (this.agent) optionsf.agent = this.agent;`) le
+ * lit bel et bien au runtime, quel que soit `protocol`. C'est exactement le mécanisme utilisé
+ * ici pour le transport SSH poolé (voir services/sshTunnel.ts) : extension locale du type
+ * officiel plutôt qu'un `any` complet, pour garder le reste de l'objet vérifié normalement.
+ */
+type DockerOptionsWithAgent = Docker.DockerOptions & { agent?: http.Agent };
+
+/**
+ * Client vers un démon Docker distant persisté (services/remoteDockerStore.ts) — deux transports :
  *
- * `protocol: "https"` est fixé EXPLICITEMENT dès que cert+key sont fournis : docker-modem
- * (lib/modem.js) ne bascule en https tout seul que si `ca` ET `cert` ET `key` sont TOUS LES
- * TROIS présents (vérifié dans ses sources) — un déploiement avec seulement cert+key (CA
- * système déjà approuvée, cas courant) retomberait sinon silencieusement en HTTP en clair.
+ * - "tcp-tls" : dockerode/docker-modem acceptent `host`/`port`/`ca`/`cert`/`key` directement dans
+ *   leur constructeur, c'est LA méthode standard pour joindre un démon Docker exposé sur le
+ *   réseau (https://docs.docker.com/engine/security/protect-access/). Sans `tls`, connexion TCP
+ *   en clair (déploiement de test uniquement — voir ARCHITECTURE.md). `protocol: "https"` est
+ *   fixé EXPLICITEMENT dès que cert+key sont fournis : docker-modem (lib/modem.js) ne bascule en
+ *   https tout seul que si `ca` ET `cert` ET `key` sont TOUS LES TROIS présents (vérifié dans ses
+ *   sources) — un déploiement avec seulement cert+key (CA système déjà approuvée, cas courant)
+ *   retomberait sinon silencieusement en HTTP en clair.
+ * - "ssh" : AUCUNE connexion TCP directe vers un port Docker — le trafic Docker est tunnelé au
+ *   travers d'une connexion SSH poolée (services/sshTunnel.ts#getSshDockerAgent, même mécanisme
+ *   que `docker context create --docker host=ssh://user@host` : chaque requête HTTP obtient un
+ *   canal `exec` "docker system dial-stdio" sur cette connexion). `host`/`port` passés à `Docker`
+ *   ici sont ceux du serveur SSH (pas d'un démon Docker TCP) : docker-modem s'en sert uniquement
+ *   pour construire l'adresse nominale de ses requêtes HTTP, jamais pour ouvrir de socket lui-même
+ *   puisque `agent.createConnection` court-circuite totalement la connexion réseau réelle.
  */
 function buildRemoteDockerClient(remote: EffectiveRemoteDockerConfig): Docker {
+  if (remote.transport === "ssh") {
+    if (!remote.ssh) {
+      throw new Error(`Remote Docker environment "${remote.id}" has transport "ssh" but no SSH credentials configured`);
+    }
+    const agent = getSshDockerAgent(remote.id, {
+      host: remote.host,
+      port: remote.port,
+      username: remote.ssh.username,
+      ...(remote.ssh.password ? { password: remote.ssh.password } : {}),
+      ...(remote.ssh.privateKey ? { privateKey: remote.ssh.privateKey } : {}),
+    });
+    const options: DockerOptionsWithAgent = { host: remote.host, port: remote.port, protocol: "http", agent };
+    return new Docker(options);
+  }
+
   const hasTls = Boolean(remote.tls?.ca || remote.tls?.cert || remote.tls?.key);
   return new Docker({
     host: remote.host,
@@ -88,8 +121,9 @@ function buildRemoteDockerClient(remote: EffectiveRemoteDockerConfig): Docker {
  * et évite d'avoir à invalider un cache quand la config change (via l'assistant, un reset...).
  *
  * `remoteEnvironmentId` (optionnel, cf. ARCHITECTURE.md § "Environnements Docker distants") :
- * quand fourni, résout à la place un client TCP+TLS vers CET hôte distant persisté (voir
- * remoteDockerStore.ts) — le démon local n'est alors jamais contacté. Omis (comportement
+ * quand fourni, résout à la place un client vers CET hôte distant persisté (voir
+ * remoteDockerStore.ts) — TCP+TLS ou SSH selon son `transport` (voir buildRemoteDockerClient
+ * ci-dessus) — le démon local n'est alors jamais contacté. Omis (comportement
  * historique, INCHANGÉ) : résout toujours le démon local/DOCKER_HOST comme avant. Lève si l'id
  * ne correspond à aucun environnement distant persisté (l'appelant — une route — traduit en 404,
  * jamais un 502 "injoignable" trompeur pour un id qui n'existe simplement pas).
@@ -952,10 +986,18 @@ export async function getDockerHostInfo(remoteEnvironmentId?: string): Promise<D
 
   try {
     const [info, version, volumes] = await Promise.all([docker.info(), docker.version(), docker.listVolumes()]);
-    const endpoint = remoteEnvironmentId
-      ? `tcp://${(await getRemoteDockerEnvironmentRef(remoteEnvironmentId))?.host ?? remoteEnvironmentId}`
-      : ((await getEffectiveDockerConfig()).host ??
-        (process.platform === "win32" ? "npipe:////./pipe/docker_engine" : "unix:///var/run/docker.sock"));
+    let endpoint: string;
+    if (remoteEnvironmentId) {
+      const ref = await getRemoteDockerEnvironmentRef(remoteEnvironmentId);
+      endpoint =
+        ref?.transport === "ssh"
+          ? `ssh://${ref.sshUsername ?? "?"}@${ref.host}:${ref.port}`
+          : `tcp://${ref?.host ?? remoteEnvironmentId}:${ref?.port ?? ""}`;
+    } else {
+      endpoint =
+        (await getEffectiveDockerConfig()).host ??
+        (process.platform === "win32" ? "npipe:////./pipe/docker_engine" : "unix:///var/run/docker.sock");
+    }
     return {
       serverVersion: version.Version ?? info.ServerVersion ?? "unknown",
       apiVersion: version.ApiVersion ?? "unknown",

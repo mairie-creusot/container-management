@@ -18,6 +18,13 @@ export function wsUrl(path: string): string {
   return `${BASE_URL.replace(/^http/, "ws")}${path}`;
 }
 
+/** URL absolue vers une route de l'API — pour un lien de téléchargement direct (ex: le certificat
+ * racine du reverse proxy, ReverseProxyPage.tsx) plutôt qu'un fetch : le cookie de session part
+ * quand même (même hôte que l'app, sameSite=strict autorise une navigation directe). */
+export function apiUrl(path: string): string {
+  return `${BASE_URL}${path}`;
+}
+
 export class ApiError extends Error {
   status: number;
 

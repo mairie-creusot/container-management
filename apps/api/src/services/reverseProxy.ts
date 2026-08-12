@@ -27,11 +27,21 @@
  * LIMITE ASSUMÉE (voir ARCHITECTURE.md § "Reverse proxy interne") : la résolution DNS réelle de
  * `*.lecreusot.priv` vers l'hôte Docker qui exécute Caddy est une responsabilité de l'infra
  * réseau de la mairie (DNS interne ou fichier hosts) — CETTE fonctionnalité route uniquement une
- * requête HTTP déjà arrivée sur Caddy avec le bon en-tête Host, elle ne peut garantir en rien que
- * cet en-tête y arrive depuis l'extérieur. TLS interne (HTTPS) est hors périmètre de ce premier
- * lot : Caddy sert exclusivement en HTTP (port 80), `auto_https off` (voir
- * deploy/compose/caddy/Caddyfile) pour ne jamais tenter d'ACME sur des noms internes non
- * résolubles publiquement.
+ * requête HTTP/HTTPS déjà arrivée sur Caddy avec le bon en-tête Host/SNI, elle ne peut garantir
+ * en rien que cet en-tête y arrive depuis l'extérieur.
+ *
+ * TLS interne (HTTPS, :443) — plus "hors périmètre" comme documenté initialement, ajouté ce jour
+ * suite à un vrai `ERR_EMPTY_RESPONSE` constaté par l'utilisateur sur :443 (rien n'y écoutait) :
+ * Caddy sert désormais AUSSI en HTTPS, avec des certificats émis par son AUTORITÉ INTERNE
+ * (`issuers: [{ module: "internal" }]`, PAS ACME/Let's Encrypt — ces noms ne sont pas résolubles
+ * publiquement, tenter une émission publique échouerait de toute façon). Un certificat interne
+ * n'est pas reconnu par défaut par un navigateur/OS : l'autorité racine de Caddy est exposée telle
+ * quelle via GET /api/reverse-proxy/ca-certificate pour être installée manuellement comme autorité
+ * de confiance (une fois, côté poste client) — voir getCaCertificate() plus bas. `auto_https off`
+ * dans le Caddyfile de bootstrap (voir deploy/compose/caddy/Caddyfile) reste nécessaire pour la
+ * toute première seconde avant le premier /load (empêche Caddy de tenter une émission ACME sur un
+ * nom qu'il ne connaît pas encore) ; une fois ce fichier ci poussé au moins une fois, c'est LUI qui
+ * fait autorité sur la config TLS réelle (POST /load remplace tout, y compris `apps.tls`).
  */
 
 import { randomUUID } from "node:crypto";
@@ -218,6 +228,9 @@ async function resolveUpstream(route: ReverseProxyRoute): Promise<string | null>
 export async function pushConfigToCaddy(): Promise<void> {
   const routes = await getAll();
   const caddyRoutes: CaddyRoute[] = [];
+  const tlsSubjects = new Set<string>(["localhost"]); // "localhost" toujours couvert : voir le
+  // commentaire sur `apps.tls` ci-dessous — permet de vérifier que le TLS interne fonctionne
+  // (https://localhost) même sans aucune route *.lecreusot.priv encore configurée.
   for (const route of routes) {
     const upstream = await resolveUpstream(route);
     if (!upstream) continue; // cible introuvable/injoignable pour l'instant : omise, réessayée au prochain push
@@ -225,6 +238,7 @@ export async function pushConfigToCaddy(): Promise<void> {
       match: [{ host: [route.subdomain] }],
       handle: [{ handler: "reverse_proxy", upstreams: [{ dial: upstream }] }],
     });
+    tlsSubjects.add(route.subdomain);
   }
   // Toujours en dernier (voir CaddyFallbackRoute ci-dessus) : un Host qui ne correspond à
   // aucune route active reçoit un 404 explicite plutôt que le 200 vide par défaut de Caddy.
@@ -251,9 +265,23 @@ export async function pushConfigToCaddy(): Promise<void> {
   const body = {
     admin: { listen: "0.0.0.0:2019", origins: adminOrigins },
     apps: {
+      // Émission de certificat par l'AUTORITÉ INTERNE de Caddy (jamais ACME/Let's Encrypt — voir
+      // le commentaire de tête de fichier) pour chaque sous-domaine réellement configuré + une
+      // entrée fixe "localhost" (utile pour vérifier que le TLS marche même sans route). `subjects`
+      // reconstruit à chaque push comme le reste : une route supprimée n'a plus de certificat émis
+      // pour elle au push suivant (Caddy garde le certificat déjà émis en cache jusqu'à expiration,
+      // mais n'en émet plus de nouveau pour ce nom une fois retiré des subjects).
+      tls: {
+        automation: {
+          policies: [{ subjects: Array.from(tlsSubjects), issuers: [{ module: "internal" }] }],
+        },
+      },
       http: {
         servers: {
-          quai: { listen: [":80"], routes: caddyRoutes },
+          // :443 en plus de :80 (existant, inchangé) — les DEUX servent les mêmes routes, aucune
+          // redirection HTTP -> HTTPS forcée pour ne rien casser de ce qui dépend déjà du HTTP
+          // (ex: tests/scripts déjà écrits en http:// dans les lots précédents).
+          quai: { listen: [":80", ":443"], routes: caddyRoutes },
         },
       },
     },
@@ -299,9 +327,51 @@ export async function getReverseProxyStatus(): Promise<ReverseProxyStatus> {
       headers: { Origin: `http://${adminAuthority}` },
       signal: controller.signal,
     });
-    return { reachable: response.ok, adminUrl: config.reverseProxy.caddyAdminUrl };
+    // httpsEnabled : "on sait que Caddy est joignable" != "on sait que le TLS interne est
+    // effectivement configuré" (un Caddy tout juste redémarré, reparti du Caddyfile de bootstrap,
+    // n'a plus que :80 tant qu'aucun /load n'a encore été repoussé) — mais push_ConfigToCaddy()
+    // est appelé à chaque mutation de route ET peut être redéclenché manuellement (POST
+    // /api/reverse-proxy/push, déjà existant), donc "joignable" est une approximation honnête
+    // suffisante pour ce premier lot plutôt qu'un vrai GET /config/apps/tls coûteux à interpréter.
+    return { reachable: response.ok, adminUrl: config.reverseProxy.caddyAdminUrl, httpsEnabled: response.ok };
   } catch {
-    return { reachable: false, adminUrl: config.reverseProxy.caddyAdminUrl };
+    return { reachable: false, adminUrl: config.reverseProxy.caddyAdminUrl, httpsEnabled: false };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * GET /api/reverse-proxy/ca-certificate — certificat racine (PEM) de l'autorité interne de Caddy
+ * qui émet les certificats HTTPS de ce reverse proxy (voir pushConfigToCaddy() ci-dessus). Un
+ * certificat émis par cette autorité n'est reconnu par AUCUN navigateur/OS tant que CE certificat
+ * racine n'y a pas été installé manuellement comme autorité de confiance (une fois, par poste) —
+ * Caddy l'expose lui-même sur son API d'admin (GET /pki/ca/local, non documenté dans l'API REST
+ * officielle mais stable — voir https://caddyserver.com/docs/command-line#caddy-trust pour
+ * l'équivalent CLI), on ne fait que le relayer tel quel.
+ */
+export async function getCaCertificate(): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.reverseProxy.requestTimeoutMs);
+  try {
+    const adminAuthority = new URL(config.reverseProxy.caddyAdminUrl).host;
+    const response = await fetch(`${config.reverseProxy.caddyAdminUrl}/pki/ca/local`, {
+      headers: { Origin: `http://${adminAuthority}` },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`Caddy admin API responded ${response.status} for /pki/ca/local`);
+    }
+    const data = (await response.json()) as { root_certificate?: string };
+    if (!data.root_certificate) {
+      throw new Error("Caddy admin API returned no root_certificate (autorité interne pas encore initialisée — poussez au moins une route ou relancez POST /api/reverse-proxy/push)");
+    }
+    return data.root_certificate;
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Caddy admin API unreachable (${config.reverseProxy.caddyAdminUrl}): timed out after ${config.reverseProxy.requestTimeoutMs}ms`);
+    }
+    throw err;
   } finally {
     clearTimeout(timeout);
   }

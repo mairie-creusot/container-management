@@ -217,6 +217,34 @@ export interface TopologyNode {
    * sous le même nom) : voir apps/api/src/types.ts#TopologyNode pour le détail.
    */
   createdAt?: string;
+  /**
+   * Conteneurs uniquement : volumes/networks montés sur CE conteneur et rattachés à AUCUN AUTRE
+   * (voir apps/api/src/services/topology.ts § "Briques") — rendus par GraphNode
+   * (topologyGraphShared.tsx) comme des "briques" cliquables directement sous la carte du
+   * conteneur, façon Railway, plutôt que comme des nœuds/arêtes séparés du graphe. Une ressource
+   * partagée par ≥2 conteneurs, ou un network Docker par défaut (bridge/host/none), reste un vrai
+   * TopologyNode top-level et n'apparaît donc jamais ici.
+   */
+  attachments?: TopologyNodeAttachment[];
+}
+
+/** Voir TopologyNode#attachments ci-dessus — même forme que apps/api/src/types.ts#TopologyNodeAttachment. */
+export interface TopologyNodeAttachment {
+  kind: "volume" | "network";
+  /** Id qu'aurait porté le TopologyNode top-level équivalent ("volume:<nom>" / "network:<id>") —
+   * utilisé tel quel pour ouvrir son panneau de détail (mêmes routes/reducers qu'un vrai nœud). */
+  id: string;
+  label: string;
+  subtitle: string;
+  destination?: string;
+  readOnly?: boolean;
+}
+
+/** Port réellement publié par un conteneur — voir TopologyEdge#ports ci-dessous. */
+export interface TopologyEdgePort {
+  protocol: "tcp" | "udp";
+  privatePort: number;
+  publicPort?: number;
 }
 
 export interface TopologyEdge {
@@ -224,6 +252,15 @@ export interface TopologyEdge {
   source: string;
   target: string;
   kind: "mount" | "network";
+  /** "network" uniquement : ports réellement publiés par le conteneur à l'une des deux extrémités
+   * (voir doc complète côté apps/api/src/types.ts). */
+  ports?: TopologyEdgePort[];
+  /** "network" uniquement : Internal réel du network Docker ("Private" façon Railway si true). */
+  private?: boolean;
+  /** "network" uniquement, overlay seulement : chiffrement natif Docker au niveau network. */
+  encrypted?: boolean;
+  /** "mount" uniquement : lecture seule réelle du montage. */
+  readOnly?: boolean;
 }
 
 export interface Topology {
@@ -309,7 +346,21 @@ export interface GitCommit {
 // --- Gestionnaire de secrets nommés (façon Vault/GitHub Actions secrets) — voir
 // apps/api/src/services/secretsStore.ts. La valeur elle-même n'apparaît JAMAIS dans ce
 // contrat : elle est chiffrée au repos et write-only côté API (jamais renvoyée par un GET
-// liste/détail), référencée par `name` lors de la création d'un conteneur.
+// liste/détail — seule POST /api/secrets/:id/reveal, admin uniquement, la déchiffre à la
+// demande), référencée par `name` lors de la création d'un conteneur.
+
+/** Un conteneur qui référence RÉELLEMENT ce secret via `secretEnv` à sa création. */
+export interface SecretUsage {
+  containerId: string;
+  containerName: string;
+  key: string; // clé d'env sous laquelle ce secret est injecté dans CE conteneur
+}
+
+/** Métadonnées (JAMAIS la valeur) d'une version passée ou courante d'un secret. */
+export interface SecretVersionMeta {
+  version: number;
+  updatedAt: string; // ISO 8601
+}
 
 export interface SecretRef {
   id: string;
@@ -317,6 +368,10 @@ export interface SecretRef {
   description?: string;
   createdAt: string; // ISO 8601
   updatedAt: string; // ISO 8601
+  usedBy: SecretUsage[];
+  version: number;
+  versionCount: number;
+  expiresAt?: string; // ISO 8601
 }
 
 // --- Reverse proxy interne (*.lecreusot.priv) — voir apps/api/src/services/reverseProxy.ts.
@@ -338,6 +393,7 @@ export interface ReverseProxyRoute {
 export interface ReverseProxyStatus {
   reachable: boolean;
   adminUrl: string;
+  httpsEnabled: boolean;
 }
 
 export type Role = "admin" | "operator" | "viewer";
@@ -458,6 +514,12 @@ export interface Vulnerability {
 
 export type ScanStatus = "running" | "success" | "failed";
 
+// "manual" : lancé par un clic operator/admin depuis ImagesPage.tsx. "automatic" : lancé tout
+// seul par apps/api/src/services/scanScheduler.ts sur une image RÉELLEMENT déployée jamais
+// scannée ou dont le dernier scan réussi est trop ancien. Optionnel pour rester lisible sur les
+// scans persistés avant l'introduction de ce champ — undefined y est traité comme "manual".
+export type ScanTrigger = "manual" | "automatic";
+
 export interface ScanResult {
   id: string;
   scanner: ScannerId; // scanner à l'origine de ce résultat
@@ -467,16 +529,19 @@ export interface ScanResult {
   finishedAt: string | null;
   vulnerabilities: Vulnerability[];
   summary: Record<VulnSeverity, number>;
+  trigger?: ScanTrigger;
 }
 
-// --- Notifications système (watchdog proactif) — voir ARCHITECTURE.md
-// § "Détection proactive (watchdog)" et apps/api/src/services/watchdog.ts ---
+// --- Notifications système (watchdog proactif + scanScheduler) — voir ARCHITECTURE.md
+// § "Détection proactive (watchdog)" / § "Scan automatique des images déployées" et
+// apps/api/src/services/watchdog.ts / apps/api/src/services/scanScheduler.ts ---
 
 export type SystemNotificationKind =
   | "image_update_available"
   | "integration_unreachable"
   | "integration_reachable"
-  | "gitops_drift_detected";
+  | "gitops_drift_detected"
+  | "vulnerability_detected";
 
 export interface SystemNotificationEvent {
   id: string;
@@ -498,4 +563,55 @@ export interface SetupCompletePayload {
   kubernetes: KubernetesConfigInput | null;
   nutanix: NutanixConfigInput | null;
   registries: RegistryConfigInput[];
+}
+
+// --- Intégration GitHub (GitOps réel) — voir ARCHITECTURE.md § "Intégration GitHub" et
+// apps/api/src/services/github.ts / githubStore.ts. Le jeton n'est jamais renvoyé par une route GET.
+
+export interface GithubStatus {
+  configured: boolean;
+  usingGhcrFallback: boolean;
+}
+
+export interface GithubRepoRef {
+  id: number;
+  fullName: string;
+  owner: string;
+  name: string;
+  private: boolean;
+  defaultBranch: string;
+  htmlUrl: string;
+  updatedAt: string;
+}
+
+export interface GithubRepoDetection {
+  ref: string;
+  hasDockerfile: boolean;
+  hasCompose: boolean;
+  hasTerraform: boolean;
+  terraformFiles: string[];
+}
+
+export type GithubDeploymentStatus = "running" | "success" | "failed";
+export type GithubDeploymentKind = "docker-build-run" | "iac-workspace";
+
+export interface GithubDeployment {
+  id: string;
+  owner: string;
+  repo: string;
+  ref: string;
+  targetEnvironmentId: string | null;
+  kind: GithubDeploymentKind | null;
+  status: GithubDeploymentStatus;
+  startedAt: string;
+  finishedAt: string | null;
+  startedBy: string;
+  imageTag?: string;
+  containerId?: string;
+  containerName?: string;
+  iacWorkspaceId?: string;
+}
+
+export interface GithubDeploymentDetail extends GithubDeployment {
+  log: string;
 }

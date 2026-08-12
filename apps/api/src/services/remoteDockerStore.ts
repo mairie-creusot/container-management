@@ -1,19 +1,33 @@
 /**
  * Environnements Docker distants persistés (cf. ARCHITECTURE.md, chapitre "Environnements
- * Docker distants") — liste nommée d'hôtes Docker joignables en TCP+TLS, en plus du démon
- * local piloté par défaut (services/docker.ts#getClient sans argument).
+ * Docker distants") — liste nommée d'hôtes Docker distants, en plus du démon local piloté par
+ * défaut (services/docker.ts#getClient sans argument). Deux modes de transport vers ce démon
+ * distant, choisis par environnement :
+ *
+ * - `"tcp-tls"` (historique) : le démon Docker distant expose son API sur le réseau via TCP+TLS
+ *   (host/port du démon, ca/cert/key client).
+ * - `"ssh"` : AUCUN port Docker n'est exposé sur le réseau — QUAI se connecte au port SSH déjà
+ *   ouvert pour l'administration de la machine (host/port SSH, identifiants), puis tunnelise le
+ *   protocole Docker au travers (voir docker.ts#buildRemoteDockerClient, services/sshTunnel.ts).
+ *   C'est le mode recommandé pour un hôte qui n'a pas vocation à exposer Docker publiquement
+ *   (ex : un VPS joignable uniquement en SSH).
  *
  * Même pattern que secretsStore.ts : persistance JSON sur disque (REMOTE_DOCKER_PATH, défaut
  * ./data/remote-docker.json), cache mémoire process invalidé à chaque écriture, fichier écrit
  * avec des permissions restrictives (0600).
  *
- * dockerode/docker-modem acceptent `host`/`port`/`ca`/`cert`/`key` directement dans leur
- * constructeur pour une connexion TCP+TLS à un démon distant (voir docker.ts#getClient) — c'est
- * la méthode standard documentée par Docker Engine pour exposer un démon sur le réseau
- * (https://docs.docker.com/engine/security/protect-access/). `ca`/`cert`/`key` (PEM) sont
- * chiffrés au repos (AES-256-GCM, crypto.ts) champ par champ, comme le mot de passe LDAP/le
- * kubeconfig/les identifiants de registry dans setupStore.ts — le fichier ne contient jamais de
- * secret en clair. `host`/`port`/`name` ne sont pas des secrets, non chiffrés.
+ * Transport "tcp-tls" : dockerode/docker-modem acceptent `host`/`port`/`ca`/`cert`/`key`
+ * directement dans leur constructeur pour une connexion TCP+TLS à un démon distant (voir
+ * docker.ts#getClient) — c'est la méthode standard documentée par Docker Engine pour exposer un
+ * démon sur le réseau (https://docs.docker.com/engine/security/protect-access/). `ca`/`cert`/
+ * `key` (PEM) sont chiffrés au repos (AES-256-GCM, crypto.ts) champ par champ, comme le mot de
+ * passe LDAP/le kubeconfig/les identifiants de registry dans setupStore.ts.
+ *
+ * Transport "ssh" : `password`/`privateKey` (l'un des deux au moins) chiffrés au repos exactement
+ * de la même façon — `username` n'est pas un secret, non chiffré (comme `host`/`port`/`name`).
+ *
+ * Dans tous les cas le fichier ne contient jamais de secret en clair, et aucune route GET ne
+ * renvoie jamais ca/cert/key/password/privateKey (write-only, voir toRef ci-dessous).
  */
 
 import { randomUUID } from "node:crypto";
@@ -21,6 +35,9 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { config } from "../config.js";
 import { decryptSecret, encryptSecretIfNeeded } from "./crypto.js";
+import { invalidateSshConnection } from "./sshTunnel.js";
+
+export type RemoteDockerTransport = "tcp-tls" | "ssh";
 
 export interface RemoteDockerTls {
   ca?: string;
@@ -28,24 +45,41 @@ export interface RemoteDockerTls {
   key?: string;
 }
 
+/** Identifiants SSH — `password` OU `privateKey` (l'un des deux au moins), chiffrés au repos comme ca/cert/key. */
+export interface RemoteDockerSsh {
+  username: string;
+  password?: string;
+  privateKey?: string;
+}
+
 interface StoredRemoteDockerEnvironment {
   id: string;
   name: string;
   host: string;
   port: number;
-  // ca/cert/key : chiffrés au repos (voir crypto.ts) quand présents.
+  // Absent sur les environnements créés avant l'introduction du transport SSH : traité comme
+  // "tcp-tls" partout où ce champ est lu (toRef, getEffectiveRemoteDockerConfig...) — migration
+  // transparente, aucun script de backfill nécessaire.
+  transport?: RemoteDockerTransport;
+  // ca/cert/key : chiffrés au repos (voir crypto.ts) quand présents. Pertinent uniquement pour transport "tcp-tls".
   tls?: RemoteDockerTls;
+  // password/privateKey : chiffrés au repos. Pertinent uniquement pour transport "ssh".
+  ssh?: RemoteDockerSsh;
   createdAt: string;
   updatedAt: string;
 }
 
-/** Vue publique — ne contient JAMAIS le contenu ca/cert/key (voir toRef ci-dessous). */
+/** Vue publique — ne contient JAMAIS le contenu ca/cert/key/password/privateKey (voir toRef ci-dessous). */
 export interface RemoteDockerEnvironmentRef {
   id: string;
   name: string;
   host: string;
   port: number;
+  transport: RemoteDockerTransport;
   hasTls: boolean;
+  /** Présent uniquement pour transport "ssh" — le login n'est pas un secret. */
+  sshUsername?: string;
+  hasSshCredentials: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -56,7 +90,9 @@ export interface EffectiveRemoteDockerConfig {
   name: string;
   host: string;
   port: number;
+  transport: RemoteDockerTransport;
   tls?: RemoteDockerTls;
+  ssh?: RemoteDockerSsh;
 }
 
 export class RemoteDockerValidationError extends Error {}
@@ -95,7 +131,10 @@ function toRef(env: StoredRemoteDockerEnvironment): RemoteDockerEnvironmentRef {
     name: env.name,
     host: env.host,
     port: env.port,
+    transport: env.transport ?? "tcp-tls",
     hasTls: Boolean(env.tls?.ca || env.tls?.cert || env.tls?.key),
+    ...(env.ssh?.username ? { sshUsername: env.ssh.username } : {}),
+    hasSshCredentials: Boolean(env.ssh?.password || env.ssh?.privateKey),
     createdAt: env.createdAt,
     updatedAt: env.updatedAt,
   };
@@ -120,6 +159,24 @@ function decryptTls(tls: RemoteDockerTls | undefined): RemoteDockerTls | undefin
   };
 }
 
+function encryptSsh(ssh: RemoteDockerSsh | undefined): RemoteDockerSsh | undefined {
+  if (!ssh || !ssh.username?.trim()) return undefined;
+  return {
+    username: ssh.username.trim(),
+    ...(ssh.password ? { password: encryptSecretIfNeeded(ssh.password) } : {}),
+    ...(ssh.privateKey ? { privateKey: encryptSecretIfNeeded(ssh.privateKey) } : {}),
+  };
+}
+
+function decryptSsh(ssh: RemoteDockerSsh | undefined): RemoteDockerSsh | undefined {
+  if (!ssh) return undefined;
+  return {
+    username: ssh.username,
+    ...(ssh.password ? { password: decryptSecret(ssh.password) } : {}),
+    ...(ssh.privateKey ? { privateKey: decryptSecret(ssh.privateKey) } : {}),
+  };
+}
+
 /** GET /api/remote-environments — jamais ca/cert/key, voir toRef(). */
 export async function listRemoteDockerEnvironments(): Promise<RemoteDockerEnvironmentRef[]> {
   return (await getAll()).map(toRef);
@@ -133,20 +190,44 @@ export async function getRemoteDockerEnvironmentRef(id: string): Promise<RemoteD
 export interface RemoteDockerEnvironmentInput {
   name: string;
   host: string;
-  port: number;
+  // Optionnel : défaut 22 pour transport "ssh" (résolu dans createRemoteDockerEnvironment).
+  // Requis pour transport "tcp-tls" (pas de port Docker par défaut sensé).
+  port?: number;
+  // Défaut "tcp-tls" si omis — comportement historique inchangé pour tout appelant qui ne
+  // précise pas ce champ.
+  transport?: RemoteDockerTransport;
   tls?: RemoteDockerTls;
+  ssh?: RemoteDockerSsh;
 }
 
-/** Valide host/port avant toute écriture — rejet propre plutôt qu'une config invalide silencieusement persistée. */
+/** Valide name/host/port/transport et les identifiants du transport choisi avant toute écriture. */
 function assertValidInput(input: RemoteDockerEnvironmentInput): void {
   if (!input.name.trim()) throw new RemoteDockerValidationError("name is required");
   if (!input.host.trim()) throw new RemoteDockerValidationError("host is required");
-  if (!Number.isInteger(input.port) || input.port < 1 || input.port > 65535) {
+
+  const transport = input.transport ?? "tcp-tls";
+  if (transport !== "tcp-tls" && transport !== "ssh") {
+    throw new RemoteDockerValidationError('transport must be "tcp-tls" or "ssh"');
+  }
+
+  const port = input.port ?? (transport === "ssh" ? 22 : undefined);
+  if (port === undefined || !Number.isInteger(port) || port < 1 || port > 65535) {
     throw new RemoteDockerValidationError("port must be an integer between 1 and 65535");
   }
-  const tls = input.tls;
-  if (tls && (tls.cert || tls.key) && !(tls.cert && tls.key)) {
-    throw new RemoteDockerValidationError("tls.cert and tls.key must be provided together");
+
+  if (transport === "tcp-tls") {
+    const tls = input.tls;
+    if (tls && (tls.cert || tls.key) && !(tls.cert && tls.key)) {
+      throw new RemoteDockerValidationError("tls.cert and tls.key must be provided together");
+    }
+  } else {
+    const ssh = input.ssh;
+    if (!ssh || !ssh.username?.trim()) {
+      throw new RemoteDockerValidationError('ssh.username is required for transport "ssh"');
+    }
+    if (!ssh.password && !ssh.privateKey) {
+      throw new RemoteDockerValidationError('ssh.password or ssh.privateKey is required for transport "ssh"');
+    }
   }
 }
 
@@ -157,13 +238,18 @@ export async function createRemoteDockerEnvironment(
   assertValidInput(input);
   const all = await getAll();
   const now = new Date().toISOString();
-  const encryptedTls = encryptTls(input.tls);
+  const transport = input.transport ?? "tcp-tls";
+  const port = input.port ?? 22; // n'est atteint pour "tcp-tls" que si input.port était défini (validé ci-dessus).
+  const encryptedTls = transport === "tcp-tls" ? encryptTls(input.tls) : undefined;
+  const encryptedSsh = transport === "ssh" ? encryptSsh(input.ssh) : undefined;
   const created: StoredRemoteDockerEnvironment = {
     id: randomUUID(),
     name: input.name.trim(),
     host: input.host.trim(),
-    port: input.port,
+    port,
+    transport,
     ...(encryptedTls ? { tls: encryptedTls } : {}),
+    ...(encryptedSsh ? { ssh: encryptedSsh } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -177,12 +263,21 @@ export interface RemoteDockerEnvironmentPatch {
   name?: string;
   host?: string;
   port?: number;
+  // transport omis = transport conservé tel quel. Changer de transport droppe TOUJOURS les
+  // identifiants de l'ancien transport (ils n'ont plus de sens une fois le mode changé) — de
+  // nouveaux identifiants tls/ssh adaptés au nouveau transport sont alors requis dans le même patch.
+  transport?: RemoteDockerTransport;
   // tls omis = TLS conservé tel quel ; tls: {} explicite = supprime le TLS (repasse en TCP
   // non chiffré) ; tls avec ca/cert/key = remplace les champs fournis (mêmes conventions que
   // password/token dans setupStore.ts#updateRegistryAt — mais ici un objet vide est un choix
   // valide, contrairement à une chaîne vide qui n'exprime rien de propre pour un PEM).
   tls?: RemoteDockerTls;
   clearTls?: boolean;
+  // ssh omis = identifiants SSH conservés tels quels ; ssh fourni = remplace username/password/
+  // privateKey ; clearSsh = supprime les identifiants SSH persistés (repasse "sans identifiants",
+  // invalide tant que transport reste "ssh" — voir assertValidInput).
+  ssh?: RemoteDockerSsh;
+  clearSsh?: boolean;
 }
 
 /** PATCH /api/remote-environments/:id — admin uniquement. */
@@ -198,22 +293,49 @@ export async function updateRemoteDockerEnvironment(
   const nextName = patch.name !== undefined ? patch.name.trim() : existing.name;
   const nextHost = patch.host !== undefined ? patch.host.trim() : existing.host;
   const nextPort = patch.port !== undefined ? patch.port : existing.port;
-  assertValidInput({ name: nextName, host: nextHost, port: nextPort, ...(patch.tls ? { tls: patch.tls } : {}) });
+  const nextTransport: RemoteDockerTransport = patch.transport ?? existing.transport ?? "tcp-tls";
 
-  const nextTls = patch.clearTls ? undefined : patch.tls ? encryptTls(patch.tls) : existing.tls;
+  // Ne réutilise les identifiants existants pour la validation que si le transport ne change
+  // pas — changer de transport sans fournir de nouveaux identifiants doit échouer proprement
+  // (assertValidInput) plutôt que de faire semblant que d'anciens identifiants TLS valident un
+  // nouveau transport SSH (ou l'inverse).
+  const tlsForValidation =
+    nextTransport !== "tcp-tls" ? undefined : patch.clearTls ? undefined : (patch.tls ?? existing.tls);
+  const sshForValidation =
+    nextTransport !== "ssh" ? undefined : patch.clearSsh ? undefined : (patch.ssh ?? existing.ssh);
+
+  assertValidInput({
+    name: nextName,
+    host: nextHost,
+    port: nextPort,
+    transport: nextTransport,
+    ...(tlsForValidation ? { tls: tlsForValidation } : {}),
+    ...(sshForValidation ? { ssh: sshForValidation } : {}),
+  });
+
+  const nextTls =
+    nextTransport !== "tcp-tls" ? undefined : patch.clearTls ? undefined : patch.tls ? encryptTls(patch.tls) : existing.tls;
+  const nextSsh =
+    nextTransport !== "ssh" ? undefined : patch.clearSsh ? undefined : patch.ssh ? encryptSsh(patch.ssh) : existing.ssh;
 
   const updated: StoredRemoteDockerEnvironment = {
     id: existing.id,
     name: nextName,
     host: nextHost,
     port: nextPort,
+    transport: nextTransport,
     ...(nextTls ? { tls: nextTls } : {}),
+    ...(nextSsh ? { ssh: nextSsh } : {}),
     createdAt: existing.createdAt,
     updatedAt: new Date().toISOString(),
   };
   const next = all.map((env, i) => (i === index ? updated : env));
   await writeToDisk(next);
   cache = next;
+  // Les identifiants viennent potentiellement de changer (ou le transport a changé) : ne jamais
+  // laisser une éventuelle connexion SSH poolée (services/sshTunnel.ts) survivre avec d'anciens
+  // identifiants jusqu'à son expiration naturelle.
+  invalidateSshConnection(id);
   return toRef(updated);
 }
 
@@ -224,6 +346,8 @@ export async function deleteRemoteDockerEnvironment(id: string): Promise<boolean
   if (next.length === all.length) return false;
   await writeToDisk(next);
   cache = next;
+  // Plus aucune config ne justifie de garder une connexion SSH poolée ouverte pour cet id.
+  invalidateSshConnection(id);
   return true;
 }
 
@@ -235,12 +359,16 @@ export async function deleteRemoteDockerEnvironment(id: string): Promise<boolean
 export async function getEffectiveRemoteDockerConfig(id: string): Promise<EffectiveRemoteDockerConfig | undefined> {
   const found = (await getAll()).find((env) => env.id === id);
   if (!found) return undefined;
-  const tls = decryptTls(found.tls);
+  const transport: RemoteDockerTransport = found.transport ?? "tcp-tls";
+  const tls = transport === "tcp-tls" ? decryptTls(found.tls) : undefined;
+  const ssh = transport === "ssh" ? decryptSsh(found.ssh) : undefined;
   return {
     id: found.id,
     name: found.name,
     host: found.host,
     port: found.port,
+    transport,
     ...(tls ? { tls } : {}),
+    ...(ssh ? { ssh } : {}),
   };
 }

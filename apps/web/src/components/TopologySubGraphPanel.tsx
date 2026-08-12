@@ -6,6 +6,7 @@ import { fetchContainerProcesses } from "@/features/containers/containersSlice";
 import { fetchImageHistory, fetchImages } from "@/features/images/imagesSlice";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import {
+  attachmentToTopologyNode,
   buildTopologyEdges,
   edgeTypes,
   formatMem,
@@ -13,6 +14,7 @@ import {
   interiorNodeTypes,
   nodeTypes,
   radialPositions,
+  type GraphNodeCallbacks,
   type ProcessNodeData,
 } from "@/components/topologyGraphShared";
 import type { Topology, TopologyNode } from "@/types";
@@ -38,9 +40,9 @@ interface TopologySubGraphPanelProps {
   /** L'animation de sortie est terminée (ou sautée sous `prefers-reduced-motion`) : le parent peut
    * démonter ce composant sans à-coup visuel. */
   onExited: () => void;
-  /** Ouvre TopologyNodeDetailModal pour un nœud du sous-graphe (menu contextuel "Voir le détail") —
-   * déléguée au parent pour n'avoir qu'UNE seule instance de la modal de détail, partagée entre le
-   * graphe principal et ce panneau. */
+  /** Ouvre TopologyNodeDetailPanel pour un nœud (ou une brique, voir brickCallbacks ci-dessous) du
+   * sous-graphe — déléguée au parent pour n'avoir qu'UNE seule instance du panneau de détail,
+   * partagée entre le graphe principal et ce panneau. */
   onOpenDetail: (node: TopologyNode) => void;
 }
 
@@ -155,7 +157,15 @@ export default function TopologySubGraphPanel({
           id: n.id,
           type: "graphNode",
           position: positions[n.id] ?? { x: 0, y: 0 },
-          data: n as unknown as Record<string, unknown>,
+          // Briques (voir GraphNode/TopologyNode#attachments) : mêmes callbacks que le graphe
+          // principal (TopologyGraph.tsx) pour rester cliquables/clic-droit-ables ICI aussi — pas
+          // de "Connecter à un network…"/déconnexion depuis ce panneau en revanche (ce sous-graphe
+          // n'a jamais eu d'action de (dé)connexion réseau propre, même pour une arête réelle :
+          // scope volontairement inchangé, seule "Voir le détail" est couverte).
+          data: {
+            ...n,
+            ...(brickCallbacks(n.kind)),
+          } as unknown as Record<string, unknown>,
         })),
     );
   }, [currentRootId, neighborIds, nodesById]);
@@ -192,7 +202,7 @@ export default function TopologySubGraphPanel({
       id: rootNode.id,
       type: "graphNode",
       position: positions[rootNode.id] ?? { x: 0, y: 0 },
-      data: rootNode as unknown as Record<string, unknown>,
+      data: { ...rootNode, ...brickCallbacks(rootNode.kind) } as unknown as Record<string, unknown>,
       draggable: false,
     };
     const pidIdx = findColumn(effectiveProcesses.titles, [/^pid$/i]);
@@ -256,6 +266,19 @@ export default function TopologySubGraphPanel({
     setNodeMenu({ x: event.clientX, y: event.clientY, node: node.data as unknown as TopologyNode });
   }
 
+  /** Callbacks de brique (voir GraphNode/TopologyNode#attachments) pour un nœud de kind `kind` —
+   * seuls les nœuds "container" en rendent, `{}` pour les autres (GraphNode gère déjà l'absence de
+   * callback sans erreur, `?.()`). Réutilise le MÊME `nodeMenu` que pour un vrai nœud pour le clic
+   * droit (voir nodeMenuItems ci-dessous, gardé contre le drilldown sur un id synthétique). */
+  function brickCallbacks(kind: TopologyNode["kind"]): GraphNodeCallbacks {
+    if (kind !== "container") return {};
+    return {
+      onOpenAttachment: (attachment) => onOpenDetail(attachmentToTopologyNode(attachment)),
+      onAttachmentContextMenu: (event, attachment) =>
+        setNodeMenu({ x: event.clientX, y: event.clientY, node: attachmentToTopologyNode(attachment) }),
+    };
+  }
+
   useEffect(() => {
     if (!visible) return;
     function handleKeyDown(event: KeyboardEvent) {
@@ -271,7 +294,11 @@ export default function TopologySubGraphPanel({
 
   function nodeMenuItems(node: TopologyNode): ContextMenuItem[] {
     const items: ContextMenuItem[] = [{ label: "Voir le détail", onClick: () => onOpenDetail(node) }];
-    if (node.id !== currentRootId) {
+    // `nodesById.has(node.id)` exclut le drilldown sur une brique (TopologyNode synthétique
+    // reconstruit par attachmentToTopologyNode, voir brickCallbacks ci-dessus) : son id ne
+    // correspond à AUCUN nœud top-level de `topology.nodes` (tout l'objet du "briquage"), le
+    // sous-graphe n'aurait rien de réel à recentrer dessus.
+    if (node.id !== currentRootId && nodesById.has(node.id)) {
       items.push({ label: "Visualiser ses dépendances", onClick: () => drillInto(node.id) });
     }
     return items;

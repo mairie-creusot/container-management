@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   BaseEdge,
+  EdgeLabelRenderer,
   Handle,
   MarkerType,
   Position,
@@ -11,7 +12,7 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import { IconContainers, IconNetworks, IconVm, IconVolumes } from "@/components/icons";
-import type { TopologyEdge, TopologyNode } from "@/types";
+import type { TopologyEdge, TopologyEdgePort, TopologyNode, TopologyNodeAttachment } from "@/types";
 
 /**
  * Éléments du graphe de topologie partagés entre le graphe principal (TopologyGraph.tsx) et le
@@ -171,12 +172,20 @@ export function buildTopologyEdges(edges: TopologyEdge[], nodesById: Map<string,
       id: e.id,
       source: e.source,
       target: e.target,
-      ...(isMount ? { type: "mountFlow" } : {}),
+      type: isMount ? "mountFlow" : "networkEdge",
       animated: !isMount,
       className: `topology-edge topology-edge--${e.kind} topology-edge--${state}`,
       style: { stroke: color, ...(strokeDasharray ? { strokeDasharray } : {}) },
       markerEnd: { type: MarkerType.ArrowClosed, color, width: 16, height: 16 },
-      data: { kind: e.kind, state, color },
+      data: {
+        kind: e.kind,
+        state,
+        color,
+        ...(e.ports ? { ports: e.ports } : {}),
+        ...(e.private !== undefined ? { private: e.private } : {}),
+        ...(e.encrypted !== undefined ? { encrypted: e.encrypted } : {}),
+        ...(e.readOnly !== undefined ? { readOnly: e.readOnly } : {}),
+      },
     };
   });
 }
@@ -203,6 +212,67 @@ export function usePrefersReducedMotion(): boolean {
 const MOUNT_PARTICLE_COUNT = 3;
 const MOUNT_PARTICLE_DURATION_S = 2.2;
 
+// --- Badge flottant sur l'arête (façon Railway : "TCP:5432 · Private · Encrypted") -------------
+// Toutes les données affichées ici viennent RÉELLEMENT de Docker (voir TopologyEdge#ports/private/
+// encrypted/readOnly, services/topology.ts) — aucune latence affichée : QUAI ne sonde jamais
+// activement le réseau, ce chiffre serait inventé.
+
+/** "TCP:5432" (premier port), ou "TCP:5432 +2" si le conteneur en publie plusieurs — jamais la
+ * liste complète (le badge doit rester un petit pavé lisible, pas un tableau). null si le
+ * conteneur ne publie aucun port vers l'hôte (cas le plus courant). */
+function formatPortLabel(ports?: TopologyEdgePort[]): string | null {
+  if (!ports || ports.length === 0) return null;
+  const first = ports[0]!;
+  const base = `${first.protocol.toUpperCase()}:${first.privatePort}`;
+  return ports.length > 1 ? `${base} +${ports.length - 1}` : base;
+}
+
+interface EdgeBadgeData {
+  ports?: TopologyEdgePort[];
+  private?: boolean;
+  encrypted?: boolean;
+  readOnly?: boolean;
+}
+
+interface EdgeBadgeItem {
+  text: string;
+  tone: "neutral" | "good" | "warn";
+}
+
+function edgeBadgeItems(data: EdgeBadgeData): EdgeBadgeItem[] {
+  const items: EdgeBadgeItem[] = [];
+  const portLabel = formatPortLabel(data.ports);
+  if (portLabel) items.push({ text: portLabel, tone: "neutral" });
+  if (data.private !== undefined) items.push({ text: data.private ? "Privé" : "Public", tone: data.private ? "good" : "neutral" });
+  if (data.encrypted !== undefined) items.push({ text: data.encrypted ? "Chiffré" : "Non chiffré", tone: data.encrypted ? "good" : "warn" });
+  if (data.readOnly !== undefined) items.push({ text: data.readOnly ? "ro" : "rw", tone: "neutral" });
+  return items;
+}
+
+/** Rendu du badge lui-même — via `EdgeLabelRenderer` (portail React Flow HORS du SVG des arêtes) :
+ * seul moyen d'avoir un vrai pavé HTML (bord arrondi, flex, ellipsis) positionné au milieu d'une
+ * arête, un `<text>` SVG ne permettrait ni la mise en forme ni le retour à la ligne. Masqué sous
+ * ZOOM_DETAIL_THRESHOLD, même seuil que le détail des nœuds (GraphNode) : dézoomé sur toute
+ * l'infra, une dizaine de badges superposés au texte devenu illisible ne feraient que noyer le
+ * canevas — cohérent avec le reste du "zoom sémantique" du graphe. */
+function EdgeBadge({ x, y, data }: { x: number; y: number; data: EdgeBadgeData }) {
+  const zoom = useStore(zoomSelector);
+  if (zoom < ZOOM_DETAIL_THRESHOLD) return null;
+  const items = edgeBadgeItems(data);
+  if (items.length === 0) return null;
+  return (
+    <EdgeLabelRenderer>
+      <div className="topology-edge-badge nodrag nopan" style={{ transform: `translate(-50%, -50%) translate(${x}px, ${y}px)` }}>
+        {items.map((item, index) => (
+          <span key={index} className={`topology-edge-badge__item topology-edge-badge__item--${item.tone}`}>
+            {item.text}
+          </span>
+        ))}
+      </div>
+    </EdgeLabelRenderer>
+  );
+}
+
 /**
  * Arête "mount" (conteneur <-> volume, des fichiers/données qui transitent) : un rendu distinct
  * de l'animation générique "tirets qui défilent" des arêtes "network" — trait plein + particules
@@ -213,9 +283,9 @@ const MOUNT_PARTICLE_DURATION_S = 2.2;
  * deux cas on retombe sur le simple trait coloré, sans les particules.
  */
 function MountFlowEdge({ id, sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, style, markerEnd, data }: EdgeProps) {
-  const [edgePath] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
+  const [edgePath, labelX, labelY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
   const reducedMotion = usePrefersReducedMotion();
-  const edgeData = data as { state?: EdgeHealthState; color?: string } | undefined;
+  const edgeData = data as (EdgeBadgeData & { state?: EdgeHealthState; color?: string }) | undefined;
   const flowing = edgeData?.state !== "stopped" && !reducedMotion;
   return (
     <>
@@ -232,14 +302,60 @@ function MountFlowEdge({ id, sourceX, sourceY, sourcePosition, targetX, targetY,
           };
           return <circle key={particleIndex} r={2.6} className="topology-edge-particle" style={particleStyle} />;
         })}
+      {edgeData && <EdgeBadge x={labelX} y={labelY} data={edgeData} />}
     </>
   );
 }
 
-export const edgeTypes = { mountFlow: MountFlowEdge };
+/** Arête "network" (conteneur <-> network) : même tracé/rendu que le type "default" de React Flow
+ * (bezier), réimplémenté ici uniquement pour pouvoir y accrocher le badge flottant ci-dessus — le
+ * type "default" ne permet pas d'injecter un enfant supplémentaire. */
+function NetworkEdge({ id, sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, style, markerEnd, data }: EdgeProps) {
+  const [edgePath, labelX, labelY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
+  const edgeData = data as EdgeBadgeData | undefined;
+  return (
+    <>
+      <BaseEdge id={id} path={edgePath} {...(markerEnd ? { markerEnd } : {})} {...(style ? { style } : {})} />
+      {edgeData && <EdgeBadge x={labelX} y={labelY} data={edgeData} />}
+    </>
+  );
+}
+
+export const edgeTypes = { mountFlow: MountFlowEdge, networkEdge: NetworkEdge };
+
+/** Icône par kind de brique — mêmes icônes que KIND_ICON, sous-ensemble volume/network uniquement
+ * (les deux seuls kinds "briquables", voir TopologyNode#attachments). */
+const ATTACHMENT_ICON: Record<TopologyNodeAttachment["kind"], (props: { className?: string }) => JSX.Element> = {
+  volume: IconVolumes,
+  network: IconNetworks,
+};
+
+/**
+ * Callbacks optionnels posés sur `node.data` par TopologyGraph.tsx/TopologySubGraphPanel.tsx lors
+ * de la construction des `flowNodes` (jamais persistés — de simples fonctions en mémoire, le reste
+ * de `data` reste le TopologyNode sérialisable tel que renvoyé par GET /api/topology) : GraphNode
+ * est un composant partagé sans accès direct à Redux/au state du panneau parent, ces callbacks sont
+ * donc le seul moyen pour une "brique" (volume/network à conteneur unique, rendue ICI plutôt que
+ * comme un nœud séparé) de rester cliquable/clic-droit-able exactement comme un vrai nœud.
+ */
+export interface GraphNodeCallbacks {
+  onOpenAttachment?: (attachment: TopologyNodeAttachment) => void;
+  onAttachmentContextMenu?: (event: React.MouseEvent, attachment: TopologyNodeAttachment) => void;
+}
+
+/** Reconstruit un TopologyNode "synthétique" pour une brique (voir TopologyNode#attachments) —
+ * une brique n'a PAS de nœud top-level correspondant dans `topology.nodes` (c'est tout l'objet de
+ * son "briquage") : ouvrir son détail nécessite donc de reconstituer un TopologyNode minimal mais
+ * suffisant (id/kind/label/subtitle attendus par TopologyNodeDetailPanel.tsx pour aller chercher
+ * le VRAI détail complet via GET /api/volumes ou GET /api/networks, comme pour un nœud normal).
+ * `status: "running"` : même convention que les vrais nœuds volume/network (services/topology.ts),
+ * ces ressources n'ont pas d'état "arrêté" propre. */
+export function attachmentToTopologyNode(attachment: TopologyNodeAttachment): TopologyNode {
+  return { id: attachment.id, kind: attachment.kind, label: attachment.label, subtitle: attachment.subtitle, status: "running" };
+}
 
 export function GraphNode({ data, selected }: NodeProps) {
-  const node = data as unknown as TopologyNode;
+  const node = data as unknown as TopologyNode & GraphNodeCallbacks;
   const Icon = KIND_ICON[node.kind];
   const isContainer = node.kind === "container";
   const ports = NODE_CAPABILITIES[node.kind];
@@ -333,6 +449,44 @@ export function GraphNode({ data, selected }: NodeProps) {
             <span className="topology-node__metric-value">{node.cpuPercent.toFixed(0)}%</span>
           </div>
           <div className="topology-node__metric-mem">{formatMem(node.memBytes ?? 0)}</div>
+        </div>
+      )}
+      {isContainer && !!node.attachments?.length && (
+        // "Briques" (volumes/networks montés par CE seul conteneur, voir TopologyNode#attachments)
+        // — façon Railway : une ressource attachée à un service s'affiche comme une propriété du
+        // service, pas comme un nœud séparé relié par une arête. `nodrag`/`nopan` (classes React
+        // Flow) évitent qu'un clic ici ne fasse glisser le nœud entier ou ne panne le canevas ;
+        // `stopPropagation` évite en plus de sélectionner/désélectionner le nœud conteneur en même
+        // temps qu'on ouvre le détail de la brique.
+        <div className="topology-node__attachments">
+          {node.attachments.map((attachment) => {
+            const AttachmentIcon = ATTACHMENT_ICON[attachment.kind];
+            return (
+              <button
+                key={attachment.id}
+                type="button"
+                className={`topology-brick topology-brick--${attachment.kind} nodrag nopan`}
+                title={`${attachment.kind === "volume" ? "Volume" : "Network"} ${attachment.label}${
+                  attachment.destination ? ` — monté sur ${attachment.destination}` : ""
+                }${attachment.readOnly ? " (lecture seule)" : ""}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  node.onOpenAttachment?.(attachment);
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  node.onAttachmentContextMenu?.(event, attachment);
+                }}
+              >
+                <span className="topology-brick__icon">
+                  <AttachmentIcon />
+                </span>
+                <span className="topology-brick__label">{attachment.label}</span>
+                {attachment.readOnly && <span className="topology-brick__ro">ro</span>}
+              </button>
+            );
+          })}
         </div>
       )}
       <div className={`topology-node__status topology-node__status--${node.status}`}>

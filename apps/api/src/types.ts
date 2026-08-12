@@ -249,7 +249,24 @@ export interface GitCommit {
 // --- Gestionnaire de secrets nommés (façon Vault/GitHub Actions secrets) — voir
 // apps/api/src/services/secretsStore.ts. La valeur elle-même n'apparaît JAMAIS dans ce
 // contrat : elle est chiffrée au repos (crypto.ts) et write-only côté API (jamais renvoyée
-// par un GET liste/détail), référencée par `name` lors de la création d'un conteneur.
+// par un GET liste/détail — seule POST /api/secrets/:id/reveal, admin uniquement, la
+// déchiffre à la demande), référencée par `name` lors de la création d'un conteneur.
+
+/** Un conteneur qui référence RÉELLEMENT ce secret via `secretEnv` à sa création (jamais une
+ * coïncidence de variable d'environnement) — voir POST /api/containers et
+ * secretsStore.ts#recordSecretUsage. */
+export interface SecretUsage {
+  containerId: string;
+  containerName: string;
+  key: string; // clé d'env sous laquelle ce secret est injecté dans CE conteneur
+}
+
+/** Métadonnées (JAMAIS la valeur) d'une version passée ou courante d'un secret — façon Vault
+ * KV v2 (created_time/version courante séparés de la donnée). Voir GET /api/secrets/:id/versions. */
+export interface SecretVersionMeta {
+  version: number;
+  updatedAt: string; // ISO 8601
+}
 
 export interface SecretRef {
   id: string;
@@ -257,6 +274,16 @@ export interface SecretRef {
   description?: string;
   createdAt: string; // ISO 8601
   updatedAt: string; // ISO 8601
+  usedBy: SecretUsage[];
+  // Historique borné façon Vault KV v2 (cf. ARCHITECTURE.md) : `version` est la version courante,
+  // `versionCount` = 1 (courante) + versions précédentes conservées (voir MAX_HISTORY_VERSIONS
+  // dans secretsStore.ts) — sert au frontend à savoir s'il vaut la peine de proposer "Historique".
+  version: number;
+  versionCount: number;
+  // Optionnelle : au-delà de cette date, POST /api/containers refuse de résoudre ce secret dans
+  // `secretEnv` (SecretExpiredError -> 400) ; reveal reste permissif (rotation possible même
+  // expiré). Absente = pas d'expiration configurée.
+  expiresAt?: string; // ISO 8601
 }
 
 // --- Reverse proxy interne (*.lecreusot.priv) — voir apps/api/src/services/reverseProxy.ts.
@@ -278,6 +305,10 @@ export interface ReverseProxyRoute {
 export interface ReverseProxyStatus {
   reachable: boolean;
   adminUrl: string;
+  /** true si Caddy sert aussi en HTTPS (:443, certificats émis par son autorité interne — voir
+   * reverseProxy.ts). Toujours true dès que Caddy est joignable (poussé à chaque configuration
+   * depuis le durcissement TLS de ce jour), false si injoignable (inconnu plutôt qu'affirmé). */
+  httpsEnabled: boolean;
 }
 
 export type Role = "admin" | "operator" | "viewer";
@@ -402,6 +433,43 @@ export interface TopologyNode {
    * appliquer à tort une position héritée de l'ancien nœud.
    */
   createdAt?: string;
+  /**
+   * Conteneurs uniquement : volumes/networks montés sur CE conteneur et rattachés à AUCUN AUTRE
+   * (voir services/topology.ts § "briques") — rendus par le frontend comme des "briques"
+   * cliquables directement sous la carte du conteneur (façon Railway), PAS comme des nœuds/arêtes
+   * séparés du graphe. Un réseau/volume partagé par ≥2 conteneurs, ou un network Docker par défaut
+   * (bridge/host/none, partagé par nature), reste un vrai TopologyNode top-level avec ses arêtes —
+   * seule la ressource à usage exclusif d'un unique conteneur devient une brique. `[]`/absent si ce
+   * conteneur n'a aucune ressource "bricable" (tout ce qu'il monte est soit orphelin d'aucun autre
+   * lien soit partagé, soit il ne monte rien).
+   */
+  attachments?: TopologyNodeAttachment[];
+}
+
+/**
+ * Une ressource (volume ou network) montée EXCLUSIVEMENT par un seul conteneur — voir
+ * TopologyNode#attachments ci-dessus et services/topology.ts. `id` reprend le format qu'aurait eu
+ * le TopologyNode top-level équivalent (`volume:<nom>` / `network:<id>`) : le frontend l'utilise
+ * tel quel pour ouvrir le panneau de détail de cette ressource (mêmes routes GET /api/volumes,
+ * GET /api/networks que pour un vrai nœud), sans dupliquer la logique de lookup.
+ */
+export interface TopologyNodeAttachment {
+  kind: "volume" | "network";
+  id: string;
+  label: string;
+  subtitle: string; // driver
+  /** Volumes uniquement : point de montage réel dans le conteneur. */
+  destination?: string;
+  /** Volumes uniquement : monté en lecture seule. */
+  readOnly?: boolean;
+}
+
+/** Port réellement publié par un conteneur (docker.listContainers()[].Ports — sous-ensemble déjà
+ * inclus dans le résumé, pas d'inspect() séparé) — voir TopologyEdge#ports ci-dessous. */
+export interface TopologyEdgePort {
+  protocol: "tcp" | "udp";
+  privatePort: number;
+  publicPort?: number;
 }
 
 export interface TopologyEdge {
@@ -409,6 +477,35 @@ export interface TopologyEdge {
   source: string; // id de TopologyNode
   target: string; // id de TopologyNode
   kind: "mount" | "network";
+  /**
+   * "network" uniquement : ports RÉELLEMENT publiés par le conteneur à l'une des deux extrémités
+   * (docker.listContainers()[].Ports, dédupliqués) — affiché façon Railway comme un badge flottant
+   * sur l'arête. Note d'honnêteté : Docker n'attribue pas un port publié à un network précis (le
+   * mapping host->conteneur est indépendant du network utilisé) — ce champ liste donc "les ports que
+   * publie ce conteneur", pas "le trafic qui transite par CETTE arête" ; pour l'immense majorité des
+   * cas (un seul network applicatif par conteneur) les deux coïncident. Absent/[] si le conteneur ne
+   * publie aucun port vers l'hôte (cas courant : communication interne au network uniquement).
+   */
+  ports?: TopologyEdgePort[];
+  /**
+   * "network" uniquement : `Internal` réel du network Docker (docker.listNetworks()[].Internal) —
+   * true = network non routé vers l'extérieur du démon Docker ("Private" façon Railway), false =
+   * routable (ex : bridge par défaut avec NAT vers l'hôte). Absent seulement si le network n'a pas
+   * pu être retrouvé (course rare entre deux appels Docker).
+   */
+  private?: boolean;
+  /**
+   * "network" uniquement, networks "overlay" seulement : chiffrement natif Docker au niveau network
+   * (`--opt encrypted`, exposé dans `Options.encrypted`) — seul mécanisme de chiffrement de network
+   * que Docker expose lui-même. Absent pour tout autre driver (bridge/host/none/macvlan) : la
+   * question n'a pas le même sens pour eux (trafic local au noyau, jamais sur le fil), plutôt que
+   * d'inventer un "non chiffré" alarmiste hors sujet.
+   */
+  encrypted?: boolean;
+  /** "mount" uniquement : lecture seule réelle du montage (Mount.RW === false côté Docker), déjà
+   * calculée pour les "briques" (TopologyNodeAttachment#readOnly) — reprise ici pour les volumes
+   * restés de vrais nœuds (partagés par ≥2 conteneurs), qui n'ont pas d'attachment correspondant. */
+  readOnly?: boolean;
 }
 
 export interface Topology {
@@ -445,6 +542,15 @@ export interface Vulnerability {
 
 export type ScanStatus = "running" | "success" | "failed";
 
+// "manual" : lancé par un clic operator/admin depuis ImagesPage.tsx (POST /api/images/:id/scan
+// sans le préciser explicitement retombe sur "manual", comportement historique inchangé).
+// "automatic" : lancé tout seul par services/scanScheduler.ts (voir ce fichier) sur une image
+// RÉELLEMENT déployée jamais scannée ou dont le dernier scan réussi est trop ancien — jamais
+// déclenché par une action utilisateur. Champ optionnel pour rester lisible sur les lignes de
+// scans.jsonl écrites avant l'introduction de ce champ (undefined y est traité comme "manual"
+// côté frontend, comportement historique).
+export type ScanTrigger = "manual" | "automatic";
+
 export interface ScanResult {
   id: string;
   scanner: ScannerId; // scanner à l'origine de ce résultat
@@ -454,19 +560,24 @@ export interface ScanResult {
   finishedAt: string | null;
   vulnerabilities: Vulnerability[];
   summary: Record<VulnSeverity, number>;
+  trigger?: ScanTrigger;
 }
 
-// --- Notifications système (watchdog proactif) — voir apps/api/src/services/watchdog.ts ---
+// --- Notifications système (watchdog proactif + scanScheduler) — voir
+// apps/api/src/services/watchdog.ts et apps/api/src/services/scanScheduler.ts ---
 // Événements détectés tout seuls en tâche de fond (PAS déclenchés par une action utilisateur,
 // contrairement aux notifications d'erreur d'action côté web) : nouvelle version d'image
-// disponible, intégration qui devient injoignable ou de nouveau joignable. Émis une seule fois
-// par transition (edge-triggered), jamais répétés en boucle tant que l'état ne change pas.
+// disponible, intégration qui devient injoignable ou de nouveau joignable, vulnérabilité
+// critique trouvée par un scan automatique. Émis une seule fois par transition/par scan
+// concerné (edge-triggered pour le watchdog ; voir scanScheduler.ts pour la nature différente
+// de sa propre condition d'émission), jamais répétés en boucle sans raison.
 
 export type SystemNotificationKind =
   | "image_update_available"
   | "integration_unreachable"
   | "integration_reachable"
-  | "gitops_drift_detected";
+  | "gitops_drift_detected"
+  | "vulnerability_detected";
 
 export interface SystemNotificationEvent {
   id: string;
@@ -476,4 +587,78 @@ export interface SystemNotificationEvent {
   /** Message concret et actionnable, ex: "Nouvelle version disponible pour nginx:1.25 -> 1.27". */
   message: string;
   read: boolean;
+}
+
+// --- Intégration GitHub (GitOps réel) — voir apps/api/src/services/githubStore.ts et
+// apps/api/src/services/github.ts. Parcourt les VRAIS repos accessibles avec un jeton GitHub
+// (PAT) configuré, détecte les fichiers réellement présents à la racine (Dockerfile, compose,
+// Terraform), clone/build/déploie réellement. Le jeton n'est jamais renvoyé par une route GET.
+
+/** GET /api/github/status — jamais le jeton lui-même. */
+export interface GithubStatus {
+  configured: boolean;
+  /**
+   * true si aucun jeton GitHub dédié n'est configuré mais qu'un jeton GHCR persisté (souvent un
+   * PAT GitHub à scope large utilisé pour `docker login ghcr.io`, voir setupStore.ts) est utilisé
+   * en repli automatique pour lister les repos — jamais modifié par ce module (lecture seule).
+   */
+  usingGhcrFallback: boolean;
+}
+
+export interface GithubRepoRef {
+  id: number;
+  fullName: string; // "owner/repo"
+  owner: string;
+  name: string;
+  private: boolean;
+  defaultBranch: string;
+  htmlUrl: string;
+  updatedAt: string; // ISO 8601
+}
+
+/**
+ * GET /api/github/repos/:owner/:repo/detect — résumé honnête de ce qui est réellement présent à
+ * la RACINE du repo (pas de parcours récursif dans ce premier lot, voir ARCHITECTURE.md) : un
+ * repo sans Dockerfile ne doit jamais faire remonter hasDockerfile: true.
+ */
+export interface GithubRepoDetection {
+  ref: string; // branche/commit effectivement inspecté (résolu à la branche par défaut si omis)
+  hasDockerfile: boolean;
+  hasCompose: boolean;
+  hasTerraform: boolean;
+  terraformFiles: string[]; // noms de fichiers *.tf trouvés à la racine
+}
+
+export type GithubDeploymentStatus = "running" | "success" | "failed";
+
+/**
+ * "docker-build-run" : Dockerfile détecté -> vrai `docker build` + `docker run` sur la cible.
+ * "iac-workspace" : *.tf détecté sans Dockerfile -> workspace IaC créé (voir services/iac/),
+ * aucun `tofu apply` automatique — reporté à une action explicite ultérieure de l'utilisateur.
+ * null tant que le clone/la détection n'a pas encore déterminé la voie suivie (déploiement
+ * encore "running").
+ */
+export type GithubDeploymentKind = "docker-build-run" | "iac-workspace";
+
+export interface GithubDeployment {
+  id: string;
+  owner: string;
+  repo: string;
+  ref: string;
+  /** null = Docker local (voir services/docker.ts#getClient sans argument). */
+  targetEnvironmentId: string | null;
+  kind: GithubDeploymentKind | null;
+  status: GithubDeploymentStatus;
+  startedAt: string; // ISO 8601
+  finishedAt: string | null;
+  startedBy: string; // username
+  imageTag?: string; // kind "docker-build-run"
+  containerId?: string; // kind "docker-build-run"
+  containerName?: string; // kind "docker-build-run"
+  iacWorkspaceId?: string; // kind "iac-workspace"
+}
+
+/** GithubDeployment + le log complet (clone + build + run entrelacés) — chargé à la demande, même principe que IacRunDetail. */
+export interface GithubDeploymentDetail extends GithubDeployment {
+  log: string;
 }

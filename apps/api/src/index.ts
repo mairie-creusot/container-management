@@ -19,6 +19,7 @@ import authRoutes from "./routes/auth.js";
 import consoleRoutes from "./routes/console.js";
 import containersRoutes from "./routes/containers.js";
 import environmentsRoutes from "./routes/environments.js";
+import githubRoutes from "./routes/github.js";
 import gitopsRoutes from "./routes/gitops.js";
 import iacRoutes from "./routes/iac.js";
 import imagesRoutes from "./routes/images.js";
@@ -35,6 +36,7 @@ import setupRoutes from "./routes/setup.js";
 import topologyRoutes from "./routes/topology.js";
 import volumesRoutes from "./routes/volumes.js";
 import { startGitopsReconciler } from "./services/gitopsReconciler.js";
+import { startScanScheduler } from "./services/scanScheduler.js";
 import { startWatchdog } from "./services/watchdog.js";
 
 function buildLoggerOptions(): NonNullable<FastifyServerOptions["logger"]> {
@@ -81,6 +83,7 @@ export function buildServer() {
   void fastify.register(lxcRoutes);
   void fastify.register(reverseProxyRoutes);
   void fastify.register(consoleRoutes);
+  void fastify.register(githubRoutes);
 
   // /health : chemin attendu par les healthchecks Docker et les probes Kubernetes (voir deploy/).
   // /healthz : alias conservé au cas où un outil externe le suppose (convention courante).
@@ -111,6 +114,13 @@ async function main(): Promise<void> {
   // démarré seulement ici pour ne jamais taper le disque/réseau pendant les tests.
   const stopGitopsReconciler = startGitopsReconciler();
 
+  // Scan automatique en tâche de fond des images RÉELLEMENT déployées (conteneurs running) qui
+  // n'ont jamais été scannées ou dont le dernier scan réussi est trop ancien (voir
+  // services/scanScheduler.ts — cron de rafraîchissement périodique, PAS un edge-triggered comme
+  // le watchdog ci-dessus) : même câblage, démarré seulement ici pour ne jamais lancer de vrai
+  // scan Grype/OSV-Scanner pendant les tests qui construisent juste le serveur avec `app.inject`.
+  const stopScanScheduler = startScanScheduler();
+
   // Sans ceci, un SIGTERM (docker stop, ou nodemon qui redémarre le process en dev) tue le
   // process sans libérer explicitement le port avant que le suivant ne démarre — source
   // d'EADDRINUSE intermittents observés avec `nodemon --legacy-watch` (voir package.json,
@@ -119,6 +129,7 @@ async function main(): Promise<void> {
     fastify.log.info(`${signal} received, closing server`);
     stopWatchdog();
     stopGitopsReconciler();
+    stopScanScheduler();
     void fastify.close().then(() => process.exit(0));
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));

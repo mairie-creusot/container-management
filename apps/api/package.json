@@ -28,7 +28,8 @@
     "ldapjs": "^3.0.7",
     "pino": "^9.3.2",
     "pino-pretty": "^11.2.2",
-    "simple-git": "^3.25.0"
+    "simple-git": "^3.25.0",
+    "ssh2": "^1.17.0"
   },
   "devDependencies": {
     "@types/dockerode": "^3.3.31",
@@ -36,6 +37,7 @@
     "@types/jsonwebtoken": "^9.0.6",
     "@types/ldapjs": "^3.0.6",
     "@types/node": "^20.14.13",
+    "@types/ssh2": "^1.15.5",
     "@types/ws": "^8.18.1",
     "nodemon": "^3.1.14",
     "tsx": "^4.16.5",

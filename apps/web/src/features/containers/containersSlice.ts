@@ -38,7 +38,7 @@ interface ContainersState {
   /** Processus réels (`docker top`) du conteneur consulté dans la vue "composition interne" du
    * sous-graphe (voir TopologySubGraphPanel.tsx) — un seul à la fois, `processesContainerId`
    * évite d'afficher la liste d'un AUTRE conteneur pendant le chargement du nouveau (même garde
-   * que `detail`/`rawId` dans TopologyNodeDetailModal.tsx). */
+   * que `detail`/`rawId` dans TopologyNodeDetailPanel.tsx). */
   processes: ContainerProcessList | null;
   processesContainerId: string | null;
   processesStatus: "idle" | "loading" | "ready" | "error";

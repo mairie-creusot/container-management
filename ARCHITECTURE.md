@@ -215,7 +215,7 @@ interface ReverseProxyStatus {
   adminUrl: string;
 }
 
-type SystemNotificationKind = "image_update_available" | "integration_unreachable" | "integration_reachable" | "gitops_drift_detected";
+type SystemNotificationKind = "image_update_available" | "integration_unreachable" | "integration_reachable" | "gitops_drift_detected" | "vulnerability_detected";
 
 interface SystemNotificationEvent {
   id: string;
@@ -248,6 +248,11 @@ interface Vulnerability {
   fixedInVersion: string | null;
 }
 
+// "manual" (clic operator/admin, ImagesPage.tsx) vs "automatic" (services/scanScheduler.ts, voir
+// « Scan automatique des images déployées » plus bas) — optionnel pour rester lisible sur les
+// scans persistés avant l'introduction de ce champ (undefined = "manual", comportement historique).
+type ScanTrigger = "manual" | "automatic";
+
 interface ScanResult {
   id: string;
   scanner: ScannerId;           // scanner à l'origine de ce résultat
@@ -257,6 +262,7 @@ interface ScanResult {
   finishedAt: string | null;
   vulnerabilities: Vulnerability[];
   summary: Record<VulnSeverity, number>;
+  trigger?: ScanTrigger;
 }
 
 // Graphe de topologie (voir chapitre dédié plus bas) — nœuds "conteneur"/"volume"/"network"
@@ -458,6 +464,26 @@ Chaque message est concret et actionnable (jamais de texte générique) : ex. `"
 
 Côté `apps/web`, `notificationsSlice.ts` récupère ces événements au chargement puis les repolle (`App.tsx`, indépendant de la vue affichée) et les fusionne par id dans le même état que les notifications purement client existantes (`pushNotification`/`errorNotificationMiddleware.ts`, inchangées) — un événement système apparaît donc à la fois en toast (`ToastStack.tsx`) et dans l'historique (`NotificationsPage.tsx`) sans code supplémentaire dans ces deux composants.
 
+## Scan automatique des images déployées
+
+Avant ce chantier, un scan de vulnérabilités (Grype/OSV-Scanner, `services/scan.ts`) ne partait que d'un clic operator/admin sur `ImagesPage.tsx` (`POST /api/images/:id/scan`) : une image tirée puis déployée en prod pouvait donc n'être jamais scannée si personne n'y pensait. `apps/api/src/services/scanScheduler.ts` comble ce trou en rafraîchissant tout seul, en tâche de fond, les scans des images **réellement déployées** (conteneurs `running`, la même notion que celle affichée dans le graphe de topologie).
+
+**DIFFÉRENCE DE NATURE avec le watchdog ci-dessus — à ne pas confondre.** Le watchdog est *edge-triggered* : il compare l'état courant à un état PRÉCÉDENT persisté (`watchdog-state.json`) pour détecter une TRANSITION et n'émet qu'au moment du changement — y compris pour `image_update_available`, qui détecte qu'une **nouvelle version d'image** est disponible (un `docker pull` la mettrait à jour), une notion totalement indépendante des CVE qu'elle contient. Le scheduler de scan n'a **aucune** notion de transition : sa question à chaque cycle n'est pas « qu'est-ce qui a changé depuis le dernier cycle ? » mais « quelles images déployées n'ont jamais été scannées par tel scanner, ou dont le dernier scan réussi par ce scanner date de plus de `STALE_AFTER_MS` (24h par défaut) ? » — un cron de rafraîchissement périodique (façon renouvellement de certificat), pas une détection de changement d'état. Conséquence directe : **pas de fichier d'état séparé** comme `watchdog-state.json` — l'historique déjà persisté (`scans.jsonl`, `services/scan.ts#listAllScans`) donne déjà, pour n'importe quelle image, tout ce qu'il faut pour décider (déjà scannée ? quand ? avec succès ?), sans rien dupliquer sur disque. Un redémarrage de l'API ne perd donc aucune information utile pour ce module.
+
+**Résolution "image déployée"** : réutilise le même client Docker/la même garde de joignabilité que `services/topology.ts` (`getClient` + `isDockerReachable`), mais `listContainers({ all: false })` plutôt que `{ all: true }` — seuls les conteneurs `running` comptent comme "actuellement déployés" ; une image seulement tirée ou un conteneur arrêté n'est volontairement pas scanné ici.
+
+**Ce qu'un cycle vérifie** : pour chaque image déployée, pour chacun des deux scanners (Grype et OSV-Scanner, indépendamment), l'image est "due" si aucun scan de ce scanner n'est déjà `"running"` pour elle (jamais de double-lancement — même vérification que le bouton "Scanner" désactivé pendant qu'un scan tourne côté `ImagesPage.tsx`) **et** (aucun scan réussi de ce scanner n'existe jamais pour cette image, **ou** son dernier scan réussi date de plus de 24h). `scanScheduler.ts#isScanDue` est pure et testable sans I/O (voir `test/scanScheduler.test.ts`), même esprit que `watchdog.ts#detectNewlyUpdatedImages`/`detectReachabilityTransition` mais sans comparaison à un état précédent.
+
+**Concurrence** : au plus 2 scans lancés en parallèle par cycle (`MAX_CONCURRENT_SCANS`) — un scan Grype/OSV-Scanner peut être lourd en CPU, lancer tous les scans dus simultanément serait irresponsable sur un hôte de dev ; un léger parallélisme (2, pas 1 strictement séquentiel) raccourcit un cycle avec plusieurs images dues sans saturer l'hôte. Chaque scan lancé (`startScan(image, scanner, "automatic")`) est attendu par polling (`getScan`, même principe que le frontend) avant de passer au suivant de son slot, plafonné à 10 min par scan (`MAX_WAIT_MS`) pour ne jamais bloquer indéfiniment un cycle — un scan encore `"running"` au-delà est simplement retrouvé comme tel par `isScanDue()` au cycle suivant (pas de double-lancement), son résultat restant consultable par polling normal côté frontend.
+
+**Scheduler** : `startScanScheduler()` est démarré une seule fois depuis `index.ts#main()` (jamais depuis `buildServer()`, même raison que le watchdog : ne jamais déclencher de vrai scan Docker/Grype/OSV-Scanner pendant les tests qui construisent juste le serveur avec `app.inject`), un cycle toutes les 45 min par défaut — bien plus espacé que le watchdog (75s) : un scan complet est coûteux, inutile de revérifier en boucle serrée un état qui ne bouge pas vite. Arrêté proprement sur `SIGTERM`/`SIGINT` comme le reste du serveur.
+
+**Notification** : un scan automatique qui se termine avec au moins une vulnérabilité Critical émet `vulnerability_detected` (level `error`, message concret ex. `"6 vulnérabilité(s) critique(s) détectée(s) sur nginx:1.27 (Grype)"`) via `notificationsStore.ts` — un scan qui ne trouve rien de Critical ne notifie pas (ce serait du bruit vu la fréquence du cycle). Contrairement au watchdog, ce n'est **pas** edge-triggered : un même Critical déjà connu au cycle précédent notifie de nouveau au prochain scan qui le retrouve (pas de mémoire "déjà notifié pour ce CVE") — accepté pour ce premier lot, la fréquence du cycle (45 min) et le seuil de staleness (24h) limitent déjà le bruit en pratique.
+
+**Frontend minimal** : `ScanResult.trigger` (`"manual" | "automatic"`, absent = "manual" sur les scans persistés avant ce champ) est affiché dans l'historique des scans de `ImagesPage.tsx` (colonne "Origine") pour distinguer un scan déclenché par un clic d'un scan lancé tout seul par ce scheduler.
+
+**Vérifié en conditions réelles** : un cycle réel (`runScanSchedulerCycle()`, exporté pour les tests/un déclenchement manuel — même pattern que `watchdog.ts#runWatchdogCycle`) lancé contre la stack de dev a bien détecté `caddy:2-alpine` (conteneur `quai-dev-caddy-1`, réellement déployé, jamais scanné) comme dû pour Grype **et** OSV-Scanner, lancé les deux scans avec `trigger: "automatic"`, et le résultat était bien consultable via `GET /api/images/:id/scans` (OSV-Scanner : 6 High/13 Medium/13 Unknown trouvés réellement sur l'image, aucun inventé).
+
 ## Réconciliation GitOps (détection de dérive)
 
 Même principe que le watchdog ci-dessus, appliqué à la dérive GitOps : `apps/api/src/services/gitopsReconciler.ts` détecte tout seul, en tâche de fond, qu'un manifeste s'est mis à dériver (ou a cessé de dériver) — mais ne l'applique **jamais**. Conformément à « GitOps » ci-dessus (« l'application du changement reste une action explicite depuis l'UI »), ce module n'appelle que `listGitOpsFiles()` (lecture pure) ; `sync()` reste déclenché exclusivement par un clic humain sur `POST /api/gitops/sync`, inchangé.
@@ -595,13 +621,18 @@ GET  /api/console/:id   (WebSocket)      # terminal interactif réel dans un con
 
 POST /api/images/:id/scan                # { scanner?: "grype" | "osv-scanner" } — "grype" par défaut si absent.
                                           # Lance le scanner réel demandé (services/scan.ts), retourne le ScanResult
-                                          # à l'état "running" immédiatement (suivi par polling, voir ci-dessous)
-GET  /api/images/:id/scans               # historique des scans d'une image, tous scanners confondus
+                                          # à l'état "running" immédiatement (suivi par polling, voir ci-dessous) —
+                                          # trigger: "manual" (voir aussi le scan automatique périodique, § « Scan
+                                          # automatique des images déployées », qui appelle la même fonction avec
+                                          # trigger: "automatic", jamais via cette route HTTP)
+GET  /api/images/:id/scans               # historique des scans d'une image, tous scanners confondus (manuels et
+                                          # automatiques mélangés, voir ScanResult.trigger)
 GET  /api/scans/:scanId                  # détail + statut d'un scan (à poller pendant qu'il tourne)
 GET  /api/scanners/status                # ScannerStatus[] — présence/version de grype et osv-scanner sur l'hôte
 
 GET  /api/notifications?since=<ISO 8601>  # événements détectés par le watchdog (voir « Détection
-                                           # proactive » ci-dessus), les plus récents d'abord
+                                           # proactive » ci-dessus) et par le scan automatique (« vulnerability_detected »,
+                                           # voir « Scan automatique des images déployées »), les plus récents d'abord
 POST /api/notifications/read-all          # marque tous les événements connus comme lus (operator/admin)
 
 GET    /api/reverse-proxy/routes    # liste des routes actives, ouvert à toute session authentifiée

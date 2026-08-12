@@ -16,6 +16,7 @@ import topologyReducer from "@/features/topology/topologySlice";
 import iacReducer from "@/features/iac/iacSlice";
 import reverseProxyReducer from "@/features/reverseProxy/reverseProxySlice";
 import remoteEnvironmentsReducer from "@/features/remoteEnvironments/remoteEnvironmentsSlice";
+import githubReducer from "@/features/github/githubSlice";
 import { errorNotificationMiddleware } from "@/features/notifications/errorNotificationMiddleware";
 
 export const store = configureStore({
@@ -37,6 +38,7 @@ export const store = configureStore({
     iac: iacReducer,
     reverseProxy: reverseProxyReducer,
     remoteEnvironments: remoteEnvironmentsReducer,
+    github: githubReducer,
   },
   middleware: (getDefaultMiddleware) => getDefaultMiddleware().concat(errorNotificationMiddleware),
 });

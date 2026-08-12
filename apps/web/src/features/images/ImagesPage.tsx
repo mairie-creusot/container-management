@@ -22,7 +22,7 @@ import RegistryBadge from "@/components/RegistryBadge";
 import KeyValueList from "@/components/KeyValueList";
 import Pagination from "@/components/Pagination";
 import { SkeletonTable } from "@/components/Skeleton";
-import type { ScannerId, ScanStatus, VulnSeverity } from "@/types";
+import type { ScannerId, ScanResult, ScanStatus, VulnSeverity } from "@/types";
 
 const FILTERS: { id: ImageStatusFilter; label: string }[] = [
   { id: "all", label: "Toutes" },
@@ -60,6 +60,13 @@ const SCAN_STATUS_LABEL: Record<ScanStatus, string> = {
   failed: "Échoué",
   running: "En cours",
 };
+
+// scan.trigger est absent sur les scans persistés avant l'introduction du scan automatique
+// (services/scanScheduler.ts) — undefined s'affiche comme "Manuel", comportement historique
+// (tout scan était manuel avant ce champ).
+function scanTriggerLabel(trigger: ScanResult["trigger"]): string {
+  return trigger === "automatic" ? "Auto" : "Manuel";
+}
 
 const SCAN_POLL_MS = 2000;
 
@@ -420,6 +427,7 @@ export default function ImagesPage() {
                     <thead>
                       <tr>
                         <th>Scanner</th>
+                        <th>Origine</th>
                         <th>Démarré</th>
                         <th>Statut</th>
                         <th>Résumé</th>
@@ -429,6 +437,18 @@ export default function ImagesPage() {
                       {scansByImageId[selected.id]!.map((scan) => (
                         <tr key={scan.id}>
                           <td>{SCANNER_LABEL[scan.scanner]}</td>
+                          <td>
+                            <span
+                              className="chip"
+                              title={
+                                scan.trigger === "automatic"
+                                  ? "Scan automatique déclenché par le rafraîchissement périodique en tâche de fond"
+                                  : "Scan lancé manuellement"
+                              }
+                            >
+                              {scanTriggerLabel(scan.trigger)}
+                            </span>
+                          </td>
                           <td className="cell-mono">{formatDate(scan.startedAt)}</td>
                           <td>
                             <span className={`status-pill status-pill--${SCAN_STATUS_SEMANTIC[scan.status]}`}>

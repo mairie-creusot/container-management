@@ -291,6 +291,100 @@
   color: var(--color-text-faint);
 }
 
+/* --- "Briques" : volumes/networks montés par CE conteneur ET AUCUN AUTRE (voir
+   TopologyNode#attachments, services/topology.ts § "Briques") — façon Railway : une ressource
+   dédiée à un service s'affiche comme une propriété DE CE service plutôt que comme un nœud séparé
+   du graphe relié par une arête. Une ressource partagée par ≥2 conteneurs (ou un network par
+   défaut bridge/host/none) reste un vrai .topology-node ailleurs sur le canevas, jamais dupliquée
+   ici. --------------------------------------------------------------------------------------- */
+.topology-node__attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.topology-brick {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 3px 8px 3px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.topology-brick:hover {
+  background: var(--color-surface-3);
+  color: var(--color-text);
+}
+
+.topology-brick--volume {
+  border-color: rgba(245, 165, 36, 0.35);
+}
+
+.topology-brick--volume:hover {
+  border-color: var(--color-warning);
+}
+
+.topology-brick--network {
+  border-color: rgba(124, 92, 252, 0.35);
+}
+
+.topology-brick--network:hover {
+  border-color: var(--accent-end);
+}
+
+.topology-brick__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  flex: none;
+}
+
+.topology-brick--volume .topology-brick__icon {
+  color: var(--color-warning);
+}
+
+.topology-brick--network .topology-brick__icon {
+  color: var(--accent-end);
+}
+
+.topology-brick__icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.topology-brick__label {
+  min-width: 0;
+  max-width: 120px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topology-brick__ro {
+  flex: none;
+  font-size: 9px;
+  color: var(--color-text-faint);
+  text-transform: uppercase;
+}
+
+.topology-node--compact .topology-node__attachments {
+  opacity: 0;
+  max-height: 0;
+  margin: 0;
+  pointer-events: none;
+}
+
 /* Zoom sémantique : sous le seuil de zoom (TopologyGraph.tsx#ZOOM_DETAIL_THRESHOLD), un nœud se
    réduit à son icône + son point de statut — libellé/sous-titre/badges/métriques s'effacent en
    fondu plutôt que de disparaître brutalement (transition douce à 0.15s, cohérente avec le reste
@@ -299,6 +393,7 @@
 .topology-node__subtitle,
 .topology-node__badges,
 .topology-node__metrics,
+.topology-node__attachments,
 .topology-node__status-label {
   transition: opacity 0.15s ease, max-height 0.15s ease, margin 0.15s ease;
   max-height: 60px;
@@ -424,6 +519,48 @@
   }
 }
 
+/* --- Badge flottant sur une arête (façon Railway : "TCP:5432 · Private · Encrypted") ------------
+   Rendu via EdgeLabelRenderer (topologyGraphShared.tsx#EdgeBadge) : un portail HORS du <svg> des
+   arêtes, positionné en absolu par transform (voir style inline) au milieu du tracé — c'est ce qui
+   permet un vrai pavé HTML (bord arrondi, flou) plutôt qu'un <text> SVG. `nodrag nopan` (classes
+   React Flow) évitent qu'un clic ici ne déplace un nœud ou ne panne le canevas. */
+.topology-edge-badge {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 4px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: color-mix(in srgb, var(--color-surface-2) 85%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+  pointer-events: auto;
+  font-family: var(--font-mono);
+}
+
+.topology-edge-badge__item {
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+  color: var(--color-text-muted);
+  background: var(--color-surface-3);
+}
+
+.topology-edge-badge__item--good {
+  color: var(--color-success);
+  background: var(--color-success-bg);
+}
+
+.topology-edge-badge__item--warn {
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
+}
+
 /* Menu contextuel (clic droit sur le canevas, un nœud ou une arête) — même pattern visuel que
    .profile-menu (Topbar.tsx), mais positionné librement au point de clic. */
 .context-menu {
@@ -526,131 +663,253 @@
   margin-top: 4px;
 }
 
-/* --- Modal de détail complet d'un nœud (clic droit -> "Voir le détail", TopologyNodeDetailModal.tsx)
-   Même famille visuelle que .volume-files-modal/.container-console-modal (console.css) : un enfant
-   plus large que .modal-card, qui grandit automatiquement dessus (min-width auto d'un flex item,
-   voir modal.css) — pas de nouvelle variante de <Modal> à maintenir. Volontairement TRÈS large
-   (jusqu'à 1180px) : l'objectif est qu'un écran de bureau normal affiche tout le contenu (identité,
-   métriques, réseau, volumes, labels, env) sans jamais faire défiler la modal entière — seule
-   .topology-detail-modal__vulns (potentiellement longue) garde un scroll cantonné à elle-même,
-   voir plus bas. --------------------------------------------------------------------------- */
-.topology-detail-modal {
-  width: 1180px;
-  max-width: 94vw;
-  max-height: 90vh;
-  padding: 22px 26px 26px;
+/* --- Panneau de détail complet d'un nœud (clic droit -> "Voir le détail",
+   TopologyNodeDetailPanel.tsx) — ANCRÉ en overlay fixe sur le bord droit du canevas, MÊME PATTERN
+   D'ANCRAGE que .topology-subgraph-panel ci-dessus (position: absolute à l'intérieur de
+   .topology-graph, devenu position: relative) plutôt qu'une <Modal> centrée : c'est la modal
+   centrée en grille qui débordait encore horizontalement sur écran étroit (voir capture) qu'il
+   remplace. Largeur FIXE raisonnable, pleine hauteur du canevas, `overflow-x: hidden` partout —
+   le contenu tronque en ellipsis (+ title=tooltip, voir KeyValueList.tsx) ou wrap (word-break) au
+   lieu de déborder, jamais de scrollbar horizontale. z-index au-dessus de .topology-subgraph-panel
+   (40) : ce panneau doit rester visible par-dessus quand il est ouvert depuis l'intérieur du
+   sous-graphe (onOpenDetail). --------------------------------------------------------------- */
+.topology-detail-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  width: 440px;
+  max-width: 100%;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  background: var(--color-surface-1);
+  border-left: 1px solid var(--color-border);
+  box-shadow: -12px 0 32px rgba(0, 0, 0, 0.28);
+  overflow-x: hidden;
+  overflow-y: auto;
+  animation: topology-detail-panel-in 0.18s ease-out;
 }
 
-.topology-detail-modal__header {
+@keyframes topology-detail-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topology-detail-panel {
+    animation: none;
+  }
+}
+
+/* Sous ~640px de large (canevas mobile/tablette étroite), le panneau devient un plein-écran
+   ancré (toute la largeur du canevas) plutôt qu'un dock étroit de 440px qui laisserait à peine
+   de place au contenu — toujours ancré (jamais une <Modal> centrée avec marge), toujours
+   `overflow-x: hidden`. */
+@media (max-width: 640px) {
+  .topology-detail-panel {
+    width: 100%;
+    left: 0;
+    border-left: none;
+  }
+}
+
+.topology-detail-panel__header {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
+  gap: 10px;
   flex-shrink: 0;
+  padding: 16px 16px 12px;
+  border-bottom: 1px solid var(--color-border);
 }
 
-.topology-detail-modal__icon {
+.topology-detail-panel__icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 34px;
-  height: 34px;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
   border-radius: var(--radius-md);
   background: var(--color-surface-2);
-  flex-shrink: 0;
 }
 
-.topology-detail-modal__icon svg {
-  width: 18px;
-  height: 18px;
+.topology-detail-panel__icon svg {
+  width: 17px;
+  height: 17px;
 }
 
-.topology-detail-modal__icon--container { color: var(--accent-start, #3b6fef); }
-.topology-detail-modal__icon--volume { color: var(--color-warning); }
-.topology-detail-modal__icon--network { color: var(--accent-end, #7c5cfc); }
-.topology-detail-modal__icon--nutanix-vm { color: var(--color-success); }
+.topology-detail-panel__icon--container { color: var(--accent-start, #3b6fef); }
+.topology-detail-panel__icon--volume { color: var(--color-warning); }
+.topology-detail-panel__icon--network { color: var(--accent-end, #7c5cfc); }
+.topology-detail-panel__icon--nutanix-vm { color: var(--color-success); }
 
-.topology-detail-modal__heading {
+.topology-detail-panel__heading {
   flex: 1;
   min-width: 0;
 }
 
-.topology-detail-modal__title {
-  font-size: 16px;
+.topology-detail-panel__title {
+  font-size: 15px;
   font-weight: 600;
-  word-break: break-word;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.topology-detail-modal__subtitle {
-  font-size: 12.5px;
+.topology-detail-panel__subtitle {
+  font-size: 12px;
   color: var(--color-text-muted);
   font-family: var(--font-mono);
   margin-top: 2px;
-  word-break: break-all;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.topology-detail-modal__body {
+.topology-detail-panel__close {
+  flex-shrink: 0;
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.topology-detail-panel__close:hover {
+  background: var(--color-surface-2);
+  color: var(--color-text);
+}
+
+/* Onglets réels (façon Railway : Deployments/Variables/Metrics/Settings) — adaptés au kind du
+   nœud (TopologyNodeDetailPanel.tsx#tabsForKind), pas affichés du tout s'il n'y en a qu'un seul
+   (volume/network/nutanix-vm : rien d'autre de pertinent à montrer). */
+.topology-detail-panel__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  flex-shrink: 0;
+  padding: 8px 10px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.topology-detail-panel__tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--color-text-muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 8px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.topology-detail-panel__tab:hover {
+  color: var(--color-text);
+}
+
+.topology-detail-panel__tab.is-active {
+  color: var(--accent-end, #7c5cfc);
+  border-bottom-color: var(--accent-end, #7c5cfc);
+}
+
+.topology-detail-panel__body {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  /* Pas d'overflow-y ici, volontairement : le contenu doit tenir dans la grille ci-dessous sur un
-     écran de bureau normal. .modal-card (modal.css) garde son overflow-y:auto en dernier recours
-     pour un très petit viewport, mais ce n'est plus le mode de fonctionnement attendu. */
+  gap: 16px;
+  padding: 16px;
+  overflow-x: hidden;
 }
 
-.topology-detail-modal__chips {
+.topology-detail-panel__chips {
   margin: 0;
 }
 
-/* Grille identité/métriques (gauche) + réseau/volumes/labels/env (droite) — 2 colonnes sur un
-   écran de bureau normal, 1 seule sous ~860px (tablette/mobile). Chaque colonne garde un flux
-   vertical normal, SANS scroll individuel : seule .topology-detail-modal__vulns (pleine largeur,
-   ci-dessous) peut légitimement dépasser et scroller en interne. */
-.topology-detail-modal__grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px 32px;
-  align-items: start;
-}
-
-.topology-detail-modal__col {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  min-width: 0;
-}
-
-@media (max-width: 860px) {
-  .topology-detail-modal__grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-/* Section vulnérabilités — pleine largeur, sous la grille : c'est la seule zone de la modal
-   susceptible d'être vraiment longue (des dizaines de CVE), donc la seule à garder un scroll
-   INTERNE cantonné à elle-même (.scan-vuln-table-wrap, components.css, complété ci-dessous). */
-.topology-detail-modal__vulns {
-  border-top: 1px solid var(--color-border);
-  padding-top: 16px;
+/* Section vulnérabilités — son propre scroll interne si la table est longue (des dizaines de CVE),
+   plutôt que d'étirer tout le panneau (.scan-vuln-table-wrap, components.css, complété ci-dessous). */
+.topology-detail-panel__vulns {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
 }
 
-.topology-detail-modal__vuln-table-wrap {
+.topology-detail-panel__vuln-table-wrap {
   max-height: 340px;
 }
 
-.topology-detail-modal__hint {
+.topology-detail-panel__hint {
   font-size: 11.5px;
   color: var(--color-text-faint);
   margin: 0;
 }
 
-.topology-detail-modal__scan-cta {
+.topology-detail-panel__scan-cta {
   margin-top: 10px;
+}
+
+/* Liste des networks connectés (onglet "Réseau") — chaque entrée cliquable navigue le panneau VERS
+   le détail de ce network (brique ou vrai nœud, voir TopologyNodeDetailPanel.tsx#openNetworkAttachment),
+   sans fermer/rouvrir le panneau. */
+.topology-detail-panel__attachment-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.topology-detail-panel__attachment-btn {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  color: var(--color-text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.topology-detail-panel__attachment-btn:hover {
+  background: var(--color-surface-3);
+  border-color: var(--accent-end);
+}
+
+.topology-detail-panel__attachment-label {
+  max-width: 100%;
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topology-detail-panel__attachment-meta {
+  font-size: 11px;
+  color: var(--color-text-faint);
+  font-family: var(--font-mono);
 }
 
 /* Ligne de variable d'environnement avec révélation à la demande (secrets masqués par défaut) —

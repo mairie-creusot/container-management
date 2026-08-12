@@ -8,8 +8,13 @@
  * POST   /api/reverse-proxy/push        — repousse la config complète vers Caddy sans rien
  *                                          changer côté QUAI (utile après un redémarrage de
  *                                          Caddy) — operator/admin.
- * GET    /api/reverse-proxy/status      — Caddy joignable ou non, même pattern que
- *                                          GET /api/scanners/status (routes/scan.ts).
+ * GET    /api/reverse-proxy/status         — Caddy joignable ou non, même pattern que
+ *                                             GET /api/scanners/status (routes/scan.ts).
+ * GET    /api/reverse-proxy/ca-certificate — certificat racine (PEM) de l'autorité TLS interne de
+ *                                             Caddy, à installer manuellement une fois côté poste
+ *                                             client pour que les certificats HTTPS émis pour
+ *                                             *.lecreusot.priv soient reconnus (voir
+ *                                             services/reverseProxy.ts#getCaCertificate).
  *
  * Un échec de push vers Caddy (voir services/reverseProxy.ts#CaddyPushFailedError) ne fait
  * jamais disparaître silencieusement une mutation qui a pourtant eu lieu côté QUAI : POST
@@ -24,6 +29,7 @@ import {
   CaddyPushFailedError,
   createRoute,
   deleteRoute,
+  getCaCertificate,
   getReverseProxyStatus,
   listRoutes,
   pushConfigToCaddy,
@@ -107,5 +113,20 @@ export default async function reverseProxyRoutes(fastify: FastifyInstance): Prom
 
   fastify.get("/api/reverse-proxy/status", async (_request, reply) => {
     return reply.send(await getReverseProxyStatus());
+  });
+
+  fastify.get("/api/reverse-proxy/ca-certificate", async (_request, reply) => {
+    try {
+      const pem = await getCaCertificate();
+      // text/plain (pas application/x-pem-file, non universellement reconnu) + Content-Disposition
+      // pour que le navigateur propose directement "Enregistrer sous quai-reverse-proxy-ca.pem"
+      // plutôt que d'afficher le PEM brut dans l'onglet.
+      return reply
+        .header("Content-Type", "application/x-pem-file")
+        .header("Content-Disposition", 'attachment; filename="quai-reverse-proxy-ca.pem"')
+        .send(pem);
+    } catch (err) {
+      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) });
+    }
   });
 }

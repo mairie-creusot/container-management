@@ -1,11 +1,16 @@
 /**
  * GET    /api/remote-environments           — liste des environnements Docker distants persistés
- *                                              (jamais ca/cert/key, voir remoteDockerStore.ts#toRef).
- * POST   /api/remote-environments           — { name, host, port, tls? }, admin uniquement.
- * PATCH  /api/remote-environments/:id       — modifie nom/host/port/tls, admin uniquement.
+ *                                              (jamais ca/cert/key/password/privateKey, voir
+ *                                              remoteDockerStore.ts#toRef).
+ * POST   /api/remote-environments           — { name, host, port?, transport?, tls?, ssh? },
+ *                                              admin uniquement. `transport` défaut "tcp-tls"
+ *                                              (comportement historique inchangé) ; `port`
+ *                                              défaut 22 pour transport "ssh".
+ * PATCH  /api/remote-environments/:id       — modifie nom/host/port/transport/tls/ssh, admin uniquement.
  * DELETE /api/remote-environments/:id       — admin uniquement.
  * GET    /api/remote-environments/:id/test  — test de connectivité réel (docker.ping() sur le
- *                                              client distant résolu, voir docker.ts#getClient).
+ *                                              client distant résolu, voir docker.ts#getClient —
+ *                                              tunnel SSH réel établi pour transport "ssh").
  *
  * Un environnement Docker distant est un point d'accès administratif à un démon Docker entier
  * (au même titre que le démon local) : mêmes règles d'accès que secrets.ts, plus strictes que
@@ -22,7 +27,7 @@ import {
   RemoteDockerValidationError,
   updateRemoteDockerEnvironment,
 } from "../services/remoteDockerStore.js";
-import type { RemoteDockerTls } from "../services/remoteDockerStore.js";
+import type { RemoteDockerSsh, RemoteDockerTls, RemoteDockerTransport } from "../services/remoteDockerStore.js";
 import { getClient, isDockerReachable } from "../services/docker.js";
 
 interface TlsBody {
@@ -31,19 +36,30 @@ interface TlsBody {
   key?: string;
 }
 
+interface SshBody {
+  username?: string;
+  password?: string;
+  privateKey?: string;
+}
+
 interface CreateRemoteEnvironmentBody {
   name?: string;
   host?: string;
   port?: number;
+  transport?: RemoteDockerTransport;
   tls?: TlsBody;
+  ssh?: SshBody;
 }
 
 interface UpdateRemoteEnvironmentBody {
   name?: string;
   host?: string;
   port?: number;
+  transport?: RemoteDockerTransport;
   tls?: TlsBody;
   clearTls?: boolean;
+  ssh?: SshBody;
+  clearSsh?: boolean;
 }
 
 /** true (et réponse 403 déjà envoyée) si la session n'a pas le rôle admin — même garde que secrets.ts. */
@@ -64,6 +80,21 @@ function tlsInputFromBody(tls: TlsBody | undefined): RemoteDockerTls | undefined
   };
 }
 
+/**
+ * Ne juge jamais de la validité des identifiants ici (délégué à
+ * remoteDockerStore.ts#assertValidInput) — se contente de reformer un `RemoteDockerSsh` à partir
+ * du corps de requête si `ssh` a été fourni, `username` manquant devenant "" (rejeté proprement
+ * par le store plutôt que silencieusement ignoré).
+ */
+function sshInputFromBody(ssh: SshBody | undefined): RemoteDockerSsh | undefined {
+  if (!ssh) return undefined;
+  return {
+    username: ssh.username?.trim() ?? "",
+    ...(ssh.password !== undefined ? { password: ssh.password } : {}),
+    ...(ssh.privateKey !== undefined ? { privateKey: ssh.privateKey } : {}),
+  };
+}
+
 export default async function remoteEnvironmentsRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get("/api/remote-environments", async (_request, reply) => {
     return reply.send(await listRemoteDockerEnvironments());
@@ -75,16 +106,27 @@ export default async function remoteEnvironmentsRoutes(fastify: FastifyInstance)
     const name = request.body?.name?.trim();
     const host = request.body?.host?.trim();
     const port = request.body?.port;
-    if (!name || !host || port === undefined) {
-      return reply.code(400).send({ error: "name, host and port are required" });
+    const transport = request.body?.transport;
+    if (!name || !host) {
+      return reply.code(400).send({ error: "name and host are required" });
+    }
+    // port reste requis pour "tcp-tls" (pas de port Docker par défaut sensé) mais optionnel pour
+    // "ssh" (défaut 22, résolu par remoteDockerStore.ts) — même règle appliquée côté store, ici
+    // c'est juste un échec plus tôt/plus clair pour le cas "tcp-tls" le plus courant.
+    if ((transport ?? "tcp-tls") === "tcp-tls" && port === undefined) {
+      return reply.code(400).send({ error: 'port is required for transport "tcp-tls"' });
     }
 
+    const tls = tlsInputFromBody(request.body?.tls);
+    const ssh = sshInputFromBody(request.body?.ssh);
     try {
       const created = await createRemoteDockerEnvironment({
         name,
         host,
-        port,
-        ...(tlsInputFromBody(request.body?.tls) ? { tls: tlsInputFromBody(request.body?.tls)! } : {}),
+        ...(port !== undefined ? { port } : {}),
+        ...(transport !== undefined ? { transport } : {}),
+        ...(tls ? { tls } : {}),
+        ...(ssh ? { ssh } : {}),
       });
       return reply.code(201).send(created);
     } catch (err) {
@@ -108,14 +150,19 @@ export default async function remoteEnvironmentsRoutes(fastify: FastifyInstance)
     async (request, reply) => {
       if (rejectIfNotAdmin(request, reply)) return;
 
-      const { name, host, port, tls, clearTls } = request.body ?? {};
+      const { name, host, port, transport, tls, clearTls, ssh, clearSsh } = request.body ?? {};
+      const tlsInput = tlsInputFromBody(tls);
+      const sshInput = sshInputFromBody(ssh);
       try {
         const updated = await updateRemoteDockerEnvironment(request.params.id, {
           ...(name !== undefined ? { name } : {}),
           ...(host !== undefined ? { host } : {}),
           ...(port !== undefined ? { port } : {}),
-          ...(tlsInputFromBody(tls) ? { tls: tlsInputFromBody(tls)! } : {}),
+          ...(transport !== undefined ? { transport } : {}),
+          ...(tlsInput ? { tls: tlsInput } : {}),
           ...(clearTls !== undefined ? { clearTls } : {}),
+          ...(sshInput ? { ssh: sshInput } : {}),
+          ...(clearSsh !== undefined ? { clearSsh } : {}),
         });
         if (!updated) {
           return reply.code(404).send({ error: `Remote Docker environment "${request.params.id}" not found` });

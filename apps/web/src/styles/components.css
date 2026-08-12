@@ -560,17 +560,31 @@
   justify-content: space-between;
   gap: 10px;
   font-size: 12.5px;
+  /* min-width: 0 sur les DEUX enfants flex ci-dessous, pas seulement sur .kv-row lui-même : un
+     flex item garde par défaut un min-width implicite = la largeur de son contenu non wrappé, ce
+     qui le fait déborder de son parent même avec word-break/ellipsis dessus (piège flexbox
+     classique) — c'est la cause racine du débordement horizontal observé sur la modal de détail
+     (scrollbar visible, badges coupés) avant l'introduction de TopologyNodeDetailPanel.tsx. */
 }
 
 .kv-row__key {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 55%;
   color: var(--color-text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .kv-row__value {
+  flex: 1 1 auto;
+  min-width: 0;
   font-family: var(--font-mono);
   color: var(--color-text);
   text-align: right;
-  word-break: break-all;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 /* GitOps */

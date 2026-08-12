@@ -117,8 +117,9 @@ services:
       - caddy_config:/config
     ports:
       - "80:80"
-      # 443 exposé pour un futur lot TLS interne (auto-signé) — non utilisé pour l'instant,
-      # Caddy ne sert qu'en HTTP (voir ARCHITECTURE.md § "Reverse proxy interne").
+      # HTTPS interne (autorité de certification interne à Caddy, jamais ACME/Let's Encrypt —
+      # voir apps/api/src/services/reverseProxy.ts#pushConfigToCaddy et ARCHITECTURE.md
+      # § "Reverse proxy interne").
       - "443:443"
     networks:
       - quai-dev

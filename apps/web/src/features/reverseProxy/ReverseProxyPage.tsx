@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
+import { apiUrl } from "@/api/client";
 import { createRoute, deleteRoute, fetchCaddyStatus, fetchRoutes } from "@/features/reverseProxy/reverseProxySlice";
 import { fetchContainers } from "@/features/containers/containersSlice";
 import { canOperate } from "@/features/auth/authSlice";
@@ -153,16 +154,27 @@ export default function ReverseProxyPage() {
           )}
         </div>
 
-        <div className="card" style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
+        <div className="card" style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
           <span
             className={`status-pill ${caddyStatus?.reachable ? "status-pill--success" : "status-pill--critical"}`}
           >
             {caddyStatusLoading ? "Vérification…" : caddyStatus?.reachable ? "Caddy joignable" : "Caddy injoignable"}
           </span>
+          {caddyStatus?.httpsEnabled && <span className="status-pill status-pill--success">HTTPS actif (:443)</span>}
           <span style={{ fontSize: 12.5, color: "var(--color-text-muted)" }}>
             {caddyStatus?.adminUrl ?? "http://caddy:2019"} — API d'administration JSON, jamais exposée en dehors du
             réseau docker-compose.
           </span>
+          {caddyStatus?.httpsEnabled && (
+            <a
+              href={apiUrl("/reverse-proxy/ca-certificate")}
+              className="btn btn-ghost btn-sm"
+              style={{ marginLeft: "auto" }}
+              download
+            >
+              Télécharger le certificat racine (.pem)
+            </a>
+          )}
         </div>
 
         <div className="card" style={{ marginBottom: 16 }}>
@@ -170,9 +182,14 @@ export default function ReverseProxyPage() {
             <strong style={{ color: "var(--color-text)" }}>Important — résolution DNS non prise en charge ici :</strong>{" "}
             un sous-domaine (ex : <code>monapp.lecreusot.priv</code>) doit ensuite être résolu vers l'hôte Docker qui
             exécute Caddy par le DNS interne de la mairie ou une entrée de fichier hosts — cette page ne fait que
-            configurer le routage HTTP côté Caddy une fois la requête arrivée, elle ne peut pas garantir cette
-            résolution externe. Le trafic servi est en HTTP uniquement pour l'instant (pas de TLS interne dans ce
-            premier lot).
+            configurer le routage une fois la requête arrivée, elle ne peut pas garantir cette résolution externe.
+          </p>
+          <p style={{ margin: "10px 0 0", fontSize: 13, color: "var(--color-text-muted)" }}>
+            <strong style={{ color: "var(--color-text)" }}>HTTPS (:443)</strong> : Caddy sert désormais aussi en
+            HTTPS, avec des certificats émis par sa propre autorité interne (jamais ACME/Let's Encrypt — ces noms ne
+            sont pas résolubles publiquement). Le navigateur affichera un avertissement "connexion non sécurisée"
+            tant que le certificat racine ci-dessus n'a pas été installé manuellement comme autorité de confiance sur
+            le poste (une fois). Le port 80 (HTTP) reste servi en parallèle, sans redirection forcée.
           </p>
         </div>
 

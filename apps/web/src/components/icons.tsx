@@ -288,3 +288,56 @@ export function IconTerminal({ className }: IconProps) {
     className,
   );
 }
+
+/** Œil ouvert — "Révéler" une valeur de secret (SecretsPage.tsx), jamais affichée par défaut. */
+export function IconEye({ className }: IconProps) {
+  return base(
+    <>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </>,
+    className,
+  );
+}
+
+/** Œil barré — "Masquer de nouveau" une valeur de secret révélée (SecretsPage.tsx). */
+export function IconEyeOff({ className }: IconProps) {
+  return base(
+    <>
+      <path d="M17.9 17.9A10.6 10.6 0 0 1 12 20c-6.5 0-10-7-10-7a18.6 18.6 0 0 1 4.2-5.2" />
+      <path d="M9.9 4.6A9.7 9.7 0 0 1 12 4c6.5 0 10 7 10 7a18.5 18.5 0 0 1-2.3 3.3" />
+      <path d="M9.9 9.9a3 3 0 0 0 4.2 4.2" />
+      <path d="M2 2l20 20" />
+    </>,
+    className,
+  );
+}
+
+/** Copier — bouton "Copier" à côté d'une valeur de secret révélée (Clipboard API, SecretsPage.tsx). */
+export function IconCopy({ className }: IconProps) {
+  return base(
+    <>
+      <rect x="9" y="9" width="12" height="12" rx="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </>,
+    className,
+  );
+}
+
+/** Coche — retour visuel bref "Copié" après un clic sur IconCopy. */
+export function IconCheck({ className }: IconProps) {
+  return base(<path d="M4 12.5l5 5L20 6" />, className);
+}
+
+/** GitHub (marque octocat simplifiée, tracé plein — pas base(), les autres icônes sont en contour) : Sidebar/GitHubDeployPage.tsx. */
+export function IconGithub({ className }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" className={className} aria-hidden="true">
+      <path
+        fillRule="evenodd"
+        clipRule="evenodd"
+        d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.482 0-.237-.008-.866-.013-1.7-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.833.092-.647.35-1.088.636-1.339-2.221-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.026 2.747-1.026.546 1.378.203 2.397.1 2.65.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.31.678.921.678 1.856 0 1.34-.012 2.421-.012 2.751 0 .268.18.58.688.482A10.02 10.02 0 0022 12.017C22 6.484 17.523 2 12 2z"
+      />
+    </svg>
+  );
+}

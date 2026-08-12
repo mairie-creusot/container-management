@@ -222,4 +222,124 @@ describe("GET /api/remote-environments/:id/test", () => {
 
     await remoteDockerStore.deleteRemoteDockerEnvironment(created.id);
   });
+
+  it("honestly reports ok:false against an SSH host that does not resolve — real tunnel attempt, never fabricated", async () => {
+    app = buildServer();
+    const created = await remoteDockerStore.createRemoteDockerEnvironment({
+      name: "ssh-unreachable-test",
+      host: "docker-remote.invalid.does-not-exist.example",
+      transport: "ssh",
+      ssh: { username: "deploy", password: "does-not-matter" },
+    });
+    expect(created.transport).toBe("ssh");
+    expect(created.port).toBe(22); // défaut résolu côté store
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/remote-environments/${created.id}/test`,
+      cookies: cookieFor(["viewer"]),
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json() as { ok: boolean; message: string };
+    expect(body.ok).toBe(false);
+    expect(body.message).toBeTruthy();
+
+    await remoteDockerStore.deleteRemoteDockerEnvironment(created.id);
+  }, 15000);
+});
+
+describe("SSH transport", () => {
+  it("rejects transport ssh without username with 400", async () => {
+    app = buildServer();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/remote-environments",
+      cookies: cookieFor(["admin"]),
+      payload: { name: "ssh-no-user", host: "vps.example", transport: "ssh", ssh: { password: "secret" } },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects transport ssh without password or privateKey with 400", async () => {
+    app = buildServer();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/remote-environments",
+      cookies: cookieFor(["admin"]),
+      payload: { name: "ssh-no-secret", host: "vps.example", transport: "ssh", ssh: { username: "deploy" } },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("creates with transport ssh (port defaults to 22), never leaks password/privateKey, encrypts them at rest", async () => {
+    app = buildServer();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/remote-environments",
+      cookies: cookieFor(["admin"]),
+      payload: {
+        name: "ssh-vps",
+        host: "vps.example.internal",
+        transport: "ssh",
+        ssh: { username: "deploy", password: "PLAINTEXT-SSH-PASSWORD" },
+      },
+    });
+    expect(response.statusCode).toBe(201);
+    const body = response.json() as Record<string, unknown>;
+    expect(body).toMatchObject({
+      name: "ssh-vps",
+      host: "vps.example.internal",
+      port: 22,
+      transport: "ssh",
+      sshUsername: "deploy",
+      hasSshCredentials: true,
+    });
+    expect(body).not.toHaveProperty("ssh");
+    expect(JSON.stringify(body)).not.toContain("PLAINTEXT-SSH-PASSWORD");
+
+    const raw = await fs.readFile(tmpRemoteDockerPath, "utf-8");
+    expect(raw).not.toContain("PLAINTEXT-SSH-PASSWORD");
+    expect(raw).toContain("enc:v1:");
+
+    const effective = await remoteDockerStore.getEffectiveRemoteDockerConfig(body.id as string);
+    expect(effective?.ssh).toEqual({ username: "deploy", password: "PLAINTEXT-SSH-PASSWORD" });
+    expect(effective?.tls).toBeUndefined();
+
+    await remoteDockerStore.deleteRemoteDockerEnvironment(body.id as string);
+  });
+
+  it("switching an environment from tcp-tls to ssh drops the old TLS credentials and requires new SSH ones", async () => {
+    app = buildServer();
+    const created = await remoteDockerStore.createRemoteDockerEnvironment({
+      name: "switch-transport",
+      host: "host.example",
+      port: 2376,
+      tls: { cert: "CERT-CONTENT", key: "KEY-CONTENT" },
+    });
+
+    // Passer en ssh sans identifiants ssh : rejeté proprement (les anciens identifiants TLS
+    // n'ont plus de sens pour ce transport).
+    const rejected = await app.inject({
+      method: "PATCH",
+      url: `/api/remote-environments/${created.id}`,
+      cookies: cookieFor(["admin"]),
+      payload: { transport: "ssh" },
+    });
+    expect(rejected.statusCode).toBe(400);
+
+    const switched = await app.inject({
+      method: "PATCH",
+      url: `/api/remote-environments/${created.id}`,
+      cookies: cookieFor(["admin"]),
+      payload: { transport: "ssh", ssh: { username: "deploy", privateKey: "PRIVATE-KEY-CONTENT" } },
+    });
+    expect(switched.statusCode).toBe(200);
+    expect(switched.json()).toMatchObject({ transport: "ssh", hasTls: false, hasSshCredentials: true });
+
+    const effective = await remoteDockerStore.getEffectiveRemoteDockerConfig(created.id);
+    expect(effective?.tls).toBeUndefined();
+    expect(effective?.ssh).toEqual({ username: "deploy", privateKey: "PRIVATE-KEY-CONTENT" });
+
+    await remoteDockerStore.deleteRemoteDockerEnvironment(created.id);
+  });
 });

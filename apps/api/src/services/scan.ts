@@ -24,6 +24,10 @@
  * vulnérabilités à la première exécution) : startScan() retourne immédiatement le scan à l'état
  * "running" et le process continue en arrière-plan ; le frontend récupère le résultat par
  * polling (GET /api/scans/:scanId), même principe que startRun() dans iac/runner.ts.
+ *
+ * `trigger` ("manual" | "automatic", voir types.ts#ScanTrigger) distingue un scan lancé par un
+ * clic operator/admin (ImagesPage.tsx) d'un scan lancé tout seul par services/scanScheduler.ts
+ * sur une image réellement déployée — même fichier, même historique, seul un champ change.
  */
 
 import { execFile, spawn, type ExecFileException } from "node:child_process";
@@ -31,7 +35,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { config } from "../config.js";
-import type { ScannerId, ScannerStatus, ScanResult, Vulnerability, VulnSeverity } from "../types.js";
+import type { ScannerId, ScannerStatus, ScanResult, ScanTrigger, Vulnerability, VulnSeverity } from "../types.js";
 
 const SEVERITIES: readonly VulnSeverity[] = ["Critical", "High", "Medium", "Low", "Negligible", "Unknown"];
 
@@ -353,9 +357,15 @@ function execFileExitCode(err: ExecFileException | null): number | null {
  * Lance le scanner demandé sur `imageReference` en arrière-plan et retourne immédiatement le
  * scan à l'état "running" — la commande continue de tourner après le retour de cette fonction ;
  * voir getScan()/listScansForImage() pour suivre sa progression par polling. `scanner` par
- * défaut à "grype" pour ne rien changer au comportement des appelants existants.
+ * défaut à "grype" et `trigger` par défaut à "manual" pour ne rien changer au comportement des
+ * appelants existants (POST /api/images/:id/scan) ; `trigger: "automatic"` est passé uniquement
+ * par services/scanScheduler.ts (scan périodique en tâche de fond, jamais déclenché par un clic).
  */
-export async function startScan(imageReference: string, scanner: ScannerId = "grype"): Promise<ScanResult> {
+export async function startScan(
+  imageReference: string,
+  scanner: ScannerId = "grype",
+  trigger: ScanTrigger = "manual",
+): Promise<ScanResult> {
   const scan: ScanResult = {
     id: randomUUID(),
     scanner,
@@ -365,6 +375,7 @@ export async function startScan(imageReference: string, scanner: ScannerId = "gr
     finishedAt: null,
     vulnerabilities: [],
     summary: emptySummary(),
+    trigger,
   };
   await appendScanEvent(scan);
 

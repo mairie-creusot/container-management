@@ -52,6 +52,9 @@ importers:
       simple-git:
         specifier: ^3.25.0
         version: 3.36.0
+      ssh2:
+        specifier: ^1.17.0
+        version: 1.17.0
     devDependencies:
       '@types/dockerode':
         specifier: ^3.3.31
@@ -68,6 +71,9 @@ importers:
       '@types/node':
         specifier: ^20.14.13
         version: 20.19.43
+      '@types/ssh2':
+        specifier: ^1.15.5
+        version: 1.15.5
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1

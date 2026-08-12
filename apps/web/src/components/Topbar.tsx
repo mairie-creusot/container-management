@@ -15,7 +15,10 @@ function initials(name: string): string {
   return (first + last).toUpperCase() || "?";
 }
 
-const SEARCHABLE_VIEWS = new Set(["images", "containers", "registries"]);
+// "secrets" : SecretsPage.tsx filtre déjà `items` sur `state.ui.searchQuery` (par nom), mais
+// sans entrée ici ce champ de recherche n'était jamais affiché — la liste devient longue avec
+// des dizaines de secrets, ce filtre existant restait donc inutilisable en pratique.
+const SEARCHABLE_VIEWS = new Set(["images", "containers", "registries", "secrets"]);
 
 export default function Topbar() {
   const dispatch = useAppDispatch();

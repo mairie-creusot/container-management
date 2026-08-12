@@ -18,6 +18,10 @@
  * POST   /api/containers/:id/restart   — redémarre un conteneur.
  * POST   /api/containers/:id/rename    — renomme un conteneur (équivalent `docker rename`).
  * DELETE /api/containers/:id           — supprime un conteneur (?force=true pour un conteneur en cours d'exécution).
+ *
+ * `secretEnv` résolu avec succès sur POST /api/containers enregistre aussi le lien secret<->
+ * conteneur (services/secretsStore.ts#recordSecretUsage, exposé via `usedBy` sur SecretRef) —
+ * maintenu à jour par renameSecretUsageContainer/removeSecretUsagesForContainer sur rename/delete.
  */
 
 import type { FastifyInstance } from "fastify";
@@ -33,7 +37,13 @@ import {
   stopContainer,
 } from "../services/docker.js";
 import { getKubernetesContainers } from "../services/kubernetes.js";
-import { getDecryptedSecretValue } from "../services/secretsStore.js";
+import {
+  getDecryptedSecretValue,
+  recordSecretUsage,
+  removeSecretUsagesForContainer,
+  renameSecretUsageContainer,
+  SecretExpiredError,
+} from "../services/secretsStore.js";
 import { remoteDockerIdFromEnvironmentId } from "../utils/environmentId.js";
 
 interface SecretEnvRef {
@@ -95,19 +105,32 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
 
     // Résolution des secrets référencés par nom (jamais côté client) — TOUJOURS avant l'appel
     // à createAndStartContainer : un secretName introuvable doit faire échouer la requête
-    // entière en 400, jamais créer le conteneur avec un env partiellement résolu.
+    // entière en 400, jamais créer le conteneur avec un env partiellement résolu. `resolvedSecretRefs`
+    // garde key/secretName (sans la valeur) pour enregistrer la liaison secret<->conteneur une
+    // fois le conteneur RÉELLEMENT créé ci-dessous (voir secretsStore.ts#recordSecretUsage) —
+    // c'est la SEULE façon dont un lien "usedBy" est établi, jamais deviné après coup.
     const secretEnv: string[] = [];
+    const resolvedSecretRefs: { key: string; secretName: string }[] = [];
     for (const ref of request.body?.secretEnv ?? []) {
       const key = ref.key?.trim();
       const secretName = ref.secretName?.trim();
       if (!key || !secretName) {
         return reply.code(400).send({ error: "secretEnv entries require both key and secretName" });
       }
-      const value = await getDecryptedSecretValue(secretName);
+      let value: string | null;
+      try {
+        value = await getDecryptedSecretValue(secretName);
+      } catch (err) {
+        if (err instanceof SecretExpiredError) {
+          return reply.code(400).send({ error: err.message });
+        }
+        throw err;
+      }
       if (value === null) {
         return reply.code(400).send({ error: `Secret "${secretName}" not found` });
       }
       secretEnv.push(`${key}=${value}`);
+      resolvedSecretRefs.push({ key, secretName });
     }
 
     try {
@@ -120,6 +143,18 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
         ...(network ? { network } : {}),
       });
       const containers = await getDockerContainers();
+      if (resolvedSecretRefs.length > 0) {
+        // Nom réel du conteneur créé (Docker peut en générer un aléatoire si `name` était omis) —
+        // relu depuis la liste fraîchement rechargée plutôt que de supposer `name`.
+        const createdName = containers.find((c) => c.id === created.id)?.name ?? name ?? created.id;
+        for (const ref of resolvedSecretRefs) {
+          await recordSecretUsage(ref.secretName, {
+            containerId: created.id,
+            containerName: createdName,
+            key: ref.key,
+          });
+        }
+      }
       return reply.code(201).send({ id: created.id, containers });
     } catch (err) {
       sendDockerActionError(reply, err);
@@ -179,6 +214,9 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
       }
       try {
         await renameContainer(request.params.id, name);
+        // Garde `usedBy` (SecretsPage.tsx) à jour avec le nom réel — sans ça, un secret lié à ce
+        // conteneur continuerait d'afficher son ancien nom après renommage.
+        await renameSecretUsageContainer(request.params.id, name);
         const containers = await getDockerContainers();
         return reply.send({ ok: true, containers });
       } catch (err) {
@@ -192,6 +230,9 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
     async (request, reply) => {
       try {
         await removeContainer(request.params.id, request.query.force === "true");
+        // Nettoyage immédiat et précis (suppression CONFIRMÉE) plutôt que d'attendre le filet de
+        // sécurité lazy de GET /api/secrets (purgeStaleSecretUsages) — voir secretsStore.ts.
+        await removeSecretUsagesForContainer(request.params.id);
         return reply.send({ ok: true });
       } catch (err) {
         sendDockerActionError(reply, err);
