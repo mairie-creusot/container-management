@@ -21,5 +21,13 @@ export default defineConfig({
       interval: 300,
     },
     host: true,
+    // Le reverse proxy interne (services/reverseProxy.ts) route des sous-domaines internes
+    // arbitraires (ex "monapp.lecreusot.priv") vers ce serveur en préservant le header Host
+    // d'origine — Vite >=5.1.9/5.4.12 refuse par défaut (403 "Blocked request") tout Host non
+    // listé explicitement (protection host-header côté prod). Ce fichier ne sert QUE le dev
+    // local en conteneur (deploy/compose/docker-compose.dev.yml) — l'image de production
+    // (Dockerfile.web) sert le build statique via un serveur HTTP classique, jamais ce serveur
+    // de dev — donc `true` (aucune restriction) reste raisonnable ici, pas en prod.
+    allowedHosts: true,
   },
 });
