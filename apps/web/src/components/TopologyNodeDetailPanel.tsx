@@ -5,11 +5,18 @@ import { fetchImages, fetchScanDetail, fetchScans, scanImage } from "@/features/
 import { fetchVolumes } from "@/features/volumes/volumesSlice";
 import { fetchNetworks } from "@/features/networks/networksSlice";
 import { canOperate } from "@/features/auth/authSlice";
+import { apiGet } from "@/api/client";
 import StatusPill from "@/components/StatusPill";
 import Gauge from "@/components/Gauge";
 import KeyValueList from "@/components/KeyValueList";
+import MetricsChart from "@/components/MetricsChart";
 import { KIND_ICON, formatMem, idWithoutPrefix } from "@/components/topologyGraphShared";
-import type { Topology, TopologyNode, TopologyNodeKind, VulnSeverity } from "@/types";
+import type { ContainerMetricPoint, Topology, TopologyNode, TopologyNodeKind, VulnSeverity } from "@/types";
+
+/** Rafraîchissement de l'onglet "Métriques" pendant qu'il est affiché — même ordre de grandeur que
+ * config.metrics.intervalMs côté API (30s par défaut) : inutile de sonder plus vite qu'un nouveau
+ * point n'est réellement écrit par metricsCollector.ts. */
+const METRICS_POLL_MS = 30_000;
 
 interface TopologyNodeDetailPanelProps {
   /** Nœud dont on affiche le détail complet — null referme le panneau. */
@@ -60,22 +67,23 @@ const HEALTH_SEMANTIC: Record<string, "success" | "critical" | "warning" | "neut
  * qui n'en est pas vraiment un que l'inverse. */
 const SECRET_KEY_PATTERN = /PASSWORD|SECRET|TOKEN|KEY/i;
 
-type TabId = "overview" | "network" | "volumes" | "variables" | "vulnerabilities";
+type TabId = "overview" | "network" | "volumes" | "variables" | "vulnerabilities" | "metrics";
 
 interface TabDef {
   id: TabId;
   label: string;
 }
 
-/** Onglets réels (pas de simples sections empilées) — adaptés au kind : un conteneur a les cinq,
+/** Onglets réels (pas de simples sections empilées) — adaptés au kind : un conteneur a les six,
  * les autres kinds (volume/network/nutanix-vm/ad-server) n'ont qu'un seul aperçu, rien d'autre à montrer de
- * pertinent (pas de ports/volumes/variables/vulnérabilités pour une ressource qui n'en a pas). */
+ * pertinent (pas de ports/volumes/variables/vulnérabilités/métriques pour une ressource qui n'en a pas). */
 const CONTAINER_TABS: TabDef[] = [
   { id: "overview", label: "Aperçu" },
   { id: "network", label: "Réseau" },
   { id: "volumes", label: "Volumes" },
   { id: "variables", label: "Variables" },
   { id: "vulnerabilities", label: "Vulnérabilités" },
+  { id: "metrics", label: "Métriques" },
 ];
 const OVERVIEW_ONLY_TABS: TabDef[] = [{ id: "overview", label: "Aperçu" }];
 
@@ -154,6 +162,8 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
   const networks = useAppSelector((s) => s.networks.items);
 
   const [activeTab, setActiveTab] = useState<TabId>("overview");
+  const [metricsPoints, setMetricsPoints] = useState<ContainerMetricPoint[]>([]);
+  const [metricsStatus, setMetricsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
 
   const kind = node?.kind;
   const rawId = node ? idWithoutPrefix(node.id) : "";
@@ -163,6 +173,10 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
   // arrivant sur un volume).
   useEffect(() => {
     setActiveTab("overview");
+    // Idem pour les métriques : jamais afficher un vieux point d'un précédent conteneur pendant
+    // le chargement du nouveau (voir l'effet de fetch ci-dessous, gardé par `activeTab === "metrics"`).
+    setMetricsPoints([]);
+    setMetricsStatus("idle");
   }, [node?.id]);
 
   // Récupère le détail complet selon le kind à l'ouverture (ou changement de nœud) — les résumés
@@ -201,6 +215,34 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
     if (imageRef) dispatch(fetchScans(imageRef.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dispatch, imageRef?.id]);
+
+  // Onglet "Métriques" : chargé à la demande (pas à l'ouverture du panneau, contrairement au
+  // détail/aux scans) — GET /api/containers/:id/metrics peut porter jusqu'à 7 jours d'historique
+  // (config.metrics.retentionMs côté API), inutile de le récupérer si l'utilisateur ne consulte
+  // jamais cet onglet. Rafraîchi périodiquement tant que l'onglet reste affiché (voir
+  // METRICS_POLL_MS) pour suivre les nouveaux points écrits par metricsCollector.ts.
+  useEffect(() => {
+    if (!node || node.kind !== "container" || activeTab !== "metrics") return;
+    let cancelled = false;
+    async function load() {
+      setMetricsStatus((s) => (s === "ready" ? s : "loading"));
+      try {
+        const points = await apiGet<ContainerMetricPoint[]>(`/containers/${rawId}/metrics`);
+        if (!cancelled) {
+          setMetricsPoints(points);
+          setMetricsStatus("ready");
+        }
+      } catch {
+        if (!cancelled) setMetricsStatus("error");
+      }
+    }
+    void load();
+    const interval = setInterval(() => void load(), METRICS_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [node, activeTab, rawId]);
 
   const scans = imageRef ? scansByImageId[imageRef.id] ?? [] : [];
   // "Dernier scan réussi" au sens strict — pas juste le plus récent des scans (qui peut être un
@@ -249,6 +291,15 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
   const volume = kind === "volume" ? volumes.find((v) => v.name === rawId) ?? null : null;
   const network = kind === "network" ? networks.find((n) => n.id === rawId) ?? null : null;
   const tabs = tabsForKind(node.kind);
+
+  // Plafonds de référence RÉELS pour l'onglet "Métriques" (façon Railway "Max 8 vCPU"/"Max 8 GB")
+  // — uniquement si une limite a effectivement été configurée à la création du conteneur
+  // (HostConfig.Memory/NanoCpus, voir ContainerDetail), jamais une valeur inventée. cpuPercent est
+  // normalisé par `onlineCpus * 100` côté API (docker.ts#readContainerUsage) : un NanoCpus de
+  // 500 000 000 (0,5 cœur) plafonne donc à 50, pas à 100.
+  const maxCpuPercent =
+    isContainerDetailReady && detail?.nanoCpus ? (detail.nanoCpus / 1_000_000_000) * 100 : undefined;
+  const maxMemBytes = isContainerDetailReady ? detail?.memoryLimitBytes : undefined;
 
   function handleLaunchScan() {
     if (imageRef) dispatch(scanImage({ id: imageRef.id }));
@@ -503,6 +554,39 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
                 <p className="topology-detail-panel__hint">
                   {latestSuccess.scanner === "grype" ? "Grype" : "OSV-Scanner"} · terminé {formatDate(latestSuccess.finishedAt)}
                 </p>
+              </>
+            )}
+          </div>
+        )}
+
+        {node.kind === "container" && activeTab === "metrics" && (
+          <div className="topology-detail-panel__metrics">
+            {metricsStatus === "loading" && metricsPoints.length === 0 && (
+              <div className="empty-state">Chargement des métriques…</div>
+            )}
+            {metricsStatus === "error" && <div className="error-banner">Impossible de charger l'historique de métriques.</div>}
+            {metricsStatus !== "loading" && metricsStatus !== "error" && metricsPoints.length === 0 && (
+              <div className="empty-state">
+                Aucun point de métrique connu pour ce conteneur pour l'instant — le scrape périodique
+                (toutes les 30s) n'a peut-être pas encore eu l'occasion de tourner.
+              </div>
+            )}
+            {metricsPoints.length > 0 && (
+              <>
+                <MetricsChart
+                  title="CPU"
+                  points={metricsPoints.map((p) => ({ timestamp: p.timestamp, value: p.cpuPercent }))}
+                  formatValue={(v) => `${v.toFixed(0)}%`}
+                  color="var(--accent-start, #3b6fef)"
+                  {...(maxCpuPercent !== undefined ? { maxValue: maxCpuPercent } : {})}
+                />
+                <MetricsChart
+                  title="Mémoire"
+                  points={metricsPoints.map((p) => ({ timestamp: p.timestamp, value: p.memBytes }))}
+                  formatValue={formatMem}
+                  color="var(--color-warning)"
+                  {...(maxMemBytes !== undefined ? { maxValue: maxMemBytes } : {})}
+                />
               </>
             )}
           </div>

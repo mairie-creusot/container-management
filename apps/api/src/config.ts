@@ -181,6 +181,13 @@ export const config = {
     // rapide (shallow), un build d'image peut prendre plusieurs minutes selon le Dockerfile.
     cloneTimeoutMs: readNumber("GITHUB_CLONE_TIMEOUT_MS", 30_000),
     buildTimeoutMs: readNumber("GITHUB_BUILD_TIMEOUT_MS", 300_000),
+    // Déploiement automatique sur push (webhook GitHub réel, cf. routes/githubWebhook.ts) :
+    // URL PUBLIQUE (joignable depuis github.com) de cette API, utilisée pour enregistrer le
+    // webhook via l'API GitHub (POST /repos/:owner/:repo/hooks#config.url). Undefined en dev par
+    // défaut (aucun hôte de dev local n'est joignable depuis GitHub) — activer le déploiement
+    // automatique répond alors 400 avec un message explicite plutôt que de créer un webhook
+    // inutilisable.
+    webhookBaseUrl: readOptionalString("GITHUB_WEBHOOK_BASE_URL"),
   },
   iac: {
     // Délai max accordé à une commande OpenTofu/Ansible/Packer lancée par services/iac/runner.ts

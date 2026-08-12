@@ -343,6 +343,18 @@ export function IconServer({ className }: IconProps) {
   );
 }
 
+/** Sauvegardes automatiques (nuage + flèche descendante, façon upload S3) — Sidebar/BackupsPage.tsx. */
+export function IconBackup({ className }: IconProps) {
+  return base(
+    <>
+      <path d="M7 18a4.5 4.5 0 01-1-8.9 5.5 5.5 0 0110.6-2A4.5 4.5 0 0117 18H7z" />
+      <path d="M12 10v7" />
+      <path d="M9 14.5L12 17.5 15 14.5" />
+    </>,
+    className,
+  );
+}
+
 /** GitHub (marque octocat simplifiée, tracé plein — pas base(), les autres icônes sont en contour) : Sidebar/GitHubDeployPage.tsx. */
 export function IconGithub({ className }: IconProps) {
   return (

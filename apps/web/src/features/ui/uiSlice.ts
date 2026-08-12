@@ -16,7 +16,9 @@ export type ViewId =
   | "secrets"
   | "reverse-proxy"
   | "ad-dns"
-  | "notification-channels";
+  | "notification-channels"
+  | "backups"
+  | "cron-jobs";
 
 interface UiState {
   currentView: ViewId;
@@ -82,6 +84,8 @@ const PAGE_TITLES: Partial<Record<ViewId, string>> = {
   secrets: "Secrets",
   "ad-dns": "DNS Active Directory",
   "notification-channels": "Canaux de notification",
+  backups: "Sauvegardes",
+  "cron-jobs": "Cron Jobs",
 };
 
 export function pageTitle(view: ViewId): string {

@@ -11,7 +11,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { config } from "../config.js";
-import type { GithubDeployment } from "../types.js";
+import type { GithubDeployment, GithubDeploymentCommit, GithubDeploymentTrigger } from "../types.js";
 
 function rootPath(): string {
   return path.join(path.dirname(path.resolve(config.setup.configPath)), "github-deployments");
@@ -70,6 +70,9 @@ export interface CreateDeploymentInput {
   ref: string;
   targetEnvironmentId: string | null;
   startedBy: string;
+  triggeredBy: GithubDeploymentTrigger;
+  commit?: GithubDeploymentCommit;
+  subdomain?: string;
 }
 
 /** Crée l'entrée d'historique à l'état "running" et initialise son fichier de log. */
@@ -85,11 +88,15 @@ export async function createDeploymentRecord(input: CreateDeploymentInput): Prom
     startedAt: new Date().toISOString(),
     finishedAt: null,
     startedBy: input.startedBy,
+    triggeredBy: input.triggeredBy,
+    ...(input.commit ? { commit: input.commit } : {}),
+    ...(input.subdomain ? { subdomain: input.subdomain } : {}),
   };
   await fs.mkdir(rootPath(), { recursive: true });
+  const trigger = input.triggeredBy === "webhook" ? "automatiquement (push GitHub)" : `par ${input.startedBy}`;
   await fs.writeFile(
     logPath(deployment.id),
-    `Déploiement ${input.owner}/${input.repo}@${input.ref} démarré par ${input.startedBy}\n\n`,
+    `Déploiement ${input.owner}/${input.repo}@${input.ref} démarré ${trigger}\n\n`,
     "utf-8",
   );
   await upsert(deployment);

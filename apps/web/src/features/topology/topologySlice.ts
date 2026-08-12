@@ -1,6 +1,6 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
-import { apiGet, apiPut } from "@/api/client";
-import type { Topology } from "@/types";
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut, ApiError } from "@/api/client";
+import type { Topology, TopologyGroup } from "@/types";
 
 export type NodePositions = Record<string, { x: number; y: number }>;
 
@@ -36,6 +36,52 @@ export const saveTopologyPositions = createAsyncThunk<NodePositions, NodePositio
   async (positions) => {
     await apiPut<{ ok: boolean }>("/topology/positions", { positions });
     return positions;
+  },
+);
+
+/**
+ * Regroupement de nœuds ("Regrouper" sur sélection multiple, voir TopologyGraph.tsx) —
+ * POST /api/topology/groups. Ne met pas à jour `state.data` directement : l'appelant redéclenche
+ * `fetchTopology()` juste après (même pattern que le reste de ce fichier/TopologyGraph.tsx), pour
+ * ne jamais désynchroniser le nouveau groupe de l'état RÉEL du graphe recalculé côté serveur.
+ */
+export const createTopologyGroup = createAsyncThunk<TopologyGroup, { label: string; nodeIds: string[] }, { rejectValue: string }>(
+  "topology/createGroup",
+  async (input, { rejectWithValue }) => {
+    try {
+      return await apiPost<TopologyGroup>("/topology/groups", input);
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : "Échec de la création du groupe.";
+      return rejectWithValue(message);
+    }
+  },
+);
+
+/** Renommer et/ou replier/déplier un groupe — PATCH /api/topology/groups/:id. */
+export const updateTopologyGroup = createAsyncThunk<
+  TopologyGroup,
+  { id: string; label?: string; collapsed?: boolean },
+  { rejectValue: string }
+>("topology/updateGroup", async ({ id, ...patch }, { rejectWithValue }) => {
+  try {
+    return await apiPatch<TopologyGroup>(`/topology/groups/${id}`, patch);
+  } catch (error) {
+    const message = error instanceof ApiError ? error.message : "Échec de la mise à jour du groupe.";
+    return rejectWithValue(message);
+  }
+});
+
+/** Dissocie un groupe (les membres redeviennent des nœuds autonomes) — DELETE /api/topology/groups/:id. */
+export const deleteTopologyGroup = createAsyncThunk<{ id: string }, string, { rejectValue: string }>(
+  "topology/deleteGroup",
+  async (id, { rejectWithValue }) => {
+    try {
+      await apiDelete<{ ok: boolean }>(`/topology/groups/${id}`);
+      return { id };
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : "Échec de la dissociation du groupe.";
+      return rejectWithValue(message);
+    }
   },
 );
 

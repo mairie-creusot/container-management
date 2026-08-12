@@ -46,6 +46,16 @@ function isPublicAuthRoute(pathname: string): boolean {
   return pathname.startsWith("/api/auth/");
 }
 
+/**
+ * POST /api/github/webhook (déploiement automatique sur push, cf. routes/githubWebhook.ts) :
+ * appelé directement par GitHub, qui n'a évidemment pas de cookie de session QUAI — authentifié
+ * à la place par une signature HMAC (`X-Hub-Signature-256`) vérifiée dans la route elle-même.
+ * Exception minimale et ciblée, même esprit que isPublicAuthRoute ci-dessus.
+ */
+function isGithubWebhookRoute(pathname: string): boolean {
+  return pathname === "/api/github/webhook";
+}
+
 /** Authentifie la requête courante (401/403 envoyés directement) ; retourne true si elle doit s'arrêter là. */
 async function requireSession(request: FastifyRequest, reply: FastifyReply, requireAdmin: boolean): Promise<boolean> {
   const token = request.cookies[config.session.cookieName];
@@ -75,6 +85,7 @@ async function authPlugin(fastify: FastifyInstance): Promise<void> {
     const pathname = pathnameOf(request.url);
     if (!pathname.startsWith("/api/")) return;
     if (isPublicAuthRoute(pathname)) return;
+    if (isGithubWebhookRoute(pathname) && request.method === "POST") return;
 
     if (pathname.startsWith("/api/setup/")) {
       const completed = await isSetupCompleted();

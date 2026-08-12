@@ -19,6 +19,8 @@ import remoteEnvironmentsReducer from "@/features/remoteEnvironments/remoteEnvir
 import githubReducer from "@/features/github/githubSlice";
 import adDnsReducer from "@/features/adDns/adDnsSlice";
 import notificationChannelsReducer from "@/features/notificationChannels/notificationChannelsSlice";
+import backupsReducer from "@/features/backups/backupsSlice";
+import cronJobsReducer from "@/features/cronJobs/cronJobsSlice";
 import { errorNotificationMiddleware } from "@/features/notifications/errorNotificationMiddleware";
 
 export const store = configureStore({
@@ -43,6 +45,8 @@ export const store = configureStore({
     github: githubReducer,
     adDns: adDnsReducer,
     notificationChannels: notificationChannelsReducer,
+    backups: backupsReducer,
+    cronJobs: cronJobsReducer,
   },
   middleware: (getDefaultMiddleware) => getDefaultMiddleware().concat(errorNotificationMiddleware),
 });

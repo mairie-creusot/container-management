@@ -75,7 +75,8 @@ import { listGitOpsFiles } from "./gitops.js";
 import { listAllScans } from "./scan.js";
 import { getNutanixVms, isNutanixConfigured } from "./nutanix.js";
 import { getEffectiveAdDnsConfig } from "./setupStore.js";
-import { lastKnownDnsSync } from "./reverseProxy.js";
+import { lastKnownDnsSync, listRoutes } from "./reverseProxy.js";
+import { listGroups } from "./topologyGroupsStore.js";
 import type { NutanixVm, ScanResult, Topology, TopologyEdge, TopologyEdgePort, TopologyNode } from "../types.js";
 
 /**
@@ -217,22 +218,38 @@ export async function getTopology(): Promise<Topology> {
   const docker = await getClient();
   const nutanixVmNodes = await getNutanixVmNodes();
   const adServerNodes = await getAdServerNodes();
-  const empty: Topology = { nodes: [...nutanixVmNodes, ...adServerNodes], edges: [], generatedAt: new Date().toISOString() };
+  // Groupements (voir topologyGroupsStore.ts) : indépendants de la joignabilité Docker (une simple
+  // lecture JSON en mémoire), inclus dans les deux chemins de retour pour que le frontend garde
+  // toujours la même forme de réponse à traiter.
+  const groups = await listGroups();
+  const empty: Topology = { nodes: [...nutanixVmNodes, ...adServerNodes], edges: [], generatedAt: new Date().toISOString(), groups };
   if (!(await isDockerReachable(docker))) return empty;
 
   try {
-    const [containers, volumesResponse, networks, imagesToUpdate, gitopsFiles, allScans] = await Promise.all([
+    const [containers, volumesResponse, networks, imagesToUpdate, gitopsFiles, allScans, proxyRoutes] = await Promise.all([
       docker.listContainers({ all: true }),
       docker.listVolumes(),
       docker.listNetworks(),
       getImages("update").catch(() => []),
       listGitOpsFiles().catch(() => []),
       listAllScans().catch(() => []),
+      listRoutes().catch(() => []),
     ]);
 
     // "name:tag" des images ayant une mise à jour disponible — même format que ContainerInfo#Image.
     const updateAvailableImages = new Set(imagesToUpdate.map((i) => `${i.name}:${i.currentTag}`));
     const driftFilePaths = gitopsFiles.filter((f) => f.drift).map((f) => f.path);
+    // Sous-domaines réellement associés à CE conteneur (rapprochement par targetContainerId — voir
+    // services/reverseProxy.ts, id Docker brut, pas préfixé "container:") — plusieurs routes
+    // peuvent cibler le même conteneur (rare mais valide), d'où un tableau. HTTPS : Caddy sert
+    // désormais toujours en TLS interne pour les routes proxyfiées (voir reverseProxy.ts en-tête).
+    const domainsByContainerId = new Map<string, string[]>();
+    for (const route of proxyRoutes) {
+      if (!route.targetContainerId) continue;
+      const list = domainsByContainerId.get(route.targetContainerId) ?? [];
+      list.push(`https://${route.subdomain}`);
+      domainsByContainerId.set(route.targetContainerId, list);
+    }
 
     // Snapshot d'utilisation par conteneur, en parallèle (chaque appel est déjà borné par un
     // timeout côté docker.ts) — même approche que docker.ts#getDockerContainers.
@@ -272,6 +289,7 @@ export async function getTopology(): Promise<Topology> {
       const name = primaryContainerName(c.Names, c.Id);
       const usage = usages[index]!;
       const vulnSummary = vulnSummaryByImage.get(c.Image) ?? null;
+      const domains = domainsByContainerId.get(c.Id);
       nodes.push({
         id: containerNodeId,
         kind: "container",
@@ -284,6 +302,7 @@ export async function getTopology(): Promise<Topology> {
         drift: driftFilePaths.some((path) => containerMatchesGitOpsFile(name, path)),
         ...(vulnSummary ? { vulnCritical: vulnSummary.vulnCritical, vulnHigh: vulnSummary.vulnHigh } : {}),
         healthStatus: healthStatuses[index]!,
+        ...(domains && domains.length > 0 ? { domains } : {}),
       });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -451,7 +470,7 @@ export async function getTopology(): Promise<Topology> {
       });
     }
 
-    return { nodes: [...nodes, ...nutanixVmNodes, ...adServerNodes], edges, generatedAt: new Date().toISOString() };
+    return { nodes: [...nodes, ...nutanixVmNodes, ...adServerNodes], edges, generatedAt: new Date().toISOString(), groups };
   } catch {
     return empty;
   }

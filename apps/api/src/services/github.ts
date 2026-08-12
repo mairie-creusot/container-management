@@ -31,16 +31,33 @@ import {
   readDeploymentLog,
   updateDeploymentRecord,
 } from "./githubDeployments.js";
+import { CaddyPushFailedError, createRoute } from "./reverseProxy.js";
 import { RegistryCredentialsMissingError, RegistryHttpError } from "./registries/http.js";
 import { withTimeout } from "../utils/async.js";
-import type { GithubDeployment, GithubDeploymentDetail, GithubRepoDetection, GithubRepoRef } from "../types.js";
+import type {
+  GithubDeployment,
+  GithubDeploymentCommit,
+  GithubDeploymentDetail,
+  GithubDeploymentTrigger,
+  GithubRepoDetection,
+  GithubRepoRef,
+} from "../types.js";
 
 // --- Client HTTP GitHub (garde le style diagnostic de registries/http.ts — RegistryHttpError/
 // RegistryCredentialsMissingError — plutôt que de réinventer une nouvelle taxonomie d'erreurs) ---
 
 const GITHUB_REQUEST_TIMEOUT_MS = 8_000;
 
-async function githubFetch(pathOrUrl: string, token: string | undefined): Promise<{ data: unknown; response: Response }> {
+interface GithubFetchInit {
+  method?: string;
+  body?: unknown; // sérialisé en JSON si présent
+}
+
+async function githubFetch(
+  pathOrUrl: string,
+  token: string | undefined,
+  init?: GithubFetchInit,
+): Promise<{ data: unknown; response: Response }> {
   const url = pathOrUrl.startsWith("http") ? pathOrUrl : `${config.github.apiBaseUrl}${pathOrUrl}`;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), GITHUB_REQUEST_TIMEOUT_MS);
@@ -50,11 +67,18 @@ async function githubFetch(pathOrUrl: string, token: string | undefined): Promis
       "X-GitHub-Api-Version": "2022-11-28",
     };
     if (token) headers.Authorization = `Bearer ${token}`;
-    const response = await fetch(url, { headers, signal: controller.signal });
+    if (init?.body !== undefined) headers["Content-Type"] = "application/json";
+    const response = await fetch(url, {
+      headers,
+      signal: controller.signal,
+      ...(init?.method ? { method: init.method } : {}),
+      ...(init?.body !== undefined ? { body: JSON.stringify(init.body) } : {}),
+    });
     if (!response.ok) {
       throw new RegistryHttpError(`GitHub API request to ${url} failed with status ${response.status}`, response.status);
     }
-    const data = (await response.json()) as unknown;
+    // DELETE réussi (204 No Content) n'a pas de corps JSON à parser.
+    const data = response.status === 204 ? null : ((await response.json()) as unknown);
     return { data, response };
   } catch (err) {
     if (err instanceof RegistryHttpError) throw err;
@@ -178,6 +202,36 @@ async function fetchDefaultBranch(owner: string, repo: string, token: string | u
   return info.default_branch ?? "main";
 }
 
+/** Dernière instruction EXPOSE d'un Dockerfile — même convention que Docker lui-même (la
+ * dernière instruction gagne en cas de plusieurs). Accepte "EXPOSE 8080" et "EXPOSE 8080/tcp" ;
+ * ignore délibérément une variable non résolue ("EXPOSE $PORT", rare mais existe) plutôt que de
+ * fabriquer un port. */
+function parseExposedPort(dockerfileContent: string): number | undefined {
+  const matches = [...dockerfileContent.matchAll(/^\s*EXPOSE\s+(\d+)(?:\/\w+)?/gim)];
+  const last = matches.at(-1);
+  if (!last?.[1]) return undefined;
+  const port = Number(last[1]);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : undefined;
+}
+
+/** Contenu brut (décodé) d'un fichier via l'API Contents GitHub — `undefined` si absent/illisible
+ * (best-effort, n'importe quelle erreur ici ne doit jamais faire échouer la détection globale). */
+async function fetchFileContent(owner: string, repo: string, filePath: string, ref: string, token: string | undefined): Promise<string | undefined> {
+  try {
+    const { data } = await githubFetch(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${filePath}?ref=${encodeURIComponent(ref)}`,
+      token,
+    );
+    const content = data as { content?: string; encoding?: string };
+    if (content.content && content.encoding === "base64") {
+      return Buffer.from(content.content, "base64").toString("utf-8");
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * GET /api/github/repos/:owner/:repo/detect — appelle l'API GitHub Contents pour la racine du
  * repo. Un jeton n'est pas strictement requis pour un repo public (API GitHub anonyme, limite de
@@ -195,7 +249,20 @@ export async function detectRepo(owner: string, repo: string, ref?: string): Pro
     );
     const entries = Array.isArray(data) ? (data as GithubApiContentItem[]) : [];
     const { hasDockerfile, hasCompose, terraformFiles } = summarizeRootEntries(entries);
-    return { ref: resolvedRef, hasDockerfile, hasCompose, hasTerraform: terraformFiles.length > 0, terraformFiles };
+    // Lecture RÉELLE du contenu du Dockerfile pour en extraire le port EXPOSE (pré-remplit le
+    // champ "port" du formulaire de déploiement) — appel best-effort supplémentaire, jamais
+    // bloquant pour la détection elle-même si absent/illisible.
+    const exposedPort = hasDockerfile
+      ? parseExposedPort((await fetchFileContent(owner, repo, "Dockerfile", resolvedRef, token)) ?? "")
+      : undefined;
+    return {
+      ref: resolvedRef,
+      hasDockerfile,
+      hasCompose,
+      hasTerraform: terraformFiles.length > 0,
+      terraformFiles,
+      ...(exposedPort ? { exposedPort } : {}),
+    };
   } catch (err) {
     // 404 sur /contents : repo vide (aucun commit) — un résumé "rien détecté" est honnête, pas
     // une donnée fabriquée. Toute autre erreur (401/403/429/réseau) est re-levée telle quelle
@@ -205,6 +272,64 @@ export async function detectRepo(owner: string, repo: string, ref?: string): Pro
     }
     throw err;
   }
+}
+
+interface GithubApiCommit {
+  sha: string;
+  commit: { message: string; author?: { name?: string } };
+  author: { login?: string; avatar_url?: string } | null;
+}
+
+/** Métadonnées réelles du commit à la tête de `ref` (GET /repos/:owner/:repo/commits/:ref) —
+ * `null` en cas d'échec (repo vide, ref introuvable, limite de débit...) : best-effort, ne doit
+ * jamais faire échouer le déploiement lui-même, voir startDeployment(). */
+async function fetchCommitInfo(
+  owner: string,
+  repo: string,
+  ref: string,
+  token: string | undefined,
+): Promise<GithubDeploymentCommit | null> {
+  try {
+    const { data } = await githubFetch(
+      `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(ref)}`,
+      token,
+    );
+    const c = data as GithubApiCommit;
+    if (!c.sha) return null;
+    return {
+      sha: c.sha,
+      message: (c.commit?.message ?? "").split("\n")[0] ?? "",
+      author: c.author?.login ?? c.commit?.author?.name ?? "inconnu",
+      ...(c.author?.avatar_url ? { authorAvatarUrl: c.author.avatar_url } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Enregistre (POST /repos/:owner/:repo/hooks) un webhook GitHub réel, pointant vers
+ * `${config.github.webhookBaseUrl}/api/github/webhook`, événement "push" uniquement, sécurisé par
+ * `secret` (vérifié côté QUAI en HMAC SHA-256, voir routes/githubWebhook.ts). Retourne l'id du
+ * hook créé (nécessaire pour pouvoir le supprimer à la désactivation).
+ */
+export async function createRepoWebhook(owner: string, repo: string, url: string, secret: string, token: string | undefined): Promise<number> {
+  const { data } = await githubFetch(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/hooks`, token, {
+    method: "POST",
+    body: {
+      name: "web",
+      active: true,
+      events: ["push"],
+      config: { url, content_type: "json", secret, insecure_ssl: "0" },
+    },
+  });
+  const hook = data as { id: number };
+  return hook.id;
+}
+
+/** Supprime (DELETE /repos/:owner/:repo/hooks/:hookId) le webhook créé par createRepoWebhook — appelée à la désactivation du déploiement automatique. */
+export async function deleteRepoWebhook(owner: string, repo: string, hookId: number, token: string | undefined): Promise<void> {
+  await githubFetch(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/hooks/${hookId}`, token, { method: "DELETE" });
 }
 
 // --- Déploiement réel (clone -> build+run Docker, ou création de workspace IaC) ----------------
@@ -242,6 +367,8 @@ async function deployViaDockerBuild(
   owner: string,
   repo: string,
   targetEnvironmentId: string | undefined,
+  subdomain: string | undefined,
+  portOverride: number | undefined,
 ): Promise<void> {
   const docker = await getClient(targetEnvironmentId);
   const imageTag = `quai-gh/${sanitizeDockerName(owner)}-${sanitizeDockerName(repo)}:${deploymentId.slice(0, 8)}`;
@@ -288,6 +415,42 @@ async function deployViaDockerBuild(
     containerId: container.id,
     containerName,
   });
+
+  // Sous-domaine demandé (dérivé du nom du repo ou choisi explicitement, voir
+  // GitHubDeployPage.tsx) : crée réellement la route reverse-proxy vers ce conteneur, port
+  // interne = celui fourni explicitement, sinon le dernier EXPOSE réellement lu dans LE VRAI
+  // Dockerfile cloné (vérité terrain, pas la détection GitHub API qui n'est qu'un aperçu).
+  if (subdomain) {
+    const dockerfilePort = await fs
+      .readFile(path.join(cloneDir, "Dockerfile"), "utf-8")
+      .then(parseExposedPort)
+      .catch(() => undefined);
+    const targetPort = portOverride ?? dockerfilePort;
+    if (!targetPort) {
+      await appendDeploymentLog(
+        deploymentId,
+        `Sous-domaine "${subdomain}" demandé mais aucun port EXPOSE détecté dans le Dockerfile ni fourni explicitement — route reverse-proxy NON créée (voir "Options avancées" pour préciser un port).\n`,
+      );
+      return;
+    }
+    try {
+      const route = await createRoute({ subdomain, targetContainerId: container.id, targetPort });
+      await appendDeploymentLog(deploymentId, `Route reverse-proxy créée : https://${subdomain} -> ${containerName}:${targetPort}\n`);
+      await updateDeploymentRecord(deploymentId, { reverseProxyRouteId: route.id });
+    } catch (err) {
+      // CaddyPushFailedError : la route est malgré tout créée/persistée côté QUAI (voir
+      // services/reverseProxy.ts#createRoute) — seul le miroir Caddy n'a pas pu être mis à jour
+      // tout de suite (rejouable via POST /api/reverse-proxy/push). reverseProxyRouteId doit donc
+      // quand même être enregistré, sinon le lien de domaine "réussi" disparaîtrait à tort.
+      if (err instanceof CaddyPushFailedError && err.route) {
+        await appendDeploymentLog(deploymentId, `Route reverse-proxy créée (https://${subdomain} -> ${containerName}:${targetPort}) mais Caddy injoignable pour l'instant : ${err.message} — un re-push (POST /api/reverse-proxy/push) suffira.\n`);
+        await updateDeploymentRecord(deploymentId, { reverseProxyRouteId: err.route.id });
+      } else {
+        // Best-effort, jamais bloquant : le déploiement Docker a réussi, seule la route échoue.
+        await appendDeploymentLog(deploymentId, `Échec de la création de la route reverse-proxy pour "${subdomain}" : ${err instanceof Error ? err.message : String(err)}\n`);
+      }
+    }
+  }
 }
 
 async function deployViaIacWorkspace(
@@ -353,6 +516,8 @@ async function runDeployment(
   targetEnvironmentId: string | undefined,
   token: string | undefined,
   startedBy: string,
+  subdomain: string | undefined,
+  port: number | undefined,
 ): Promise<void> {
   const cloneDir = path.join(os.tmpdir(), `quai-github-deploy-${deploymentId}`);
   // Préparé AVANT le try (pour être nettoyé dans tous les cas via le `finally` ci-dessous) —
@@ -379,7 +544,7 @@ async function runDeployment(
     );
 
     if (detection.hasDockerfile) {
-      await deployViaDockerBuild(deploymentId, cloneDir, owner, repo, targetEnvironmentId);
+      await deployViaDockerBuild(deploymentId, cloneDir, owner, repo, targetEnvironmentId, subdomain, port);
     } else if (detection.terraformFiles.length > 0) {
       await deployViaIacWorkspace(deploymentId, cloneDir, owner, repo, detection.terraformFiles, startedBy);
     } else {
@@ -406,17 +571,32 @@ export interface StartDeploymentInput {
   ref?: string;
   targetEnvironmentId?: string;
   startedBy: string;
+  /** "manual" (défaut) : clic operator/admin. "webhook" : déclenché par POST /api/github/webhook (voir routes/githubWebhook.ts). */
+  triggeredBy?: GithubDeploymentTrigger;
+  /** Sous-domaine reverse-proxy à router vers le conteneur déployé (kind "docker-build-run" uniquement) — voir deployViaDockerBuild. */
+  subdomain?: string;
+  /** Port interne du conteneur pour la route reverse-proxy — remplace la détection EXPOSE automatique si fourni. */
+  port?: number;
+  /** Déclenchement webhook : métadonnées de commit déjà connues (payload `push`), pour éviter un
+   * appel GitHub supplémentaire — sinon récupérées ici via l'API (déclenchement manuel). */
+  commit?: GithubDeploymentCommit;
 }
 
 /**
- * POST /api/github/repos/:owner/:repo/deploy — résout la référence par défaut si omise (appel
- * rapide, avant de retourner) puis démarre le clone/build/run en arrière-plan (comme
- * iac/runner.ts#startRun) : retourne immédiatement l'entrée d'historique à l'état "running".
+ * POST /api/github/repos/:owner/:repo/deploy (ou déclenchement webhook, voir routes/githubWebhook.ts)
+ * — résout la référence par défaut si omise (appel rapide, avant de retourner) puis démarre le
+ * clone/build/run en arrière-plan (comme iac/runner.ts#startRun) : retourne immédiatement
+ * l'entrée d'historique à l'état "running".
  */
 export async function startDeployment(input: StartDeploymentInput): Promise<GithubDeployment> {
   const effective = await getEffectiveToken();
   const token = effective?.token;
   const resolvedRef = input.ref ?? (await fetchDefaultBranch(input.owner, input.repo, token));
+
+  // Métadonnées de commit RÉELLES — déjà connues pour un déclenchement webhook (payload `push`),
+  // sinon récupérées via l'API GitHub (best-effort, voir fetchCommitInfo : `null` n'empêche jamais
+  // le déploiement, l'historique affiche juste moins d'informations dans ce cas).
+  const commit = input.commit ?? (await fetchCommitInfo(input.owner, input.repo, resolvedRef, token));
 
   const id = randomUUID();
   const deployment = await createDeploymentRecord({
@@ -426,9 +606,12 @@ export async function startDeployment(input: StartDeploymentInput): Promise<Gith
     ref: resolvedRef,
     targetEnvironmentId: input.targetEnvironmentId ?? null,
     startedBy: input.startedBy,
+    triggeredBy: input.triggeredBy ?? "manual",
+    ...(commit ? { commit } : {}),
+    ...(input.subdomain ? { subdomain: input.subdomain } : {}),
   });
 
-  void runDeployment(id, input.owner, input.repo, resolvedRef, input.targetEnvironmentId, token, input.startedBy);
+  void runDeployment(id, input.owner, input.repo, resolvedRef, input.targetEnvironmentId, token, input.startedBy, input.subdomain, input.port);
 
   return deployment;
 }

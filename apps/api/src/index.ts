@@ -24,6 +24,7 @@ import containersRoutes from "./routes/containers.js";
 import cronJobsRoutes from "./routes/cronJobs.js";
 import environmentsRoutes from "./routes/environments.js";
 import githubRoutes from "./routes/github.js";
+import githubWebhookRoutes from "./routes/githubWebhook.js";
 import gitopsRoutes from "./routes/gitops.js";
 import iacRoutes from "./routes/iac.js";
 import imagesRoutes from "./routes/images.js";
@@ -94,6 +95,7 @@ export function buildServer() {
   void fastify.register(adDnsRoutes);
   void fastify.register(consoleRoutes);
   void fastify.register(githubRoutes);
+  void fastify.register(githubWebhookRoutes);
   void fastify.register(containerLogsRoutes);
   void fastify.register(notificationChannelsRoutes);
   void fastify.register(metricsRoutes);

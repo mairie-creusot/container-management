@@ -11,8 +11,8 @@ import {
   type EdgeProps,
   type NodeProps,
 } from "@xyflow/react";
-import { IconContainers, IconNetworks, IconServer, IconVm, IconVolumes } from "@/components/icons";
-import type { TopologyEdge, TopologyEdgePort, TopologyNode, TopologyNodeAttachment } from "@/types";
+import { IconChevron, IconContainers, IconFolder, IconGlobe, IconNetworks, IconServer, IconVm, IconVolumes } from "@/components/icons";
+import type { TopologyEdge, TopologyEdgePort, TopologyGroup, TopologyNode, TopologyNodeAttachment } from "@/types";
 
 /**
  * Éléments du graphe de topologie partagés entre le graphe principal (TopologyGraph.tsx) et le
@@ -119,6 +119,51 @@ export const CAPABILITY_DEFS: Record<CapabilityId, CapabilityDef> = {
   provide: { linksTo: "volume-mount", interactive: false, infoMessage: VOLUME_MOUNT_INFO },
 };
 
+/**
+ * Métadonnées de rendu d'un port PAR CAPACITÉ (indépendantes du type de nœud qui le porte) —
+ * reprises telles quelles des entrées NODE_CAPABILITIES existantes (même position/couleur/libellé
+ * pour une capacité donnée, quel que soit le nœud) : un groupe (voir deriveGroupPorts ci-dessous)
+ * n'est PAS un type de nœud avec ses propres ports fixes, ses ports dépendent de ce qu'il contient
+ * réellement — cette table permet de construire un Handle synthétique cohérent avec le reste du
+ * graphe pour n'importe quelle capacité, sans dupliquer position/couleur/libellé à chaque usage.
+ */
+const CAPABILITY_PORT_META: Record<CapabilityId, Pick<PortSpec, "handleType" | "position" | "colorToken" | "label">> = {
+  network: { handleType: "source", position: Position.Right, colorToken: "network", label: "Network" },
+  attach: { handleType: "target", position: Position.Left, colorToken: "network", label: "Attache un conteneur" },
+  "volume-mount": { handleType: "target", position: Position.Left, colorToken: "volume", label: "Volume (lecture seule)" },
+  provide: { handleType: "source", position: Position.Right, colorToken: "volume", label: "Fournit un volume" },
+};
+
+/**
+ * Ports d'entrée/sortie d'un groupe (voir TopologyGroup, apps/api/src/types.ts) — DÉRIVÉS des
+ * arêtes réelles du graphe complet qui traversent sa frontière (un membre du groupe d'un côté, un
+ * nœud extérieur de l'autre), jamais inventés/devinés : un groupe qui ne contient que des nœuds
+ * sans aucune connexion externe n'a simplement aucun port. Une arête ENTIÈREMENT interne au groupe
+ * (les deux bouts sont membres) ne produit aucun port — elle reste invisible une fois le groupe
+ * replié, exactement comme Docker/Railway masquent la plomberie interne d'un service groupé.
+ *
+ * Règle de correspondance capacité <-> (kind d'arête, membre source ou cible) — copie directe de
+ * NODE_CAPABILITIES pour les deux seuls kinds connectables (container/network/volume) :
+ *  - arête "mount" (source = volume, target = conteneur) : conteneur membre -> "volume-mount"
+ *    (le groupe consomme un volume extérieur) ; volume membre -> "provide" (le groupe fournit un
+ *    volume à un conteneur extérieur).
+ *  - arête "network" (source = conteneur, target = network) : conteneur membre -> "network" (le
+ *    groupe se connecte à un network extérieur) ; network membre -> "attach" (le groupe accueille
+ *    un conteneur extérieur).
+ */
+export function deriveGroupPorts(group: Pick<TopologyGroup, "nodeIds">, edges: TopologyEdge[]): PortSpec[] {
+  const memberIds = new Set(group.nodeIds);
+  const capabilities = new Set<CapabilityId>();
+  for (const edge of edges) {
+    const sourceIn = memberIds.has(edge.source);
+    const targetIn = memberIds.has(edge.target);
+    if (sourceIn === targetIn) continue; // les deux dedans (arête interne) ou les deux dehors (non pertinent ici)
+    if (edge.kind === "mount") capabilities.add(targetIn ? "volume-mount" : "provide");
+    else if (edge.kind === "network") capabilities.add(sourceIn ? "network" : "attach");
+  }
+  return Array.from(capabilities).map((capability) => ({ id: capability, capability, ...CAPABILITY_PORT_META[capability] }));
+}
+
 /** Zoom sémantique : sous ce niveau, un nœud n'affiche plus que son icône et son point de statut. */
 export const ZOOM_DETAIL_THRESHOLD = 0.6;
 /** state.transform du store React Flow est [x, y, zoom] ; ne resélectionne que le zoom pour éviter
@@ -160,8 +205,16 @@ export function edgeContainerNode(edge: TopologyEdgeLike, nodesById: Map<string,
 /**
  * Construit les arêtes React Flow (couleur/état/animation) depuis les TopologyEdge bruts — logique
  * partagée par le graphe principal ET le sous-graphe de dépendances, pour un rendu identique.
+ * `sourceHandle`/`targetHandle` optionnels : utilisés par TopologyGraph.tsx quand une arête a été
+ * redirigée vers un nœud de groupe replié (voir deriveGroupPorts ci-dessus) — un groupe peut porter
+ * PLUSIEURS handles du même côté (ex: "network" ET "provide", tous deux source/Right), l'id du
+ * handle cible devient alors nécessaire pour lever l'ambiguïté (React Flow ne peut plus déduire le
+ * bon handle tout seul dès qu'il y en a plusieurs du même type sur un nœud).
  */
-export function buildTopologyEdges(edges: TopologyEdge[], nodesById: Map<string, TopologyNode>): Edge[] {
+export function buildTopologyEdges(
+  edges: (TopologyEdge & { sourceHandle?: string; targetHandle?: string })[],
+  nodesById: Map<string, TopologyNode>,
+): Edge[] {
   return edges.map((e) => {
     const containerNode = edgeContainerNode(e, nodesById);
     const stopped = containerNode ? containerNode.status !== "running" : false;
@@ -177,6 +230,8 @@ export function buildTopologyEdges(edges: TopologyEdge[], nodesById: Map<string,
       id: e.id,
       source: e.source,
       target: e.target,
+      ...(e.sourceHandle ? { sourceHandle: e.sourceHandle } : {}),
+      ...(e.targetHandle ? { targetHandle: e.targetHandle } : {}),
       type: isMount ? "mountFlow" : "networkEdge",
       animated: !isMount,
       className: `topology-edge topology-edge--${e.kind} topology-edge--${state}`,
@@ -378,6 +433,14 @@ function attachmentsEqual(a: TopologyNodeAttachment[] | undefined, b: TopologyNo
   });
 }
 
+/** `domains` (voir TopologyNode#domains) — même principe que attachmentsEqual ci-dessus, simple
+ * tableau de chaînes ici. */
+function domainsEqual(a: string[] | undefined, b: string[] | undefined): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every((domain, index) => domain === b[index]);
+}
+
 /**
  * Comparateur `React.memo` de GraphNode — voir docs/reports/optimization-audit-2026-08-12.md §É9 :
  * `data` est reconstruit avec une NOUVELLE référence à chaque poll réussi de la topologie
@@ -410,7 +473,8 @@ function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
     a.healthStatus === b.healthStatus &&
     a.cpuPercent === b.cpuPercent &&
     a.memBytes === b.memBytes &&
-    attachmentsEqual(a.attachments, b.attachments)
+    attachmentsEqual(a.attachments, b.attachments) &&
+    domainsEqual(a.domains, b.domains)
   );
 }
 
@@ -499,6 +563,29 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
         </div>
       )}
       <div className="topology-node__subtitle">{node.subtitle}</div>
+      {isContainer && !!node.domains?.length && (
+        // Domaine(s) de reverse proxy réellement associés à ce conteneur (voir TopologyNode#domains,
+        // rapproché par targetContainerId côté services/topology.ts) — affiché directement sous le
+        // nom du service façon Railway, cliquable vers l'URL réelle. `nodrag`/`nopan` + `stopPropagation`
+        // : même raison que les briques ci-dessous (ne pas faire glisser le nœud / le sélectionner
+        // en cliquant sur le lien).
+        <div className="topology-node__domains">
+          {node.domains.map((domain) => (
+            <a
+              key={domain}
+              href={domain}
+              target="_blank"
+              rel="noreferrer"
+              className="topology-node__domain nodrag nopan"
+              title={`Ouvrir ${domain}`}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <IconGlobe className="topology-node__domain-icon" />
+              <span className="topology-node__domain-label">{domain.replace(/^https?:\/\//, "")}</span>
+            </a>
+          ))}
+        </div>
+      )}
       {isContainer && typeof node.cpuPercent === "number" && (
         <div className="topology-node__metrics">
           <div className="topology-node__metric-row">
@@ -570,6 +657,101 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
  * optimization-audit-2026-08-12.md §É9). */
 export const GraphNode = memo(GraphNodeImpl, graphNodePropsEqual);
 
+// --- Regroupement de nœuds ("encapsulation façon Railway/Logisim", voir TopologyGroup) --------
+// Sélection multiple + "Regrouper" (TopologyGraph.tsx) -> carte parente repliable/dépliable :
+//  - repliée (par défaut à la création) : UN SEUL nœud comme les autres, ports dérivés
+//    (deriveGroupPorts ci-dessus) connectables au reste du graphe exactement comme un vrai nœud.
+//  - dépliée : les nœuds membres restent affichés à leurs positions normales (inchangées, mêmes
+//    arêtes internes/externes que d'habitude) ; GroupFrameNode ci-dessous n'est qu'un CADRE
+//    décoratif non connectable/non sélectionnable rendu derrière eux (zIndex négatif) pour les
+//    faire lire visuellement comme "contenus" dans le groupe, sans réimplémenter le système de
+//    parenting natif de React Flow (positions relatives complexes) pour ce premier lot.
+
+export interface GroupNodeData {
+  group: TopologyGroup;
+  ports: PortSpec[];
+  onToggleCollapse?: () => void;
+}
+
+/** Carte repliée d'un groupe — un seul nœud, comme un vrai TopologyNode, avec ses ports dérivés. */
+function GroupNodeImpl({ data, selected }: NodeProps) {
+  const { group, ports, onToggleCollapse } = data as unknown as GroupNodeData;
+  return (
+    <div className={`topology-node topology-group-node${selected ? " is-selected" : ""}`}>
+      {ports.map((port) => (
+        <Handle
+          key={port.id}
+          id={port.id}
+          type={port.handleType}
+          position={port.position}
+          className={`topology-handle topology-handle--${port.colorToken}`}
+          title={port.label}
+        />
+      ))}
+      <div className="topology-node__head">
+        <span className="topology-node__icon topology-group-node__icon">
+          <IconFolder />
+        </span>
+        <span className="topology-node__label">{group.label}</span>
+        <button
+          type="button"
+          className="topology-group-node__toggle nodrag nopan"
+          title="Déplier le groupe"
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleCollapse?.();
+          }}
+        >
+          <IconChevron className="topology-group-node__chevron topology-group-node__chevron--collapsed" />
+        </button>
+      </div>
+      <div className="topology-node__subtitle">
+        {group.nodeIds.length} élément{group.nodeIds.length > 1 ? "s" : ""} regroupé{group.nodeIds.length > 1 ? "s" : ""}
+      </div>
+    </div>
+  );
+}
+
+export const GroupNode = memo(GroupNodeImpl);
+
+export interface GroupFrameNodeData {
+  group: TopologyGroup;
+  onToggleCollapse?: () => void;
+}
+
+/** Cadre décoratif derrière les membres d'un groupe DÉPLIÉ — non connectable/non sélectionnable
+ * (voir nodesConnectable/nodesDraggable posés sur ce node précis par TopologyGraph.tsx), aucun
+ * Handle : ce n'est pas une ressource, juste un repère visuel + un en-tête pour replier le groupe. */
+function GroupFrameNodeImpl({ data }: NodeProps) {
+  const { group, onToggleCollapse } = data as unknown as GroupFrameNodeData;
+  return (
+    <div className="topology-group-frame">
+      <div className="topology-group-frame__header nodrag nopan">
+        <span className="topology-group-frame__icon">
+          <IconFolder />
+        </span>
+        <span className="topology-group-frame__label">{group.label}</span>
+        <span className="topology-group-frame__count">
+          {group.nodeIds.length} élément{group.nodeIds.length > 1 ? "s" : ""}
+        </span>
+        <button
+          type="button"
+          className="topology-group-node__toggle"
+          title="Replier le groupe"
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleCollapse?.();
+          }}
+        >
+          <IconChevron className="topology-group-node__chevron topology-group-node__chevron--expanded" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export const GroupFrameNode = memo(GroupFrameNodeImpl);
+
 /**
  * Rayon (px) du cercle de nœuds voisins autour d'un nœud racine — disposition "hub and spoke",
  * réutilisée par TopologySubGraphPanel.tsx pour le sous-graphe de dépendances ET la vue
@@ -587,7 +769,7 @@ export function radialPositions(rootId: string, satelliteIds: string[], radius =
   return positions;
 }
 
-export const nodeTypes = { graphNode: GraphNode };
+export const nodeTypes = { graphNode: GraphNode, topologyGroupNode: GroupNode, topologyGroupFrame: GroupFrameNode };
 
 /**
  * Un processus RÉEL du conteneur (`docker top`, voir TopologySubGraphPanel.tsx "composition

@@ -2,6 +2,7 @@ import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/tool
 import { apiGet, apiPost, apiPut, ApiError } from "@/api/client";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
 import type {
+  GithubAutoDeployStatus,
   GithubDeployment,
   GithubDeploymentDetail,
   GithubRepoDetection,
@@ -23,6 +24,11 @@ interface GithubState {
   detectionStatus: "idle" | "loading" | "ready" | "error";
   detectionError: string | null;
 
+  autoDeploy: GithubAutoDeployStatus | null;
+  autoDeployStatus: "idle" | "loading" | "ready" | "error";
+  autoDeploySaving: boolean;
+  autoDeployError: string | null;
+
   deployments: GithubDeployment[];
   deploymentsStatus: "idle" | "loading" | "ready" | "error";
   selectedDeployment: GithubDeploymentDetail | null;
@@ -40,6 +46,10 @@ const initialState: GithubState = {
   detection: null,
   detectionStatus: "idle",
   detectionError: null,
+  autoDeploy: null,
+  autoDeployStatus: "idle",
+  autoDeploySaving: false,
+  autoDeployError: null,
   deployments: [],
   deploymentsStatus: "idle",
   selectedDeployment: null,
@@ -92,13 +102,15 @@ export const fetchGithubDetection = createAsyncThunk<
 
 export const deployGithubRepo = createAsyncThunk<
   GithubDeployment,
-  { owner: string; repo: string; ref?: string; targetEnvironmentId?: string },
+  { owner: string; repo: string; ref?: string; targetEnvironmentId?: string; subdomain?: string; port?: number },
   { rejectValue: string }
->("github/deploy", async ({ owner, repo, ref, targetEnvironmentId }, { rejectWithValue, dispatch }) => {
+>("github/deploy", async ({ owner, repo, ref, targetEnvironmentId, subdomain, port }, { rejectWithValue, dispatch }) => {
   try {
     const deployment = await apiPost<GithubDeployment>(`/github/repos/${owner}/${repo}/deploy`, {
       ...(ref ? { ref } : {}),
       ...(targetEnvironmentId ? { targetEnvironmentId } : {}),
+      ...(subdomain ? { subdomain } : {}),
+      ...(port !== undefined ? { port } : {}),
     });
     dispatch(pushNotification({ level: "info", message: `Déploiement de ${owner}/${repo} démarré.` }));
     return deployment;
@@ -117,6 +129,40 @@ export const fetchGithubDeploymentDetail = createAsyncThunk<GithubDeploymentDeta
   async (id) => apiGet<GithubDeploymentDetail>(`/github/deployments/${id}`),
 );
 
+export const fetchGithubAutoDeploy = createAsyncThunk<GithubAutoDeployStatus, { owner: string; repo: string }, { rejectValue: string }>(
+  "github/fetchAutoDeploy",
+  async ({ owner, repo }, { rejectWithValue }) => {
+    try {
+      return await apiGet<GithubAutoDeployStatus>(`/github/repos/${owner}/${repo}/auto-deploy`);
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : "Échec du chargement du statut de déploiement automatique.";
+      return rejectWithValue(message);
+    }
+  },
+);
+
+export const saveGithubAutoDeploy = createAsyncThunk<
+  GithubAutoDeployStatus,
+  { owner: string; repo: string; enabled: boolean; branch?: string; targetEnvironmentId?: string; subdomain?: string; port?: number },
+  { rejectValue: string }
+>("github/saveAutoDeploy", async ({ owner, repo, ...body }, { rejectWithValue, dispatch }) => {
+  try {
+    const result = await apiPut<GithubAutoDeployStatus>(`/github/repos/${owner}/${repo}/auto-deploy`, body);
+    dispatch(
+      pushNotification({
+        level: "success",
+        message: result.enabled
+          ? `Déploiement automatique activé sur "${result.branch}" — chaque push déclenchera un déploiement.`
+          : "Déploiement automatique désactivé.",
+      }),
+    );
+    return result;
+  } catch (error) {
+    const message = error instanceof ApiError ? error.message : "Échec de la mise à jour du déploiement automatique.";
+    return rejectWithValue(message);
+  }
+});
+
 const githubSlice = createSlice({
   name: "github",
   initialState,
@@ -126,6 +172,9 @@ const githubSlice = createSlice({
       state.detection = null;
       state.detectionStatus = "idle";
       state.detectionError = null;
+      state.autoDeploy = null;
+      state.autoDeployStatus = "idle";
+      state.autoDeployError = null;
     },
     selectDeployment(state, action: PayloadAction<GithubDeploymentDetail | null>) {
       state.selectedDeployment = action.payload;
@@ -200,6 +249,30 @@ const githubSlice = createSlice({
         state.selectedDeployment = action.payload;
         const index = state.deployments.findIndex((d) => d.id === action.payload.id);
         if (index >= 0) state.deployments[index] = action.payload;
+      })
+      .addCase(fetchGithubAutoDeploy.pending, (state) => {
+        state.autoDeployStatus = "loading";
+        state.autoDeployError = null;
+      })
+      .addCase(fetchGithubAutoDeploy.fulfilled, (state, action) => {
+        state.autoDeployStatus = "ready";
+        state.autoDeploy = action.payload;
+      })
+      .addCase(fetchGithubAutoDeploy.rejected, (state, action) => {
+        state.autoDeployStatus = "error";
+        state.autoDeployError = action.payload ?? "Échec du chargement.";
+      })
+      .addCase(saveGithubAutoDeploy.pending, (state) => {
+        state.autoDeploySaving = true;
+        state.autoDeployError = null;
+      })
+      .addCase(saveGithubAutoDeploy.fulfilled, (state, action) => {
+        state.autoDeploySaving = false;
+        state.autoDeploy = action.payload;
+      })
+      .addCase(saveGithubAutoDeploy.rejected, (state, action) => {
+        state.autoDeploySaving = false;
+        state.autoDeployError = action.payload ?? "Échec de la mise à jour.";
       });
   },
 });

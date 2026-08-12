@@ -1240,3 +1240,459 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* --- Domaine(s) de reverse proxy sur la carte du nœud (façon Railway, voir TopologyNode#domains
+   et GraphNode dans topologyGraphShared.tsx) --------------------------------------------------- */
+
+.topology-node__domains {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.topology-node__domain {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--accent-start, #3b6fef);
+  text-decoration: none;
+  overflow: hidden;
+}
+
+.topology-node__domain:hover {
+  text-decoration: underline;
+}
+
+.topology-node__domain-icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+
+.topology-node__domain-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Regroupement de nœuds ("encapsulation façon Railway/Logisim", voir TopologyGroup) -------- */
+
+.topology-group-node {
+  border-color: #e879f9;
+}
+
+.topology-group-node__icon {
+  color: #e879f9;
+}
+
+.topology-group-node__toggle {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  flex: none;
+}
+
+.topology-group-node__toggle:hover {
+  background: var(--color-surface-2);
+  color: var(--color-text);
+}
+
+.topology-group-node__chevron {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.15s ease;
+}
+
+.topology-group-node__chevron--collapsed {
+  transform: rotate(0deg);
+}
+
+.topology-group-node__chevron--expanded {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topology-group-node__chevron {
+    transition: none;
+  }
+}
+
+/* Cadre décoratif derrière les membres d'un groupe DÉPLIÉ (GroupFrameNode, topologyGraphShared.tsx)
+   — non connectable/non sélectionnable, purement un repère visuel + en-tête pour replier. */
+.topology-group-frame {
+  width: 100%;
+  height: 100%;
+  border: 1.5px dashed #e879f9;
+  border-radius: var(--radius-md);
+  background: rgba(232, 121, 249, 0.05);
+  pointer-events: none;
+}
+
+.topology-group-frame__header {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  pointer-events: auto;
+  max-width: calc(100% - 16px);
+}
+
+.topology-group-frame__icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: #e879f9;
+}
+
+.topology-group-frame__label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topology-group-frame__count {
+  font-size: 11px;
+  color: var(--color-text-faint);
+  flex: none;
+}
+
+/* --- Barre d'outils du canevas (façon Railway, coin haut-gauche) ------------------------------- */
+
+.topology-controls__minimap-toggle svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* --- Bouton "+ Créer" persistant + bouton flottant "Regrouper" (coin haut-droit du canevas) ---- */
+
+.topology-toolbar-top-right {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.topology-create-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  box-shadow: var(--shadow-lg, 0 8px 20px rgba(0, 0, 0, 0.25));
+}
+
+.topology-create-btn__icon {
+  width: 14px;
+  height: 14px;
+}
+
+.topology-group-action-btn {
+  box-shadow: var(--shadow-lg, 0 8px 20px rgba(0, 0, 0, 0.25));
+  animation: popover-in 0.15s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topology-group-action-btn {
+    animation: none;
+  }
+}
+
+/* --- Palette de création "spotlight" (façon Railway "What can we help with?") ------------------ */
+
+.graph-spotlight {
+  width: 360px;
+  padding: 0;
+  overflow: hidden;
+}
+
+.graph-spotlight__search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.graph-spotlight__search-icon {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  color: var(--color-text-faint);
+}
+
+.graph-spotlight__search-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 13.5px;
+  outline: none;
+}
+
+.graph-spotlight__list {
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.graph-spotlight__empty {
+  padding: 16px 10px;
+  font-size: 12.5px;
+  color: var(--color-text-faint);
+  text-align: center;
+}
+
+.graph-spotlight__group + .graph-spotlight__group {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border);
+}
+
+.graph-spotlight__group-title {
+  padding: 4px 8px;
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-faint);
+}
+
+.graph-spotlight__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.graph-spotlight__row:hover:not(:disabled) {
+  background: var(--color-surface-2);
+}
+
+.graph-spotlight__row:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.graph-spotlight__row-icon {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  color: var(--accent-start, #3b6fef);
+}
+
+.graph-spotlight__row-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.graph-spotlight__row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.graph-spotlight__row-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.graph-spotlight__row-desc {
+  font-size: 11.5px;
+  color: var(--color-text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-spotlight__row-busy {
+  flex: none;
+  color: var(--color-text-faint);
+}
+
+/* --- Panneau "Activity" docké à droite du canevas (façon Railway), voir TopologyActivityPanel -- */
+
+.topology-activity-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 15;
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-surface-1);
+  border-left: 1px solid var(--color-border);
+  transition: width 0.15s ease;
+}
+
+.topology-activity-panel--collapsed {
+  width: 40px;
+}
+
+.topology-activity-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--color-border);
+  flex: none;
+}
+
+.topology-activity-panel--collapsed .topology-activity-panel__header {
+  justify-content: center;
+}
+
+.topology-activity-panel__title {
+  font-size: 12.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--color-text-muted);
+}
+
+.topology-activity-panel__toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  flex: none;
+}
+
+.topology-activity-panel__toggle:hover {
+  background: var(--color-surface-2);
+  color: var(--color-text);
+}
+
+.topology-activity-panel__chevron {
+  width: 14px;
+  height: 14px;
+  transform: rotate(180deg);
+  transition: transform 0.15s ease;
+}
+
+.topology-activity-panel__chevron--open {
+  transform: rotate(0deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topology-activity-panel {
+    transition: none;
+  }
+
+  .topology-activity-panel__chevron {
+    transition: none;
+  }
+}
+
+.topology-activity-panel__empty {
+  padding: 16px 12px;
+  font-size: 12px;
+  color: var(--color-text-faint);
+  text-align: center;
+}
+
+.topology-activity-panel__list {
+  list-style: none;
+  margin: 0;
+  padding: 6px;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.topology-activity-panel__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+}
+
+.topology-activity-panel__item:hover {
+  background: var(--color-surface-2);
+}
+
+.topology-activity-panel__item-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--color-text-faint);
+}
+
+.topology-activity-panel__item--error .topology-activity-panel__item-dot {
+  background: var(--color-critical);
+}
+
+.topology-activity-panel__item--success .topology-activity-panel__item-dot {
+  background: var(--color-success);
+}
+
+.topology-activity-panel__item--info .topology-activity-panel__item-dot {
+  background: var(--color-text-faint);
+}
+
+.topology-activity-panel__item-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.topology-activity-panel__item-message {
+  font-size: 12px;
+  color: var(--color-text);
+  overflow-wrap: break-word;
+}
+
+.topology-activity-panel__item-time {
+  font-size: 10.5px;
+  color: var(--color-text-faint);
+}
+
+.topology-activity-panel__more {
+  margin: 6px auto 10px;
+}

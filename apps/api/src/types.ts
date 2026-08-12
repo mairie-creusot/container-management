@@ -647,6 +647,9 @@ export interface Topology {
   nodes: TopologyNode[];
   edges: TopologyEdge[];
   generatedAt: string; // ISO 8601
+  /** Regroupements réels créés par un utilisateur (voir TopologyGroup ci-dessous et
+   * services/topologyGroupsStore.ts) — [] tant qu'aucun groupement n'a jamais été créé. */
+  groups: TopologyGroup[];
 }
 
 /**
@@ -846,6 +849,11 @@ export interface GithubRepoDetection {
   hasCompose: boolean;
   hasTerraform: boolean;
   terraformFiles: string[]; // noms de fichiers *.tf trouvés à la racine
+  /** Dernière instruction EXPOSE trouvée dans le Dockerfile de la racine (lecture réelle du
+   * contenu du fichier via l'API Contents GitHub) — absent si aucun Dockerfile ou aucune
+   * instruction EXPOSE, jamais une valeur devinée par convention. Pré-remplit le champ "port"
+   * du formulaire de déploiement (voir GitHubDeployPage.tsx), toujours éditable. */
+  exposedPort?: number;
 }
 
 export type GithubDeploymentStatus = "running" | "success" | "failed";
@@ -859,6 +867,22 @@ export type GithubDeploymentStatus = "running" | "success" | "failed";
  */
 export type GithubDeploymentKind = "docker-build-run" | "iac-workspace";
 
+/** "manual" : clic operator/admin sur GitHubDeployPage.tsx. "webhook" : push GitHub reçu par
+ * POST /api/github/webhook avec le déploiement automatique activé pour ce dépôt (voir
+ * services/githubStore.ts#StoredAutoDeployEntry, routes/githubWebhook.ts). */
+export type GithubDeploymentTrigger = "manual" | "webhook";
+
+/** Métadonnées RÉELLES du commit déployé — récupérées via l'API GitHub (GET .../commits/:ref)
+ * pour un déploiement manuel, ou directement depuis le payload `push` pour un déploiement
+ * automatique (même donnée, deux sources selon le chemin) : jamais fabriqué, absent si la
+ * récupération échoue (best-effort, ne bloque jamais le déploiement lui-même). */
+export interface GithubDeploymentCommit {
+  sha: string;
+  message: string; // première ligne uniquement
+  author: string; // login GitHub si connu, sinon nom du commit Git
+  authorAvatarUrl?: string;
+}
+
 export interface GithubDeployment {
   id: string;
   owner: string;
@@ -870,16 +894,42 @@ export interface GithubDeployment {
   status: GithubDeploymentStatus;
   startedAt: string; // ISO 8601
   finishedAt: string | null;
-  startedBy: string; // username
+  startedBy: string; // username, ou "github-webhook:<login>" pour un déclenchement automatique
+  triggeredBy: GithubDeploymentTrigger;
+  commit?: GithubDeploymentCommit;
   imageTag?: string; // kind "docker-build-run"
   containerId?: string; // kind "docker-build-run"
   containerName?: string; // kind "docker-build-run"
   iacWorkspaceId?: string; // kind "iac-workspace"
+  /** Sous-domaine demandé pour ce déploiement (reverse proxy interne), s'il y en a un — voir
+   * GitHubDeployPage.tsx. Présent même si la route n'a en fin de compte pas pu être créée
+   * (ex: aucun port EXPOSE détecté ni fourni) : reverseProxyRouteId distingue les deux cas. */
+  subdomain?: string;
+  /** id de la route reverse-proxy (services/reverseProxy.ts) effectivement créée pour ce
+   * déploiement — absent si aucun sous-domaine demandé, ou si la création a échoué (voir le log
+   * du déploiement pour le détail dans ce dernier cas, jamais une route fantôme inventée ici). */
+  reverseProxyRouteId?: string;
 }
 
 /** GithubDeployment + le log complet (clone + build + run entrelacés) — chargé à la demande, même principe que IacRunDetail. */
 export interface GithubDeploymentDetail extends GithubDeployment {
   log: string;
+}
+
+/**
+ * GET/PUT /api/github/repos/:owner/:repo/auto-deploy — déploiement automatique sur push (webhook
+ * GitHub réel, cf. routes/githubWebhook.ts). Jamais de secret ici (voir
+ * services/githubStore.ts#StoredAutoDeployEntry pour la forme persistée avec le secret chiffré).
+ */
+export interface GithubAutoDeployStatus {
+  owner: string;
+  repo: string;
+  enabled: boolean;
+  branch: string;
+  targetEnvironmentId?: string;
+  subdomain?: string;
+  port?: number;
+  updatedAt: string | null; // null si jamais configuré
 }
 
 // --- Sauvegardes automatiques (volumes Docker + bases de données) vers un stockage

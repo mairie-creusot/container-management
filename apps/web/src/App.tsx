@@ -25,6 +25,8 @@ const NetworksPage = lazy(() => import("@/features/networks/NetworksPage"));
 const ReverseProxyPage = lazy(() => import("@/features/reverseProxy/ReverseProxyPage"));
 const AdDnsPage = lazy(() => import("@/features/adDns/AdDnsPage"));
 const NotificationChannelsPage = lazy(() => import("@/features/notificationChannels/NotificationChannelsPage"));
+const BackupsPage = lazy(() => import("@/features/backups/BackupsPage"));
+const CronJobsPage = lazy(() => import("@/features/cronJobs/CronJobsPage"));
 const GitOpsPage = lazy(() => import("@/features/gitops/GitOpsPage"));
 const EnvironmentsPage = lazy(() => import("@/features/clusters/EnvironmentsPage"));
 const NotificationsPage = lazy(() => import("@/features/notifications/NotificationsPage"));
@@ -75,6 +77,10 @@ function renderView(view: string) {
       return <AdDnsPage />;
     case "notification-channels":
       return <NotificationChannelsPage />;
+    case "backups":
+      return <BackupsPage />;
+    case "cron-jobs":
+      return <CronJobsPage />;
     case "iac":
       return <IacPage />;
     case "gitops":

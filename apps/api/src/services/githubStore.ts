@@ -19,10 +19,34 @@ import path from "node:path";
 import { config } from "../config.js";
 import { decryptSecret, encryptSecretIfNeeded } from "./crypto.js";
 import { getEffectiveRegistryCredentials } from "./setupStore.js";
-import type { GithubStatus } from "../types.js";
+import type { GithubAutoDeployStatus, GithubStatus } from "../types.js";
 
 interface StoredGithubConfig {
   token?: string; // chiffré au repos
+  autoDeploy?: Record<string, StoredAutoDeployEntry>; // clé "owner/repo" (minuscules)
+}
+
+/**
+ * Déploiement automatique sur push (webhook GitHub réel — cf. routes/githubWebhook.ts). `secret`
+ * (secret HMAC du webhook, un par dépôt, généré aléatoirement à l'activation) est chiffré au
+ * repos, même mécanisme que `token` ci-dessus — jamais renvoyé par une route GET (voir
+ * GithubAutoDeployStatus, la forme exposée côté API, qui ne le porte jamais).
+ */
+export interface StoredAutoDeployEntry {
+  owner: string;
+  repo: string;
+  branch: string;
+  enabled: boolean;
+  /** id du webhook côté GitHub (POST /repos/:owner/:repo/hooks) — nécessaire pour le désactiver
+   * proprement (DELETE .../hooks/:hookId). Absent si la création a échoué côté GitHub alors que
+   * la config est malgré tout restée "enabled: true" localement (ne devrait pas arriver, voir
+   * routes/github.ts qui ne persiste qu'après succès de la création). */
+  hookId?: number;
+  secret: string; // chiffré au repos
+  targetEnvironmentId?: string;
+  subdomain?: string;
+  port?: number;
+  updatedAt: string; // ISO 8601
 }
 
 let cache: StoredGithubConfig | null = null;
@@ -73,7 +97,10 @@ export async function getStatus(): Promise<GithubStatus> {
 export async function setToken(token: string): Promise<void> {
   const trimmed = token.trim();
   if (!trimmed) throw new Error("token is required");
-  const next: StoredGithubConfig = { token: encryptSecretIfNeeded(trimmed) };
+  const current = await getCurrent();
+  // Préserve autoDeploy existant — un remplacement de jeton ne doit jamais effacer les
+  // configurations de déploiement automatique déjà en place pour d'autres dépôts.
+  const next: StoredGithubConfig = { ...current, token: encryptSecretIfNeeded(trimmed) };
   await writeToDisk(next);
   cache = next;
 }
@@ -95,4 +122,100 @@ export async function getEffectiveToken(): Promise<EffectiveGithubToken | null> 
   const fallback = await ghcrFallbackToken();
   if (fallback) return { token: fallback, source: "ghcr-fallback" };
   return null;
+}
+
+// --- Déploiement automatique sur push (webhook GitHub réel, cf. routes/githubWebhook.ts) -------
+
+function autoDeployKey(owner: string, repo: string): string {
+  return `${owner.toLowerCase()}/${repo.toLowerCase()}`;
+}
+
+async function getAutoDeployEntry(owner: string, repo: string): Promise<StoredAutoDeployEntry | null> {
+  const current = await getCurrent();
+  return current.autoDeploy?.[autoDeployKey(owner, repo)] ?? null;
+}
+
+/** GET /api/github/repos/:owner/:repo/auto-deploy — jamais le secret. */
+export async function getAutoDeployStatus(owner: string, repo: string): Promise<GithubAutoDeployStatus | null> {
+  const entry = await getAutoDeployEntry(owner, repo);
+  if (!entry) return null;
+  return {
+    owner: entry.owner,
+    repo: entry.repo,
+    enabled: entry.enabled,
+    branch: entry.branch,
+    updatedAt: entry.updatedAt,
+    ...(entry.targetEnvironmentId ? { targetEnvironmentId: entry.targetEnvironmentId } : {}),
+    ...(entry.subdomain ? { subdomain: entry.subdomain } : {}),
+    ...(entry.port ? { port: entry.port } : {}),
+  };
+}
+
+/**
+ * Résolution interne pour la vérification de signature du webhook (routes/githubWebhook.ts) —
+ * secret DÉCHIFFRÉ, jamais exposé par une route GET. `null` si ce dépôt n'a jamais eu de
+ * déploiement automatique configuré (webhook orphelin, ou payload forgé visant un dépôt inconnu).
+ */
+export async function getAutoDeploySecretEntry(
+  owner: string,
+  repo: string,
+): Promise<{ secret: string; enabled: boolean; branch: string; targetEnvironmentId?: string; subdomain?: string; port?: number } | null> {
+  const entry = await getAutoDeployEntry(owner, repo);
+  if (!entry) return null;
+  return {
+    secret: decryptSecret(entry.secret),
+    enabled: entry.enabled,
+    branch: entry.branch,
+    ...(entry.targetEnvironmentId ? { targetEnvironmentId: entry.targetEnvironmentId } : {}),
+    ...(entry.subdomain ? { subdomain: entry.subdomain } : {}),
+    ...(entry.port ? { port: entry.port } : {}),
+  };
+}
+
+/** Secret HMAC existant pour ce dépôt (déchiffré) s'il y en a déjà un — pour réutiliser le même
+ * secret entre deux réactivations plutôt que d'en régénérer un nouveau à chaque fois. */
+export async function getExistingAutoDeploySecret(owner: string, repo: string): Promise<string | null> {
+  const entry = await getAutoDeployEntry(owner, repo);
+  return entry ? decryptSecret(entry.secret) : null;
+}
+
+export async function getAutoDeployHookId(owner: string, repo: string): Promise<number | undefined> {
+  const entry = await getAutoDeployEntry(owner, repo);
+  return entry?.hookId;
+}
+
+export interface SaveAutoDeployInput {
+  owner: string;
+  repo: string;
+  branch: string;
+  enabled: boolean;
+  hookId?: number;
+  secret: string; // en clair, chiffré ici avant écriture
+  targetEnvironmentId?: string;
+  subdomain?: string;
+  port?: number;
+}
+
+/** PUT /api/github/repos/:owner/:repo/auto-deploy — remplace l'entrée existante pour ce dépôt. */
+export async function saveAutoDeployEntry(input: SaveAutoDeployInput): Promise<GithubAutoDeployStatus> {
+  const current = await getCurrent();
+  const entry: StoredAutoDeployEntry = {
+    owner: input.owner,
+    repo: input.repo,
+    branch: input.branch,
+    enabled: input.enabled,
+    secret: encryptSecretIfNeeded(input.secret),
+    updatedAt: new Date().toISOString(),
+    ...(input.hookId !== undefined ? { hookId: input.hookId } : {}),
+    ...(input.targetEnvironmentId ? { targetEnvironmentId: input.targetEnvironmentId } : {}),
+    ...(input.subdomain ? { subdomain: input.subdomain } : {}),
+    ...(input.port ? { port: input.port } : {}),
+  };
+  const next: StoredGithubConfig = {
+    ...current,
+    autoDeploy: { ...(current.autoDeploy ?? {}), [autoDeployKey(input.owner, input.repo)]: entry },
+  };
+  await writeToDisk(next);
+  cache = next;
+  return (await getAutoDeployStatus(input.owner, input.repo))!;
 }

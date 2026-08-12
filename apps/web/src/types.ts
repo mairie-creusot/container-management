@@ -237,6 +237,13 @@ export interface TopologyNode {
    * TopologyNode top-level et n'apparaît donc jamais ici.
    */
   attachments?: TopologyNodeAttachment[];
+  /**
+   * Conteneurs uniquement : sous-domaines de reverse proxy RÉELLEMENT associés à ce conteneur
+   * (rapprochés par targetContainerId côté apps/api/src/services/topology.ts) — URL complète
+   * (`https://<subdomain>`), affichée directement sur la carte du nœud, cliquable. Absent si
+   * aucune route ne cible ce conteneur — jamais un domaine inventé.
+   */
+  domains?: string[];
 }
 
 /** Voir TopologyNode#attachments ci-dessus — même forme que apps/api/src/types.ts#TopologyNodeAttachment. */
@@ -278,6 +285,29 @@ export interface Topology {
   nodes: TopologyNode[];
   edges: TopologyEdge[];
   generatedAt: string;
+  /** Regroupements réels créés par un utilisateur (voir TopologyGroup ci-dessous) — [] tant
+   * qu'aucun groupement n'a jamais été créé. */
+  groups: TopologyGroup[];
+}
+
+/**
+ * Regroupement visuel de nœuds RÉELS du graphe de topologie ("encapsulation façon Railway/
+ * Logisim") — une carte parente repliable/dépliable créée UNIQUEMENT par une action explicite de
+ * l'utilisateur (sélection multiple + "Regrouper" sur le canevas), jamais deviné/inféré
+ * automatiquement. Persisté et PARTAGÉ entre tous les utilisateurs connectés (voir
+ * apps/api/src/services/topologyGroupsStore.ts) — les ports d'entrée/sortie du groupe sont
+ * dérivés CÔTÉ CLIENT des arêtes réelles qui traversent sa frontière (voir
+ * topologyGraphShared.tsx#deriveGroupPorts), jamais persistés ici.
+ */
+export interface TopologyGroup {
+  id: string; // "group:<uuid>"
+  label: string;
+  /** Ids de TopologyNode RÉELS regroupés — toujours >= 2. */
+  nodeIds: string[];
+  /** Replié (une seule carte compacte) ou déplié (cadre contenant visuellement ses membres). */
+  collapsed: boolean;
+  createdAt: string; // ISO 8601
+  createdBy: string; // username LDAP à l'origine du regroupement
 }
 
 export type IacEngine = "tofu" | "ansible" | "packer";
@@ -695,10 +725,21 @@ export interface GithubRepoDetection {
   hasCompose: boolean;
   hasTerraform: boolean;
   terraformFiles: string[];
+  /** Dernière instruction EXPOSE trouvée dans le Dockerfile de la racine — absent si aucun
+   * Dockerfile ou aucun EXPOSE, jamais deviné. Pré-remplit le champ "port" (toujours éditable). */
+  exposedPort?: number;
 }
 
 export type GithubDeploymentStatus = "running" | "success" | "failed";
 export type GithubDeploymentKind = "docker-build-run" | "iac-workspace";
+export type GithubDeploymentTrigger = "manual" | "webhook";
+
+export interface GithubDeploymentCommit {
+  sha: string;
+  message: string;
+  author: string;
+  authorAvatarUrl?: string;
+}
 
 export interface GithubDeployment {
   id: string;
@@ -711,12 +752,156 @@ export interface GithubDeployment {
   startedAt: string;
   finishedAt: string | null;
   startedBy: string;
+  triggeredBy: GithubDeploymentTrigger;
+  commit?: GithubDeploymentCommit;
   imageTag?: string;
   containerId?: string;
   containerName?: string;
   iacWorkspaceId?: string;
+  subdomain?: string;
+  reverseProxyRouteId?: string;
 }
 
 export interface GithubDeploymentDetail extends GithubDeployment {
   log: string;
+}
+
+/** GET/PUT /api/github/repos/:owner/:repo/auto-deploy — déploiement automatique sur push. */
+export interface GithubAutoDeployStatus {
+  owner: string;
+  repo: string;
+  enabled: boolean;
+  branch: string;
+  targetEnvironmentId?: string;
+  subdomain?: string;
+  port?: number;
+  updatedAt: string | null;
+}
+
+// --- Métriques temps réel et historiques (voir apps/api/src/services/metricsCollector.ts) ---
+// Scrape périodique (tous les conteneurs `running`, 30s par défaut) écrit un point par conteneur
+// par cycle dans un store à fenêtre glissante — voir GET /api/containers/:id/metrics.
+
+export interface ContainerMetricPoint {
+  containerId: string;
+  timestamp: string; // ISO 8601
+  cpuPercent: number;
+  memBytes: number;
+}
+
+// --- Cron Jobs comme type de service natif (voir apps/api/src/services/cronJobsStore.ts et
+// cronJobsScheduler.ts) — façon Railway : une expression cron standard 5 champs associée à une
+// commande shell exécutée via un VRAI `docker exec` dans un conteneur déjà existant.
+
+export interface CronJobDefinition {
+  id: string;
+  name: string;
+  containerId: string;
+  /** Dénormalisé pour affichage même si le conteneur cible est ensuite supprimé/renommé. */
+  containerName: string;
+  /** Exécutée dans le conteneur cible via ["/bin/sh", "-c", command]. */
+  command: string;
+  // Expression cron standard 5 champs, ex "0,5,10 * * * *" ou une syntaxe avec pas.
+  schedule: string;
+  enabled: boolean;
+  createdAt: string; // ISO 8601
+  updatedAt: string; // ISO 8601
+  createdBy: string; // username
+}
+
+export type CronJobRunStatus = "running" | "success" | "failed";
+
+/** "scheduled" : déclenché tout seul par le cycle du scheduler. "manual" : clic operator/admin
+ * (POST /api/cron-jobs/:id/trigger). */
+export type CronJobRunTrigger = "scheduled" | "manual";
+
+export interface CronJobRun {
+  id: string;
+  jobId: string;
+  status: CronJobRunStatus;
+  trigger: CronJobRunTrigger;
+  startedAt: string; // ISO 8601
+  finishedAt: string | null;
+  /** null si non déterminé (ex : timeout, conteneur injoignable avant le lancement réel). */
+  exitCode: number | null;
+  /** Sortie stdout+stderr entrelacée réellement capturée sur l'exec Docker, tronquée au-delà
+   * d'une taille raisonnable côté API. */
+  output: string;
+}
+
+// --- Sauvegardes automatiques (volumes Docker + bases de données) vers un stockage
+// S3-compatible — voir apps/api/src/services/backupsStore.ts (définitions + historique) et
+// apps/api/src/services/backupScheduler.ts (exécution réelle : tar/pg_dump/mysqldump/mongodump
+// en sous-processus/docker exec, upload/suppression S3 via @aws-sdk/client-s3). accessKey/
+// secretKey ne transitent JAMAIS par ce contrat une fois enregistrés (write-only, même principe
+// que RemoteDockerTls/SecretRef) : seul `hasCredentials` indique leur présence.
+
+export type BackupTargetKind = "volume" | "database";
+
+export type BackupDatabaseEngine = "postgres" | "mysql" | "mariadb" | "mongo";
+
+export interface BackupTarget {
+  kind: BackupTargetKind;
+  /** "volume" : nom du volume Docker. "database" : id du conteneur cible — le dump est exécuté
+   * DEDANS via `docker exec` (dockerode `container.exec`, même mécanisme que la console
+   * interactive), jamais par un binaire pg_dump/mysqldump/mongodump installé côté API. */
+  ref: string;
+  /** "database" uniquement : détecté automatiquement depuis l'image du conteneur cible au moment
+   * de l'exécution (ex: "postgres:16" -> "postgres") — jamais saisi manuellement, jamais fabriqué
+   * si l'image ne correspond à aucun moteur supporté (l'exécution échoue alors explicitement). */
+  engine?: BackupDatabaseEngine;
+}
+
+export interface BackupDestinationRef {
+  endpoint: string;
+  region: string;
+  bucket: string;
+  forcePathStyle: boolean;
+  hasCredentials: boolean;
+}
+
+export interface BackupDefinition {
+  id: string;
+  name: string;
+  target: BackupTarget;
+  destination: BackupDestinationRef;
+  /** Expression cron standard à 5 champs (minute heure jour-du-mois mois jour-de-semaine). */
+  schedule: string;
+  /** Nombre de copies conservées — rotation automatique (S3 + historique local) au-delà, voir
+   * services/backupsStore.ts#computeRunsToRotate. */
+  retentionCount: number;
+  enabled: boolean;
+  createdAt: string; // ISO 8601
+  updatedAt: string; // ISO 8601
+}
+
+export type BackupRunStatus = "running" | "success" | "failed";
+
+/** "scheduled" : lancé tout seul par services/backupScheduler.ts quand l'expression cron matche.
+ * "manual" : POST /api/backups/:id/run (bouton "Sauvegarder maintenant"). */
+export type BackupRunTrigger = "scheduled" | "manual";
+
+export interface BackupRun {
+  id: string;
+  definitionId: string;
+  status: BackupRunStatus;
+  trigger: BackupRunTrigger;
+  startedAt: string; // ISO 8601
+  finishedAt: string | null;
+  sizeBytes: number | null;
+  /** Clé de l'objet S3 uploadé — absente tant que l'upload n'a pas réussi. */
+  objectKey?: string;
+  /** Détail concret en cas d'échec (jamais avalé) — absent si status !== "failed". */
+  error?: string;
+  /** true une fois que la rotation (retentionCount dépassé) a réellement supprimé l'objet côté
+   * S3 — le run reste visible dans l'historique (append-only, voir backupsStore.ts) mais n'est
+   * plus proposé à la restauration. Absent = jamais rotaté. */
+  rotated?: boolean;
+}
+
+/** POST /api/backups/:id/restore/:runId — restauration RÉELLE et destructive (voir
+ * services/backupScheduler.ts#restoreBackup). */
+export interface BackupRestoreResult {
+  ok: boolean;
+  message: string;
 }

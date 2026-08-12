@@ -778,6 +778,16 @@
   transform: rotate(90deg);
 }
 
+/* Chevron du bouton "Historique" de BackupsPage.tsx — même principe que .env-node__caret. */
+.backups-history__caret {
+  display: inline-flex;
+  transition: transform 0.15s ease;
+}
+
+.backups-history__caret.is-open {
+  transform: rotate(90deg);
+}
+
 .env-node__name {
   font-weight: 600;
   flex: 1;

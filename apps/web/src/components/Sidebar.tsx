@@ -1,6 +1,6 @@
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import { NAV_ITEMS, pageTitle, setCurrentView, setUnsavedFormActive, type ViewId } from "@/features/ui/uiSlice";
-import { canAdminister } from "@/features/auth/authSlice";
+import { canAdminister, canOperate } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import Brand from "@/components/Brand";
 import {
@@ -18,6 +18,7 @@ import {
   IconKey,
   IconGlobe,
   IconServer,
+  IconBackup,
 } from "@/components/icons";
 
 const ICONS: Partial<Record<ViewId, (props: { className?: string }) => JSX.Element>> = {
@@ -138,6 +139,40 @@ export default function Sidebar() {
               <IconBell />
             </span>
             {pageTitle("notification-channels")}
+          </button>
+        )}
+
+        {/* Sauvegardes automatiques — operator/admin (même rôle que les mutations de
+            routes/backups.ts, pas admin uniquement contrairement aux entrées ci-dessus). */}
+        {canOperate(session) && (
+          <button
+            type="button"
+            className={`sidebar__item${currentView === "backups" ? " is-active" : ""}`}
+            onClick={() => handleNavigate("backups")}
+            title={pageTitle("backups")}
+          >
+            <span className="sidebar__icon">
+              <IconBackup />
+            </span>
+            {pageTitle("backups")}
+          </button>
+        )}
+
+        {/* Cron Jobs — operator/admin (routes/cronJobs.ts : GET/liste/historique ouverts à toute
+            session, mais le déclenchement manuel POST .../trigger exige operator/admin ; la
+            création/modification/suppression, elles, reste admin uniquement, gérée DANS la page
+            elle-même — voir CronJobsPage.tsx). */}
+        {canOperate(session) && (
+          <button
+            type="button"
+            className={`sidebar__item${currentView === "cron-jobs" ? " is-active" : ""}`}
+            onClick={() => handleNavigate("cron-jobs")}
+            title={pageTitle("cron-jobs")}
+          >
+            <span className="sidebar__icon">
+              <IconHistory />
+            </span>
+            {pageTitle("cron-jobs")}
           </button>
         )}
       </div>
