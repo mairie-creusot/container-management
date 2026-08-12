@@ -186,6 +186,22 @@ function fqdn(name: string): string {
 }
 
 /**
+ * Défense en profondeur, DUPLIQUÉE volontairement de services/reverseProxy.ts#isValidSubdomain
+ * (un import direct créerait un cycle : reverseProxy.ts importe déjà pushDnsRecord/removeDnsRecord
+ * d'ici) — reverseProxy.ts valide déjà `subdomain` avant tout appel, mais `subdomain` est ensuite
+ * interpolé TEL QUEL dans un script `nsupdate` transmis en texte brut, ligne par ligne : n'importe
+ * quel appelant futur de pushDnsRecord/removeDnsRecord qui oublierait cette validation permettrait
+ * une injection de commandes DNS arbitraires (voir docs/reports/security-audit-2026-08-12.md,
+ * finding C3) — jamais construire le script sans revalider ici, quoi qu'il arrive côté appelant.
+ */
+const DNS_LABEL = "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?";
+const SUBDOMAIN_PATTERN = new RegExp(`^${DNS_LABEL}(\\.${DNS_LABEL})+$`);
+
+function isValidDnsName(value: string): boolean {
+  return value.length <= 253 && SUBDOMAIN_PATTERN.test(value.toLowerCase());
+}
+
+/**
  * POST /api/ad-dns/test — valide uniquement les identifiants/realm/KDC (kinit), n'écrit AUCUN
  * enregistrement DNS : sert à vérifier une config candidate avant de l'enregistrer.
  */
@@ -209,6 +225,9 @@ export async function testAdDnsConnection(candidate: SetupAdDnsConfig): Promise<
  */
 export async function pushDnsRecord(cfg: SetupAdDnsConfig, subdomain: string): Promise<AdDnsSyncResult> {
   const at = new Date().toISOString();
+  if (!isValidDnsName(subdomain)) {
+    return { status: "failed", message: `"${subdomain}" is not a valid DNS name — refusing to build an nsupdate script from it.`, at };
+  }
   const work = await prepareKerberosWorkDir(cfg);
   try {
     const ticket = await kinit(cfg, work);
@@ -231,6 +250,9 @@ export async function pushDnsRecord(cfg: SetupAdDnsConfig, subdomain: string): P
  * best-effort (une route déjà supprimée côté QUAI/Caddy le reste même si ce retrait échoue). */
 export async function removeDnsRecord(cfg: SetupAdDnsConfig, subdomain: string): Promise<AdDnsSyncResult> {
   const at = new Date().toISOString();
+  if (!isValidDnsName(subdomain)) {
+    return { status: "failed", message: `"${subdomain}" is not a valid DNS name — refusing to build an nsupdate script from it.`, at };
+  }
   const work = await prepareKerberosWorkDir(cfg);
   try {
     const ticket = await kinit(cfg, work);

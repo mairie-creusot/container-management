@@ -59,6 +59,9 @@ import type { AdDnsSyncResult, ReverseProxyRoute, ReverseProxyStatus } from "../
 
 export class SubdomainConflictError extends Error {}
 
+/** `subdomain` refusé : caractères hors d'un nom DNS valide (voir SUBDOMAIN_PATTERN ci-dessous). */
+export class InvalidSubdomainError extends Error {}
+
 /**
  * Le push vers l'API d'admin Caddy a échoué (Caddy pas encore démarré, réseau...) : ÉCHEC
  * EXPLICITE, jamais silencieux — mais la mutation locale (création/suppression de la route)
@@ -155,6 +158,24 @@ function normalizeSubdomain(raw: string): string {
 }
 
 /**
+ * Format DNS strict (labels alphanumériques/tirets, jamais en bordure de label, séparés par des
+ * points — au moins deux labels, ex "monapp.lecreusot.priv") — REJETTE tout caractère qui
+ * permettrait une injection dans le script `nsupdate` transmis en texte brut ligne par ligne
+ * (retour à la ligne, espace, guillemet...) quand l'intégration DNS AD est configurée (voir
+ * services/adDns.ts). Sans cette validation, un simple `operator` (seul le rôle "admin" est requis
+ * pour configurer AD DNS lui-même, mais "operator" suffit à créer une route) pouvait faire pointer
+ * `subdomain` vers un nom contenant `\nupdate add autrehote.lecreusot.fr 300 A 6.6.6.6\n` et
+ * réécrire n'importe quel enregistrement de la zone — voir
+ * docs/reports/security-audit-2026-08-12.md, finding C3.
+ */
+const DNS_LABEL = "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?";
+const SUBDOMAIN_PATTERN = new RegExp(`^${DNS_LABEL}(\\.${DNS_LABEL})+$`);
+
+export function isValidSubdomain(value: string): boolean {
+  return value.length <= 253 && SUBDOMAIN_PATTERN.test(value);
+}
+
+/**
  * POST /api/reverse-proxy/routes — `subdomain` doit être unique (409 via SubdomainConflictError
  * sinon). Persiste d'abord, pousse ensuite la config complète vers Caddy : si ce push échoue, la
  * route reste malgré tout créée (voir CaddyPushFailedError ci-dessus) — un re-push peut être
@@ -164,6 +185,11 @@ export async function createRoute(input: CreateRouteInput): Promise<ReverseProxy
   const all = await getAll();
   const subdomain = normalizeSubdomain(input.subdomain);
   if (!subdomain) throw new Error("subdomain is required");
+  if (!isValidSubdomain(subdomain)) {
+    throw new InvalidSubdomainError(
+      `"${input.subdomain}" is not a valid DNS subdomain (letters, digits, hyphens and dots only, e.g. "monapp.lecreusot.priv")`,
+    );
+  }
   if (!input.targetContainerId && !input.targetHost) {
     throw new Error("targetContainerId or targetHost is required");
   }

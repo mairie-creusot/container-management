@@ -177,3 +177,21 @@ export const config = {
 } as const;
 
 export type Config = typeof config;
+
+/**
+ * Échec net au démarrage en production si JWT_SECRET n'a pas été positionné (valeur toujours
+ * égale au défaut de développement, committé dans ce dépôt) — même principe que
+ * CONFIG_ENCRYPTION_KEY (crypto.ts#requireKey) : sans cette vérification, n'importe qui connaissant
+ * ce défaut public peut forger un JWT de session avec le rôle "admin" et prendre le contrôle total
+ * d'une instance déployée sans jamais s'authentifier (voir docs/reports/security-audit-2026-08-12.md,
+ * finding C2). Volontairement placé ici (chargement du module), pas dans session.ts : la vérification
+ * doit bloquer le démarrage du process avant même qu'une route ne puisse être servie.
+ */
+const INSECURE_DEFAULT_JWT_SECRET = "dev-insecure-secret-change-me";
+if (config.server.nodeEnv === "production" && config.session.jwtSecret === INSECURE_DEFAULT_JWT_SECRET) {
+  throw new Error(
+    "JWT_SECRET is required in production (refusing to start with the default development secret, which is " +
+      "committed in this repository and would let anyone forge an admin session token). Generate one with: " +
+      "openssl rand -hex 32",
+  );
+}

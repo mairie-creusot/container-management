@@ -82,6 +82,17 @@ export interface SetupRegistryConfig {
 
 export interface SetupConfig {
   completed: boolean;
+  /**
+   * true dès que l'assistant a été terminé AU MOINS UNE FOIS — contrairement à `completed`,
+   * jamais remis à `false` par resetSetup() (voir plugins/auth.ts). Distingue un VRAI premier
+   * démarrage (aucune session requise sur /api/setup/*, seul cas légitime) d'une réouverture de
+   * l'assistant par un admin déjà authentifié (completed=false temporairement, mais everCompleted
+   * reste true) — sans cette distinction, POST /api/setup/complete redevenait accessible sans
+   * authentification pendant toute la fenêtre de reconfiguration, permettant à quiconque sur le
+   * réseau d'y injecter un LDAP qu'il contrôle et de s'octroyer le rôle admin (voir
+   * docs/reports/security-audit-2026-08-12.md, finding C1).
+   */
+  everCompleted?: boolean;
   ldap?: SetupLdapConfig;
   docker?: SetupDockerConfig;
   kubernetes?: SetupKubernetesConfig;
@@ -207,11 +218,16 @@ export async function isSetupCompleted(): Promise<boolean> {
   return (await getCurrent()).completed;
 }
 
-export type SetupCandidate = Omit<SetupConfig, "completed">;
+/** Voir SetupConfig#everCompleted — jamais remis à false, y compris après resetSetup(). */
+export async function hasEverCompletedSetup(): Promise<boolean> {
+  return (await getCurrent()).everCompleted === true;
+}
+
+export type SetupCandidate = Omit<SetupConfig, "completed" | "everCompleted">;
 
 /** POST /api/setup/complete — persiste la config candidate (secrets chiffrés) et marque l'assistant terminé. */
 export async function completeSetup(candidate: SetupCandidate): Promise<SetupConfig> {
-  const next: SetupConfig = encryptSecrets({ ...candidate, completed: true });
+  const next: SetupConfig = encryptSecrets({ ...candidate, completed: true, everCompleted: true });
   await writeToDisk(next);
   cache = next;
   return next;

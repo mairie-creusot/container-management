@@ -7,19 +7,25 @@
  * - 403 si la méthode est mutante (POST/PUT/PATCH/DELETE) et que l'utilisateur n'a ni le
  *   rôle "operator" ni le rôle "admin" (cf. ARCHITECTURE.md : "Les routes POST exigent le
  *   rôle operator ou admin").
- * - /api/setup/* : ouvert (aucune session requise) tant que `completed=false` ; une fois
- *   `completed=true`, exige une session avec le rôle "admin" (401 sans session, 403 si
- *   authentifié mais pas admin) — flux de reconfiguration réservé aux admins. Exception :
- *   GET /api/setup/status (juste { completed, ...booléens }, aucun secret) n'exige qu'une
- *   session valide, quel que soit le rôle — appelé par tout utilisateur à chaque chargement
- *   de l'app pour savoir si l'assistant doit s'afficher.
+ * - /api/setup/* : ouvert (aucune session requise) UNIQUEMENT lors d'un vrai premier démarrage
+ *   (`completed=false` ET l'assistant n'a JAMAIS été terminé une seule fois — voir setupStore.ts#
+ *   everCompleted/hasEverCompletedSetup). Dès que l'assistant a été terminé au moins une fois —
+ *   y compris temporairement rouvert par un admin via POST /api/setup/reset (`completed` repasse
+ *   à false, mais `everCompleted` reste true) — exige une session avec le rôle "admin" (401 sans
+ *   session, 403 si authentifié mais pas admin) : sans cette distinction, la fenêtre de
+ *   reconfiguration laissait POST /api/setup/complete accessible sans authentification, permettant
+ *   à quiconque sur le réseau de prendre le contrôle admin de l'instance (corrigé le 12/08/2026,
+ *   voir docs/reports/security-audit-2026-08-12.md, finding C1). Exception : GET /api/setup/status
+ *   (juste { completed, ...booléens }, aucun secret) n'exige qu'une session valide, quel que soit
+ *   le rôle — appelé par tout utilisateur à chaque chargement de l'app pour savoir si l'assistant
+ *   doit s'afficher.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import fp from "fastify-plugin";
 import { config } from "../config.js";
 import { verifySessionToken } from "../services/session.js";
-import { isSetupCompleted } from "../services/setupStore.js";
+import { hasEverCompletedSetup, isSetupCompleted } from "../services/setupStore.js";
 import type { Session } from "../types.js";
 
 declare module "fastify" {
@@ -72,7 +78,13 @@ async function authPlugin(fastify: FastifyInstance): Promise<void> {
 
     if (pathname.startsWith("/api/setup/")) {
       const completed = await isSetupCompleted();
-      if (!completed) return; // assistant en cours : ouvert, aucune session requise
+      // Un VRAI premier démarrage (jamais terminé une seule fois) reste ouvert, aucune session
+      // requise — c'est le seul cas légitime. Une réouverture par un admin (POST /api/setup/reset,
+      // `completed` redevenu false mais `everCompleted` toujours true) exige au contraire une
+      // session comme le reste de cette route : sans cette distinction, POST /api/setup/complete
+      // redevenait accessible sans authentification pendant toute la fenêtre de reconfiguration
+      // (voir docs/reports/security-audit-2026-08-12.md, finding C1).
+      if (!completed && !(await hasEverCompletedSetup())) return;
 
       // GET /api/setup/status ne renvoie que { completed, ...booléens } (aucun secret, voir
       // routes/setup.ts) et TOUT utilisateur authentifié en a besoin à chaque chargement de

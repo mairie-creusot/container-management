@@ -31,6 +31,8 @@ import {
   deleteRoute,
   getCaCertificate,
   getReverseProxyStatus,
+  InvalidSubdomainError,
+  isValidSubdomain,
   listRoutes,
   pushConfigToCaddy,
   SubdomainConflictError,
@@ -61,6 +63,15 @@ export default async function reverseProxyRoutes(fastify: FastifyInstance): Prom
     if (!subdomain) {
       return reply.code(400).send({ error: "subdomain is required" });
     }
+    // Rejette ici tout caractère hors d'un nom DNS valide (espace, retour à la ligne, guillemet...)
+    // — défense en profondeur EN PLUS de la validation dans le service (voir
+    // services/reverseProxy.ts#isValidSubdomain) contre une injection dans le script `nsupdate` de
+    // la synchronisation DNS AD (docs/reports/security-audit-2026-08-12.md, finding C3).
+    if (!isValidSubdomain(subdomain.toLowerCase())) {
+      return reply.code(400).send({
+        error: `"${subdomain}" is not a valid DNS subdomain (letters, digits, hyphens and dots only, e.g. "monapp.lecreusot.priv")`,
+      });
+    }
     if (!targetContainerId && !targetHost) {
       return reply.code(400).send({ error: "targetContainerId or targetHost is required" });
     }
@@ -79,6 +90,9 @@ export default async function reverseProxyRoutes(fastify: FastifyInstance): Prom
     } catch (err) {
       if (err instanceof SubdomainConflictError) {
         return reply.code(409).send({ error: err.message });
+      }
+      if (err instanceof InvalidSubdomainError) {
+        return reply.code(400).send({ error: err.message });
       }
       if (err instanceof CaddyPushFailedError) {
         return reply.code(201).send({ ...err.route, caddyPushError: err.message });
