@@ -13,9 +13,15 @@
 
 // `pkg/` n'existe qu'après build (`pnpm --filter @quai/wasm-core build`,
 // voir package.json / README.md). Il est volontairement absent du dépôt
-// (voir .gitignore racine), d'où le @ts-expect-error tant qu'il n'a pas été
-// généré localement.
-// @ts-expect-error -- généré par `wasm-pack build`, absent avant le premier build local.
+// (voir .gitignore racine) : le module peut donc être absent (poste de dev
+// avant le premier build local) ou présent (CI/Dockerfile.api, qui compile
+// wasm-core puis copie pkg/ AVANT ce tsc — voir deploy/docker/Dockerfile.api).
+// @ts-ignore volontairement, PAS @ts-expect-error : ce dernier échoue lui-même
+// dès que pkg/ est présent et que l'import résout sans erreur (directive
+// "inutilisée" -> erreur TS2578), exactement le cas de ce Dockerfile — trouvé
+// en reproduisant le build de prod en local après un premier correctif du
+// pipeline CI (wasm-pack manquant dans le stage de build TS, voir Dockerfile).
+// @ts-ignore -- généré par `wasm-pack build`, peut être absent avant le premier build local.
 import { diffManifests as diffManifestsWasm } from "./pkg/quai_wasm_core.js";
 
 /** Nature d'une ligne du diff : inchangée, ajoutée, ou supprimée. */

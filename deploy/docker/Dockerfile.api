@@ -59,9 +59,14 @@ COPY --from=rust-builder /workspace/packages/wasm-core/pkg ./packages/wasm-core/
 
 RUN pnpm install --frozen-lockfile
 
-# "..." inclut les dépendances de workspace de @quai/api (dont
-# @quai/wasm-core) dans l'ordre de build correct.
-RUN pnpm --filter @quai/api... build
+# PAS de "..." ici : ça inclurait @quai/wasm-core dans le graphe de build de
+# pnpm, qui ré-exécuterait alors SON PROPRE script "build" (package.json —
+# `wasm-pack build --target bundler --out-dir pkg`) dans CE stage, qui n'a
+# pas la toolchain Rust/wasm-pack (seul le stage rust-builder l'a) — pipeline
+# CI cassé avec "wasm-pack: not found" jusqu'à ce correctif. Le binding wasm
+# déjà compilé au bon target (nodejs) est copié depuis rust-builder ci-dessus ;
+# @quai/api n'a besoin que de son propre `tsc`, pas d'un rebuild de wasm-core.
+RUN pnpm --filter @quai/api build
 
 # Bundle de déploiement autonome : ne garde que les deps de prod de
 # @quai/api, avec les dépendances de workspace "dé-symlinkées" (fichiers
@@ -81,6 +86,15 @@ WORKDIR /app
 # node:22-slim fournit déjà un utilisateur non-root "node" (uid 1000) prêt
 # à l'emploi — inutile d'en recréer un.
 COPY --from=build --chown=node:node /workspace/out/api/ ./
+
+# ./data/ (config.json/secrets.json/audit-log.jsonl/watchdog-state.json/...,
+# CONFIG_PATH par défaut, voir config.ts) est créée ET possédée par "node"
+# AVANT de perdre les privilèges root — sans ça, un premier démarrage réel
+# échoue en EACCES sur mkdir('/app/data') (reproduit et vérifié en lançant
+# l'image construite ici). Un volume nommé/anonyme monté sur /app/data
+# hérite de ce contenu/ces permissions au premier montage (comportement
+# standard de Docker), donc ça reste correct même avec un volume externe.
+RUN mkdir -p /app/data && chown node:node /app/data
 
 USER node
 
