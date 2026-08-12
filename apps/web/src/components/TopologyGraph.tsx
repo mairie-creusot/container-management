@@ -55,9 +55,15 @@ import type { TopologyNode, TopologyNodeAttachment } from "@/types";
 const SKELETON_COLUMN_ROWS = [2, 3, 2];
 
 const REFRESH_INTERVAL_MS = 15_000;
-// Colonne "nutanix-vm" à part, après network — nœuds isolés (jamais d'arête vers Docker), une
-// colonne dédiée les garde lisibles plutôt que de les mélanger aux conteneurs.
-const COLUMN_X: Record<TopologyNode["kind"], number> = { volume: 0, container: 340, network: 680, "nutanix-vm": 1020 };
+// Colonnes "nutanix-vm"/"ad-server" à part, après network — nœuds isolés (jamais d'arête vers
+// Docker), des colonnes dédiées les gardent lisibles plutôt que de les mélanger aux conteneurs.
+const COLUMN_X: Record<TopologyNode["kind"], number> = {
+  volume: 0,
+  container: 340,
+  network: 680,
+  "nutanix-vm": 1020,
+  "ad-server": 1360,
+};
 const ROW_HEIGHT = 130;
 const NETWORK_DRIVERS = ["bridge", "overlay", "host", "none"];
 const ACTION_LABEL: Record<LifecycleAction, string> = {
@@ -482,7 +488,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       setFlowNodes([]);
       return;
     }
-    const columnCounters: Record<TopologyNode["kind"], number> = { volume: 0, container: 0, network: 0, "nutanix-vm": 0 };
+    const columnCounters: Record<TopologyNode["kind"], number> = { volume: 0, container: 0, network: 0, "nutanix-vm": 0, "ad-server": 0 };
     setFlowNodes((prev) => {
       const prevById = new Map(prev.map((n) => [n.id, n]));
       return data.nodes.map((n) => {

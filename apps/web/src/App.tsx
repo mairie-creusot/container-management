@@ -16,6 +16,7 @@ import ContainersPage from "@/features/containers/ContainersPage";
 import VolumesPage from "@/features/volumes/VolumesPage";
 import NetworksPage from "@/features/networks/NetworksPage";
 import ReverseProxyPage from "@/features/reverseProxy/ReverseProxyPage";
+import AdDnsPage from "@/features/adDns/AdDnsPage";
 import GitOpsPage from "@/features/gitops/GitOpsPage";
 import EnvironmentsPage from "@/features/clusters/EnvironmentsPage";
 import NotificationsPage from "@/features/notifications/NotificationsPage";
@@ -50,6 +51,8 @@ function renderView(view: string) {
       return <NetworksPage />;
     case "reverse-proxy":
       return <ReverseProxyPage />;
+    case "ad-dns":
+      return <AdDnsPage />;
     case "iac":
       return <IacPage />;
     case "gitops":

@@ -155,6 +155,15 @@ export const config = {
     caddyAdminUrl: readString("CADDY_ADMIN_URL", "http://caddy:2019"),
     requestTimeoutMs: readNumber("CADDY_REQUEST_TIMEOUT_MS", 5000),
   },
+  adDns: {
+    // Mise à jour dynamique sécurisée du DNS Active Directory (RFC 2136 + GSS-TSIG, cf.
+    // ARCHITECTURE.md chapitre "DNS Active Directory") — délai max accordé à `kinit` PUIS à
+    // `nsupdate -g` (deux appels séquentiels, voir services/adDns.ts), et TTL posé sur chaque
+    // enregistrement A créé (court : une route peut changer de cible IP si la machine hôte du
+    // reverse proxy change, pas de valeur à faire propager longtemps).
+    requestTimeoutMs: readNumber("AD_DNS_TIMEOUT_MS", 10000),
+    recordTtlSeconds: readNumber("AD_DNS_RECORD_TTL_SECONDS", 300),
+  },
   github: {
     // Intégration GitOps GitHub (cf. ARCHITECTURE.md, chapitre "Intégration GitHub") : jeton
     // (PAT) persisté chiffré au repos, même pattern/répertoire que secrets.json.

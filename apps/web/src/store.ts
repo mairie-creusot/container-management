@@ -17,6 +17,7 @@ import iacReducer from "@/features/iac/iacSlice";
 import reverseProxyReducer from "@/features/reverseProxy/reverseProxySlice";
 import remoteEnvironmentsReducer from "@/features/remoteEnvironments/remoteEnvironmentsSlice";
 import githubReducer from "@/features/github/githubSlice";
+import adDnsReducer from "@/features/adDns/adDnsSlice";
 import { errorNotificationMiddleware } from "@/features/notifications/errorNotificationMiddleware";
 
 export const store = configureStore({
@@ -39,6 +40,7 @@ export const store = configureStore({
     reverseProxy: reverseProxyReducer,
     remoteEnvironments: remoteEnvironmentsReducer,
     github: githubReducer,
+    adDns: adDnsReducer,
   },
   middleware: (getDefaultMiddleware) => getDefaultMiddleware().concat(errorNotificationMiddleware),
 });

@@ -31,6 +31,11 @@
  * arête aux nœuds Docker (aucune relation réelle entre les deux dans ce projet), [] tant que
  * Nutanix n'a jamais été configuré ou si configuré mais injoignable (nutanix.ts#getNutanixVms).
  *
+ * Nœud "ad-server" (voir getAdServerNodes ci-dessous) : le contrôleur de domaine/DNS Active
+ * Directory synchronisé par les routes de reverse proxy (services/adDns.ts) — même principe que
+ * "nutanix-vm" (indépendant de Docker, [] tant que jamais configuré), jamais relié par une arête
+ * à un nœud Docker ou Nutanix (aucune donnée ne prouve que c'est la même machine physique/VM).
+ *
  * Volumes/networks ORPHELINS (existants sur l'hôte Docker mais rattachés à AUCUN conteneur) :
  * délibérément EXCLUS de ce graphe (voir le filtre juste avant leur construction plus bas) pour
  * ne pas le noyer — un hôte de dev peut avoir des dizaines de volumes de cache d'autres projets.
@@ -69,6 +74,8 @@ import { getImages } from "./images.js";
 import { listGitOpsFiles } from "./gitops.js";
 import { listAllScans } from "./scan.js";
 import { getNutanixVms, isNutanixConfigured } from "./nutanix.js";
+import { getEffectiveAdDnsConfig } from "./setupStore.js";
+import { lastKnownDnsSync } from "./reverseProxy.js";
 import type { NutanixVm, ScanResult, Topology, TopologyEdge, TopologyEdgePort, TopologyNode } from "../types.js";
 
 /**
@@ -162,10 +169,40 @@ async function getNutanixVmNodes(): Promise<TopologyNode[]> {
   return vms.map(nutanixVmToNode);
 }
 
+/**
+ * Nœud "ad-server" (voir services/adDns.ts, types.ts#AdDnsConfig) : le contrôleur de domaine/DNS
+ * AD que QUAI synchronise pour les routes de reverse proxy — indépendant de Docker (comme les VMs
+ * Nutanix ci-dessus), [] si jamais configuré. `status` reflète le DERNIER essai réel de
+ * synchronisation (lastKnownDnsSync, en mémoire process — voir reverseProxy.ts) : "running" =
+ * dernière synchro réussie, "stopped" = dernière synchro en échec (KDC injoignable, droits
+ * insuffisants...), "neutral" = configuré mais aucune route créée/supprimée depuis le démarrage du
+ * process (aucune tentative encore faite, honnêtement "indéterminé" plutôt qu'un statut inventé).
+ * PAS de lien/arête vers un éventuel nœud "nutanix-vm" : QUAI n'a aucune donnée reliant réellement
+ * ce contrôleur de domaine à une VM Nutanix précise (même principe que l'absence d'arête entre
+ * nœuds Docker et VMs Nutanix, voir en-tête de fichier) — à l'utilisateur de le reconnaître
+ * visuellement via le libellé (hostname du KDC) si c'est bien la même machine.
+ */
+async function getAdServerNodes(): Promise<TopologyNode[]> {
+  const adDnsConfig = await getEffectiveAdDnsConfig();
+  if (!adDnsConfig) return [];
+  const lastSync = lastKnownDnsSync();
+  const status: TopologyNode["status"] = lastSync ? (lastSync.status === "synced" ? "running" : "stopped") : "neutral";
+  return [
+    {
+      id: `ad-server:${adDnsConfig.kdcHost}`,
+      kind: "ad-server",
+      label: adDnsConfig.kdcHost,
+      subtitle: `Zone DNS ${adDnsConfig.zone}`,
+      status,
+    },
+  ];
+}
+
 export async function getTopology(): Promise<Topology> {
   const docker = await getClient();
   const nutanixVmNodes = await getNutanixVmNodes();
-  const empty: Topology = { nodes: nutanixVmNodes, edges: [], generatedAt: new Date().toISOString() };
+  const adServerNodes = await getAdServerNodes();
+  const empty: Topology = { nodes: [...nutanixVmNodes, ...adServerNodes], edges: [], generatedAt: new Date().toISOString() };
   if (!(await isDockerReachable(docker))) return empty;
 
   try {
@@ -396,7 +433,7 @@ export async function getTopology(): Promise<Topology> {
       });
     }
 
-    return { nodes: [...nodes, ...nutanixVmNodes], edges, generatedAt: new Date().toISOString() };
+    return { nodes: [...nodes, ...nutanixVmNodes, ...adServerNodes], edges, generatedAt: new Date().toISOString() };
   } catch {
     return empty;
   }

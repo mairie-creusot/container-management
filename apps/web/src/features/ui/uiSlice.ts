@@ -14,7 +14,8 @@ export type ViewId =
   | "notifications"
   | "audit"
   | "secrets"
-  | "reverse-proxy";
+  | "reverse-proxy"
+  | "ad-dns";
 
 interface UiState {
   currentView: ViewId;
@@ -78,6 +79,7 @@ const PAGE_TITLES: Partial<Record<ViewId, string>> = {
   audit: "Traçabilité",
   "registry-explorer": "Explorateur de registry",
   secrets: "Secrets",
+  "ad-dns": "DNS Active Directory",
 };
 
 export function pageTitle(view: ViewId): string {

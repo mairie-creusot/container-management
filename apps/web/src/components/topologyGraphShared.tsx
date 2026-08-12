@@ -11,7 +11,7 @@ import {
   type EdgeProps,
   type NodeProps,
 } from "@xyflow/react";
-import { IconContainers, IconNetworks, IconVm, IconVolumes } from "@/components/icons";
+import { IconContainers, IconNetworks, IconServer, IconVm, IconVolumes } from "@/components/icons";
 import type { TopologyEdge, TopologyEdgePort, TopologyNode, TopologyNodeAttachment } from "@/types";
 
 /**
@@ -37,6 +37,7 @@ export const KIND_ICON: Record<TopologyNode["kind"], (props: { className?: strin
   volume: IconVolumes,
   network: IconNetworks,
   "nutanix-vm": IconVm,
+  "ad-server": IconServer,
 };
 
 /** Couleurs de la MiniMap par type de nœud — mêmes valeurs que celles utilisées pour l'icône du
@@ -46,6 +47,7 @@ export const MINIMAP_NODE_COLOR: Record<TopologyNode["kind"], string> = {
   volume: "#f5a524",
   network: "#7c5cfc",
   "nutanix-vm": "#22c55e",
+  "ad-server": "#e879f9",
 };
 
 /**
@@ -94,6 +96,9 @@ export const NODE_CAPABILITIES: Record<TopologyNode["kind"], PortSpec[]> = {
   // (voir services/topology.ts), pas de capacité de connexion à déclarer. GraphNode ci-dessous
   // gère déjà un tableau de ports vide sans erreur (ports.map sur []).
   "nutanix-vm": [],
+  // Même principe pour le contrôleur de domaine/DNS AD (services/adDns.ts) : jamais relié par une
+  // arête (aucune donnée ne prouve un lien réel avec un nœud Docker/Nutanix précis).
+  "ad-server": [],
 };
 
 export interface CapabilityDef {

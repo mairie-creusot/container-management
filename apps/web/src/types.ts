@@ -177,7 +177,7 @@ export interface AuditEvent {
   ok: boolean;
 }
 
-export type TopologyNodeKind = "container" | "volume" | "network" | "nutanix-vm";
+export type TopologyNodeKind = "container" | "volume" | "network" | "nutanix-vm" | "ad-server";
 
 export interface TopologyNode {
   id: string;
@@ -387,6 +387,9 @@ export interface ReverseProxyRoute {
   targetHost?: string;
   targetPort: number;
   createdAt: string; // ISO 8601
+  /** Résultat du dernier essai de synchronisation DNS AD pour cette route (voir services/adDns.ts
+   * côté API) — absent si l'intégration AD DNS n'a jamais été configurée. */
+  dnsSync?: AdDnsSyncResult;
 }
 
 /** GET /api/reverse-proxy/status — Caddy joignable ou non, même pattern que ScannerStatus. */
@@ -394,6 +397,40 @@ export interface ReverseProxyStatus {
   reachable: boolean;
   adminUrl: string;
   httpsEnabled: boolean;
+}
+
+// --- DNS Active Directory (mise à jour dynamique sécurisée, RFC 2136 + GSS-TSIG) --------------
+// Voir apps/api/src/types.ts pour la doc complète et apps/api/src/services/adDns.ts pour
+// l'implémentation (kinit + nsupdate -g réels, aucune réimplémentation de Kerberos/DNS).
+
+export interface AdDnsConfig {
+  realm: string;
+  kdcHost: string;
+  zone: string;
+  serviceAccount: string;
+  targetIp: string;
+}
+
+/** GET /api/ad-dns/config — jamais le mot de passe du compte de service (write-only). */
+export interface AdDnsStatus {
+  configured: boolean;
+  config?: AdDnsConfig;
+  lastSync?: AdDnsSyncResult;
+}
+
+export type AdDnsSyncOutcome = "synced" | "failed";
+
+export interface AdDnsSyncResult {
+  status: AdDnsSyncOutcome;
+  message?: string;
+  at: string; // ISO 8601
+}
+
+/** POST /api/ad-dns/test — vérifie seulement l'obtention d'un ticket Kerberos, n'écrit aucun
+ * enregistrement DNS. */
+export interface AdDnsTestResult {
+  ok: boolean;
+  message: string;
 }
 
 export type Role = "admin" | "operator" | "viewer";

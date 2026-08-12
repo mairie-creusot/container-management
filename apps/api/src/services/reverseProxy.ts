@@ -24,11 +24,15 @@
  * routes actives restent fonctionnelles) — elle revient automatiquement au prochain push une fois
  * le conteneur de nouveau joignable (voir pushConfigToCaddy()).
  *
- * LIMITE ASSUMÉE (voir ARCHITECTURE.md § "Reverse proxy interne") : la résolution DNS réelle de
- * `*.lecreusot.priv` vers l'hôte Docker qui exécute Caddy est une responsabilité de l'infra
- * réseau de la mairie (DNS interne ou fichier hosts) — CETTE fonctionnalité route uniquement une
- * requête HTTP/HTTPS déjà arrivée sur Caddy avec le bon en-tête Host/SNI, elle ne peut garantir
- * en rien que cet en-tête y arrive depuis l'extérieur.
+ * RÉSOLUTION DNS : automatisée quand l'intégration AD DNS est configurée (voir services/adDns.ts,
+ * types.ts#AdDnsConfig) — createRoute()/deleteRoute() poussent/retirent alors réellement
+ * l'enregistrement `A` du sous-domaine dans le DNS intégré à l'AD de la mairie (RFC 2136 +
+ * GSS-TSIG), plus besoin d'entrée manuelle de fichier hosts. Best-effort et jamais bloquant : si
+ * AD DNS n'a jamais été configuré, ou si la synchronisation échoue (realm injoignable, droits
+ * insuffisants...), la route reste malgré tout créée/supprimée côté QUAI/Caddy — voir `dnsSync`
+ * sur ReverseProxyRoute pour le statut réel. Sans AD DNS configuré, la résolution reste une
+ * responsabilité manuelle de l'infra réseau (DNS interne ou fichier hosts) : cette fonctionnalité
+ * route uniquement une requête déjà arrivée sur Caddy avec le bon en-tête Host/SNI.
  *
  * TLS interne (HTTPS, :443) — plus "hors périmètre" comme documenté initialement, ajouté ce jour
  * suite à un vrai `ERR_EMPTY_RESPONSE` constaté par l'utilisateur sur :443 (rien n'y écoutait) :
@@ -49,7 +53,9 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { config } from "../config.js";
 import { getContainerNetworkAddress } from "./docker.js";
-import type { ReverseProxyRoute, ReverseProxyStatus } from "../types.js";
+import { pushDnsRecord, removeDnsRecord } from "./adDns.js";
+import { getEffectiveAdDnsConfig } from "./setupStore.js";
+import type { AdDnsSyncResult, ReverseProxyRoute, ReverseProxyStatus } from "../types.js";
 
 export class SubdomainConflictError extends Error {}
 
@@ -101,6 +107,37 @@ async function getAll(): Promise<ReverseProxyRoute[]> {
   return cache;
 }
 
+// --- Synchronisation DNS Active Directory (best-effort, voir services/adDns.ts) -----------------
+// Un échec ici ne fait JAMAIS échouer createRoute()/deleteRoute() — la route reste créée/supprimée
+// côté QUAI/Caddy quoi qu'il arrive, seul dnsSync reflète si la résolution DNS a réellement suivi.
+
+let lastDnsSync: AdDnsSyncResult | null = null;
+
+/** Dernier résultat de synchronisation DNS AD connu (toute route confondue), pour l'indicateur de
+ * la page de configuration (routes/adDns.ts) — non persisté (perdu au redémarrage du process),
+ * le résultat par route dans reverse-proxy.json reste la source de vérité durable. */
+export function lastKnownDnsSync(): AdDnsSyncResult | null {
+  return lastDnsSync;
+}
+
+async function tryPushDns(subdomain: string): Promise<AdDnsSyncResult | undefined> {
+  const adDnsConfig = await getEffectiveAdDnsConfig();
+  if (!adDnsConfig) return undefined; // jamais configuré : aucune tentative, pas un échec
+  const result = await pushDnsRecord(adDnsConfig, subdomain).catch(
+    (err): AdDnsSyncResult => ({ status: "failed", message: err instanceof Error ? err.message : String(err), at: new Date().toISOString() }),
+  );
+  lastDnsSync = result;
+  return result;
+}
+
+async function tryRemoveDns(subdomain: string): Promise<void> {
+  const adDnsConfig = await getEffectiveAdDnsConfig();
+  if (!adDnsConfig) return;
+  lastDnsSync = await removeDnsRecord(adDnsConfig, subdomain).catch(
+    (err): AdDnsSyncResult => ({ status: "failed", message: err instanceof Error ? err.message : String(err), at: new Date().toISOString() }),
+  );
+}
+
 /** GET /api/reverse-proxy/routes */
 export async function listRoutes(): Promise<ReverseProxyRoute[]> {
   return getAll();
@@ -134,6 +171,10 @@ export async function createRoute(input: CreateRouteInput): Promise<ReverseProxy
     throw new SubdomainConflictError(`A route for "${subdomain}" already exists`);
   }
 
+  // Avant la persistance : si AD DNS est configuré, tente de pousser l'enregistrement DNS pour
+  // que `dnsSync` fasse partie de la route dès sa création (une seule écriture disque, pas deux).
+  const dnsSync = await tryPushDns(subdomain);
+
   const created: ReverseProxyRoute = {
     id: randomUUID(),
     subdomain,
@@ -141,6 +182,7 @@ export async function createRoute(input: CreateRouteInput): Promise<ReverseProxy
     ...(input.targetHost ? { targetHost: input.targetHost } : {}),
     targetPort: input.targetPort,
     createdAt: new Date().toISOString(),
+    ...(dnsSync ? { dnsSync } : {}),
   };
   const next = [...all, created];
   await writeToDisk(next);
@@ -161,10 +203,15 @@ export async function createRoute(input: CreateRouteInput): Promise<ReverseProxy
  */
 export async function deleteRoute(id: string): Promise<boolean> {
   const all = await getAll();
+  const target = all.find((route) => route.id === id);
   const next = all.filter((route) => route.id !== id);
   if (next.length === all.length) return false;
   await writeToDisk(next);
   cache = next;
+
+  // Best-effort, jamais bloquant : la suppression reste acquise même si le retrait DNS échoue
+  // (voir tryRemoveDns ci-dessus) — un enregistrement DNS orphelin est gênant, pas dangereux.
+  if (target) await tryRemoveDns(target.subdomain);
 
   try {
     await pushConfigToCaddy();

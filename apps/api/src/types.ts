@@ -299,6 +299,13 @@ export interface ReverseProxyRoute {
   targetHost?: string;
   targetPort: number;
   createdAt: string; // ISO 8601
+  /**
+   * Résultat du dernier essai de synchronisation DNS AD pour cette route (voir services/adDns.ts)
+   * — absent si l'intégration AD DNS n'a jamais été configurée (aucune tentative faite). Permet
+   * d'éliminer le besoin d'une entrée manuelle de fichier hosts : quand ce statut est "synced",
+   * `subdomain` résout réellement via le DNS AD de la mairie, sans intervention côté poste client.
+   */
+  dnsSync?: AdDnsSyncResult;
 }
 
 /** GET /api/reverse-proxy/status — Caddy joignable ou non, même pattern que ScannerStatus. */
@@ -309,6 +316,51 @@ export interface ReverseProxyStatus {
    * reverseProxy.ts). Toujours true dès que Caddy est joignable (poussé à chaque configuration
    * depuis le durcissement TLS de ce jour), false si injoignable (inconnu plutôt qu'affirmé). */
   httpsEnabled: boolean;
+}
+
+// --- DNS Active Directory (mise à jour dynamique sécurisée, RFC 2136 + GSS-TSIG) --------------
+// QUAI ne réimplémente AUCUN client Kerberos/DNS : `kinit` (krb5-user) obtient un ticket pour le
+// compte de service configuré, `nsupdate -g` (bind9-dnsutils) l'utilise pour authentifier une
+// mise à jour dynamique sécurisée auprès du DNS intégré à l'AD — exactement le mécanisme standard
+// qu'utilisent les clients Windows/DHCP pour s'enregistrer eux-mêmes. Objectif : quand une route
+// de reverse proxy est créée, son sous-domaine devient réellement résolvable sur le réseau de la
+// mairie SANS entrée manuelle de fichier hosts — voir services/adDns.ts.
+
+export interface AdDnsConfig {
+  /** Royaume Kerberos (ex "LECREUSOT.FR", conventionnellement en majuscules). */
+  realm: string;
+  /** Contrôleur de domaine faisant aussi office de KDC/serveur DNS (ex "dc01.lecreusot.fr"). */
+  kdcHost: string;
+  /** Zone DNS à mettre à jour (ex "lecreusot.fr"). */
+  zone: string;
+  /** Compte de service Kerberos avec droit "Dynamic Update" sur la zone (ex "svc-quai-dns"). */
+  serviceAccount: string;
+  /** IP (LAN) vers laquelle pointeront les enregistrements A créés — généralement l'IP de la
+   * machine hôte qui publie les ports 80/443 de Caddy (le reverse proxy lui-même). */
+  targetIp: string;
+}
+
+/** GET /api/ad-dns/config — jamais le mot de passe du compte de service (write-only, voir PUT). */
+export interface AdDnsStatus {
+  configured: boolean;
+  config?: AdDnsConfig;
+  lastSync?: AdDnsSyncResult;
+}
+
+export type AdDnsSyncOutcome = "synced" | "failed";
+
+export interface AdDnsSyncResult {
+  status: AdDnsSyncOutcome;
+  /** Détail concret en cas d'échec (jamais avalé) — vide/absent si status = "synced". */
+  message?: string;
+  at: string; // ISO 8601
+}
+
+/** POST /api/ad-dns/test — vérifie seulement l'obtention d'un ticket Kerberos (kinit), n'écrit
+ * aucun enregistrement DNS : sert à valider les identifiants avant d'enregistrer la config. */
+export interface AdDnsTestResult {
+  ok: boolean;
+  message: string;
 }
 
 export type Role = "admin" | "operator" | "viewer";
@@ -385,7 +437,7 @@ export interface IacRunDetail extends IacRun {
 // Construit à partir des vraies données Docker (docker.listContainers renvoie déjà Mounts et
 // NetworkSettings.Networks dans son résumé, pas besoin d'un inspect() par conteneur).
 
-export type TopologyNodeKind = "container" | "volume" | "network" | "nutanix-vm";
+export type TopologyNodeKind = "container" | "volume" | "network" | "nutanix-vm" | "ad-server";
 
 export interface TopologyNode {
   id: string; // ex: "container:<id>", "volume:<name>", "network:<id>", "nutanix-vm:<uuid>"

@@ -17,6 +17,7 @@ import {
   IconHistory,
   IconKey,
   IconGlobe,
+  IconServer,
 } from "@/components/icons";
 
 const ICONS: Partial<Record<ViewId, (props: { className?: string }) => JSX.Element>> = {
@@ -109,6 +110,20 @@ export default function Sidebar() {
               <IconHistory />
             </span>
             {pageTitle("audit")}
+          </button>
+        )}
+
+        {canAdminister(session) && (
+          <button
+            type="button"
+            className={`sidebar__item${currentView === "ad-dns" ? " is-active" : ""}`}
+            onClick={() => handleNavigate("ad-dns")}
+            title={pageTitle("ad-dns")}
+          >
+            <span className="sidebar__icon">
+              <IconServer />
+            </span>
+            {pageTitle("ad-dns")}
           </button>
         )}
       </div>

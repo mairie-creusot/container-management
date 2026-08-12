@@ -14,6 +14,12 @@ FROM node:22-slim
 
 ARG TARGETARCH
 
+# krb5-user pose une question debconf ("royaume Kerberos par défaut") lors de son installation —
+# sans frontend non-interactif explicite, `docker build` peut rester bloqué en attente d'une
+# réponse. Sans incidence sur QUAI : services/adDns.ts fournit toujours son propre krb5.conf
+# temporaire par appel (KRB5_CONFIG), le royaume par défaut laissé vide ici n'est jamais utilisé.
+ENV DEBIAN_FRONTEND=noninteractive
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
         curl \
@@ -23,6 +29,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \
         openssh-client \
         gnupg \
+        krb5-user \
+        dnsutils \
     && rm -rf /var/lib/apt/lists/*
 
 # Ansible : paquet Debian trop ancien pour les modules récents — installé via pip, dans un

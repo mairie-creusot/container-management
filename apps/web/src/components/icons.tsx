@@ -329,6 +329,20 @@ export function IconCheck({ className }: IconProps) {
   return base(<path d="M4 12.5l5 5L20 6" />, className);
 }
 
+/** Serveur/contrôleur de domaine (façon rack empilé) — nœud "ad-server" du graphe de topologie et
+ * page de configuration DNS AD, distincte de IconVm (poste virtuel Nutanix). */
+export function IconServer({ className }: IconProps) {
+  return base(
+    <>
+      <rect x="3" y="4" width="18" height="6" rx="1.2" />
+      <rect x="3" y="14" width="18" height="6" rx="1.2" />
+      <circle cx="7" cy="7" r="0.6" fill="currentColor" stroke="none" />
+      <circle cx="7" cy="17" r="0.6" fill="currentColor" stroke="none" />
+    </>,
+    className,
+  );
+}
+
 /** GitHub (marque octocat simplifiée, tracé plein — pas base(), les autres icônes sont en contour) : Sidebar/GitHubDeployPage.tsx. */
 export function IconGithub({ className }: IconProps) {
   return (

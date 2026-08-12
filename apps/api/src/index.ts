@@ -14,6 +14,7 @@ import { pathToFileURL } from "node:url";
 import { config } from "./config.js";
 import auditPlugin from "./plugins/audit.js";
 import authPlugin from "./plugins/auth.js";
+import adDnsRoutes from "./routes/adDns.js";
 import auditRoutes from "./routes/audit.js";
 import authRoutes from "./routes/auth.js";
 import consoleRoutes from "./routes/console.js";
@@ -82,6 +83,7 @@ export function buildServer() {
   void fastify.register(remoteEnvironmentsRoutes);
   void fastify.register(lxcRoutes);
   void fastify.register(reverseProxyRoutes);
+  void fastify.register(adDnsRoutes);
   void fastify.register(consoleRoutes);
   void fastify.register(githubRoutes);
 

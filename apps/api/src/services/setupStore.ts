@@ -54,6 +54,22 @@ export interface SetupNutanixConfig {
   password: string;
 }
 
+/**
+ * DNS Active Directory (RFC 2136 + GSS-TSIG, voir services/adDns.ts et types.ts#AdDnsConfig) —
+ * config distincte de l'assistant de configuration au premier lancement (jamais requise pour
+ * `completed`) : gérée en continu via GET/PUT/DELETE /api/ad-dns/config (routes/adDns.ts), même
+ * principe que l'ajout d'un registry en dehors de l'assistant (addRegistry ci-dessous).
+ */
+export interface SetupAdDnsConfig {
+  realm: string;
+  kdcHost: string;
+  zone: string;
+  serviceAccount: string;
+  // password : chiffré au repos (voir encryptSecrets ci-dessous), comme le mot de passe LDAP.
+  password: string;
+  targetIp: string;
+}
+
 export interface SetupRegistryConfig {
   kind: RegistryKind;
   name: string;
@@ -71,6 +87,7 @@ export interface SetupConfig {
   kubernetes?: SetupKubernetesConfig;
   nutanix?: SetupNutanixConfig;
   registries?: SetupRegistryConfig[];
+  adDns?: SetupAdDnsConfig;
 }
 
 let cache: SetupConfig | null = null;
@@ -121,6 +138,9 @@ function encryptSecrets(cfg: SetupConfig): SetupConfig {
     ...(cfg.nutanix?.password
       ? { nutanix: { ...cfg.nutanix, password: encryptSecretIfNeeded(cfg.nutanix.password) } }
       : {}),
+    ...(cfg.adDns?.password
+      ? { adDns: { ...cfg.adDns, password: encryptSecretIfNeeded(cfg.adDns.password) } }
+      : {}),
     ...(cfg.registries
       ? {
           registries: cfg.registries.map((r) => ({
@@ -138,6 +158,7 @@ function hasLegacyPlaintextSecret(cfg: SetupConfig): boolean {
   if (cfg.ldap && !isEncrypted(cfg.ldap.bindPassword)) return true;
   if (cfg.kubernetes?.kubeconfigYaml && !isEncrypted(cfg.kubernetes.kubeconfigYaml)) return true;
   if (cfg.nutanix?.password && !isEncrypted(cfg.nutanix.password)) return true;
+  if (cfg.adDns?.password && !isEncrypted(cfg.adDns.password)) return true;
   if (cfg.registries?.some((r) => (r.password && !isEncrypted(r.password)) || (r.token && !isEncrypted(r.token)))) {
     return true;
   }
@@ -309,6 +330,37 @@ export async function getEffectiveNutanixConfig(): Promise<SetupNutanixConfig | 
   const current = await getCurrent();
   if (!current.nutanix) return null;
   return { ...current.nutanix, password: decryptSecret(current.nutanix.password) };
+}
+
+/** Config DNS AD effective (mot de passe déchiffré), ou `null` si jamais configurée — même
+ * principe que getEffectiveNutanixConfig (aucun mécanisme de bootstrap par variable
+ * d'environnement pour cette intégration, toujours saisie explicitement). */
+export async function getEffectiveAdDnsConfig(): Promise<SetupAdDnsConfig | null> {
+  const current = await getCurrent();
+  if (!current.adDns) return null;
+  return { ...current.adDns, password: decryptSecret(current.adDns.password) };
+}
+
+/** PUT /api/ad-dns/config — remplace la config DNS AD entière (mot de passe chiffré avant
+ * écriture). N'affecte aucune autre section de la config (ldap/docker/k8s/nutanix/registries). */
+export async function setAdDnsConfig(input: SetupAdDnsConfig): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const next: SetupConfig = encryptSecrets({ ...current, adDns: input });
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/** DELETE /api/ad-dns/config — désactive la synchronisation DNS automatique (retour au mode
+ * manuel/fichier hosts pour les futures routes ; les enregistrements DNS déjà créés ne sont PAS
+ * supprimés rétroactivement, QUAI n'a plus les moyens de les gérer une fois la config effacée). */
+export async function clearAdDnsConfig(): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const { adDns: _removed, ...rest } = current;
+  const next: SetupConfig = rest;
+  await writeToDisk(next);
+  cache = next;
+  return next;
 }
 
 export interface EffectiveRegistryCredentials {

@@ -7,6 +7,7 @@ import { canOperate } from "@/features/auth/authSlice";
 import { setUnsavedFormActive } from "@/features/ui/uiSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import { SkeletonTable } from "@/components/Skeleton";
+import StatusPill from "@/components/StatusPill";
 import { IconPlus, IconTrash } from "@/components/icons";
 import type { ReverseProxyRoute } from "@/types";
 
@@ -27,6 +28,19 @@ function targetLabel(route: ReverseProxyRoute, containerNameById: Map<string, st
     return `${containerNameById.get(route.targetContainerId) ?? route.targetContainerId.slice(0, 12)} : ${route.targetPort}`;
   }
   return `${route.targetHost} : ${route.targetPort}`;
+}
+
+/** Statut DNS AD de la route (voir services/adDns.ts côté API) — absent = intégration jamais
+ * configurée, résolution manuelle (fichier hosts/DNS interne) toujours nécessaire pour ce
+ * sous-domaine. */
+function dnsStatusPill(route: ReverseProxyRoute) {
+  if (!route.dnsSync) {
+    return <StatusPill status="unconfigured" label="DNS manuel" />;
+  }
+  if (route.dnsSync.status === "synced") {
+    return <StatusPill status="ok" label="DNS synchronisé" />;
+  }
+  return <StatusPill status="crit" label="Échec DNS" />;
 }
 
 export default function ReverseProxyPage() {
@@ -325,6 +339,7 @@ export default function ReverseProxyPage() {
                 <tr>
                   <th>Sous-domaine</th>
                   <th>Cible</th>
+                  <th>DNS</th>
                   <th>Créée le</th>
                   <th />
                 </tr>
@@ -334,6 +349,7 @@ export default function ReverseProxyPage() {
                   <tr key={route.id}>
                     <td className="cell-primary cell-mono">{route.subdomain}</td>
                     <td className="cell-mono">{targetLabel(route, containerNameById)}</td>
+                    <td {...(route.dnsSync?.message ? { title: route.dnsSync.message } : {})}>{dnsStatusPill(route)}</td>
                     <td>{formatDate(route.createdAt)}</td>
                     <td className="cell-actions">
                       {operator && (
