@@ -636,15 +636,23 @@ export async function getTopology(): Promise<Topology> {
   if (!(await isDockerReachable(docker))) return empty;
 
   try {
-    const [containers, volumesResponse, networks, imagesToUpdate, gitopsFiles, allScans, proxyRoutes] = await Promise.all([
-      docker.listContainers({ all: true }),
-      docker.listVolumes(),
-      docker.listNetworks(),
-      getImages("update").catch(() => []),
-      listGitOpsFiles().catch(() => []),
-      listAllScans().catch(() => []),
-      listRoutes().catch(() => []),
-    ]);
+    const [containers, volumesResponse, networks, imagesToUpdate, gitopsFiles, allScans, proxyRoutes, localHostInfo] =
+      await Promise.all([
+        docker.listContainers({ all: true }),
+        docker.listVolumes(),
+        docker.listNetworks(),
+        getImages("update").catch(() => []),
+        listGitOpsFiles().catch(() => []),
+        listAllScans().catch(() => []),
+        listRoutes().catch(() => []),
+        // Nœud "host" du démon Docker LOCAL lui-même (voir plus bas) — appelé ici, dans CE
+        // Promise.all, pour ne pas ajouter de latence séquentielle : `isDockerReachable(docker)`
+        // vient déjà d'être vérifié juste au-dessus (`if (!(await isDockerReachable(docker)))`),
+        // cet appel ne peut donc pas échouer pour la même raison (mais reste défendu par un
+        // .catch, jamais de nœud "host" sans hostInfo réel plutôt qu'une exception qui ferait
+        // échouer TOUT le graphe pour ce seul détail).
+        getDockerHostInfo().catch(() => null),
+      ]);
 
     // "name:tag" des images ayant une mise à jour disponible — même format que ContainerInfo#Image.
     const updateAvailableImages = new Set(imagesToUpdate.map((i) => `${i.name}:${i.currentTag}`));
@@ -670,6 +678,31 @@ export async function getTopology(): Promise<Topology> {
 
     const nodes: TopologyNode[] = [];
     const edges: TopologyEdge[] = [];
+
+    // Nœud "host" du démon Docker LOCAL — même famille que les nœuds "host" nutanix-cluster/
+    // remote-docker/lxc (voir hostKind, TopologyNode) mais TOUJOURS présent dès que ce point du
+    // code est atteint (Docker local est par définition joignable ici, `isDockerReachable` vient
+    // d'être vérifié juste au-dessus) : contrairement aux autres sous-types de host, celui-ci n'a
+    // pas de "configuré ou non" à refléter, seulement une vraie ancre pour tous les conteneurs
+    // locaux — demande utilisateur du 13/08/2026 ("il faut le node host aussi... normalement tout
+    // ceux là son relier avant au node dev local"). `hostInfo` réel (docker.ts#getDockerHostInfo,
+    // même appel que pour un environnement Docker distant) plutôt qu'un sous-titre inventé.
+    // Arêtes `kind: "hosts"` réelles vers CHAQUE conteneur local (même kind d'arête que cluster
+    // Nutanix -> VM ci-dessus, sémantique identique : "héberge réellement") — permet le
+    // regroupement façon Logisim (deriveGroupPorts, topologyGraphShared.tsx) de tous les
+    // conteneurs locaux sous ce seul nœud, sans qu'aucun ne soit orphelin de tout ancrage physique.
+    nodes.push({
+      id: "host:docker-local",
+      kind: "host",
+      hostKind: "docker-local",
+      label: "Docker local",
+      subtitle: localHostInfo ? `${localHostInfo.serverVersion} · ${containers.length} conteneur(s)` : "Docker local",
+      status: "running",
+      ...(localHostInfo ? { hostInfo: localHostInfo } : {}),
+    });
+    for (const c of containers) {
+      edges.push({ id: `hosts:docker-local:${c.Id}`, source: "host:docker-local", target: `container:${c.Id}`, kind: "hosts" });
+    }
 
     // --- Étape 1 : un premier passage sur les conteneurs COLLECTE seulement (aucun edge/attachment
     // décidé ici) — savoir si une ressource est "partagée" exige d'avoir vu TOUS les conteneurs qui

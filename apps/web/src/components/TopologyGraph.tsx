@@ -1937,15 +1937,21 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         result.push(e);
         continue;
       }
+      // Capacité du côté groupe = EXACTEMENT la même règle que deriveGroupPorts (topologyGraphShared.tsx)
+      // — mount: target->"volume-mount", source->"provide" ; network: source->"network",
+      // target->"attach" ; hosts: target->"hosted-by" (jamais de port côté source, voir
+      // deriveGroupPorts). Un "automation-flow" redirigé vers un groupe (cas rare, non supporté
+      // dans ce premier lot) retomberait sur "network"/"attach" par défaut plutôt que de planter —
+      // pas un vrai port existant sur le groupe, React Flow masque alors simplement l'arête.
+      const sourceHandle = e.kind === "mount" ? "provide" : "network";
+      const targetHandle = e.kind === "mount" ? "volume-mount" : e.kind === "hosts" ? "hosted-by" : "attach";
       result.push({
         ...e,
         id: `${e.id}__grouped`,
         source: sourceGroupId ?? e.source,
         target: targetGroupId ?? e.target,
-        // Capacité du côté groupe = même règle que deriveGroupPorts (mount: target->"volume-mount",
-        // source->"provide" ; network: source->"network", target->"attach").
-        ...(sourceGroupId ? { sourceHandle: e.kind === "mount" ? "provide" : "network" } : {}),
-        ...(targetGroupId ? { targetHandle: e.kind === "mount" ? "volume-mount" : "attach" } : {}),
+        ...(sourceGroupId ? { sourceHandle } : {}),
+        ...(targetGroupId ? { targetHandle } : {}),
       });
     }
     return result;

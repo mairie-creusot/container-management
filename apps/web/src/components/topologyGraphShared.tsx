@@ -134,7 +134,7 @@ export const MINIMAP_NODE_COLOR: Record<TopologyNode["kind"], string> = {
  * isValidConnection/handleConnect (TopologyGraph.tsx) restent inchangés, ils ne lisent que ces
  * deux tables.
  */
-export type CapabilityId = "network" | "attach" | "volume-mount" | "provide";
+export type CapabilityId = "network" | "attach" | "volume-mount" | "provide" | "hosted-by";
 
 export interface PortSpec {
   /** Id du Handle React Flow — unique au sein d'un même type de nœud. */
@@ -146,7 +146,7 @@ export interface PortSpec {
   label: string;
   /** Suffixe de classe .topology-handle--<token> — couleur reprise de celle de l'icône du même
    * type de nœud (variables.css), pas de couleur arbitraire ajoutée. */
-  colorToken: "network" | "volume";
+  colorToken: "network" | "volume" | "host";
 }
 
 export const NODE_CAPABILITIES: Record<TopologyNode["kind"], PortSpec[]> = {
@@ -226,6 +226,12 @@ export const CAPABILITY_DEFS: Record<CapabilityId, CapabilityDef> = {
   attach: { linksTo: "network", interactive: true },
   "volume-mount": { linksTo: "provide", interactive: false, infoMessage: VOLUME_MOUNT_INFO },
   provide: { linksTo: "volume-mount", interactive: false, infoMessage: VOLUME_MOUNT_INFO },
+  // N'existe QUE sur les ports synthétiques d'un groupe replié (voir deriveGroupPorts ci-dessous,
+  // arête "hosts" — ex: docker-local -> conteneur) : jamais posé sur un vrai NODE_CAPABILITIES
+  // (les nœuds "host" n'ont eux-mêmes aucun port, cette relation n'est jamais glissée à la main).
+  // `linksTo` auto-référent car sans utilité réelle ici — juste pour satisfaire le type, ce
+  // capability n'est jamais l'origine d'une connexion initiée par l'utilisateur.
+  "hosted-by": { linksTo: "hosted-by", interactive: false, infoMessage: "Relation d'hébergement posée par le serveur, non modifiable ici." },
 };
 
 /**
@@ -241,6 +247,10 @@ const CAPABILITY_PORT_META: Record<CapabilityId, Pick<PortSpec, "handleType" | "
   attach: { handleType: "target", position: Position.Left, colorToken: "network", label: "Attache un conteneur" },
   "volume-mount": { handleType: "target", position: Position.Left, colorToken: "volume", label: "Volume (lecture seule)" },
   provide: { handleType: "source", position: Position.Right, colorToken: "volume", label: "Fournit un volume" },
+  // Position.Top (jamais Left/Right, déjà pris par network/volume) : un groupe hébergé par un
+  // nœud "host" externe (ex: docker-local) le reste visuellement distinct de ses connexions
+  // réseau/volume habituelles — voir deriveGroupPorts ci-dessous.
+  "hosted-by": { handleType: "target", position: Position.Top, colorToken: "host", label: "Hébergé par" },
 };
 
 /**
@@ -252,13 +262,19 @@ const CAPABILITY_PORT_META: Record<CapabilityId, Pick<PortSpec, "handleType" | "
  * replié, exactement comme Docker/Railway masquent la plomberie interne d'un service groupé.
  *
  * Règle de correspondance capacité <-> (kind d'arête, membre source ou cible) — copie directe de
- * NODE_CAPABILITIES pour les deux seuls kinds connectables (container/network/volume) :
+ * NODE_CAPABILITIES pour les kinds connectables (container/network/volume), plus "hosts" (source =
+ * nœud host, ex: docker-local ; target = conteneur — voir services/topology.ts) qui n'a lui aucun
+ * NODE_CAPABILITIES propre (jamais glissé à la main) mais reste réel et doit rester VISIBLE une
+ * fois le groupe replié plutôt que silencieusement masqué :
  *  - arête "mount" (source = volume, target = conteneur) : conteneur membre -> "volume-mount"
  *    (le groupe consomme un volume extérieur) ; volume membre -> "provide" (le groupe fournit un
  *    volume à un conteneur extérieur).
  *  - arête "network" (source = conteneur, target = network) : conteneur membre -> "network" (le
  *    groupe se connecte à un network extérieur) ; network membre -> "attach" (le groupe accueille
  *    un conteneur extérieur).
+ *  - arête "hosts" : conteneur membre (toujours target) -> "hosted-by" (le groupe est hébergé par
+ *    un nœud host extérieur, ex: docker-local) — jamais l'inverse dans ce premier lot (grouper un
+ *    nœud "host" lui-même avec d'autres nœuds n'est pas un cas réel supporté ici).
  */
 export function deriveGroupPorts(group: Pick<TopologyGroup, "nodeIds">, edges: TopologyEdge[]): PortSpec[] {
   const memberIds = new Set(group.nodeIds);
@@ -269,6 +285,7 @@ export function deriveGroupPorts(group: Pick<TopologyGroup, "nodeIds">, edges: T
     if (sourceIn === targetIn) continue; // les deux dedans (arête interne) ou les deux dehors (non pertinent ici)
     if (edge.kind === "mount") capabilities.add(targetIn ? "volume-mount" : "provide");
     else if (edge.kind === "network") capabilities.add(sourceIn ? "network" : "attach");
+    else if (edge.kind === "hosts" && targetIn) capabilities.add("hosted-by");
   }
   return Array.from(capabilities).map((capability) => ({ id: capability, capability, ...CAPABILITY_PORT_META[capability] }));
 }

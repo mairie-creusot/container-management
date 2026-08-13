@@ -212,7 +212,7 @@ export type TopologyNodeKind =
 
 /** Sous-type d'un nœud "host" — voir TopologyNode#hostKind ci-dessous et
  * apps/api/src/services/topology.ts. Champ explicite plutôt qu'une convention dans `subtitle`. */
-export type TopologyHostKind = "nutanix-cluster" | "remote-docker" | "lxc";
+export type TopologyHostKind = "docker-local" | "nutanix-cluster" | "remote-docker" | "lxc";
 
 export interface TopologyNode {
   id: string;

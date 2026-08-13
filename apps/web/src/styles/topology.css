@@ -113,6 +113,17 @@
   background: var(--color-warning);
 }
 
+/* Port "hosted-by" d'un groupe replié (voir deriveGroupPorts, topologyGraphShared.tsx) — même
+   teal que .topology-node--host .topology-node__icon, jamais interactif (voir --readonly
+   ci-dessous, toujours appliqué en plus pour ce token). */
+.topology-handle--host.react-flow__handle {
+  border-color: #14b8a6;
+}
+
+.topology-handle--host.react-flow__handle:hover {
+  background: #14b8a6;
+}
+
 /* Ports non interactifs (ex : montage de volume — Docker ne permet pas de le modifier sans
    recréer le conteneur) : bordure en tirets pour signaler visuellement "informatif seulement",
    avant même la tentative de glisser-connecter qui affiche le message. */

@@ -565,7 +565,7 @@ export type TopologyNodeKind =
  * frontend choisit l'icône/couleur/contenu du panneau de détail sur CE champ, jamais en parsant du
  * texte libre.
  */
-export type TopologyHostKind = "nutanix-cluster" | "remote-docker" | "lxc";
+export type TopologyHostKind = "docker-local" | "nutanix-cluster" | "remote-docker" | "lxc";
 
 export interface TopologyNode {
   // ex: "container:<id>", "volume:<name>", "network:<id>", "nutanix-vm:<uuid>",
