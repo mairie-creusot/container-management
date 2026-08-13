@@ -1345,26 +1345,6 @@
   padding: 1px 4px;
 }
 
-.topology-interior__body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  gap: 14px;
-}
-
-.topology-interior__graph {
-  flex: 1;
-  min-width: 0;
-  position: relative;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-}
-
-.topology-interior__graph .react-flow {
-  background: var(--color-surface-1);
-}
-
 .topology-interior__status-message {
   position: absolute;
   inset: 0;
@@ -1376,37 +1356,296 @@
   z-index: 1;
 }
 
-/* Colonne latérale de la vue "composition interne" (retour utilisateur du 13/08/2026 : vraies
-   vulnérabilités Grype/OSV-Scanner ajoutées au-dessus de l'historique des couches déjà existant) —
-   les deux blocs défilent chacun indépendamment (voir overflow-y sur chacun ci-dessous), la colonne
-   elle-même ne scrolle jamais en bloc. */
-.topology-interior__sidebar {
-  width: 320px;
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  min-height: 0;
-}
-
-.topology-interior__vulns {
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: 12px;
-  overflow-y: auto;
-  background: var(--color-surface-1);
-  flex-shrink: 0;
-  max-height: 45%;
-}
-
-.topology-interior__history {
+/* --- Vue unifiée "Composition interne" (fusion Dépendances, 13/08/2026) ------------------------
+   Deux colonnes de panneaux empilés (voir mockup validé "Radiographie du conteneur") plutôt que le
+   graphe+sidebar figé d'avant : chaque panneau scrolle/se replie indépendamment, la grille elle-même
+   ne scrolle jamais en bloc (overflow-y confiné à CHAQUE panneau, voir .topology-interior__panel-body). */
+.topology-interior__unified-grid {
   flex: 1;
   min-height: 0;
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.topology-interior__unified-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+/* Panneau repliable générique (CollapsibleSection, TopologySubGraphPanel.tsx) — même famille
+   visuelle que .context-menu/.graph-popover (surface + bordure du thème), cohérente avec le reste
+   du sous-graphe plutôt qu'un système parallèle. */
+.topology-interior__panel {
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
-  padding: 12px;
-  overflow-y: auto;
   background: var(--color-surface-1);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.topology-interior__panel-title {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  text-align: left;
+}
+
+/* Titre "statique" (panneaux jamais repliés : Processus réels, Image) — même apparence que le
+   bouton repliable ci-dessus mais sans interaction, pour rester visuellement homogène. */
+.topology-interior__panel-title--static {
+  cursor: default;
+}
+
+.topology-interior__panel-chevron {
+  display: inline-flex;
+  font-size: 10px;
+  color: var(--color-text-faint);
+  transition: transform 0.15s ease;
+  flex-shrink: 0;
+}
+
+.topology-interior__panel-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.topology-interior__panel-title-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.topology-interior__panel-title-text code {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.topology-interior__panel-subtitle {
+  font-size: 11px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--color-text-faint);
+  flex-shrink: 0;
+}
+
+.topology-interior__panel-body {
+  padding: 0 12px 12px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+/* --- Liste des processus réels (GET .../processes/detailed) ------------------------------------ */
+.topology-interior__proc-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.topology-interior__proc-row {
+  display: grid;
+  grid-template-columns: 14px 52px 1fr 88px 56px auto;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 4px;
+  font-size: 11.5px;
+  border-radius: 5px;
+}
+
+.topology-interior__proc-row:hover {
+  background: var(--color-surface-2);
+}
+
+.topology-interior__proc-row + .topology-interior__proc-row {
+  border-top: 1px solid var(--color-border);
+}
+
+.topology-interior__proc-row--head {
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-faint);
+  border-top: none !important;
+}
+
+.topology-interior__proc-row--head:hover {
+  background: none;
+}
+
+.topology-interior__proc-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-text-faint);
+  justify-self: center;
+}
+
+/* État process réel "R" (running, `man 5 proc`) — même code couleur "live" que le reste de l'app,
+   jamais un état deviné pour les autres codes (S/Z/...), simplement pas de pastille allumée. */
+.topology-interior__proc-dot.is-running {
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px var(--color-success-bg);
+}
+
+.topology-interior__proc-pid {
+  color: var(--color-text-faint);
+}
+
+.topology-interior__proc-cmd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text);
+}
+
+.topology-interior__proc-cpu,
+.topology-interior__proc-age {
+  text-align: right;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.topology-interior__proc-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+}
+
+/* Petit bouton texte façon lien — déclencheurs secondaires de la vue unifiée (Inspecter/Tuer/
+   Relancer, "Fichiers", "Voir en hex"...) : trop nombreux/fréquents pour justifier un .btn plein
+   à chaque fois, cohérent avec les liens ".jump" du mockup validé. */
+.topology-interior__link-btn {
+  background: none;
+  border: none;
+  padding: 2px 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--accent);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.topology-interior__link-btn:hover {
+  text-decoration: underline;
+}
+
+.topology-interior__link-btn:disabled {
+  color: var(--color-text-faint);
+  cursor: not-allowed;
+  text-decoration: none;
+}
+
+.topology-interior__link-btn--danger {
+  color: var(--color-danger);
+}
+
+/* --- Réseau interne (carte dérivée des `listenPorts` réels) ------------------------------------ */
+.topology-interior__netmap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.topology-interior__netmap-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+}
+
+.topology-interior__netmap-port {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-radius: 4px;
+  padding: 2px 6px;
+  flex-shrink: 0;
+}
+
+.topology-interior__netmap-owner {
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Réseau externe (ex-onglet "Dépendances", fusionné dans le panneau repliable) --------------- */
+.topology-interior__depgraph {
+  height: 280px;
+  position: relative;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.topology-interior__depgraph .react-flow {
+  background: var(--color-surface-1);
+}
+
+/* --- Liste de fichiers (paquet -> fichiers réels, fichiers ouverts d'un process) ---------------- */
+.topology-interior__file-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.topology-interior__file-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  word-break: break-all;
+}
+
+.topology-interior__hint {
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+  margin: 0 0 8px;
+}
+
+/* --- Hexdump (GET .../files/hexdump, ADMIN uniquement) — colonnes offset/hex/ASCII façon `xxd` -- */
+.topology-interior__hexdump {
+  margin: 0 0 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--color-text-muted);
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.topology-interior__hexdump-row {
+  display: flex;
+  gap: 12px;
+}
+
+.topology-interior__hexdump-offset {
+  color: var(--color-text-faint);
+  flex-shrink: 0;
+}
+
+.topology-interior__hexdump-hex {
+  color: var(--color-text);
+  flex-shrink: 0;
+}
+
+.topology-interior__hexdump-ascii {
+  color: var(--accent);
 }
 
 .topology-interior__history-title {
@@ -1459,17 +1698,8 @@
 }
 
 @media (max-width: 900px) {
-  .topology-interior__body {
-    flex-direction: column;
-  }
-  .topology-interior__sidebar {
-    width: auto;
-  }
-  .topology-interior__vulns {
-    max-height: 240px;
-  }
-  .topology-interior__history {
-    max-height: 200px;
+  .topology-interior__unified-grid {
+    grid-template-columns: 1fr;
   }
 }
 

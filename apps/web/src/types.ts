@@ -160,6 +160,64 @@ export interface ContainerProcessList {
   processes: string[][];
 }
 
+/**
+ * Détail enrichi d'UN process RÉEL en cours d'exécution DANS le conteneur cible — voir GET
+ * /api/containers/:id/processes/detailed (apps/api/src/services/containerInternals.ts).
+ * Contrairement à ContainerProcessList ci-dessus (docker top, PID côté HÔTE), `pid`/`ppid` ici
+ * sont lus DEPUIS `/proc` À L'INTÉRIEUR du conteneur cible : ce sont les PID tels que le
+ * conteneur se voit lui-même — les SEULS utilisables pour inspecter/tuer/relancer un process
+ * (voir ContainerProcessInspection plus bas), jamais les PID hôte de ContainerProcessList.
+ */
+export interface ContainerProcessDetail {
+  pid: number;
+  ppid: number;
+  /** Nom résolu depuis /etc/passwd si lisible (best-effort) ; sinon l'uid numérique brut en
+   * chaîne — jamais un nom fabriqué. */
+  user: string;
+  /** `comm` tel que rapporté par /proc/<pid>/stat — peut contenir espaces/parenthèses. */
+  command: string;
+  /** Code d'état process brut (`man 5 proc`, ex: "S", "R", "Z"...), jamais traduit/deviné. */
+  state: string;
+  /** Temps CPU cumulé RÉEL (utime+stime) en millisecondes. */
+  cpuTimeMs: number;
+  /** Âge réel du process en secondes (uptime système - starttime du process). */
+  ageSeconds: number;
+  /** Ports RÉELLEMENT en LISTEN possédés par ce process — absent si aucun. Sert de "carte réseau
+   * interne" (aucune route réseau séparée n'existe côté API, voir TopologySubGraphPanel.tsx). */
+  listenPorts?: number[];
+}
+
+/** Voir GET /api/containers/:id/processes/detailed. `shellAvailable: false` (processes toujours
+ * []) signifie qu'aucun shell POSIX (`sh`) n'a pu être exécuté dans le conteneur cible (image
+ * "distroless"/scratch typiquement) — à distinguer explicitement côté UI d'une liste vide
+ * silencieuse qui laisserait croire qu'aucun processus ne tourne. */
+export interface ContainerProcessDetailList {
+  processes: ContainerProcessDetail[];
+  shellAvailable: boolean;
+}
+
+/**
+ * cmdline/environ/fichiers ouverts RÉELS d'UN process précis, lus DEPUIS `/proc/<pid>` À
+ * L'INTÉRIEUR du conteneur cible — voir GET /api/containers/:id/processes/:pid/inspect. `pid`
+ * suit la même numérotation que ContainerProcessDetail ci-dessus (namespace PID du conteneur),
+ * PAS celle de ContainerProcessList (docker top, PID hôte).
+ */
+export interface ContainerProcessInspection {
+  pid: number;
+  /** Ligne de commande RÉELLE (/proc/<pid>/cmdline, champs déjà séparés) — toujours présente si
+   * le process existe encore. */
+  cmdline: string[];
+  /** Variables d'environnement RÉELLES (/proc/<pid>/environ) — absent si le noyau a refusé la
+   * lecture pour CE process précis (permission refusée) : jamais un objet vide fabriqué. */
+  environ?: Record<string, string>;
+  /** Cibles réelles des descripteurs de fichier ouverts (/proc/<pid>/fd/*) — chemins réels, ou
+   * `socket:[inode]`/`pipe:[inode]`. Mêmes conditions d'absence qu'`environ` ci-dessus. */
+  openFiles?: string[];
+  /** true si `environ` et/ou `openFiles` a dû être omis faute de permission — honnêteté
+   * explicite plutôt qu'un échec silencieux ; `cmdline` reste fiable dans tous les cas. */
+  partial?: boolean;
+}
+
 /** Une couche de l'image d'un conteneur (équivalent `docker history <image>`) — voir
  * GET /api/images/:id/history. `id` vaut souvent "<missing>" pour une couche intermédiaire. */
 export interface ImageHistoryLayer {
@@ -491,6 +549,29 @@ export interface VolumeFileEntry {
   modifiedAt: string;
 }
 
+/**
+ * Hexdump en lecture seule d'une fenêtre d'octets d'un fichier ARBITRAIRE dans un conteneur —
+ * voir GET /api/containers/:id/files/hexdump. ADMIN UNIQUEMENT côté route (surface plus
+ * sensible qu'un simple listing de noms/tailles : lecture de contenu binaire brut, peut exposer
+ * un secret sur disque).
+ */
+export interface FileHexdump {
+  /** Chemin absolu normalisé réellement lu. */
+  path: string;
+  /** Taille RÉELLE et totale du fichier dans le conteneur (indépendante de `length`/`offset`). */
+  sizeBytes: number;
+  /** true si le fichier est plus gros que la fenêtre lue (demande partielle, ou `length`
+   * plafonné côté serveur) — le frontend s'en sert pour afficher "fichier tronqué" plutôt que
+   * de laisser croire que `bytes` est le fichier entier. */
+  truncated: boolean;
+  offset: number;
+  /** Nombre d'octets RÉELLEMENT renvoyés dans `bytes` (bytes.length === length * 2). */
+  length: number;
+  /** Représentation hexadécimale minuscule, sans espaces ni séparateurs — le frontend formate
+   * lui-même l'affichage colonnes/ASCII à partir de cette chaîne brute. */
+  bytes: string;
+}
+
 export interface GitOpsFile {
   path: string; // ex: "prod/nginx.yaml"
   desiredManifest: string; // YAML brut
@@ -743,6 +824,29 @@ export interface ScanResult {
   vulnerabilities: Vulnerability[];
   summary: Record<VulnSeverity, number>;
   trigger?: ScanTrigger;
+}
+
+// --- Fichiers réels d'un paquet vulnérable dans une image (voir
+// apps/api/src/services/packageInspector.ts, GET /api/images/:id/packages/:packageName/files) —
+// Grype/OSV-Scanner rapportent un Vulnerability#packageName mais jamais SES fichiers réels dans
+// l'image ; ce module retrouve cette information EN INSPECTANT RÉELLEMENT l'image (apt/dpkg, npm,
+// pip, dans cet ordre). Un paquet Go/Rust compilé statiquement n'a JAMAIS de code source
+// récupérable dans l'image finale — `available: false` avec un `reason` concret dans ce cas,
+// jamais un `files: []` qui laisserait croire à tort à un paquet réellement vide.
+
+export type PackageEcosystem = "apt" | "npm" | "pip" | "unknown";
+
+export interface PackageFilesResult {
+  ecosystem: PackageEcosystem;
+  available: boolean;
+  /** Message honnête et concret expliquant pourquoi `available` est false (ou une précision sur
+   * la résolution) — absent si tout s'est bien passé sans rien à préciser. */
+  reason?: string;
+  /** Chemins réels à l'intérieur de l'image — absent/vide si `available` est false. */
+  files?: string[];
+  /** Racine réelle sous laquelle `files` a été trouvé — absent pour apt (aucune racine unique
+   * n'existe pour un paquet système, ses fichiers sont dispersés sous /usr, /etc, /lib...). */
+  packageRoot?: string;
 }
 
 // --- Notifications système (watchdog proactif + scanScheduler) — voir ARCHITECTURE.md

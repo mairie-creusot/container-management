@@ -31,8 +31,23 @@ function formatDate(iso: string | null | undefined): string {
  * qu'un scan tourne — l'appelant n'a besoin de fournir que `imageRef` (déjà résolu par lui,
  * rapprochement par "name:tag" — voir services/topology.ts#vulnSummaryForImage côté serveur) et
  * `operate` (le bouton "Lancer un scan" reste réservé operator/admin, comme toute action mutante).
+ *
+ * `onInspectPackage` (optionnel, ajouté le 13/08/2026 pour la fusion Dépendances/Composition
+ * interne — voir TopologySubGraphPanel.tsx) : quand fourni, affiche un petit déclencheur
+ * "Fichiers" sur chaque ligne de vulnérabilité — l'appelant décide seul de ce qu'il en fait (ici :
+ * ouvrir le panneau "paquet -> fichiers réels", GET /api/images/:id/packages/:packageName/files).
+ * Absent (TopologyNodeDetailPanel.tsx, onglet "Vulnérabilités" d'origine) : aucune colonne
+ * supplémentaire, comportement strictement inchangé.
  */
-export default function VulnerabilitiesPanel({ imageRef, operate }: { imageRef: ImageRef | null; operate: boolean }) {
+export default function VulnerabilitiesPanel({
+  imageRef,
+  operate,
+  onInspectPackage,
+}: {
+  imageRef: ImageRef | null;
+  operate: boolean;
+  onInspectPackage?: (packageName: string) => void;
+}) {
   const dispatch = useAppDispatch();
   const scansByImageId = useAppSelector((s) => s.images.scansByImageId);
   const scanStatus = useAppSelector((s) => s.images.scanStatus);
@@ -119,6 +134,7 @@ export default function VulnerabilitiesPanel({ imageRef, operate }: { imageRef: 
                     <th>Paquet</th>
                     <th>Version</th>
                     <th>Corrigé</th>
+                    {onInspectPackage && <th></th>}
                   </tr>
                 </thead>
                 <tbody>
@@ -134,6 +150,18 @@ export default function VulnerabilitiesPanel({ imageRef, operate }: { imageRef: 
                         <td>{vuln.packageName}</td>
                         <td className="cell-mono">{vuln.installedVersion}</td>
                         <td className="cell-mono">{vuln.fixedInVersion ?? "—"}</td>
+                        {onInspectPackage && (
+                          <td>
+                            <button
+                              type="button"
+                              className="topology-interior__link-btn"
+                              onClick={() => onInspectPackage(vuln.packageName)}
+                              title={`Retrouver les fichiers réels de "${vuln.packageName}" dans l'image`}
+                            >
+                              Fichiers
+                            </button>
+                          </td>
+                        )}
                       </tr>
                     ))}
                 </tbody>

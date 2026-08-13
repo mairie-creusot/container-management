@@ -40,11 +40,19 @@ export function apiUrl(path: string): string {
 
 export class ApiError extends Error {
   status: number;
+  /** Corps JSON complet de la réponse d'erreur, au-delà du seul champ `error` déjà extrait dans
+   * `message` — certaines routes ajoutent des indicateurs structurés (ex: `useContainerStopInstead`
+   * sur POST .../processes/:pid/kill, voir containersSlice.ts#killContainerProcess) qu'un
+   * appelant peut avoir besoin d'inspecter. `undefined` si le corps n'était pas du JSON exploitable. */
+  details?: Record<string, unknown>;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, details?: Record<string, unknown>) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    // `exactOptionalPropertyTypes` interdit d'assigner `undefined` explicitement à un champ
+    // optionnel — omis plutôt qu'assigné quand absent, jamais { details: undefined } en pratique.
+    if (details !== undefined) this.details = details;
   }
 }
 
@@ -61,15 +69,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     let message = `Erreur ${response.status} sur ${path}`;
+    let details: Record<string, unknown> | undefined;
     try {
       // Les routes de l'API renvoient toujours { error: "..." } (jamais { message }) —
       // voir n'importe quelle route de apps/api/src/routes/*.ts.
-      const body = (await response.json()) as { error?: string; message?: string };
+      const body = (await response.json()) as { error?: string; message?: string } & Record<string, unknown>;
       if (body?.error || body?.message) message = body.error ?? body.message ?? message;
+      details = body;
     } catch {
       // corps non-JSON, on garde le message par défaut
     }
-    throw new ApiError(response.status, message);
+    throw new ApiError(response.status, message, details);
   }
 
   if (response.status === 204) {

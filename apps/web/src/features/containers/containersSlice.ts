@@ -1,6 +1,6 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { apiDelete, apiGet, apiPost, ApiError } from "@/api/client";
-import type { ContainerDetail, ContainerProcessList, ContainerRef } from "@/types";
+import type { ContainerDetail, ContainerProcessDetailList, ContainerProcessList, ContainerRef } from "@/types";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
 
 /** Référence par nom vers un secret défini dans le gestionnaire de secrets (features/secrets) —
@@ -48,6 +48,19 @@ interface ContainersState {
   processesContainerId: string | null;
   processesStatus: "idle" | "loading" | "ready" | "error";
   processesError: string | null;
+  /** Détail enrichi des processus (voir ContainerProcessDetailList) affiché dans le panneau
+   * unifié "Composition interne" du sous-graphe (TopologySubGraphPanel.tsx) — remplace le
+   * panneau `docker top` ci-dessus DANS CETTE VUE PRÉCISE uniquement (processes/processesStatus
+   * ci-dessus restent inchangés, potentiellement utilisés ailleurs). Rafraîchi par polling court
+   * (2-3s) tant que ce panneau est affiché, voir TopologySubGraphPanel.tsx. */
+  processesDetailed: ContainerProcessDetailList | null;
+  processesDetailedContainerId: string | null;
+  processesDetailedStatus: "idle" | "loading" | "ready" | "error";
+  processesDetailedError: string | null;
+  /** Pid ayant une action kill/restart en cours (désactive son bouton) — un seul à la fois, même
+   * principe qu'`actionPendingId` ci-dessus pour le cycle de vie du conteneur. */
+  processActionPendingPid: number | null;
+  processActionError: string | null;
 }
 
 const initialState: ContainersState = {
@@ -65,6 +78,12 @@ const initialState: ContainersState = {
   processesContainerId: null,
   processesStatus: "idle",
   processesError: null,
+  processesDetailed: null,
+  processesDetailedContainerId: null,
+  processesDetailedStatus: "idle",
+  processesDetailedError: null,
+  processActionPendingPid: null,
+  processActionError: null,
 };
 
 /**
@@ -102,6 +121,73 @@ export const fetchContainerProcesses = createAsyncThunk<
   } catch (error) {
     const message = error instanceof ApiError ? error.message : "Impossible de récupérer les processus du conteneur.";
     return rejectWithValue(message);
+  }
+});
+
+/** Détail enrichi des processus réels (voir ContainerProcessDetailList) — voir
+ * GET /api/containers/:id/processes/detailed. Même contrat d'échec explicite que
+ * fetchContainerProcesses ci-dessus (409 conteneur arrêté, etc.) ; `shellAvailable: false`
+ * (succès HTTP, liste vide) est un cas HONNÊTE distinct, géré côté composant (jamais ici comme
+ * une erreur). */
+export const fetchContainerProcessesDetailed = createAsyncThunk<
+  { id: string; list: ContainerProcessDetailList },
+  string,
+  { rejectValue: string }
+>("containers/fetchProcessesDetailed", async (id, { rejectWithValue }) => {
+  try {
+    const list = await apiGet<ContainerProcessDetailList>(`/containers/${id}/processes/detailed`);
+    return { id, list };
+  } catch (error) {
+    const message =
+      error instanceof ApiError ? error.message : "Impossible de récupérer le détail des processus du conteneur.";
+    return rejectWithValue(message);
+  }
+});
+
+/** Tue RÉELLEMENT un process (`docker exec kill`, voir POST .../processes/:pid/kill) — `pid` suit
+ * la numérotation ContainerProcessDetail (namespace PID du conteneur), jamais celle de
+ * ContainerProcessList (docker top, PID hôte). Le serveur répond 409 avec
+ * `useContainerStopInstead: true` (AUCUN kill n'a eu lieu) si `pid` vaut 1 : ce cas remonte via
+ * `rejectValue.useContainerStopInstead`, à l'appelant de rediriger vers l'action "Arrêter le
+ * conteneur" existante — jamais un message d'erreur brut qui laisserait l'utilisateur bloqué. */
+export const killContainerProcess = createAsyncThunk<
+  { id: string; pid: number },
+  { id: string; pid: number; signal?: "TERM" | "KILL" },
+  { rejectValue: { message: string; useContainerStopInstead?: boolean } }
+>("containers/killProcess", async ({ id, pid, signal }, { rejectWithValue }) => {
+  try {
+    await apiPost(`/containers/${id}/processes/${pid}/kill`, signal ? { signal } : undefined);
+    return { id, pid };
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return rejectWithValue({
+        message: error.message,
+        useContainerStopInstead: error.details?.useContainerStopInstead === true,
+      });
+    }
+    return rejectWithValue({ message: "Échec de l'arrêt du processus." });
+  }
+});
+
+/** Tue puis relance EXACTEMENT la même cmdline (voir POST .../processes/:pid/restart) — même
+ * garde-fou PID 1 que killContainerProcess ci-dessus, redirige alors vers l'action "Redémarrer
+ * le conteneur" via `rejectValue.useContainerRestartInstead`. */
+export const restartContainerProcess = createAsyncThunk<
+  { id: string; pid: number },
+  { id: string; pid: number },
+  { rejectValue: { message: string; useContainerRestartInstead?: boolean } }
+>("containers/restartProcess", async ({ id, pid }, { rejectWithValue }) => {
+  try {
+    await apiPost(`/containers/${id}/processes/${pid}/restart`);
+    return { id, pid };
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return rejectWithValue({
+        message: error.message,
+        useContainerRestartInstead: error.details?.useContainerRestartInstead === true,
+      });
+    }
+    return rejectWithValue({ message: "Échec du redémarrage du processus." });
   }
 });
 
@@ -204,6 +290,48 @@ const containersSlice = createSlice({
       .addCase(fetchContainerProcesses.rejected, (state, action) => {
         state.processesStatus = "error";
         state.processesError = action.payload ?? "Impossible de récupérer les processus du conteneur.";
+      })
+      .addCase(fetchContainerProcessesDetailed.pending, (state, action) => {
+        state.processesDetailedStatus = "loading";
+        state.processesDetailedError = null;
+        state.processesDetailedContainerId = action.meta.arg;
+      })
+      .addCase(fetchContainerProcessesDetailed.fulfilled, (state, action) => {
+        state.processesDetailedStatus = "ready";
+        state.processesDetailed = action.payload.list;
+        state.processesDetailedContainerId = action.payload.id;
+      })
+      .addCase(fetchContainerProcessesDetailed.rejected, (state, action) => {
+        state.processesDetailedStatus = "error";
+        state.processesDetailedError = action.payload ?? "Impossible de récupérer le détail des processus du conteneur.";
+      })
+      .addCase(killContainerProcess.pending, (state, action) => {
+        state.processActionPendingPid = action.meta.arg.pid;
+        state.processActionError = null;
+      })
+      .addCase(killContainerProcess.fulfilled, (state) => {
+        state.processActionPendingPid = null;
+      })
+      .addCase(killContainerProcess.rejected, (state, action) => {
+        state.processActionPendingPid = null;
+        // Le cas "PID 1" (useContainerStopInstead) est géré par l'appelant (redirection vers
+        // l'action conteneur) — pas affiché comme une erreur brute ici s'il est présent.
+        if (!action.payload?.useContainerStopInstead) {
+          state.processActionError = action.payload?.message ?? "Échec de l'arrêt du processus.";
+        }
+      })
+      .addCase(restartContainerProcess.pending, (state, action) => {
+        state.processActionPendingPid = action.meta.arg.pid;
+        state.processActionError = null;
+      })
+      .addCase(restartContainerProcess.fulfilled, (state) => {
+        state.processActionPendingPid = null;
+      })
+      .addCase(restartContainerProcess.rejected, (state, action) => {
+        state.processActionPendingPid = null;
+        if (!action.payload?.useContainerRestartInstead) {
+          state.processActionError = action.payload?.message ?? "Échec du redémarrage du processus.";
+        }
       })
       .addCase(createContainer.pending, (state) => {
         state.createStatus = "creating";
