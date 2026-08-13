@@ -410,6 +410,16 @@ export interface ContainerMetricPoint {
   timestamp: string; // ISO 8601
   cpuPercent: number;
   memBytes: number;
+  /** Cumuls RÉSEAU/DISQUE réels (voir services/docker.ts#ContainerUsage) — optionnels : absents
+   * pour tout point persisté AVANT l'ajout de ces champs (13/08/2026, jamais rétro-calculés sur
+   * l'historique déjà écrit) et pour un conteneur en `network_mode: host`/dont le storage driver
+   * ne remonte pas l'E/S bloc. Le frontend doit toujours gérer leur absence gracieusement (aucune
+   * courbe affichée pour un point qui ne les porte pas), jamais une valeur 0 substituée qui
+   * laisserait croire à une mesure réelle nulle. */
+  netRxBytes?: number;
+  netTxBytes?: number;
+  blkReadBytes?: number;
+  blkWriteBytes?: number;
 }
 
 // --- Cron Jobs comme type de service natif (voir apps/api/src/services/cronJobsStore.ts et
@@ -711,6 +721,18 @@ export interface TopologyNode {
    * cycle ("failing" = source en échec, "ok" = source saine, "unknown" = jamais encore évalué).
    */
   automationLastStatus?: "ok" | "failing" | "unknown";
+  /**
+   * Conteneurs uniquement : limites RÉELLEMENT configurées (`HostConfig.Memory`/`HostConfig.
+   * NanoCpus`, voir services/docker.ts#ContainerHealthAndLimits, même valeurs que ContainerDetail#
+   * memoryLimitBytes/nanoCpus) — absentes si aucune limite n'a été fixée à la création (0 côté
+   * Docker = pas de limite, jamais traduit en 0 ici). Alimente la carte flottante d'alerte
+   * "Mémoire élevée" du graphe (topologyGraphShared.tsx) : ne se déclenche QUE si une limite
+   * réelle existe, jamais un seuil absolu inventé en son absence — même principe que l'alerte CPU
+   * déjà existante (CPU_ALERT_THRESHOLD_PERCENT), qui elle n'a besoin d'aucune limite réelle
+   * puisque cpuPercent a un plafond naturel implicite (100% par cœur).
+   */
+  memoryLimitBytes?: number;
+  nanoCpus?: number;
 }
 
 // --- Moteur d'automatisation (trigger -> condition -> action), façon n8n mais câblé UNIQUEMENT

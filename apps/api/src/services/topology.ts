@@ -731,6 +731,7 @@ export async function getTopology(): Promise<Topology> {
       const containerNodeId = `container:${c.Id}`;
       const name = primaryContainerName(c.Names, c.Id);
       const usage = usages[index]!;
+      const healthAndLimits = healthStatuses[index]!;
       const vulnSummary = vulnSummaryByImage.get(c.Image) ?? null;
       const domains = domainsByContainerId.get(c.Id);
       nodes.push({
@@ -744,7 +745,12 @@ export async function getTopology(): Promise<Topology> {
         updateAvailable: updateAvailableImages.has(c.Image),
         drift: driftFilePaths.some((path) => containerMatchesGitOpsFile(name, path)),
         ...(vulnSummary ? { vulnCritical: vulnSummary.vulnCritical, vulnHigh: vulnSummary.vulnHigh } : {}),
-        healthStatus: healthStatuses[index]!,
+        healthStatus: healthAndLimits.healthStatus,
+        // Limites RÉELLEMENT configurées (voir docker.ts#ContainerHealthAndLimits) — permettent au
+        // frontend une carte d'alerte "Mémoire élevée" (façon Railway) UNIQUEMENT quand une vraie
+        // limite existe, jamais un seuil absolu inventé en son absence (topologyGraphShared.tsx).
+        ...(healthAndLimits.memoryLimitBytes ? { memoryLimitBytes: healthAndLimits.memoryLimitBytes } : {}),
+        ...(healthAndLimits.nanoCpus ? { nanoCpus: healthAndLimits.nanoCpus } : {}),
         ...(domains && domains.length > 0 ? { domains } : {}),
       });
 

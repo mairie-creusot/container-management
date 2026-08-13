@@ -327,6 +327,10 @@ export interface TopologyNode {
    * cycle ("failing" = source en échec, "ok" = source saine, "unknown" = jamais encore évalué).
    */
   automationLastStatus?: "ok" | "failing" | "unknown";
+  /** Conteneurs uniquement : limites RÉELLEMENT configurées — voir apps/api/src/types.ts pour le
+   * détail complet. Absentes si aucune limite n'a été fixée à la création. */
+  memoryLimitBytes?: number;
+  nanoCpus?: number;
 }
 
 // --- Moteur d'automatisation (trigger -> condition -> action) — voir
@@ -921,6 +925,12 @@ export interface ContainerMetricPoint {
   timestamp: string; // ISO 8601
   cpuPercent: number;
   memBytes: number;
+  /** Cumuls réseau/disque réels — optionnels, voir apps/api/src/types.ts pour le détail complet
+   * (absents sur les points antérieurs au 13/08/2026 ou pour un conteneur en network_mode:host). */
+  netRxBytes?: number;
+  netTxBytes?: number;
+  blkReadBytes?: number;
+  blkWriteBytes?: number;
 }
 
 // --- Cron Jobs comme type de service natif (voir apps/api/src/services/cronJobsStore.ts et

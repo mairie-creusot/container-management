@@ -38,6 +38,30 @@
   stroke-width: 1;
 }
 
+/* Légende (MetricsChart.tsx, uniquement affichée pour un graphique à PLUSIEURS séries — ex :
+   Réseau réception/émission) — sans elle, deux lignes de couleurs différentes sur le même
+   graphique n'auraient aucun moyen de dire laquelle est laquelle. */
+.metrics-chart__legend {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.metrics-chart__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.metrics-chart__legend-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+
 .metrics-chart__y-label,
 .metrics-chart__x-label {
   font-size: 9.5px;

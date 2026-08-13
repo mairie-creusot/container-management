@@ -42,7 +42,7 @@ import { useConfirm } from "@/components/ConfirmProvider";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import Modal from "@/components/Modal";
 import Skeleton from "@/components/Skeleton";
-import TopologyNodeDetailPanel from "@/components/TopologyNodeDetailPanel";
+import TopologyNodeDetailPanel, { type TabId } from "@/components/TopologyNodeDetailPanel";
 import TopologySubGraphPanel from "@/components/TopologySubGraphPanel";
 import { IconGithub, IconSearch, IconTopology, IconTrash } from "@/components/icons";
 // Réutilise TEL QUEL le flux de déploiement GitHub existant (détection Dockerfile/compose/
@@ -1723,6 +1723,10 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   // de la Vue d'ensemble) qui affiche quoi que ce soit ici, uniquement ce panneau ouvert à la
   // demande.
   const [detailNode, setDetailNode] = useState<TopologyNode | null>(null);
+  // Onglet à ouvrir pour le PROCHAIN affichage de `detailNode` (voir openNodeDetail ci-dessous) —
+  // undefined = comportement historique ("overview"). Sert à la carte flottante d'alerte "CPU
+  // élevé" (GraphNode, topologyGraphShared.tsx) pour ouvrir directement sur "metrics".
+  const [detailInitialTab, setDetailInitialTab] = useState<TabId | undefined>(undefined);
   // Sous-graphe de dépendances/composition interne (double-clic sur un nœud, ou "Visualiser les
   // dépendances" du menu contextuel) — voir TopologySubGraphPanel.tsx. Ne stocke que l'id racine :
   // le sous-graphe se recalcule depuis `data` (déjà en mémoire), jamais de nouvel appel réseau.
@@ -1820,12 +1824,17 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           // Briques (voir GraphNode, topologyGraphShared.tsx) : callbacks posés UNIQUEMENT sur les
           // nœuds conteneur (seul kind qui en rend), liés par fermeture à CE nœud précis — une
           // brique elle-même ne porte aucun id de nœud top-level, ces callbacks sont son seul moyen
-          // d'ouvrir son détail / son menu contextuel.
+          // d'ouvrir son détail / son menu contextuel. Même principe pour les cartes flottantes
+          // d'alerte "CPU élevé"/"Mémoire élevée" (onViewMetrics/onRestartFromAlert) : GraphNode est
+          // un composant partagé sans accès direct à dispatch/useConfirm/onOpenDetail, ces callbacks
+          // sont son seul moyen de déclencher une action réelle.
           const callbacks: GraphNodeCallbacks =
             n.kind === "container"
               ? {
                   onOpenAttachment: (attachment) => handleOpenAttachment(attachment),
                   onAttachmentContextMenu: (event, attachment) => handleAttachmentContextMenu(event, n.id, attachment),
+                  onViewMetrics: (node) => openNodeDetail(node, "metrics"),
+                  onRestartFromAlert: (node) => void handleCpuAlertRestart(node),
                 }
               : {};
           return {
@@ -2242,9 +2251,26 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
    * pas. Pour une brique (id synthétique, jamais un nœud top-level réel — voir
    * attachmentToTopologyNode), `selectNode` est un no-op visuel inoffensif : aucun flowNode ne
    * porte cet id, rien ne se met en surbrillance, mais rien ne casse non plus. */
-  function openNodeDetail(node: TopologyNode) {
+  function openNodeDetail(node: TopologyNode, initialTab?: TabId) {
     selectNode(node.id);
     setDetailNode(node);
+    setDetailInitialTab(initialTab);
+  }
+
+  /** Bouton "Redémarrer" d'une carte flottante d'alerte "CPU élevé"/"Mémoire élevée" (GraphNode,
+   * topologyGraphShared.tsx#onRestartFromAlert) — MÊME chemin réel que "Redémarrer" du menu
+   * contextuel du nœud (handleContainerAction/runContainerAction), avec une confirmation `useConfirm`
+   * posée ICI (handleContainerAction lui-même ne confirme que stop/remove) : un redémarrage
+   * interrompt le service, mérite lui aussi une confirmation explicite depuis cette carte d'alerte. */
+  async function handleCpuAlertRestart(node: TopologyNode) {
+    const ok = await confirm({
+      title: "Redémarrer le conteneur",
+      description: `Confirmer le redémarrage de "${node.label}" ? Le service sera interrompu le temps du redémarrage.`,
+      confirmLabel: "Redémarrer",
+      variant: "danger",
+    });
+    if (!ok) return;
+    await handleContainerAction(idWithoutPrefix(node.id), node.label, "restart");
   }
 
   /** Clic sur une brique (volume/network monté par un seul conteneur, voir GraphNode) -> ouvre le
@@ -2748,6 +2774,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         topology={data ?? null}
         onClose={() => setDetailNode(null)}
         onNavigate={openNodeDetail}
+        initialTab={detailInitialTab}
       />
     </div>
   );

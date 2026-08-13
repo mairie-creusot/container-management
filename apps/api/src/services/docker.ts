@@ -343,12 +343,34 @@ export async function createAndStartContainer(options: CreateContainerOptions): 
   return { id: container.id };
 }
 
+export interface ContainerUsage {
+  cpuPercent: number;
+  memBytes: number;
+  /** Cumul RÉEL (compteur croissant depuis le démarrage du conteneur, jamais un débit calculé —
+   * voir metricsCollector.ts qui, lui, dérive un débit entre deux points) toutes interfaces
+   * réseau confondues (`stats.networks`, même snapshot que CPU/mémoire ci-dessus, aucun appel
+   * Docker supplémentaire). Absent (jamais 0 par convention) si le conteneur utilise
+   * `network_mode: host` (Docker ne rapporte alors aucune interface propre dans `networks`).
+   */
+  netRxBytes?: number;
+  netTxBytes?: number;
+  /** Cumul RÉEL lecture/écriture bloc (`stats.blkio_stats.io_service_bytes_recursive`, même
+   * snapshot) — de l'E/S disque réelle, PAS un espace disque total utilisé (Docker n'expose pas
+   * cette dernière notion dans `stats()`, seulement via un calcul de taille de répertoire coûteux
+   * hors périmètre ici) : jamais présenté comme "espace disque" côté UI, toujours "E/S disque".
+   * Absent si le pilote de stockage ne remonte pas cette catégorie (dépend du storage driver).
+   */
+  blkReadBytes?: number;
+  blkWriteBytes?: number;
+}
+
 /**
- * Calcule un cpuPercent/memBytes approximatif à partir d'un snapshot unique de stats. Exporté
- * pour être réutilisé par services/topology.ts (métriques par conteneur affichées sur le nœud
- * du graphe), en plus de son usage interne à ce module.
+ * Calcule un instantané d'utilisation à partir d'un snapshot unique de `docker stats` — exporté
+ * pour être réutilisé par services/topology.ts (cpuPercent/memBytes affichés sur le nœud du
+ * graphe) ET services/metricsCollector.ts (persistance de la série temporelle complète), en plus
+ * de son usage interne à ce module.
  */
-export async function readContainerUsage(docker: Docker, containerId: string): Promise<{ cpuPercent: number; memBytes: number }> {
+export async function readContainerUsage(docker: Docker, containerId: string): Promise<ContainerUsage> {
   try {
     const container = docker.getContainer(containerId);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -360,7 +382,34 @@ export async function readContainerUsage(docker: Docker, containerId: string): P
     const cpuPercent = systemDelta > 0 && cpuDelta > 0 ? (cpuDelta / systemDelta) * onlineCpus * 100 : 0;
     const memBytes: number = stats.memory_stats?.usage ?? 0;
 
-    return { cpuPercent: Math.round(cpuPercent * 10) / 10, memBytes };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const networks: Record<string, any> | undefined = stats.networks;
+    let net: { netRxBytes: number; netTxBytes: number } | undefined;
+    if (networks && Object.keys(networks).length > 0) {
+      net = { netRxBytes: 0, netTxBytes: 0 };
+      for (const iface of Object.values(networks)) {
+        net.netRxBytes += iface.rx_bytes ?? 0;
+        net.netTxBytes += iface.tx_bytes ?? 0;
+      }
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const blkEntries: any[] | undefined = stats.blkio_stats?.io_service_bytes_recursive;
+    let blk: { blkReadBytes: number; blkWriteBytes: number } | undefined;
+    if (Array.isArray(blkEntries) && blkEntries.length > 0) {
+      blk = { blkReadBytes: 0, blkWriteBytes: 0 };
+      for (const entry of blkEntries) {
+        if (entry.op === "read" || entry.op === "Read") blk.blkReadBytes += entry.value ?? 0;
+        else if (entry.op === "write" || entry.op === "Write") blk.blkWriteBytes += entry.value ?? 0;
+      }
+    }
+
+    return {
+      cpuPercent: Math.round(cpuPercent * 10) / 10,
+      memBytes,
+      ...(net ? net : {}),
+      ...(blk ? blk : {}),
+    };
   } catch {
     return { cpuPercent: 0, memBytes: 0 };
   }
@@ -381,16 +430,41 @@ export async function readContainerUsage(docker: Docker, containerId: string): P
  */
 export type ContainerHealthStatus = "healthy" | "unhealthy" | "starting" | "none";
 
-export async function readContainerHealth(docker: Docker, containerId: string): Promise<ContainerHealthStatus> {
+export interface ContainerHealthAndLimits {
+  healthStatus: ContainerHealthStatus;
+  /** Limites RÉELLEMENT configurées (`HostConfig.Memory`/`HostConfig.NanoCpus`, mêmes champs que
+   * ContainerDetail#memoryLimitBytes/nanoCpus, voir routes/containers.ts) — lues sur CE MÊME
+   * inspect() plutôt qu'un appel séparé : services/topology.ts en a besoin sur le TopologyNode
+   * pour la carte flottante d'alerte "Mémoire élevée" (façon Railway), qui — comme l'alerte CPU
+   * déjà existante — ne se déclenche QUE si une limite RÉELLE existe (jamais un seuil absolu
+   * inventé en son absence, voir topologyGraphShared.tsx). 0/absent côté Docker = "pas de
+   * limite" : jamais traduit en 0 ici, reste absent.
+   */
+  memoryLimitBytes?: number;
+  nanoCpus?: number;
+}
+
+/** Un seul `inspect()` par conteneur, réutilisé pour DEUX besoins (santé + limites réelles) —
+ * jamais deux appels réseau séparés pour la même information déjà disponible sur la même réponse.
+ * Repli honnête `{healthStatus: "none"}` en cas d'échec (conteneur disparu entre deux appels,
+ * timeout...) : jamais des limites inventées à la place d'une lecture qui a échoué. */
+export async function readContainerHealth(docker: Docker, containerId: string): Promise<ContainerHealthAndLimits> {
   try {
     const container = docker.getContainer(containerId);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const data: any = await withTimeout(container.inspect(), HEALTH_TIMEOUT_MS, "docker inspect (health)");
     const status = data?.State?.Health?.Status;
-    if (status === "healthy" || status === "unhealthy" || status === "starting") return status;
-    return "none";
+    const healthStatus: ContainerHealthStatus =
+      status === "healthy" || status === "unhealthy" || status === "starting" ? status : "none";
+    const memory: number | undefined = data?.HostConfig?.Memory;
+    const nanoCpus: number | undefined = data?.HostConfig?.NanoCpus;
+    return {
+      healthStatus,
+      ...(memory ? { memoryLimitBytes: memory } : {}),
+      ...(nanoCpus ? { nanoCpus } : {}),
+    };
   } catch {
-    return "none";
+    return { healthStatus: "none" };
   }
 }
 

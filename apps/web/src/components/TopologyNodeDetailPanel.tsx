@@ -59,8 +59,21 @@ import {
 // slice dédié (automationSlice.ts) : DELETE /api/automation/nodes/:id réel pour la suppression,
 // GET /api/automation/runs réel pour l'historique d'exécution affiché sur trigger/action.
 import { deleteAutomationNode, fetchAutomationRuns } from "@/features/automation/automationSlice";
+// Section "Déployé depuis GitHub" (mission point B) ci-dessous, onglet "Aperçu" d'un conteneur —
+// réutilise TEL QUEL fetchGithubDeployments (githubSlice.ts, déjà exposé pour GitHubDeployPage.tsx,
+// liste TOUT l'historique indépendamment d'un repo sélectionné) pour retrouver le déploiement
+// GitHub réel dont `containerId` correspond à ce nœud, et deployGithubRepo pour "Redéployer" avec
+// les mêmes paramètres. Aucune nouvelle route backend : GET /api/github/deployments porte déjà
+// `containerId` (voir apps/api/src/types.ts#GithubDeployment). Le détail complet (log) est en
+// revanche récupéré via un simple apiGet local (comme l'onglet "Métriques" plus bas dans ce même
+// fichier) plutôt que via le thunk fetchGithubDeploymentDetail/selectDeployment du slice : ce
+// dernier alimente `state.github.selectedDeployment`, également lu par l'assistant 3 étapes de
+// GitHubDeployPage.tsx (étape "Déploiement") — le réutiliser ici écraserait silencieusement son
+// état si la modal GitHub est rouverte ensuite.
+import { deployGithubRepo, fetchGithubDeployments } from "@/features/github/githubSlice";
 import type { ContainerMetricPoint, Topology, TopologyHostKind, TopologyNode, TopologyNodeKind, VulnSeverity } from "@/types";
 import type { AutomationRunLogEntry, BackupRun, CronJobRun } from "@/types";
+import type { GithubDeployment, GithubDeploymentDetail } from "@/types";
 import type { IacEngine, IacRunStatus } from "@/types";
 
 /** Les 3 networks internes par défaut de Docker ne sont jamais supprimables — même exclusion que
@@ -97,6 +110,11 @@ interface TopologyNodeDetailPanelProps {
    * nœud) : remplace le nœud affiché SANS fermer/rouvrir le panneau — évite l'aller-retour visuel
    * d'une fermeture suivie d'une réouverture pour simplement changer de ressource inspectée. */
   onNavigate: (node: TopologyNode) => void;
+  /** Onglet ouvert à l'affichage d'un NOUVEAU nœud (voir l'effet basé sur `node?.id` plus bas) —
+   * absent = "overview" (comportement historique). Sert par ex. à la carte flottante d'alerte "CPU
+   * élevé" du graphe (voir topologyGraphShared.tsx#GraphNode/TopologyGraph.tsx#onViewCpuMetrics)
+   * pour ouvrir directement sur "metrics" plutôt que de forcer un clic supplémentaire. */
+  initialTab?: TabId | undefined;
 }
 
 const SEVERITY_ORDER: VulnSeverity[] = ["Critical", "High", "Medium", "Low", "Negligible", "Unknown"];
@@ -165,7 +183,7 @@ const IAC_RUN_POLL_MS = 2000;
  * qui n'en est pas vraiment un que l'inverse. */
 const SECRET_KEY_PATTERN = /PASSWORD|SECRET|TOKEN|KEY/i;
 
-type TabId = "overview" | "network" | "volumes" | "variables" | "vulnerabilities" | "metrics";
+export type TabId = "overview" | "network" | "volumes" | "variables" | "vulnerabilities" | "metrics";
 
 interface TabDef {
   id: TabId;
@@ -1044,7 +1062,7 @@ interface NetworkAttachmentRow {
  * pour les deux autres kinds Docker — y compris pour une ressource "briquée" (plus un nœud
  * top-level du graphe, mais toujours une vraie ressource Docker avec son propre détail complet).
  */
-export default function TopologyNodeDetailPanel({ node, topology, onClose, onNavigate }: TopologyNodeDetailPanelProps) {
+export default function TopologyNodeDetailPanel({ node, topology, onClose, onNavigate, initialTab }: TopologyNodeDetailPanelProps) {
   const dispatch = useAppDispatch();
   const confirm = useConfirm();
   const session = useAppSelector((s) => s.auth.session);
@@ -1079,6 +1097,9 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
   const gitopsSyncing = useAppSelector((s) => s.gitops.syncing);
   const gitopsError = useAppSelector((s) => s.gitops.error);
   const gitopsLastCheckedAt = useAppSelector((s) => s.gitops.lastCheckedAt);
+  // Historique complet des déploiements GitHub (state.github.deployments) — voir la section
+  // "Déployé depuis GitHub" de l'onglet Aperçu d'un conteneur, plus bas dans ce fichier.
+  const githubDeployments = useAppSelector((s) => s.github.deployments);
 
   const [activeTab, setActiveTab] = useState<TabId>("overview");
   // Console interactive (docker exec) / logs — mêmes composants EXACTS que ContainersPage.tsx
@@ -1090,20 +1111,35 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
   const [logsTarget, setLogsTarget] = useState<{ id: string; name: string } | null>(null);
   const [metricsPoints, setMetricsPoints] = useState<ContainerMetricPoint[]>([]);
   const [metricsStatus, setMetricsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  // Section "Déployé depuis GitHub" (onglet Aperçu, conteneur) — log complet chargé à la demande
+  // via un simple apiGet local (même pattern que l'onglet "Métriques" ci-dessus), volontairement
+  // PAS via state.github.selectedDeployment (voir la note d'import plus haut).
+  const [githubLogsOpen, setGithubLogsOpen] = useState(false);
+  const [githubLogsStatus, setGithubLogsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [githubLog, setGithubLog] = useState("");
+  const [githubRedeploying, setGithubRedeploying] = useState(false);
 
   const kind = node?.kind;
   const rawId = node ? idWithoutPrefix(node.id) : "";
 
-  // Nouveau nœud affiché (y compris via navigation interne) -> repart toujours sur l'onglet Aperçu,
-  // jamais bloqué sur un onglet qui n'existe pas pour le nouveau kind (ex: "Vulnérabilités" en
-  // arrivant sur un volume).
+  // Nouveau nœud affiché (y compris via navigation interne) -> repart sur `initialTab` si fourni par
+  // l'appelant (ex: carte flottante "CPU élevé" du graphe -> "metrics"), sinon sur l'onglet Aperçu
+  // comme avant — jamais bloqué sur un onglet qui n'existe pas pour le nouveau kind (ex:
+  // "Vulnérabilités" en arrivant sur un volume, `initialTab` n'est de toute façon jamais passé pour
+  // un kind non-conteneur).
   useEffect(() => {
-    setActiveTab("overview");
+    setActiveTab(initialTab ?? "overview");
     // Idem pour les métriques : jamais afficher un vieux point d'un précédent conteneur pendant
     // le chargement du nouveau (voir l'effet de fetch ci-dessous, gardé par `activeTab === "metrics"`).
     setMetricsPoints([]);
     setMetricsStatus("idle");
-  }, [node?.id]);
+    // Idem pour le log GitHub de la section "Déployé depuis GitHub" — jamais montrer le log d'un
+    // précédent conteneur pendant que le nouveau déploiement correspondant (s'il y en a un) se
+    // recalcule.
+    setGithubLogsOpen(false);
+    setGithubLogsStatus("idle");
+    setGithubLog("");
+  }, [node?.id, initialTab]);
 
   // Récupère le détail complet selon le kind à l'ouverture (ou changement de nœud) — les résumés
   // déjà présents sur `node` (TopologyNode) ne suffisent pas pour cette vue.
@@ -1112,6 +1148,10 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
     if (node.kind === "container") {
       dispatch(fetchContainerDetail(rawId));
       dispatch(fetchImages());
+      // "Déployé depuis GitHub" (mission point B) : liste TOUJOURS tout l'historique, indépendant
+      // du repo — le rapprochement avec CE conteneur se fait ensuite côté client sur containerId
+      // (voir githubDeployment plus bas).
+      dispatch(fetchGithubDeployments());
     } else if (node.kind === "volume") {
       dispatch(fetchVolumes());
     } else if (node.kind === "network") {
@@ -1177,6 +1217,14 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
     if (imageRef) dispatch(fetchScans(imageRef.id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dispatch, imageRef?.id]);
+
+  // Déploiement GitHub réel dont `containerId` correspond à CE conteneur, s'il y en a un — jamais
+  // affiché pour un conteneur créé autrement (voir la garde `githubDeployment &&` dans le JSX de
+  // l'onglet Aperçu). `githubDeployments` est déjà trié du plus récent au plus ancien côté serveur
+  // (services/githubDeployments.ts#listDeployments) : le premier match est donc le bon, sans tri
+  // supplémentaire côté client.
+  const githubDeployment: GithubDeployment | null =
+    kind === "container" ? githubDeployments.find((d) => d.containerId === rawId) ?? null : null;
 
   // Onglet "Métriques" : chargé à la demande (pas à l'ouverture du panneau, contrairement au
   // détail/aux scans) — GET /api/containers/:id/metrics peut porter jusqu'à 7 jours d'historique
@@ -1267,6 +1315,52 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
     if (imageRef) dispatch(scanImage({ id: imageRef.id }));
   }
 
+  /** Charge (à la demande, une seule fois) puis bascule l'affichage du log complet du déploiement
+   * GitHub trouvé pour ce conteneur — GET /api/github/deployments/:id, même route que
+   * GitHubDeployPage.tsx, appelée ici en direct (apiGet) plutôt que via le thunk du slice pour ne
+   * jamais toucher state.github.selectedDeployment (voir la note d'import en tête de fichier). */
+  async function handleToggleGithubLogs(deploymentId: string) {
+    setGithubLogsOpen((open) => !open);
+    if (githubLogsStatus !== "idle") return;
+    setGithubLogsStatus("loading");
+    try {
+      const detail = await apiGet<GithubDeploymentDetail>(`/github/deployments/${deploymentId}`);
+      setGithubLog(detail.log || "(pas de sortie)");
+      setGithubLogsStatus("ready");
+    } catch {
+      setGithubLogsStatus("error");
+    }
+  }
+
+  /** Redéploie EXACTEMENT le même repo/ref/environnement/sous-domaine que le déploiement GitHub
+   * trouvé pour ce conteneur, via le thunk deployGithubRepo déjà utilisé par GitHubDeployPage.tsx
+   * (même route POST /api/github/repos/:owner/:repo/deploy) — confirmation explicite avant action
+   * (même pattern que handleRemoveVolume/handleRemoveNetwork ci-dessous). Le port n'est
+   * volontairement PAS repassé : GithubDeployment (historique) ne le conserve pas (seul le port
+   * effectivement EXPOSE détecté au moment du déploiement original comptait), le POST /deploy
+   * réappliquera la même auto-détection que pour un premier déploiement plutôt qu'une valeur
+   * inventée ici. */
+  async function handleRedeployFromGithub(d: GithubDeployment) {
+    const ok = await confirm({
+      title: "Redéployer depuis GitHub",
+      description: `Confirmer un nouveau déploiement de "${d.owner}/${d.repo}@${d.ref}" avec exactement les mêmes paramètres (même environnement cible${d.subdomain ? `, sous-domaine "${d.subdomain}"` : ""}) ?`,
+      confirmLabel: "Redéployer",
+    });
+    if (!ok) return;
+    setGithubRedeploying(true);
+    await dispatch(
+      deployGithubRepo({
+        owner: d.owner,
+        repo: d.repo,
+        ref: d.ref,
+        ...(d.targetEnvironmentId ? { targetEnvironmentId: d.targetEnvironmentId } : {}),
+        ...(d.subdomain ? { subdomain: d.subdomain } : {}),
+      }),
+    );
+    setGithubRedeploying(false);
+    dispatch(fetchGithubDeployments());
+  }
+
   function openNetworkAttachment(row: NetworkAttachmentRow) {
     onNavigate({ id: row.id, kind: "network", label: row.label, subtitle: row.subtitle, status: "running" });
   }
@@ -1355,6 +1449,68 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
               {node.updateAvailable && <span className="status-pill status-pill--warning">Mise à jour d'image disponible</span>}
               {node.drift && <span className="status-pill status-pill--critical">Dérive GitOps détectée</span>}
             </div>
+
+            {/* "Déployé depuis GitHub" (mission point B) — UNIQUEMENT si un vrai déploiement GitHub
+                a réellement produit CE conteneur (containerId réel, voir githubDeployment plus
+                haut) : jamais affiché pour un conteneur créé autrement, pas de faux vide. */}
+            {githubDeployment && (
+              <>
+                <div className="inspector-section-title">Déployé depuis GitHub</div>
+                <div className="card" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13 }}>
+                    {githubDeployment.owner}/{githubDeployment.repo}@{githubDeployment.ref}
+                  </div>
+                  {githubDeployment.commit ? (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      {githubDeployment.commit.authorAvatarUrl && (
+                        <img
+                          src={githubDeployment.commit.authorAvatarUrl}
+                          alt={githubDeployment.commit.author}
+                          width={22}
+                          height={22}
+                          style={{ borderRadius: "50%" }}
+                        />
+                      )}
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {githubDeployment.commit.message || "(pas de message de commit)"}
+                        </div>
+                        <div className="muted" style={{ fontSize: 11 }}>
+                          {githubDeployment.commit.author} ·{" "}
+                          {githubDeployment.triggeredBy === "webhook" ? "push automatique" : `par ${githubDeployment.startedBy}`}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="muted" style={{ fontSize: 11 }}>
+                      {githubDeployment.triggeredBy === "webhook" ? "push automatique" : `démarré par ${githubDeployment.startedBy}`}
+                    </div>
+                  )}
+
+                  {githubLogsOpen && (
+                    <pre className="iac-log" style={{ maxHeight: 240, minHeight: 0 }}>
+                      {githubLogsStatus === "loading" ? "Chargement…" : githubLogsStatus === "error" ? "Impossible de charger le log." : githubLog}
+                    </pre>
+                  )}
+
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => handleToggleGithubLogs(githubDeployment.id)}>
+                      {githubLogsOpen ? "Masquer les logs" : "Voir les logs de ce déploiement"}
+                    </button>
+                    {operate && (
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => handleRedeployFromGithub(githubDeployment)}
+                        disabled={githubRedeploying}
+                      >
+                        {githubRedeploying ? "Redéploiement…" : "Redéployer"}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
 
             {/* Logs : lecture seule, ouvert à tout rôle authentifié (viewer inclus, voir
                 routes/containerLogs.ts) — utile même sur un conteneur arrêté (comprendre pourquoi
@@ -1588,18 +1744,57 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
               <>
                 <MetricsChart
                   title="CPU"
-                  points={metricsPoints.map((p) => ({ timestamp: p.timestamp, value: p.cpuPercent }))}
+                  series={[{ label: "CPU", points: metricsPoints.map((p) => ({ timestamp: p.timestamp, value: p.cpuPercent })), color: "var(--accent-start, #3b6fef)" }]}
                   formatValue={(v) => `${v.toFixed(0)}%`}
-                  color="var(--accent-start, #3b6fef)"
                   {...(maxCpuPercent !== undefined ? { maxValue: maxCpuPercent } : {})}
                 />
                 <MetricsChart
                   title="Mémoire"
-                  points={metricsPoints.map((p) => ({ timestamp: p.timestamp, value: p.memBytes }))}
+                  series={[{ label: "Mémoire", points: metricsPoints.map((p) => ({ timestamp: p.timestamp, value: p.memBytes })), color: "var(--color-warning)" }]}
                   formatValue={formatMem}
-                  color="var(--color-warning)"
                   {...(maxMemBytes !== undefined ? { maxValue: maxMemBytes } : {})}
                 />
+                {/* Réseau/E·S disque : cumuls RÉELS (services/docker.ts#ContainerUsage), absents
+                    pour tout point antérieur au 13/08/2026 ou pour un conteneur qui ne les rapporte
+                    pas (network_mode:host, storage driver sans E/S bloc) — jamais un point à 0
+                    substitué, le graphique correspondant reste alors simplement absent plutôt que
+                    de mentir sur une activité nulle. */}
+                {metricsPoints.some((p) => p.netRxBytes !== undefined) && (
+                  <MetricsChart
+                    title="Réseau"
+                    series={[
+                      {
+                        label: "Réception",
+                        points: metricsPoints.filter((p) => p.netRxBytes !== undefined).map((p) => ({ timestamp: p.timestamp, value: p.netRxBytes! })),
+                        color: "var(--accent-end, #7c5cfc)",
+                      },
+                      {
+                        label: "Émission",
+                        points: metricsPoints.filter((p) => p.netTxBytes !== undefined).map((p) => ({ timestamp: p.timestamp, value: p.netTxBytes! })),
+                        color: "#14b8a6",
+                      },
+                    ]}
+                    formatValue={formatMem}
+                  />
+                )}
+                {metricsPoints.some((p) => p.blkReadBytes !== undefined) && (
+                  <MetricsChart
+                    title="E/S disque"
+                    series={[
+                      {
+                        label: "Lecture",
+                        points: metricsPoints.filter((p) => p.blkReadBytes !== undefined).map((p) => ({ timestamp: p.timestamp, value: p.blkReadBytes! })),
+                        color: "var(--color-success)",
+                      },
+                      {
+                        label: "Écriture",
+                        points: metricsPoints.filter((p) => p.blkWriteBytes !== undefined).map((p) => ({ timestamp: p.timestamp, value: p.blkWriteBytes! })),
+                        color: "#f97316",
+                      },
+                    ]}
+                    formatValue={formatMem}
+                  />
+                )}
               </>
             )}
           </div>

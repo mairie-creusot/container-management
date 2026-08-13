@@ -290,6 +290,22 @@ export function deriveGroupPorts(group: Pick<TopologyGroup, "nodeIds">, edges: T
   return Array.from(capabilities).map((capability) => ({ id: capability, capability, ...CAPABILITY_PORT_META[capability] }));
 }
 
+/** Seuil réel (pourcentage, cohérent avec TopologyNode#cpuPercent, voir apps/api/src/types.ts) à
+ * partir duquel un conteneur `running` affiche la carte flottante d'alerte "CPU élevé" (voir
+ * GraphNodeImpl ci-dessous) — réévalué à chaque rafraîchissement de la topologie
+ * (TopologyGraph.tsx, REFRESH_INTERVAL_MS), aucun débounce/hystérésis supplémentaire pour ce
+ * premier lot : la carte apparaît/disparaît avec l'état réel. */
+export const CPU_ALERT_THRESHOLD_PERCENT = 90;
+
+/** Même principe que CPU_ALERT_THRESHOLD_PERCENT ci-dessus, mais pour la mémoire — RATIO (pas un
+ * seuil absolu en octets, qui n'aurait aucun sens comparé d'un conteneur à l'autre) de
+ * `memBytes` sur `memoryLimitBytes`. Contrairement au CPU (plafond naturel implicite, 100% par
+ * cœur), la mémoire n'a AUCUN plafond réel sans une limite explicitement configurée à la création
+ * du conteneur (voir services/docker.ts#ContainerHealthAndLimits) — cette alerte ne se déclenche
+ * donc QUE quand `memoryLimitBytes` existe réellement, jamais un seuil absolu inventé en son
+ * absence (voir hasMemoryAlert, GraphNodeImpl ci-dessous). */
+export const MEMORY_ALERT_RATIO = 0.9;
+
 /** Zoom sémantique : sous ce niveau, un nœud n'affiche plus que son icône et son point de statut. */
 export const ZOOM_DETAIL_THRESHOLD = 0.6;
 /** state.transform du store React Flow est [x, y, zoom] ; ne resélectionne que le zoom pour éviter
@@ -599,6 +615,13 @@ const ATTACHMENT_ICON: Record<TopologyNodeAttachment["kind"], (props: { classNam
 export interface GraphNodeCallbacks {
   onOpenAttachment?: (attachment: TopologyNodeAttachment) => void;
   onAttachmentContextMenu?: (event: React.MouseEvent, attachment: TopologyNodeAttachment) => void;
+  /** Cartes flottantes d'alerte "CPU élevé"/"Mémoire élevée" (voir CPU_ALERT_THRESHOLD_PERCENT/
+   * MEMORY_ALERT_RATIO/GraphNodeImpl ci-dessous) — ouvre le panneau de détail de CE nœud
+   * directement sur l'onglet "Métriques". */
+  onViewMetrics?: (node: TopologyNode) => void;
+  /** Idem : redémarre CE conteneur — même chemin réel (runContainerAction) que "Redémarrer" du menu
+   * contextuel du nœud, avec confirmation posée côté TopologyGraph.tsx (useConfirm). */
+  onRestartFromAlert?: (node: TopologyNode) => void;
 }
 
 /** Reconstruit un TopologyNode "synthétique" pour une brique (voir TopologyNode#attachments) —
@@ -697,6 +720,40 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   // l'icône + le point de statut — évite un canevas illisible une fois dézoomé sur toute l'infra.
   const zoom = useStore(zoomSelector);
   const isCompact = zoom < ZOOM_DETAIL_THRESHOLD;
+  // Cartes flottantes d'alerte "CPU élevé"/"Mémoire élevée" (façon Railway) — seuils RÉELS sur
+  // node.cpuPercent/memBytes (déjà calculés server-side, docker.ts#readContainerUsage), jamais sur
+  // un conteneur arrêté. La mémoire, contrairement au CPU, n'a de sens QUE si une limite RÉELLE
+  // est configurée (memoryLimitBytes, voir MEMORY_ALERT_RATIO ci-dessus) — jamais de seuil absolu
+  // inventé en son absence, ce conteneur n'affiche alors simplement aucune alerte mémoire.
+  const hasCpuAlert =
+    isContainer && node.status === "running" && typeof node.cpuPercent === "number" && node.cpuPercent > CPU_ALERT_THRESHOLD_PERCENT;
+  const hasMemoryAlert =
+    isContainer &&
+    node.status === "running" &&
+    typeof node.memBytes === "number" &&
+    typeof node.memoryLimitBytes === "number" &&
+    node.memoryLimitBytes > 0 &&
+    node.memBytes / node.memoryLimitBytes > MEMORY_ALERT_RATIO;
+  const resourceAlerts: { key: string; title: string; message: string }[] = [
+    ...(hasCpuAlert
+      ? [
+          {
+            key: "cpu",
+            title: "CPU élevé",
+            message: `« ${node.label} » utilise ${node.cpuPercent!.toFixed(0)}% de CPU — risque de ralentissement ou d'arrêt.`,
+          },
+        ]
+      : []),
+    ...(hasMemoryAlert
+      ? [
+          {
+            key: "memory",
+            title: "Mémoire élevée",
+            message: `« ${node.label} » utilise ${formatMem(node.memBytes!)} sur ${formatMem(node.memoryLimitBytes!)} configurés (${Math.round((node.memBytes! / node.memoryLimitBytes!) * 100)}%) — risque d'arrêt (OOM kill).`,
+          },
+        ]
+      : []),
+  ];
   return (
     <div
       className={`topology-node topology-node--${node.kind} topology-node--${node.status}${node.orphan ? " topology-node--orphan" : ""}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}`}
@@ -731,6 +788,49 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
           className="topology-handle topology-handle--automation"
           title="Relié depuis un déclencheur/une condition"
         />
+      )}
+      {resourceAlerts.length > 0 && (
+        // ANCRÉ au-dessus de la carte du nœud (parent .topology-node en position: relative) : reste
+        // un enfant DOM du nœud React Flow, suit donc automatiquement le pan/zoom du canevas. `nodrag
+        // nopan` (classes React Flow) + stopPropagation sur les boutons : ne doit jamais faire glisser
+        // le nœud dessous ni le sélectionner/désélectionner au clic. Empilement (CPU + Mémoire toutes
+        // deux en alerte simultanément, possible) via .topology-node-alert-stack ci-dessous — chaque
+        // carte individuelle (.topology-node-cpu-alert) n'a plus sa propre position, seule la pile
+        // entière est ancrée. Pas de mini-graphique (aucune série historique disponible ici sans
+        // nouvelle infrastructure de polling) — message + valeur RÉELLE actuelle uniquement.
+        <div className="topology-node-alert-stack nodrag nopan" onClick={(event) => event.stopPropagation()}>
+          {resourceAlerts.map((alert) => (
+            <div key={alert.key} className="topology-node-cpu-alert">
+              <div className="topology-node-cpu-alert__head">
+                <IconBell className="topology-node-cpu-alert__icon" />
+                <span className="topology-node-cpu-alert__title">{alert.title}</span>
+              </div>
+              <p className="topology-node-cpu-alert__message">{alert.message}</p>
+              <div className="topology-node-cpu-alert__actions">
+                <button
+                  type="button"
+                  className="topology-node-cpu-alert__btn"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    node.onViewMetrics?.(node);
+                  }}
+                >
+                  Voir les métriques
+                </button>
+                <button
+                  type="button"
+                  className="topology-node-cpu-alert__btn topology-node-cpu-alert__btn--danger"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    node.onRestartFromAlert?.(node);
+                  }}
+                >
+                  Redémarrer
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
       )}
       <div className="topology-node__head">
         <span className="topology-node__icon">

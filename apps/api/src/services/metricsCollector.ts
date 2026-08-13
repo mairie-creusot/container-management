@@ -126,7 +126,16 @@ export async function runMetricsCollectorCycle(
     const newPoints: ContainerMetricPoint[] = await Promise.all(
       runningContainers.map(async (c): Promise<ContainerMetricPoint> => {
         const usage = await readContainerUsage(docker, c.Id);
-        return { containerId: c.Id, timestamp, cpuPercent: usage.cpuPercent, memBytes: usage.memBytes };
+        return {
+          containerId: c.Id,
+          timestamp,
+          cpuPercent: usage.cpuPercent,
+          memBytes: usage.memBytes,
+          // Cumuls réseau/disque réels (voir docker.ts#ContainerUsage) — absents plutôt que 0 pour
+          // un conteneur qui n'en rapporte pas (network_mode:host, storage driver sans E/S bloc).
+          ...(usage.netRxBytes !== undefined ? { netRxBytes: usage.netRxBytes, netTxBytes: usage.netTxBytes } : {}),
+          ...(usage.blkReadBytes !== undefined ? { blkReadBytes: usage.blkReadBytes, blkWriteBytes: usage.blkWriteBytes } : {}),
+        };
       }),
     );
 

@@ -394,6 +394,89 @@
   color: var(--color-text-faint);
 }
 
+/* --- Carte(s) flottante(s) d'alerte "CPU élevé"/"Mémoire élevée" (façon Railway) — voir
+   GraphNodeImpl, topologyGraphShared.tsx#CPU_ALERT_THRESHOLD_PERCENT/MEMORY_ALERT_RATIO. La PILE
+   entière (.topology-node-alert-stack, une ou deux cartes si les deux seuils sont dépassés
+   simultanément) est ANCRÉE au nœud (parent .topology-node en position: relative, voir plus haut
+   dans ce fichier) : reste un enfant DOM du nœud React Flow, suit donc automatiquement le
+   pan/zoom, contrairement à un popover flottant hors du système de coordonnées du graphe. Même
+   famille visuelle que .graph-popover/.toast (fond teinté critique, bordure de même teinte, ombre
+   portée façon toast pour bien détacher chaque carte du reste du canevas) — pas une esthétique à
+   part. `pointer-events` par défaut (auto) : la pile occupe exactement sa propre boîte au-dessus
+   du nœud, elle ne déborde donc jamais sur une zone cliquable du nœud dessous ; `nodrag nopan`
+   (posées côté JSX) empêchent en plus qu'un clic dessus ne fasse glisser le nœud ou ne panne le
+   canevas. */
+.topology-node-alert-stack {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 10px);
+  width: 224px;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.topology-node-cpu-alert {
+  background: var(--color-critical-bg);
+  border: 1px solid var(--color-critical);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg, 0 12px 32px rgba(0, 0, 0, 0.35));
+  padding: 10px 12px;
+  cursor: default;
+}
+
+.topology-node-cpu-alert__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.topology-node-cpu-alert__icon {
+  flex: none;
+  color: var(--color-critical);
+}
+
+.topology-node-cpu-alert__title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-critical);
+}
+
+.topology-node-cpu-alert__message {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--color-text);
+  margin: 0 0 10px;
+}
+
+.topology-node-cpu-alert__actions {
+  display: flex;
+  gap: 6px;
+}
+
+.topology-node-cpu-alert__btn {
+  flex: 1;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-1);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.topology-node-cpu-alert__btn:hover {
+  background: var(--color-surface-2);
+}
+
+.topology-node-cpu-alert__btn--danger {
+  border-color: var(--color-critical);
+  color: var(--color-critical);
+}
+
 /* --- "Briques" : volumes/networks montés par CE conteneur ET AUCUN AUTRE (voir
    TopologyNode#attachments, services/topology.ts § "Briques") — façon Railway : une ressource
    dédiée à un service s'affiche comme une propriété DE CE service plutôt que comme un nœud séparé
@@ -1718,11 +1801,12 @@
 }
 
 /* --- Flux "Déployer depuis GitHub" inline (CreateSpotlight, voir TopologyGraph.tsx) -----------
-   GitHubDeployPage.tsx (page complète, colonnes 220px/1fr/340px) est monté TEL QUEL dans la
-   <Modal> partagée (Modal.tsx, INCHANGÉE) : elle est bien trop à l'étroit dans les 420px par
-   défaut d'une modal de confirmation classique. `:has()` déjà utilisé ailleurs dans l'appli
-   (layout.css, `.inspector:has(.inspector__empty)`) : élargit CETTE modal précise uniquement,
-   aucune autre modal de l'appli (confirmations, renommage...) n'est affectée. */
+   GitHubDeployPage.tsx (assistant à 3 étapes Dépôt/Configuration/Déploiement, voir .gh-wizard*
+   plus bas) est monté TEL QUEL dans la <Modal> partagée (Modal.tsx, INCHANGÉE) : elle est bien
+   trop à l'étroit dans les 420px par défaut d'une modal de confirmation classique. `:has()` déjà
+   utilisé ailleurs dans l'appli (layout.css, `.inspector:has(.inspector__empty)`) : élargit CETTE
+   modal précise uniquement, aucune autre modal de l'appli (confirmations, renommage...) n'est
+   affectée. */
 .modal-card:has(.graph-github-modal) {
   width: 100%;
   max-width: min(1180px, calc(100vw - 40px));
@@ -1759,6 +1843,177 @@
 .graph-github-modal__body .page-content {
   animation: none;
   padding-top: 6px;
+}
+
+/* --- Assistant 3 étapes "Déployer depuis GitHub" (Dépôt -> Configuration -> Déploiement), voir
+   GitHubDeployPage.tsx — remplace l'ancien layout 3 colonnes denses en permanence visibles
+   (.iac-layout, iac.css, toujours utilisé tel quel par IacWorkspacePanel/CronJobsPage.tsx) par un
+   flux séquentiel guidé : une seule étape à la fois occupe tout l'espace, l'historique des
+   déploiements passe d'une 3e colonne dense à un petit panneau déroulant à la demande (ne vole
+   jamais de largeur à l'étape 3, dont les logs doivent occuper tout l'espace disponible). Réutilise
+   volontairement .iac-workspace-list/.iac-run-item/.iac-log (iac.css) pour un rendu cohérent avec
+   le reste de l'appli plutôt que de dupliquer ces styles de liste/log. */
+.gh-wizard {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.gh-wizard__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.gh-steps {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.gh-steps__step {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--color-text-faint);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: not-allowed;
+}
+
+.gh-steps__step.is-reachable {
+  cursor: pointer;
+  color: var(--color-text-muted);
+}
+
+.gh-steps__step.is-reachable:hover {
+  background: var(--color-surface-2);
+}
+
+.gh-steps__step.is-active {
+  color: var(--color-text);
+  border-color: var(--accent-end);
+  background: var(--color-surface-2);
+}
+
+.gh-steps__num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--color-border);
+  font-size: 10.5px;
+}
+
+.gh-steps__step.is-active .gh-steps__num {
+  background: var(--accent-end);
+  color: #fff;
+}
+
+.gh-steps__sep {
+  width: 16px;
+  height: 1px;
+  background: var(--color-border);
+  flex: none;
+}
+
+.gh-history-toggle-icon {
+  transition: transform 0.15s ease;
+}
+
+.gh-history-toggle-icon.is-open {
+  transform: rotate(180deg);
+}
+
+.gh-wizard-history-panel {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.gh-wizard-history-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.gh-wizard-history-panel__list {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.gh-step {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.gh-step__toolbar {
+  display: flex;
+  gap: 8px;
+}
+
+.gh-step__search {
+  flex: 1;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--color-text);
+}
+
+.gh-step__repo-list {
+  max-height: calc(100vh - 320px);
+  overflow-y: auto;
+}
+
+.gh-step--config {
+  max-width: 480px;
+}
+
+.gh-step--deploy .iac-log {
+  flex: 1;
+  min-height: 380px;
+  max-height: calc(100vh - 320px);
+}
+
+.gh-deploy-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.gh-deploy-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 900px) {
+  .gh-step__repo-list {
+    max-height: 320px;
+  }
+
+  .gh-step--deploy .iac-log {
+    max-height: 320px;
+  }
 }
 
 /* --- Nœud "gitops-source" (TopologyNodeDetailPanel.tsx) --------------------------------------
