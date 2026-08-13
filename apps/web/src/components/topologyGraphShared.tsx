@@ -248,10 +248,29 @@ const CAPABILITY_PORT_META: Record<CapabilityId, Pick<PortSpec, "handleType" | "
   "volume-mount": { handleType: "target", position: Position.Left, colorToken: "volume", label: "Volume (lecture seule)" },
   provide: { handleType: "source", position: Position.Right, colorToken: "volume", label: "Fournit un volume" },
   // Position.Top (jamais Left/Right, déjà pris par network/volume) : un groupe hébergé par un
-  // nœud "host" externe (ex: docker-local) le reste visuellement distinct de ses connexions
+  // nœud "host" externe (ex: un groupe de VMs Nutanix relié à son cluster physique via une arête
+  // "hosts", voir services/topology.ts) reste visuellement distinct de ses connexions
   // réseau/volume habituelles — voir deriveGroupPorts ci-dessous.
   "hosted-by": { handleType: "target", position: Position.Top, colorToken: "host", label: "Hébergé par" },
 };
+
+/**
+ * Écarte visuellement plusieurs Handles qui partageraient le même `position` sur un même nœud (ex
+ * un groupe replié avec à la fois un port "network" ET un port "provide", tous deux Position.Right
+ * — voir deriveGroupPorts ci-dessus) : React Flow centre par défaut TOUS les handles d'un même
+ * côté au même endroit (`top: 50%` pour Left/Right, `left: 50%` pour Top/Bottom) sans répartition
+ * explicite, les rendant visuellement superposés et impossibles à distinguer/cliquer séparément —
+ * bug constaté en conditions réelles le 13/08/2026 sur un groupe à ports multiples. Un seul port
+ * sur ce côté garde le centrage par défaut (retourne `undefined`, aucun style forcé).
+ */
+function portOffsetStyle(port: PortSpec, allPorts: PortSpec[]): CSSProperties | undefined {
+  const sameSide = allPorts.filter((p) => p.position === port.position);
+  if (sameSide.length <= 1) return undefined;
+  const index = sameSide.findIndex((p) => p.id === port.id);
+  const percent = 25 + (index * 50) / (sameSide.length - 1);
+  const isVertical = port.position === Position.Left || port.position === Position.Right;
+  return isVertical ? { top: `${percent}%` } : { left: `${percent}%` };
+}
 
 /**
  * Ports d'entrée/sortie d'un groupe (voir TopologyGroup, apps/api/src/types.ts) — DÉRIVÉS des
@@ -769,6 +788,7 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
             CAPABILITY_DEFS[port.capability].interactive ? "" : " topology-handle--readonly"
           }`}
           title={port.label}
+          {...(portOffsetStyle(port, ports) ? { style: portOffsetStyle(port, ports) } : {})}
         />
       ))}
       {isAutomationNode && !isAutomationAction && (
@@ -1026,6 +1046,7 @@ function GroupNodeImpl({ data, selected }: NodeProps) {
           position={port.position}
           className={`topology-handle topology-handle--${port.colorToken}`}
           title={port.label}
+          {...(portOffsetStyle(port, ports) ? { style: portOffsetStyle(port, ports) } : {})}
         />
       ))}
       <div className="topology-node__head">

@@ -4,6 +4,7 @@ import {
   Background,
   Controls,
   MiniMap,
+  SelectionMode,
   applyNodeChanges,
   type Node,
   type Edge,
@@ -1742,10 +1743,18 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const reducedMotion = usePrefersReducedMotion();
 
   // --- Regroupement de nœuds ("encapsulation façon Railway/Logisim", voir TopologyGroup) --------
-  // Sélection multiple (Maj+clic sur des nœuds, voir handleNodeClick) — DISTINCTE de `selectedId`
-  // ci-dessus (simple surbrillance d'UN nœud pour l'Inspector/le détail) : un clic simple réinitialise
-  // toujours cette sélection multiple, elle ne sert QUE pour l'action "Regrouper".
+  // Sélection multiple (Maj+clic sur des nœuds OU rectangle de sélection glissé sur le canevas
+  // vide, voir handleNodeClick/onSelectionEnd) — DISTINCTE de `selectedId` ci-dessus (simple
+  // surbrillance d'UN nœud pour l'Inspector/le détail) : un clic simple réinitialise toujours
+  // cette sélection multiple, elle ne sert QUE pour l'action "Regrouper".
   const [multiSelectedIds, setMultiSelectedIds] = useState<Set<string>>(new Set());
+  // Dernière sélection RAPPORTÉE par React Flow (onSelectionChange, déclenché aussi bien par un
+  // clic que par un rectangle de sélection glissé) — gardée à part dans une ref plutôt que
+  // synchronisée directement dans `multiSelectedIds` : un clic simple gère déjà `multiSelectedIds`
+  // lui-même (handleNodeClick, Maj+clic) et ne doit pas être perturbé par ce mécanisme parallèle.
+  // Seul `onSelectionEnd` (déclenché UNIQUEMENT à la fin d'un geste de rectangle de sélection, JAMAIS
+  // par un simple clic) copie effectivement cette ref dans `multiSelectedIds`.
+  const lastReactFlowSelectionIds = useRef<string[]>([]);
   // Popover de saisie du libellé — réutilisé pour la création ("Regrouper" sur la sélection
   // courante) ET le renommage d'un groupe existant (voir groupMenuItems ci-dessous).
   const [groupLabelPopover, setGroupLabelPopover] = useState<
@@ -2577,6 +2586,27 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           // reste "Shift" quel que soit l'OS, plus prévisible que le défaut (Meta/Control) sur ce
           // canevas où Ctrl/Cmd n'a par ailleurs aucun autre usage.
           multiSelectionKeyCode="Shift"
+          // Rectangle de sélection au clic-glissé sur le canevas VIDE (façon Figma/Miro, demande
+          // utilisateur du 13/08/2026) — réservé operator/admin, seul rôle qui peut ensuite
+          // "Regrouper" (le bouton flottant reste de toute façon masqué pour un viewer). Le bouton
+          // gauche de la souris sert alors à sélectionner plutôt qu'à panner : panOnDrag=[1,2]
+          // laisse le clic milieu/droit continuer de panner (jamais retiré, juste déplacé sur un
+          // autre bouton). Un viewer garde le comportement précédent (clic gauche = pan) —
+          // panOnDrag=true par défaut — puisqu'il ne peut de toute façon rien faire d'une sélection.
+          // SelectionMode.Partial : un nœud est inclus dès qu'il touche le rectangle, pas
+          // seulement s'il y est entièrement contenu — plus indulgent, correspond à l'attente la
+          // plus courante pour ce genre de geste.
+          panOnDrag={operate ? [1, 2] : true}
+          selectionOnDrag={operate}
+          selectionMode={SelectionMode.Partial}
+          onSelectionChange={(params) => {
+            lastReactFlowSelectionIds.current = params.nodes.map((n) => n.id);
+          }}
+          onSelectionEnd={() => {
+            if (lastReactFlowSelectionIds.current.length >= 2) {
+              setMultiSelectedIds(new Set(lastReactFlowSelectionIds.current));
+            }
+          }}
           deleteKeyCode={null}
           fitView
           proOptions={{ hideAttribution: true }}

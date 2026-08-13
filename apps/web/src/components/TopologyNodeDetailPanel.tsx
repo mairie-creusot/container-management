@@ -143,7 +143,6 @@ const HEALTH_SEMANTIC: Record<string, "success" | "critical" | "warning" | "neut
 /** Libellé du sous-type d'un nœud "host" (voir TopologyNode#hostKind) — affiché en badge à côté du
  * statut, pour distinguer les trois sources possibles sans dépendre du libellé/sous-titre libre. */
 const HOST_KIND_LABEL: Record<TopologyHostKind, string> = {
-  "docker-local": "Docker local",
   "nutanix-cluster": "Cluster Nutanix",
   "remote-docker": "Docker distant",
   lxc: "Hôte LXD",
@@ -1944,7 +1943,7 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
           <>
             <div className="chip-row topology-detail-panel__chips">
               <StatusPill status={node.status} />
-              <span className="status-pill status-pill--neutral">{HOST_KIND_LABEL[node.hostKind ?? "docker-local"]}</span>
+              <span className="status-pill status-pill--neutral">{HOST_KIND_LABEL[node.hostKind ?? "remote-docker"]}</span>
             </div>
             <KeyValueList
               rows={[
@@ -1956,7 +1955,7 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
                 },
               ]}
             />
-            {(node.hostKind === "remote-docker" || node.hostKind === "docker-local") && node.hostInfo && (
+            {node.hostKind === "remote-docker" && node.hostInfo && (
               <>
                 <div className="inspector-section-title">Démon Docker (infos réelles)</div>
                 <KeyValueList
