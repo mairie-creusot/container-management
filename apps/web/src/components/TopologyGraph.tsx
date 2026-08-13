@@ -44,7 +44,7 @@ import Modal from "@/components/Modal";
 import Skeleton from "@/components/Skeleton";
 import TopologyNodeDetailPanel from "@/components/TopologyNodeDetailPanel";
 import TopologySubGraphPanel from "@/components/TopologySubGraphPanel";
-import { IconGithub, IconSearch, IconTopology } from "@/components/icons";
+import { IconGithub, IconSearch, IconTopology, IconTrash } from "@/components/icons";
 // Réutilise TEL QUEL le flux de déploiement GitHub existant (détection Dockerfile/compose/
 // Terraform, build, déploiement, déploiement auto sur push — voir ARCHITECTURE.md § "Intégration
 // GitHub") : CreateSpotlight ne fait que le monter dans une modal par-dessus le canevas, aucune
@@ -1202,6 +1202,14 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const session = useAppSelector((s) => s.auth.session);
   const operate = canOperate(session);
   const confirm = useConfirm();
+  const [cleaningOrphans, setCleaningOrphans] = useState(false);
+
+  // Volumes/networks orphelins (voir TopologyNode#orphan, services/topology.ts) — vrais nœuds du
+  // graphe, jamais reliés par une arête (0 conteneur ne référence rien à connecter). Recalculé à
+  // chaque fetch pour alimenter le bouton flottant "Nettoyer les orphelins" ci-dessous.
+  const orphanVolumeNodes = useMemo(() => (data?.nodes ?? []).filter((n) => n.kind === "volume" && n.orphan), [data]);
+  const orphanNetworkNodes = useMemo(() => (data?.nodes ?? []).filter((n) => n.kind === "network" && n.orphan), [data]);
+  const orphanCount = orphanVolumeNodes.length + orphanNetworkNodes.length;
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [canvasMenu, setCanvasMenu] = useState<{ x: number; y: number } | null>(null);
@@ -1618,6 +1626,43 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     if (removeNetwork.fulfilled.match(result)) dispatch(fetchTopology());
   }
 
+  /** Bouton flottant "Nettoyer les orphelins" (voir orphanVolumeNodes/orphanNetworkNodes ci-dessus)
+   * — supprime EN UNE FOIS tous les volumes/networks à 0 conteneur actuellement affichés comme
+   * nœuds atténués sur le graphe. Séquentiel plutôt que Promise.all : chaque suppression Docker
+   * réelle, pas besoin de paralléliser une poignée d'appels, et un échec isolé (ressource déjà
+   * supprimée entre-temps, verrou Docker...) ne doit pas interrompre les suivants. */
+  async function handleCleanOrphans() {
+    if (orphanCount === 0) return;
+    const ok = await confirm({
+      title: "Nettoyer les ressources orphelines",
+      description: `Confirmer la suppression de ${orphanVolumeNodes.length} volume(s) et ${orphanNetworkNodes.length} network(s) non utilisés par aucun conteneur ? Les données des volumes seront définitivement perdues. Cette action est irréversible.`,
+      confirmLabel: `Nettoyer (${orphanCount})`,
+      variant: "danger",
+    });
+    if (!ok) return;
+    setCleaningOrphans(true);
+    let failures = 0;
+    for (const node of orphanVolumeNodes) {
+      const result = await dispatch(removeVolume(idWithoutPrefix(node.id)));
+      if (!removeVolume.fulfilled.match(result)) failures++;
+    }
+    for (const node of orphanNetworkNodes) {
+      const result = await dispatch(removeNetwork({ id: idWithoutPrefix(node.id), name: node.label }));
+      if (!removeNetwork.fulfilled.match(result)) failures++;
+    }
+    setCleaningOrphans(false);
+    dispatch(fetchTopology());
+    dispatch(
+      pushNotification({
+        level: failures > 0 ? "error" : "success",
+        message:
+          failures > 0
+            ? `${orphanCount - failures}/${orphanCount} ressource(s) orpheline(s) supprimée(s), ${failures} échec(s) (déjà en cours d'utilisation par un autre processus ?).`
+            : `${orphanCount} ressource(s) orpheline(s) supprimée(s).`,
+      }),
+    );
+  }
+
   async function handleDisconnectEdge(source: string, target: string) {
     const containerId = idWithoutPrefix(source);
     const networkId = idWithoutPrefix(target);
@@ -1980,6 +2025,27 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
             onClick={(event) => openCreateGroupPopover(event.clientX, event.clientY)}
           >
             Regrouper ({multiSelectedIds.size})
+          </button>
+        </div>
+      )}
+
+      {/* Bouton flottant "Nettoyer les orphelins" (voir orphanVolumeNodes/orphanNetworkNodes —
+          services/topology.ts § "Volumes/networks ORPHELINS") — coin bas-droit du canevas, visible
+          UNIQUEMENT quand il existe au moins une ressource orpheline, plutôt qu'un bouton mort la
+          plupart du temps. Style glassmorphisme (fond translucide + flou) distinct des boutons
+          pleins "Regrouper"/toolbar : une action de nettoyage volontairement discrète en overlay,
+          jamais dans le flux normal des nœuds. */}
+      {operate && orphanCount > 0 && (
+        <div className="topology-toolbar-bottom-right">
+          <button
+            type="button"
+            className="topology-glass-btn"
+            disabled={cleaningOrphans}
+            onClick={handleCleanOrphans}
+            title="Supprimer tous les volumes/networks non utilisés par aucun conteneur"
+          >
+            <IconTrash />
+            {cleaningOrphans ? "Nettoyage…" : `Nettoyer les orphelins (${orphanCount})`}
           </button>
         </div>
       )}

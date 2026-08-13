@@ -1,14 +1,14 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import { apiUrl } from "@/api/client";
-import { createRoute, deleteRoute, fetchCaddyStatus, fetchRoutes } from "@/features/reverseProxy/reverseProxySlice";
+import { createRoute, deleteRoute, fetchCaddyStatus, fetchRoutes, resyncRouteDns } from "@/features/reverseProxy/reverseProxySlice";
 import { fetchContainers } from "@/features/containers/containersSlice";
 import { canOperate } from "@/features/auth/authSlice";
 import { setUnsavedFormActive } from "@/features/ui/uiSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import { SkeletonTable } from "@/components/Skeleton";
 import StatusPill from "@/components/StatusPill";
-import { IconPlus, IconTrash } from "@/components/icons";
+import { IconPlus, IconRestart, IconTrash } from "@/components/icons";
 import type { ReverseProxyRoute } from "@/types";
 
 type TargetMode = "container" | "manual";
@@ -45,7 +45,9 @@ function dnsStatusPill(route: ReverseProxyRoute) {
 
 export default function ReverseProxyPage() {
   const dispatch = useAppDispatch();
-  const { items, status, error, creating, caddyStatus, caddyStatusLoading } = useAppSelector((s) => s.reverseProxy);
+  const { items, status, error, creating, caddyStatus, caddyStatusLoading, resyncingId } = useAppSelector(
+    (s) => s.reverseProxy,
+  );
   const containers = useAppSelector((s) => s.containers.items);
   const searchQuery = useAppSelector((s) => s.ui.searchQuery);
   const session = useAppSelector((s) => s.auth.session);
@@ -144,6 +146,10 @@ export default function ReverseProxyPage() {
     });
     if (!ok) return;
     dispatch(deleteRoute(route.id));
+  }
+
+  function handleResyncDns(route: ReverseProxyRoute) {
+    dispatch(resyncRouteDns(route.id));
   }
 
   return (
@@ -349,7 +355,23 @@ export default function ReverseProxyPage() {
                   <tr key={route.id}>
                     <td className="cell-primary cell-mono">{route.subdomain}</td>
                     <td className="cell-mono">{targetLabel(route, containerNameById)}</td>
-                    <td {...(route.dnsSync?.message ? { title: route.dnsSync.message } : {})}>{dnsStatusPill(route)}</td>
+                    <td {...(route.dnsSync?.message ? { title: route.dnsSync.message } : {})}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        {dnsStatusPill(route)}
+                        {operator && (
+                          <button
+                            type="button"
+                            className="icon-btn"
+                            title="Retester la synchronisation DNS (nsupdate, sans recréer la route)"
+                            aria-label="Retester la synchronisation DNS"
+                            disabled={resyncingId === route.id}
+                            onClick={() => handleResyncDns(route)}
+                          >
+                            <IconRestart {...(resyncingId === route.id ? { className: "icon-spin" } : {})} />
+                          </button>
+                        )}
+                      </div>
+                    </td>
                     <td>{formatDate(route.createdAt)}</td>
                     <td className="cell-actions">
                       {operator && (

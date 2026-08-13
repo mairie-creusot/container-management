@@ -301,6 +301,28 @@ export async function deleteRoute(id: string): Promise<boolean> {
   return true;
 }
 
+/**
+ * POST /api/reverse-proxy/routes/:id/resync-dns — retente UNIQUEMENT le push DNS AD (`nsupdate`)
+ * pour une route déjà créée, sans toucher à Caddy ni recréer la route — utile après correction
+ * d'un problème côté serveur AD (ACL, réglage "mises à jour dynamiques" de la zone...) constaté
+ * via `dnsSync.status === "failed"`, pour re-vérifier sans passer par un cycle
+ * supprimer/recréer. `null` si la route n'existe pas ; `dnsSync` reste absent (jamais réécrit) si
+ * AD DNS n'est pas/plus configuré (voir tryPushDns — aucune tentative n'est alors distinguable
+ * d'un échec réel).
+ */
+export async function resyncDns(id: string): Promise<ReverseProxyRoute | null> {
+  const all = await getAll();
+  const target = all.find((route) => route.id === id);
+  if (!target) return null;
+  const dnsSync = await tryPushDns(target.subdomain);
+  if (!dnsSync) return target; // AD DNS non configuré : rien à écrire, route inchangée
+  const updated: ReverseProxyRoute = { ...target, dnsSync };
+  const next = all.map((route) => (route.id === id ? updated : route));
+  await writeToDisk(next);
+  cache = next;
+  return updated;
+}
+
 // ---------------------------------------------------------------------------------------
 // Push vers l'API d'administration Caddy (POST /load — remplace toute la config en mémoire,
 // atomiquement, sans toucher au disque de Caddy ni redémarrer son process).

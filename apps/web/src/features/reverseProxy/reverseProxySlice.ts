@@ -16,6 +16,9 @@ interface ReverseProxyState {
   creating: boolean;
   caddyStatus: ReverseProxyStatus | null;
   caddyStatusLoading: boolean;
+  /** Id de la route dont le resync DNS est en cours (une seule à la fois), pour désactiver
+   * seulement le bouton "Retester" de cette ligne — jamais toute la table. */
+  resyncingId: string | null;
 }
 
 const initialState: ReverseProxyState = {
@@ -25,6 +28,7 @@ const initialState: ReverseProxyState = {
   creating: false,
   caddyStatus: null,
   caddyStatusLoading: false,
+  resyncingId: null,
 };
 
 export const fetchRoutes = createAsyncThunk<ReverseProxyRoute[]>("reverseProxy/fetchRoutes", async () =>
@@ -59,6 +63,21 @@ export const deleteRoute = createAsyncThunk<string, string, { rejectValue: strin
       return id;
     } catch (error) {
       const message = error instanceof ApiError ? error.message : "Impossible de supprimer cette route.";
+      return rejectWithValue(message);
+    }
+  },
+);
+
+/** Retente UNIQUEMENT le push DNS AD (nsupdate) d'une route déjà créée — sans la recréer, sans
+ * toucher à Caddy (voir POST /reverse-proxy/routes/:id/resync-dns côté API). Utile après
+ * correction d'un problème serveur (ACL/réglage de zone) constaté via `dnsSync.status === "failed"`. */
+export const resyncRouteDns = createAsyncThunk<ReverseProxyRoute, string, { rejectValue: string }>(
+  "reverseProxy/resyncDns",
+  async (id, { rejectWithValue }) => {
+    try {
+      return await apiPost<ReverseProxyRoute>(`/reverse-proxy/routes/${id}/resync-dns`);
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : "Impossible de retester la synchronisation DNS.";
       return rejectWithValue(message);
     }
   },
@@ -108,6 +127,18 @@ const reverseProxySlice = createSlice({
       })
       .addCase(deleteRoute.rejected, (state, action) => {
         state.error = action.payload ?? "Impossible de supprimer cette route.";
+      })
+      .addCase(resyncRouteDns.pending, (state, action) => {
+        state.resyncingId = action.meta.arg;
+      })
+      .addCase(resyncRouteDns.fulfilled, (state, action) => {
+        state.resyncingId = null;
+        const index = state.items.findIndex((route) => route.id === action.payload.id);
+        if (index !== -1) state.items[index] = action.payload;
+      })
+      .addCase(resyncRouteDns.rejected, (state, action) => {
+        state.resyncingId = null;
+        state.error = action.payload ?? "Impossible de retester la synchronisation DNS.";
       });
   },
 });

@@ -9,6 +9,10 @@
  *                                          #isForbiddenProxyTarget pour le risque SSRF documenté
  *                                          et le correctif minimal appliqué, finding M1).
  * DELETE /api/reverse-proxy/routes/:id  — operator/admin.
+ * POST   /api/reverse-proxy/routes/:id/resync-dns — retente uniquement le push DNS AD
+ *                                          (nsupdate) pour cette route, sans la recréer ni
+ *                                          toucher à Caddy — operator/admin (voir
+ *                                          services/reverseProxy.ts#resyncDns).
  * POST   /api/reverse-proxy/push        — repousse la config complète vers Caddy sans rien
  *                                          changer côté QUAI (utile après un redémarrage de
  *                                          Caddy) — operator/admin.
@@ -41,6 +45,7 @@ import {
   isValidSubdomain,
   listRoutes,
   pushConfigToCaddy,
+  resyncDns,
   SubdomainConflictError,
 } from "../services/reverseProxy.js";
 
@@ -132,6 +137,14 @@ export default async function reverseProxyRoutes(fastify: FastifyInstance): Prom
       }
       throw err;
     }
+  });
+
+  fastify.post<{ Params: { id: string } }>("/api/reverse-proxy/routes/:id/resync-dns", async (request, reply) => {
+    const updated = await resyncDns(request.params.id);
+    if (!updated) {
+      return reply.code(404).send({ error: `Route "${request.params.id}" not found` });
+    }
+    return reply.send(updated);
   });
 
   fastify.post("/api/reverse-proxy/push", async (_request, reply) => {

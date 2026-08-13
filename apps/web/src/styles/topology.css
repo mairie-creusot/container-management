@@ -1467,6 +1467,52 @@
   }
 }
 
+/* --- Bouton flottant "Nettoyer les orphelins" (coin bas-droit, glassmorphisme) ------------------ */
+
+.topology-toolbar-bottom-right {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  z-index: 20;
+}
+
+.topology-glass-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(24, 26, 32, 0.55);
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  box-shadow: var(--shadow-lg, 0 8px 24px rgba(0, 0, 0, 0.3));
+  color: var(--color-text-muted);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  animation: popover-in 0.15s ease-out;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.topology-glass-btn svg {
+  width: 14px;
+  height: 14px;
+}
+.topology-glass-btn:hover:not(:disabled) {
+  color: var(--color-critical);
+  border-color: rgba(248, 113, 113, 0.35);
+  background: rgba(248, 113, 113, 0.1);
+}
+.topology-glass-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+@media (prefers-reduced-motion: reduce) {
+  .topology-glass-btn {
+    animation: none;
+  }
+}
+
 /* --- Palette de création "spotlight" (façon Railway "What can we help with?") ------------------ */
 
 .graph-spotlight {

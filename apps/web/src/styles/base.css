@@ -152,6 +152,26 @@ p {
   color: var(--color-critical);
 }
 
+/* Icône en rotation continue pendant une action asynchrone en cours (ex : IconRestart sur le
+   bouton "Retester la synchronisation DNS", ReverseProxyPage.tsx) — un `disabled` seul sur le
+   bouton ne suffit pas à communiquer visuellement qu'une requête est réellement en vol. */
+@keyframes icon-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+.icon-spin {
+  animation: icon-spin 0.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .icon-spin {
+    animation: none;
+  }
+}
+
 .row-actions {
   display: flex;
   gap: 6px;
