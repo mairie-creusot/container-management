@@ -1382,7 +1382,7 @@
   height: 16px;
 }
 
-/* --- Bouton "+ Créer" persistant + bouton flottant "Regrouper" (coin haut-droit du canevas) ---- */
+/* --- Bouton flottant "Regrouper" (coin haut-droit du canevas, sélection multiple uniquement) --- */
 
 .topology-toolbar-top-right {
   position: absolute;
@@ -1392,18 +1392,6 @@
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-.topology-create-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  box-shadow: var(--shadow-lg, 0 8px 20px rgba(0, 0, 0, 0.25));
-}
-
-.topology-create-btn__icon {
-  width: 14px;
-  height: 14px;
 }
 
 .topology-group-action-btn {
@@ -1542,157 +1530,3 @@
   color: var(--color-text-faint);
 }
 
-/* --- Panneau "Activity" docké à droite du canevas (façon Railway), voir TopologyActivityPanel -- */
-
-.topology-activity-panel {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 15;
-  width: 280px;
-  display: flex;
-  flex-direction: column;
-  background: var(--color-surface-1);
-  border-left: 1px solid var(--color-border);
-  transition: width 0.15s ease;
-}
-
-.topology-activity-panel--collapsed {
-  width: 40px;
-}
-
-.topology-activity-panel__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--color-border);
-  flex: none;
-}
-
-.topology-activity-panel--collapsed .topology-activity-panel__header {
-  justify-content: center;
-}
-
-.topology-activity-panel__title {
-  font-size: 12.5px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: var(--color-text-muted);
-}
-
-.topology-activity-panel__toggle {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--color-text-muted);
-  cursor: pointer;
-  flex: none;
-}
-
-.topology-activity-panel__toggle:hover {
-  background: var(--color-surface-2);
-  color: var(--color-text);
-}
-
-.topology-activity-panel__chevron {
-  width: 14px;
-  height: 14px;
-  transform: rotate(180deg);
-  transition: transform 0.15s ease;
-}
-
-.topology-activity-panel__chevron--open {
-  transform: rotate(0deg);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .topology-activity-panel {
-    transition: none;
-  }
-
-  .topology-activity-panel__chevron {
-    transition: none;
-  }
-}
-
-.topology-activity-panel__empty {
-  padding: 16px 12px;
-  font-size: 12px;
-  color: var(--color-text-faint);
-  text-align: center;
-}
-
-.topology-activity-panel__list {
-  list-style: none;
-  margin: 0;
-  padding: 6px;
-  overflow-y: auto;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.topology-activity-panel__item {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 8px;
-  border-radius: var(--radius-sm);
-}
-
-.topology-activity-panel__item:hover {
-  background: var(--color-surface-2);
-}
-
-.topology-activity-panel__item-dot {
-  flex: none;
-  width: 7px;
-  height: 7px;
-  margin-top: 4px;
-  border-radius: 50%;
-  background: var(--color-text-faint);
-}
-
-.topology-activity-panel__item--error .topology-activity-panel__item-dot {
-  background: var(--color-critical);
-}
-
-.topology-activity-panel__item--success .topology-activity-panel__item-dot {
-  background: var(--color-success);
-}
-
-.topology-activity-panel__item--info .topology-activity-panel__item-dot {
-  background: var(--color-text-faint);
-}
-
-.topology-activity-panel__item-body {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-
-.topology-activity-panel__item-message {
-  font-size: 12px;
-  color: var(--color-text);
-  overflow-wrap: break-word;
-}
-
-.topology-activity-panel__item-time {
-  font-size: 10.5px;
-  color: var(--color-text-faint);
-}
-
-.topology-activity-panel__more {
-  margin: 6px auto 10px;
-}

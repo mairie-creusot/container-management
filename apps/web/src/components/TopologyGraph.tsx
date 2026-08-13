@@ -42,7 +42,7 @@ import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import Skeleton from "@/components/Skeleton";
 import TopologyNodeDetailPanel from "@/components/TopologyNodeDetailPanel";
 import TopologySubGraphPanel from "@/components/TopologySubGraphPanel";
-import { IconChevron, IconPlus, IconSearch, IconTopology } from "@/components/icons";
+import { IconSearch, IconTopology } from "@/components/icons";
 import {
   CAPABILITY_DEFS,
   KIND_ICON,
@@ -762,10 +762,6 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   // Menu contextuel d'un nœud de groupe (replié) ou du cadre d'un groupe déplié — distinct de
   // `nodeMenu` (un groupe n'est pas un TopologyNode réel, voir GroupNodeData/GroupFrameNodeData).
   const [groupMenu, setGroupMenu] = useState<{ x: number; y: number; group: TopologyGroup } | null>(null);
-  // Panneau "Activity" docké à droite du canevas (voir TopologyActivityPanel plus bas) — replié par
-  // défaut sur un petit graphe (Inspector déjà visible ailleurs), déplié par défaut sur le grand
-  // graphe de la page Topologie dédiée (heuristique simple sur la hauteur allouée).
-  const [activityCollapsed, setActivityCollapsed] = useState(height < 600);
   // Bouton "grille" de la barre d'outils (voir <Controls> plus bas) — bascule la MiniMap, seule
   // "vue d'ensemble" que ce graphe propose pour l'instant.
   const [showMiniMap, setShowMiniMap] = useState(true);
@@ -1461,27 +1457,19 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         </ReactFlow>
       </div>
 
-      {/* Bouton "+ Créer" persistant (toujours visible, pas seulement via clic droit) + bouton
-          flottant "Regrouper" (apparaît uniquement sur une sélection multiple d'au moins 2 nœuds,
-          voir multiSelectedIds/handleNodeClick) — coin haut-droit du canevas, décalé de la largeur
-          courante du panneau Activity (voir TopologyActivityPanel) pour ne jamais le recouvrir. */}
-      {operate && (
-        <div className="topology-toolbar-top-right" style={{ right: (activityCollapsed ? 40 : 280) + 12 }}>
-          {multiSelectedIds.size >= 2 && (
-            <button
-              type="button"
-              className="btn btn-primary btn-sm topology-group-action-btn"
-              onClick={(event) => openCreateGroupPopover(event.clientX, event.clientY)}
-            >
-              Regrouper ({multiSelectedIds.size})
-            </button>
-          )}
+      {/* Bouton flottant "Regrouper" (apparaît uniquement sur une sélection multiple d'au moins
+          2 nœuds, voir multiSelectedIds/handleNodeClick) — coin haut-droit du canevas. La création
+          reste accessible par clic droit sur le canevas (onPaneContextMenu -> handlePaneContextMenu
+          -> CreateSpotlight ci-dessous) : pas de bouton "+ Créer" persistant, retiré (gênait la
+          lecture du graphe et se chevauchait avec d'autres éléments d'UI sur la page principale). */}
+      {operate && multiSelectedIds.size >= 2 && (
+        <div className="topology-toolbar-top-right">
           <button
             type="button"
-            className="btn btn-primary btn-sm topology-create-btn"
-            onClick={(event) => setCanvasMenu({ x: event.clientX, y: event.clientY })}
+            className="btn btn-primary btn-sm topology-group-action-btn"
+            onClick={(event) => openCreateGroupPopover(event.clientX, event.clientY)}
           >
-            <IconPlus className="topology-create-btn__icon" /> Créer
+            Regrouper ({multiSelectedIds.size})
           </button>
         </div>
       )}
@@ -1572,13 +1560,6 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         />
       )}
 
-      {/* Panneau "Activity" docké à droite du canevas, TOUJOURS visible (repliable via le chevron)
-          — voir TopologyActivityPanel plus bas, alimenté par GET /api/notifications (déjà
-          existant, déjà repollé par App.tsx quelle que soit la vue affichée). Rendu AVANT le
-          sous-graphe/la modal de détail : ces deux-là doivent rester visuellement au-dessus s'ils
-          se recouvrent (ordre de montage, voir commentaires ci-dessous). */}
-      <TopologyActivityPanel collapsed={activityCollapsed} onToggleCollapsed={() => setActivityCollapsed((v) => !v)} />
-
       {/* Sous-graphe de dépendances/composition interne (double-clic sur un nœud, ou "Visualiser
           les dépendances" du menu contextuel) — remplace le graphe principal EN PLACE (voir
           .topology-graph__main--receded ci-dessus), rendu APRÈS les popovers/menus mais AVANT la
@@ -1615,84 +1596,3 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   );
 }
 
-/** Horodatage relatif façon "il y a 2 minutes" — même esprit que le panneau "Deployments" de
- * Railway inspecté pour cette mission (voir aussi BackupsPage.tsx/GitHubDeployPage.tsx). */
-function formatRelativeTime(iso: string): string {
-  const diffMs = Date.now() - new Date(iso).getTime();
-  const minutes = Math.floor(diffMs / 60_000);
-  if (minutes < 1) return "à l'instant";
-  if (minutes < 60) return `il y a ${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `il y a ${hours} h`;
-  const days = Math.floor(hours / 24);
-  return `il y a ${days} j`;
-}
-
-const ACTIVITY_PAGE_SIZE = 8;
-
-interface TopologyActivityPanelProps {
-  collapsed: boolean;
-  onToggleCollapsed: () => void;
-}
-
-/**
- * Panneau "Activity" docké à droite du canevas, TOUJOURS visible (façon Railway, voir
- * ARCHITECTURE.md mission point 3) — liste d'événements réels en direct : notifications système
- * détectées par le watchdog/réconciliateur GitOps (`image_update_available`, `gitops_drift_detected`,
- * `vulnerability_detected`...) ET notifications client (actions échouées), TOUTES DÉJÀ fusionnées
- * dans `state.notifications.items` par notificationsSlice.ts (repollé en continu par App.tsx,
- * indépendant de la vue affichée — ce composant ne redéclenche donc AUCUN appel réseau propre, il
- * ne fait que lire cet état déjà à jour). "Fetch More" de Railway est ici une pagination CÔTÉ
- * CLIENT (`ACTIVITY_PAGE_SIZE` par palier) sur cette liste déjà en mémoire — jamais un faux
- * aller-retour réseau simulé pour imiter visuellement Railway.
- */
-function TopologyActivityPanel({ collapsed, onToggleCollapsed }: TopologyActivityPanelProps) {
-  const items = useAppSelector((s) => s.notifications.items);
-  const [visibleCount, setVisibleCount] = useState(ACTIVITY_PAGE_SIZE);
-  const sorted = useMemo(
-    () => [...items].sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0)),
-    [items],
-  );
-  const visible = sorted.slice(0, visibleCount);
-
-  return (
-    <div className={`topology-activity-panel${collapsed ? " topology-activity-panel--collapsed" : ""}`}>
-      <div className="topology-activity-panel__header">
-        {!collapsed && <span className="topology-activity-panel__title">Activité</span>}
-        <button
-          type="button"
-          className="topology-activity-panel__toggle"
-          title={collapsed ? "Déplier le panneau Activité" : "Replier le panneau Activité"}
-          onClick={onToggleCollapsed}
-        >
-          <IconChevron className={`topology-activity-panel__chevron${collapsed ? "" : " topology-activity-panel__chevron--open"}`} />
-        </button>
-      </div>
-      {!collapsed && (
-        <>
-          {visible.length === 0 && <div className="topology-activity-panel__empty">Aucun événement récent.</div>}
-          <ul className="topology-activity-panel__list">
-            {visible.map((item) => (
-              <li key={item.id} className={`topology-activity-panel__item topology-activity-panel__item--${item.level}`}>
-                <span className="topology-activity-panel__item-dot" />
-                <div className="topology-activity-panel__item-body">
-                  <span className="topology-activity-panel__item-message">{item.message}</span>
-                  <span className="topology-activity-panel__item-time">{formatRelativeTime(item.createdAt)}</span>
-                </div>
-              </li>
-            ))}
-          </ul>
-          {sorted.length > visibleCount && (
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm topology-activity-panel__more"
-              onClick={() => setVisibleCount((v) => v + ACTIVITY_PAGE_SIZE)}
-            >
-              Voir plus
-            </button>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
