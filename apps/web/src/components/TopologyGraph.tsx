@@ -1810,6 +1810,25 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   // Seul `onSelectionEnd` (déclenché UNIQUEMENT à la fin d'un geste de rectangle de sélection, JAMAIS
   // par un simple clic) copie effectivement cette ref dans `multiSelectedIds`.
   const lastReactFlowSelectionIds = useRef<string[]>([]);
+  /**
+   * Bug réel corrigé le 13/08/2026 (retour utilisateur : "j'ai créé une zone bleue mais ça n'a pas
+   * sélectionné les nœuds") : le memo `nodes` ci-dessous (canevas CONTRÔLÉ) recalculait `selected`
+   * UNIQUEMENT depuis `selectedId`/`multiSelectedIds`, en écrasant systématiquement le `selected`
+   * que React Flow lui-même pose en interne pendant le glissé (`commitUserSelectionRect` ->
+   * `onNodesChange` -> `applyNodeChanges` -> `flowNodes[].selected`). Comme `multiSelectedIds` ne se
+   * met à jour qu'À LA FIN du geste (`onSelectionEnd`, voir plus haut), CHAQUE frame intermédiaire du
+   * glissé renvoyait `selected: false` pour les nœuds pourtant dans le rectangle -> ce faux `nodes`
+   * contrôlé était resynchronisé vers le store interne de React Flow, qui écrasait à son tour son
+   * PROPRE `nodeLookup` avant même que `SelectionListenerInner` (useEffect différé) ait pu lire l'état
+   * réel -> `onSelectionChange`/`onSelectionEnd` ne recevaient jamais qu'une liste vide. Ce drapeau,
+   * posé UNIQUEMENT pendant un vrai geste de rectangle (`onSelectionStart`/`onSelectionEnd` ne se
+   * déclenchent jamais sur un simple clic, voir Pane#onPointerMove de la lib : le seuil de distance
+   * `paneClickDistance` doit être dépassé), laisse alors le memo `nodes` respecter le `selected`
+   * QUE React Flow vient lui-même de poser plutôt que de le contredire — sans rien changer au
+   * comportement hors glissé (clic simple/Maj+clic restent pilotés par `selectedId`/`multiSelectedIds`
+   * comme avant).
+   */
+  const [isBoxSelecting, setIsBoxSelecting] = useState(false);
   // Popover de saisie du libellé — réutilisé pour la création ("Regrouper" sur la sélection
   // courante) ET le renommage d'un groupe existant (voir groupMenuItems ci-dessous).
   const [groupLabelPopover, setGroupLabelPopover] = useState<
@@ -2050,8 +2069,17 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   // simple (`selectedId`, un seul nœud) soit la sélection multiple en cours pour "Regrouper"
   // (`multiSelectedIds`, voir handleNodeClick) : les deux réutilisent le même style `.is-selected`.
   const nodes = useMemo(
-    () => [...groupFrameNodes, ...flowNodes.map((n) => ({ ...n, selected: n.id === selectedId || multiSelectedIds.has(n.id) }))],
-    [groupFrameNodes, flowNodes, selectedId, multiSelectedIds],
+    () => [
+      ...groupFrameNodes,
+      ...flowNodes.map((n) => ({
+        ...n,
+        // `isBoxSelecting` (voir sa définition ci-dessus, bug réel corrigé le 13/08/2026) : pendant un
+        // glissé de rectangle en cours, on respecte le `selected` que React Flow vient de poser lui-même
+        // sur `n` plutôt que de le remplacer par `false`, sous peine d'empêcher le geste d'aboutir.
+        selected: n.id === selectedId || multiSelectedIds.has(n.id) || (isBoxSelecting && !!n.selected),
+      })),
+    ],
+    [groupFrameNodes, flowNodes, selectedId, multiSelectedIds, isBoxSelecting],
   );
 
   // Recherche O(1) du nœud à chaque bout d'une arête pour en dériver sa couleur (voir
@@ -2734,7 +2762,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           onSelectionChange={(params) => {
             lastReactFlowSelectionIds.current = params.nodes.map((n) => n.id);
           }}
+          onSelectionStart={() => setIsBoxSelecting(true)}
           onSelectionEnd={() => {
+            setIsBoxSelecting(false);
             if (lastReactFlowSelectionIds.current.length >= 2) {
               setMultiSelectedIds(new Set(lastReactFlowSelectionIds.current));
             }
