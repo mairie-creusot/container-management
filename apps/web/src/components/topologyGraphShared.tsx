@@ -1177,6 +1177,60 @@ export function radialPositions(rootId: string, satelliteIds: string[], radius =
   return positions;
 }
 
+/**
+ * Disposition en COUCHES (Sugiyama simplifié) des membres DIRECTS d'un groupe, pour sa vue
+ * "composition interne" (TopologySubGraphPanel.tsx, root = groupe) — bug réel corrigé le
+ * 13/08/2026 (retour utilisateur : "une fois groupé il ne son plus relié... trouve un algorithme
+ * pour les placer correctement pas en tas"). Contrairement à `radialPositions` (voisins d'UN vrai
+ * nœud, disposés en cercle AUTOUR de lui) : un groupe n'a par nature AUCUNE arête vers ses membres
+ * (voir services/topology.ts), il n'y a donc aucun "centre" réel à faire orbiter — la disposition
+ * doit au contraire refléter comment les membres sont réellement reliés ENTRE EUX (ex : 5
+ * conteneurs -> 2 networks, cas réel constaté).
+ *
+ * Algorithme (bipartite/DAG simple, suffisant pour la taille réelle d'un groupe — jamais un
+ * vrai risque de cycle, `edges` ne vient que de container<->network/volume, jamais l'inverse) :
+ * 1) couche 0 par défaut pour tout membre ; 2) chaque arête INTERNE (les deux bouts sont des
+ * membres directs, voir l'appelant) pousse sa cible à au moins couche(source)+1, en passes
+ * successives bornées par `memberIds.length` (jamais une boucle infinie même sur des données
+ * corrompues) ; 3) un membre jamais touché par une arête interne (îlot au sein du groupe) reste en
+ * couche 0 — jamais une position inventée hors de tout repère réel. Au sein d'une couche, simple
+ * espacement vertical centré (pas de minimisation de croisements : hors de portée utile pour la
+ * taille d'un groupe dans ce premier lot).
+ */
+export function layeredGroupPositions(
+  memberIds: string[],
+  internalEdges: { source: string; target: string }[],
+): Record<string, { x: number; y: number }> {
+  const layerById = new Map<string, number>();
+  for (const id of memberIds) layerById.set(id, 0);
+  for (let pass = 0; pass < memberIds.length; pass++) {
+    let changed = false;
+    for (const e of internalEdges) {
+      if (!layerById.has(e.source) || !layerById.has(e.target)) continue;
+      const next = layerById.get(e.source)! + 1;
+      if (next > layerById.get(e.target)!) {
+        layerById.set(e.target, next);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+  const membersByLayer = new Map<number, string[]>();
+  for (const id of memberIds) {
+    const layer = layerById.get(id) ?? 0;
+    (membersByLayer.get(layer) ?? membersByLayer.set(layer, []).get(layer)!).push(id);
+  }
+  const LAYER_WIDTH = 260;
+  const ROW_HEIGHT = 110;
+  const positions: Record<string, { x: number; y: number }> = {};
+  for (const [layer, ids] of membersByLayer) {
+    ids.forEach((id, row) => {
+      positions[id] = { x: layer * LAYER_WIDTH, y: (row - (ids.length - 1) / 2) * ROW_HEIGHT };
+    });
+  }
+  return positions;
+}
+
 export const nodeTypes = { graphNode: GraphNode, topologyGroupNode: GroupNode, topologyGroupFrame: GroupFrameNode };
 
 /**

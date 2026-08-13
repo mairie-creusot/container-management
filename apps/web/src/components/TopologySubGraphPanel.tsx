@@ -15,6 +15,7 @@ import {
   formatMem,
   idWithoutPrefix,
   interiorNodeTypes,
+  layeredGroupPositions,
   nodeTypes,
   radialPositions,
   resolveGroupMemberNodeIds,
@@ -22,7 +23,7 @@ import {
   type GroupNodeData,
   type ProcessNodeData,
 } from "@/components/topologyGraphShared";
-import type { Topology, TopologyGroup, TopologyNode } from "@/types";
+import type { Topology, TopologyEdge, TopologyGroup, TopologyNode } from "@/types";
 
 interface TopologySubGraphPanelProps {
   /** Graphe complet déjà chargé côté client (state.topology.data) — le sous-graphe est un pur
@@ -181,16 +182,86 @@ export default function TopologySubGraphPanel({
     [topology, currentRootId],
   );
 
-  // Reconstruit la disposition (racine au centre, voisins en cercle) à chaque recentrage — pas de
-  // persistance (contrairement au graphe principal) : une exploration ponctuelle, pas un canevas
-  // durable.
+  /** "Propriétaire" direct (au sens de cette vue) de chaque vrai TopologyNode réel — un membre
+   * direct du groupe qui est lui-même un sous-groupe possède, transitivement, tous les vrais nœuds
+   * qu'il contient (resolveGroupMemberNodeIds) ; un membre direct qui est un vrai nœud se possède
+   * lui-même. Sert à redescendre une arête réelle vers la carte VISIBLE à ce niveau (le vrai nœud
+   * lui-même, ou la carte repliée du sous-groupe qui le contient) — même principe que
+   * resolveVisibleGroupTarget (TopologyGraph.tsx), mais restreint à UN seul niveau (les membres
+   * directs de `currentGroup`, jamais toute la hiérarchie globale du graphe).
+   */
+  const memberOwnerByRealNodeId = useMemo(() => {
+    const map = new Map<string, string>();
+    if (!currentGroup) return map;
+    for (const memberId of currentGroup.nodeIds) {
+      const subGroup = groupsById.get(memberId);
+      const realIds = subGroup ? resolveGroupMemberNodeIds(subGroup.nodeIds, topology.groups) : [memberId];
+      for (const realId of realIds) map.set(realId, memberId);
+    }
+    return map;
+  }, [currentGroup, groupsById, topology.groups]);
+
+  /**
+   * Arêtes RÉELLES entre les membres directs d'un groupe (retour utilisateur du 13/08/2026 : "une
+   * fois groupé il ne son plus relié") — bug réel corrigé : cette vue n'affichait jusqu'ici QUE des
+   * traits neutres groupe -> chaque membre (voir `groupMemberEdges` plus bas, conservé en repli
+   * pour un groupe sans aucune arête interne), jamais les arêtes RÉELLES qui existaient entre les
+   * membres eux-mêmes (ex : conteneur -> network) — l'information de connectivité qui a justement
+   * amené l'utilisateur à les grouper ensemble disparaissait entièrement une fois à l'intérieur.
+   * `sOwner === tOwner` exclue une arête entièrement interne à un même sous-groupe MEMBRE (déjà
+   * masquée par sa propre carte repliée, voir deriveGroupPorts) ; une arête touchant un nœud hors de
+   * TOUT membre direct (donc hors du groupe entier) est elle aussi exclue (`!sOwner || !tOwner`) —
+   * cette vue ne montre que la composition interne de CE groupe, jamais ses connexions externes
+   * (déjà visibles, une fois replié, via ses propres ports — voir deriveGroupPorts).
+   */
+  const groupInternalEdges = useMemo<(TopologyEdge & { sourceHandle?: string; targetHandle?: string })[]>(() => {
+    if (!currentGroup) return [];
+    const result: (TopologyEdge & { sourceHandle?: string; targetHandle?: string })[] = [];
+    for (const e of topology.edges) {
+      const sOwner = memberOwnerByRealNodeId.get(e.source);
+      const tOwner = memberOwnerByRealNodeId.get(e.target);
+      if (!sOwner || !tOwner || sOwner === tOwner) continue;
+      const sourceRedirected = sOwner !== e.source;
+      const targetRedirected = tOwner !== e.target;
+      if (!sourceRedirected && !targetRedirected) {
+        result.push(e);
+        continue;
+      }
+      // Même règle de correspondance capacité <-> Handle qu'à la racine du graphe principal (voir
+      // TopologyGraph.tsx#groupedTopologyEdges/deriveGroupPorts) — nécessaire seulement quand une
+      // extrémité est redirigée vers la carte repliée d'un sous-groupe (qui peut porter plusieurs
+      // Handles du même côté).
+      result.push({
+        ...e,
+        id: `${e.id}__group-interior`,
+        source: sOwner,
+        target: tOwner,
+        ...(sourceRedirected ? { sourceHandle: e.kind === "mount" ? "provide" : "network" } : {}),
+        ...(targetRedirected
+          ? { targetHandle: e.kind === "mount" ? "volume-mount" : e.kind === "hosts" ? "hosted-by" : "attach" }
+          : {}),
+      });
+    }
+    return result;
+  }, [currentGroup, memberOwnerByRealNodeId, topology.edges]);
+
+  // Reconstruit la disposition à chaque recentrage — pas de persistance (contrairement au graphe
+  // principal) : une exploration ponctuelle, pas un canevas durable. Racine = un vrai nœud : cercle
+  // radial autour de lui (radialPositions, inchangé). Racine = un GROUPE (13/08/2026, retour
+  // utilisateur "tas de merde" sur le cercle radial précédent) : AUCUN nœud central réel (un groupe
+  // n'a aucune arête vers ses membres, voir plus haut) — layeredGroupPositions dispose plutôt les
+  // membres en couches selon leurs arêtes RÉELLES entre eux (groupInternalEdges ci-dessus), le
+  // groupe lui-même n'apparaît alors plus comme un nœud flottant dans cette vue (déjà représenté
+  // par l'en-tête/le fil d'Ariane de ce panneau).
   useEffect(() => {
     if (!currentRootId || !(nodesById.has(currentRootId) || groupsById.has(currentRootId))) {
       setFlowNodes([]);
       return;
     }
-    const positions = radialPositions(currentRootId, neighborIds, DEPENDENCY_RADIUS);
-    const ids = [currentRootId, ...neighborIds];
+    const positions = currentGroup
+      ? layeredGroupPositions(neighborIds, groupInternalEdges)
+      : radialPositions(currentRootId, neighborIds, DEPENDENCY_RADIUS);
+    const ids = currentGroup ? neighborIds : [currentRootId, ...neighborIds];
     setFlowNodes(
       ids
         .map((id): Node | null => {
@@ -231,25 +302,16 @@ export default function TopologySubGraphPanel({
         })
         .filter((n): n is Node => !!n),
     );
-  }, [currentRootId, neighborIds, nodesById, groupsById, topology]);
+  }, [currentRootId, currentGroup, neighborIds, groupInternalEdges, nodesById, groupsById, topology]);
 
-  /** Arêtes structurelles "racine -> membre direct" pour une racine GROUPE (groupes imbriqués,
-   * 13/08/2026) — un groupe n'a aucune vraie TopologyEdge (voir neighborIds ci-dessus), ce simple
-   * trait neutre (même style que interiorEdges plus bas, structurel, pas un flux de trafic) fait
-   * seulement office de repère visuel d'appartenance dans la disposition radiale. */
-  const groupMemberEdges = useMemo<Edge[]>(() => {
-    if (!currentGroup || !currentRootId) return [];
-    return currentGroup.nodeIds.map((memberId) => ({
-      id: `group-member-edge:${memberId}`,
-      source: currentRootId,
-      target: memberId,
-      style: { stroke: "var(--color-text-faint)", strokeWidth: 1.2 },
-    }));
-  }, [currentGroup, currentRootId]);
-
+  // Racine = un GROUPE (13/08/2026, retour utilisateur — voir groupInternalEdges ci-dessus) : les
+  // VRAIES arêtes entre membres, plutôt que les traits neutres groupe -> membre d'avant (qui de
+  // toute façon pointeraient maintenant vers un nœud absent de ce panneau, le groupe n'y étant plus
+  // représenté — voir l'effet ci-dessus). Un groupe sans aucune arête interne (membres réellement
+  // sans rapport entre eux) n'affiche alors honnêtement aucune arête, jamais un trait inventé.
   const flowEdges = useMemo(
-    () => (currentGroup ? groupMemberEdges : buildTopologyEdges(subEdges, nodesById)),
-    [currentGroup, groupMemberEdges, subEdges, nodesById],
+    () => (currentGroup ? buildTopologyEdges(groupInternalEdges, nodesById) : buildTopologyEdges(subEdges, nodesById)),
+    [currentGroup, groupInternalEdges, subEdges, nodesById],
   );
 
   // --- Vue "composition interne" (conteneurs uniquement) ----------------------------------------
