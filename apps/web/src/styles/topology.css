@@ -522,14 +522,16 @@
   pointer-events: none;
 }
 
-/* --- Arêtes : couleur pilotée par état de santé --------------------------------------------
-   La couleur (`var(--color-success|warning|critical|text-faint)`) est posée en inline style par
-   TopologyGraph.tsx#edges (dérivée de healthStatus/status du nœud conteneur aux deux bouts) — ces
-   règles ne gèrent que les effets visuels additionnels : distinction mount (trait plein +
-   particules) / network (tirets fins, existant) / stopped (tirets larges espacés, conteneur
-   injoignable mais pas nécessairement en panne), et la pulsation d'alerte "unhealthy". Le
-   sélecteur cible `.react-flow__edge-path` (le <path> réel) à l'intérieur du groupe `<g>` qui
-   porte les classes `topology-edge--*` posées via la prop `className` de chaque arête. */
+/* --- Arêtes : deux axes visuels indépendants (revu le 13/08/2026) ---------------------------
+   COULEUR (`var(--color-success|warning|critical|text-faint)`) = santé réelle de la ressource
+   (conteneur ou déclencheur d'automatisation) à une extrémité. POINTILLÉ = confiance de
+   connectivité réelle (port publié = plein, configuré non confirmé = tirets fins, inactif =
+   tirets larges) — un axe DISTINCT de la couleur, jamais une redite. Les deux sont calculés par
+   topologyGraphShared.tsx#buildTopologyEdges et posés en inline style ; ces règles CSS ne gèrent
+   que les effets visuels additionnels : épaisseur par kind (mount/network/hosts/automation-flow),
+   estompage "stopped", et la pulsation d'alerte "unhealthy". Le sélecteur cible
+   `.react-flow__edge-path` (le <path> réel) à l'intérieur du groupe `<g>` qui porte les classes
+   `topology-edge--*` posées via la prop `className` de chaque arête. */
 .react-flow__edge.topology-edge--mount .react-flow__edge-path {
   stroke-width: 2;
 }

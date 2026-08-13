@@ -380,6 +380,15 @@ async function deployViaDockerBuild(
   // le temps réel du build : le timeout doit donc englober followProgress, pas ce seul appel.
   const buildStream = await docker.buildImage({ context: cloneDir, src: files }, { t: imageTag });
 
+  // Un échec RÉEL d'une étape du build (ex: `RUN` qui retourne un code non-zéro) n'est JAMAIS
+  // remonté comme erreur du flux lui-même côté dockerode/l'API Docker — le flux se termine
+  // "normalement" (le callback `err` ci-dessous reste `undefined`), l'échec n'apparaît que DANS un
+  // évènement `{error: "..."}` au milieu du flux, exactement comme la ligne de log correspondante.
+  // Sans cette capture, le code poursuivait comme si le build avait réussi ("Build terminé" loggé
+  // quoi qu'il arrive) puis échouait plus loin sur `docker run` avec un message 404 trompeur ("no
+  // such image") qui masque la VRAIE cause — constaté en conditions réelles le 13/08/2026 (déploiement
+  // mairie-creusot/SpacetimeDB, échec de compilation Rust réel dans une dépendance).
+  let buildError: string | undefined;
   await withTimeout(
     new Promise<void>((resolve, reject) => {
       docker.modem.followProgress(
@@ -388,12 +397,16 @@ async function deployViaDockerBuild(
         (event: { stream?: string; status?: string; error?: string }) => {
           const line = event.error ?? event.stream ?? event.status;
           if (line) void appendDeploymentLog(deploymentId, line.endsWith("\n") ? line : `${line}\n`);
+          if (event.error) buildError = event.error;
         },
       );
     }),
     config.github.buildTimeoutMs,
     "docker build",
   );
+  if (buildError) {
+    throw new Error(`docker build a échoué : ${buildError}`);
+  }
   await appendDeploymentLog(deploymentId, `Build terminé : ${imageTag}\n`);
 
   const containerName = sanitizeDockerName(`quai-gh-${owner}-${repo}-${deploymentId.slice(0, 8)}`);

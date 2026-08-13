@@ -279,13 +279,16 @@ export const ZOOM_DETAIL_THRESHOLD = 0.6;
  * un re-render de chaque nœud à chaque pan. */
 export const zoomSelector = (s: { transform: [number, number, number] }) => s.transform[2];
 
-// --- Couleur des arêtes selon la santé réelle du/des conteneur(s) qu'elles touchent -------------
+// --- Couleur des arêtes selon la santé réelle de la ressource qu'elles touchent ------------------
 // Une arête ne porte aucune donnée de santé propre (voir services/topology.ts côté API) : on lit
 // `healthStatus`/`status` du nœud conteneur à l'une ou l'autre extrémité (mount : volume<->
 // conteneur ; network : conteneur<->network — il y a toujours exactement un nœud conteneur parmi
-// les deux bouts). "stopped" prime sur healthStatus : un conteneur arrêté n'a plus de healthcheck
-// qui tourne, ce n'est pas une panne (arrêt souvent volontaire) donc pas rouge, mais clairement
-// visuellement "injoignable" (tirets plus espacés, voir topology.css).
+// les deux bouts) — ou, pour une arête "automation-flow", `automationLastStatus` du déclencheur
+// qui l'alimente (voir automationTriggerEdgeState ci-dessous), MÊME palette, jamais un système de
+// couleurs parallèle à retenir en plus pour ce seul kind. "stopped" prime sur healthStatus : un
+// conteneur arrêté n'a plus de healthcheck qui tourne, ce n'est pas une panne (arrêt souvent
+// volontaire) donc pas rouge, mais clairement visuellement "injoignable" (voir POINTILLÉ,
+// buildTopologyEdges ci-dessous — axe séparé de la couleur, jamais une redite de "stopped").
 export type EdgeHealthState = "healthy" | "unhealthy" | "starting" | "none" | "stopped";
 
 export const EDGE_STATE_COLOR: Record<EdgeHealthState, string> = {
@@ -295,17 +298,6 @@ export const EDGE_STATE_COLOR: Record<EdgeHealthState, string> = {
   none: "var(--color-text-faint)",
   stopped: "var(--color-text-faint)",
 };
-
-/**
- * Arête "automation-flow" (trigger -> condition -> action, voir services/automationStore.ts) : ni
- * un mount ni un network, aucun nœud conteneur à l'une de ses deux extrémités (edgeContainerNode
- * ci-dessous retourne toujours `null`) — sans ce cas particulier elle retomberait sur la couleur
- * "none" (gris fade), indiscernable des arêtes "hosts". Couleur fixe volontairement distincte de
- * toutes celles de EDGE_STATE_COLOR ci-dessus ET de MINIMAP_NODE_COLOR (aucune reprise exacte
- * d'une couleur de kind déjà utilisée), cohérente avec .topology-edge--automation-flow dans
- * topology.css.
- */
-const AUTOMATION_FLOW_EDGE_COLOR = "#fb923e";
 
 export interface TopologyEdgeLike {
   source: string;
@@ -331,29 +323,89 @@ export function edgeContainerNode(edge: TopologyEdgeLike, nodesById: Map<string,
  * handle cible devient alors nécessaire pour lever l'ambiguïté (React Flow ne peut plus déduire le
  * bon handle tout seul dès qu'il y en a plusieurs du même type sur un nœud).
  */
+/**
+ * État réel d'un déclencheur d'automatisation (TopologyNode#automationLastStatus, voir
+ * services/automationEngine.ts) projeté sur la même palette que EDGE_STATE_COLOR — "ok" partage
+ * le vert "healthy", "failing" le rouge "unhealthy", "unknown" (jamais encore évalué) le gris
+ * "none" : un SEUL système de couleurs pour tout le graphe, jamais une palette parallèle à retenir
+ * en plus pour ce seul kind d'arête.
+ */
+function automationTriggerEdgeState(status: "ok" | "failing" | "unknown"): EdgeHealthState {
+  if (status === "ok") return "healthy";
+  if (status === "failing") return "unhealthy";
+  return "none";
+}
+
+/**
+ * Construit les arêtes React Flow (couleur/état/animation) depuis les TopologyEdge bruts — logique
+ * partagée par le graphe principal ET le sous-graphe de dépendances, pour un rendu identique.
+ * `sourceHandle`/`targetHandle` optionnels : utilisés par TopologyGraph.tsx quand une arête a été
+ * redirigée vers un nœud de groupe replié (voir deriveGroupPorts ci-dessus) — un groupe peut porter
+ * PLUSIEURS handles du même côté (ex: "network" ET "provide", tous deux source/Right), l'id du
+ * handle cible devient alors nécessaire pour lever l'ambiguïté (React Flow ne peut plus déduire le
+ * bon handle tout seul dès qu'il y en a plusieurs du même type sur un nœud).
+ *
+ * Deux axes visuels INDÉPENDANTS, chacun porteur d'une information réelle distincte (revu le
+ * 13/08/2026 suite à un retour utilisateur — l'ancien système faisait porter au pointillé
+ * essentiellement la même information que la couleur) :
+ *  - COULEUR = santé/état réel de la ressource à une extrémité (conteneur ou déclencheur
+ *    d'automatisation) — jamais un axe de type de relation.
+ *  - POINTILLÉ = confiance de connectivité RÉELLE, jamais une simple redite de la couleur : trait
+ *    PLEIN = port publié sur l'hôte (Docker confirme un socket réellement lié, voir
+ *    TopologyEdgePort#publicPort) ; tirets fins animés = configuré mais sans port publié à
+ *    vérifier (trafic interne uniquement, ni prouvé ni infirmé) ; tirets larges = ressource
+ *    arrêtée/inactive. Une arête "mount"/"hosts" reste structurelle (jamais de sonde active
+ *    pertinente pour elle) : toujours pleine, seule sa couleur bouge.
+ */
 export function buildTopologyEdges(
   edges: (TopologyEdge & { sourceHandle?: string; targetHandle?: string })[],
   nodesById: Map<string, TopologyNode>,
 ): Edge[] {
+  // Pré-passe : propage le statut RÉEL de chaque déclencheur à la/aux condition(s) qu'il alimente,
+  // pour qu'une arête condition -> action (qui n'a elle-même aucun déclencheur à l'une de ses deux
+  // extrémités) hérite quand même d'un état réel plutôt que de retomber sur "aucun signal".
+  const triggerStatusByNodeId = new Map<string, "ok" | "failing" | "unknown">();
+  for (const n of nodesById.values()) {
+    if (n.kind === "automation-trigger") triggerStatusByNodeId.set(n.id, n.automationLastStatus ?? "unknown");
+  }
+  for (const e of edges) {
+    if (e.kind !== "automation-flow") continue;
+    const inherited = triggerStatusByNodeId.get(e.source);
+    if (inherited && !triggerStatusByNodeId.has(e.target)) triggerStatusByNodeId.set(e.target, inherited);
+  }
+
   return edges.map((e) => {
+    const isAutomationFlowEdge = e.kind === "automation-flow";
     const containerNode = edgeContainerNode(e, nodesById);
     const stopped = containerNode ? containerNode.status !== "running" : false;
-    const state: EdgeHealthState = stopped ? "stopped" : (containerNode?.healthStatus ?? "none");
-    // "automation-flow" (voir AUTOMATION_FLOW_EDGE_COLOR ci-dessus) : jamais dérivée de la santé
-    // d'un conteneur, toujours sa propre couleur fixe distincte.
-    const isAutomationFlowEdge = e.kind === "automation-flow";
-    const color = isAutomationFlowEdge ? AUTOMATION_FLOW_EDGE_COLOR : EDGE_STATE_COLOR[state];
+    const state: EdgeHealthState = isAutomationFlowEdge
+      ? automationTriggerEdgeState(triggerStatusByNodeId.get(e.source) ?? "unknown")
+      : stopped
+        ? "stopped"
+        : (containerNode?.healthStatus ?? "none");
+    const color = EDGE_STATE_COLOR[state];
     const isMount = e.kind === "mount";
     // "hosts" (cluster Nutanix -> VM, voir services/topology.ts) : relation structurelle statique,
     // pas un flux de trafic — jamais de tirets défilants (contrairement à "network") ni de
     // particules (contrairement à "mount") pour ne pas laisser croire à une activité mesurée.
     const isHostsEdge = e.kind === "hosts";
-    // "stopped" prime sur le type : tirets larges et espacés, quel que soit mount/network.
-    // Sinon : réseau garde ses tirets fins animés (existant) ; mount reste en trait plein — les
-    // particules de MountFlowEdge assurent seules l'impression de flux, un dasharray en plus
-    // ferait double emploi visuel. "automation-flow" : tirets plus serrés (2 4), distincts du
-    // "4 4" réseau, pour rester reconnaissable au premier coup d'œil.
-    const strokeDasharray = isAutomationFlowEdge ? "2 4" : state === "stopped" ? "2 8" : isMount ? undefined : "4 4";
+    // Port(s) réellement publié(s) sur l'hôte (voir TopologyEdgePort#publicPort, jamais déduit —
+    // absent si Docker n'a mappé aucun port hôte pour ce conteneur) : seul signal d'activité
+    // "confirmée" dont QUAI dispose sans sonde active à chaque rafraîchissement du graphe (une
+    // vraie sonde TCP par arête, à chaque fetch, coûterait cher — voir services/automationEngine.ts
+    // pour la sonde active RÉSERVÉE aux seules routes reverse-proxy explicitement surveillées).
+    const hasPublishedPort = e.ports?.some((p) => p.publicPort !== undefined) ?? false;
+    const strokeDasharray = isMount
+      ? undefined // structurel, jamais de pointillé — cf. JSDoc ci-dessus
+      : isHostsEdge
+        ? undefined // idem
+        : isAutomationFlowEdge
+          ? "2 4" // axe pointillé non pertinent pour ce kind (pas de "port publié") : motif fixe distinctif
+          : state === "stopped"
+            ? "2 8" // large : ressource inactive
+            : hasPublishedPort
+              ? undefined // plein : connectivité confirmée
+              : "4 4"; // fin animé : configuré, non confirmable sans sonde active
     return {
       id: e.id,
       source: e.source,
@@ -369,6 +421,7 @@ export function buildTopologyEdges(
         kind: e.kind,
         state,
         color,
+        hasPublishedPort,
         ...(e.ports ? { ports: e.ports } : {}),
         ...(e.private !== undefined ? { private: e.private } : {}),
         ...(e.encrypted !== undefined ? { encrypted: e.encrypted } : {}),
