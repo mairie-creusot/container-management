@@ -80,8 +80,19 @@ export default async function topologyRoutes(fastify: FastifyInstance): Promise<
   fastify.get("/api/topology/positions", async (request, reply) => {
     // Graphe actuel calculé côté serveur (mêmes données que GET /api/topology) pour purger toute
     // position dont l'id de nœud n'y apparaît plus avant de la renvoyer — voir purgeStalePositions.
+    //
+    // Bug réel corrigé le 13/08/2026 (retour utilisateur : "il memorise mal a chaque refresh ou
+    // hardrefresh ou rebuild ce n'est pas a la position ou j'ai mis" — la carte d'un GROUPE
+    // repositionnée à la main sur le canevas principal revenait systématiquement à sa position par
+    // défaut) : `liveNodeIds` ne contenait QUE les ids de `topology.nodes` (vrais conteneurs/
+    // volumes/networks/VMs...), jamais ceux de `topology.groups` (groupes imbriqués, 13/08/2026) —
+    // une carte de groupe déplacée à la main persiste pourtant sa position sous SON PROPRE id
+    // (`group:<uuid>`, voir handleNodeDragStop, TopologyGraph.tsx). purgeStalePositions traitait
+    // donc CETTE entrée comme orpheline (aucun id de ce nom dans liveNodeIds) et la supprimait à
+    // CHAQUE appel de cette route — donc à chaque rechargement de page, quasi immédiatement après
+    // l'avoir déplacée.
     const topology = await getTopology();
-    const liveNodeIds = new Set(topology.nodes.map((n) => n.id));
+    const liveNodeIds = new Set([...topology.nodes.map((n) => n.id), ...topology.groups.map((g) => g.id)]);
     return reply.send(await purgeStalePositions(request.authSession!.username, liveNodeIds));
   });
 

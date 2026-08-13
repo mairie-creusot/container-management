@@ -103,56 +103,72 @@ export function ContainerLogsBody({ containerId, containerName, onClose }: Conta
     resizeObserver.observe(terminalHostRef.current);
 
     // Même garde que ContainerConsole.tsx#ContainerConsoleBody (voir son commentaire détaillé) :
-    // `cancelled` protège déjà le fetch du snapshot ci-dessous, mais PAS (avant ce correctif) les
-    // handlers du WebSocket — un `socket.close()` déclenché par le nettoyage (démontage/remontage,
-    // ex sous React.StrictMode en dev) appelle quand même `onclose`/`onerror` de façon asynchrone,
-    // pouvant écraser à tort le statut d'une connexion suivante déjà établie.
+    // `cancelled` protège les handlers du WebSocket — un `socket.close()` déclenché par le
+    // nettoyage (démontage/remontage, ex sous React.StrictMode en dev) appelle quand même
+    // `onclose`/`onerror` de façon asynchrone, pouvant écraser à tort le statut d'une connexion
+    // suivante déjà établie.
     let cancelled = false;
-    let socket: WebSocket | null = null;
     const decoder = new TextDecoder();
     let partialLine = "";
+    // Bug réel corrigé le 13/08/2026 (retour utilisateur : le statut restait bloqué sur
+    // "Connexion…", jamais de logs affichés une fois imbriqué dans le sous-graphe d'un groupe) —
+    // la socket s'ouvrait auparavant seulement APRÈS l'attente (`await`) du fetch du snapshot, ce
+    // qui l'exposait à une fenêtre de course avec le double-montage React.StrictMode (l'instance
+    // "jetable" du double-montage pouvait être démontée — `cancelled = true` — AVANT que son
+    // `await` n'ait résolu, empêchant alors `openStream()` de jamais s'exécuter pour cette
+    // instance ; un remontage supplémentaire avant la résolution du fetch reproduisait le même
+    // blocage indéfiniment). ContainerConsole.tsx#ContainerConsoleBody n'a jamais ce problème
+    // car sa socket s'ouvre de façon SYNCHRONE dès le début de l'effet — même principe appliqué
+    // ici : la socket s'ouvre immédiatement, en PARALLÈLE du fetch du snapshot (plus après), les
+    // deux se rejoignant sans jamais dépendre l'un de l'autre pour démarrer. Les lignes live
+    // reçues avant que le snapshot n'ait fini de charger sont mises en attente (`pendingLiveLines`)
+    // puis ajoutées à leur tour une fois le snapshot appliqué, pour ne jamais les afficher AVANT
+    // l'historique qu'elles suivent chronologiquement.
+    let snapshotApplied = false;
+    let pendingLiveLines: string[] = [];
 
     function flushChunk(text: string) {
       partialLine += text;
       const parts = partialLine.split("\n");
       partialLine = parts.pop() ?? "";
-      if (parts.length > 0) appendLines(parts);
+      if (parts.length === 0) return;
+      if (snapshotApplied) appendLines(parts);
+      else pendingLiveLines.push(...parts);
     }
 
-    function openStream() {
-      // tail=0 : le snapshot ci-dessus a déjà fourni l'historique récent, on ne veut ici QUE les
-      // nouvelles lignes écrites après l'ouverture du flux (voir routes/containerLogs.ts#parseTail
-      // — "0" est accepté explicitement, contrairement à un paramètre absent qui retomberait sur
-      // le tail par défaut et dupliquerait des lignes déjà affichées).
-      socket = new WebSocket(wsUrl(`/containers/${encodeURIComponent(containerId!)}/logs/stream?tail=0`));
-      socket.binaryType = "arraybuffer";
+    // tail=0 : on ne veut ici QUE les nouvelles lignes écrites après l'ouverture du flux (voir
+    // routes/containerLogs.ts#parseTail — "0" est accepté explicitement, contrairement à un
+    // paramètre absent qui retomberait sur le tail par défaut et dupliquerait des lignes déjà
+    // affichées par le snapshot ci-dessous) — l'historique récent reste entièrement à la charge
+    // du snapshot, jamais du flux temps réel.
+    const socket = new WebSocket(wsUrl(`/containers/${encodeURIComponent(containerId)}/logs/stream?tail=0`));
+    socket.binaryType = "arraybuffer";
 
-      socket.onopen = () => {
-        if (!cancelled) setStatus("connected");
-      };
-      socket.onmessage = (event) => {
-        const text = typeof event.data === "string" ? event.data : decoder.decode(event.data as ArrayBuffer);
-        flushChunk(text);
-      };
-      socket.onerror = () => {
-        if (cancelled) return;
-        setStatus("error");
-        setErrorMessage("Connexion au flux de logs interrompue.");
-      };
-      socket.onclose = (event) => {
-        if (cancelled) return; // fermeture volontaire par le nettoyage, voir le commentaire de tête d'effet
-        setStatus((current) => (current === "error" ? current : "closed"));
-        // Même remarque que ContainerConsole.tsx : un rejet avant l'upgrade (401, conteneur
-        // introuvable...) n'expose pas de `reason` exploitable ici ; seul le cas "conteneur
-        // introuvable/injoignable" (code 4404, voir routes/containerLogs.ts) porte un message
-        // clair après un upgrade réussi.
-        if (event.reason) setErrorMessage(event.reason);
-      };
-    }
+    socket.onopen = () => {
+      if (!cancelled) setStatus("connected");
+    };
+    socket.onmessage = (event) => {
+      const text = typeof event.data === "string" ? event.data : decoder.decode(event.data as ArrayBuffer);
+      flushChunk(text);
+    };
+    socket.onerror = () => {
+      if (cancelled) return;
+      setStatus("error");
+      setErrorMessage("Connexion au flux de logs interrompue.");
+    };
+    socket.onclose = (event) => {
+      if (cancelled) return; // fermeture volontaire par le nettoyage, voir le commentaire de tête d'effet
+      setStatus((current) => (current === "error" ? current : "closed"));
+      // Même remarque que ContainerConsole.tsx : un rejet avant l'upgrade (401, conteneur
+      // introuvable...) n'expose pas de `reason` exploitable ici ; seul le cas "conteneur
+      // introuvable/injoignable" (code 4404, voir routes/containerLogs.ts) porte un message
+      // clair après un upgrade réussi.
+      if (event.reason) setErrorMessage(event.reason);
+    };
 
-    // Snapshot instantané d'abord (premier affichage sans attendre l'upgrade WebSocket), puis
-    // le flux temps réel prend le relais — voir en-tête de composant.
-    (async () => {
+    // Snapshot instantané EN PARALLÈLE du flux ci-dessus (plus avant lui, voir commentaire de tête
+    // d'effet) — premier affichage dès qu'il arrive, sans jamais bloquer l'ouverture du flux.
+    void (async () => {
       try {
         const snapshot = await apiGet<ContainerLogsSnapshot>(
           `/containers/${encodeURIComponent(containerId)}/logs?tail=${INITIAL_TAIL}`,
@@ -164,14 +180,18 @@ export function ContainerLogsBody({ containerId, containerName, onClose }: Conta
         if (cancelled) return;
         setErrorMessage(err instanceof ApiError ? err.message : "Impossible de charger les logs récents.");
       } finally {
-        if (!cancelled) openStream();
+        if (!cancelled) {
+          snapshotApplied = true;
+          if (pendingLiveLines.length > 0) appendLines(pendingLiveLines);
+          pendingLiveLines = [];
+        }
       }
     })();
 
     return () => {
       cancelled = true;
       resizeObserver.disconnect();
-      socket?.close();
+      socket.close();
       terminal.dispose();
       terminalRef.current = null;
     };
