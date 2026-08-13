@@ -1837,6 +1837,11 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   // Menu contextuel d'un nœud de groupe (replié) ou du cadre d'un groupe déplié — distinct de
   // `nodeMenu` (un groupe n'est pas un TopologyNode réel, voir GroupNodeData/GroupFrameNodeData).
   const [groupMenu, setGroupMenu] = useState<{ x: number; y: number; group: TopologyGroup } | null>(null);
+  /** Clic droit sur le canevas VIDE pendant une sélection multiple active (retour utilisateur du
+   * 13/08/2026, voir handlePaneContextMenu) : propose "Grouper la sélection" au lieu du picker de
+   * création habituel (canvasMenu/CreateSpotlight) — créer un nouveau nœud n'a aucun sens tant
+   * qu'une sélection est en cours, alors que grouper est justement l'action attendue à cet instant. */
+  const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number } | null>(null);
   // Bouton "grille" de la barre d'outils (voir <Controls> plus bas) — bascule la MiniMap, seule
   // "vue d'ensemble" que ce graphe propose pour l'instant.
   const [showMiniMap, setShowMiniMap] = useState(true);
@@ -2283,6 +2288,12 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     event.preventDefault();
     if (!operate) return;
     const mouseEvent = event as MouseEvent;
+    // Sélection multiple active (retour utilisateur du 13/08/2026, voir `selectionMenu` ci-dessus) :
+    // clic droit sur le vide propose "Grouper la sélection" plutôt que le picker de création.
+    if (multiSelectedIds.size >= 2) {
+      setSelectionMenu({ x: mouseEvent.clientX, y: mouseEvent.clientY });
+      return;
+    }
     setCanvasMenu({ x: mouseEvent.clientX, y: mouseEvent.clientY });
   }
 
@@ -2639,6 +2650,16 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       // qui a ouvert CE menu (x, y), pas la position du clic sur l'entrée de menu elle-même.
       { label: "Visualiser les dépendances", onClick: () => openSubGraph(node.id, x, y) },
     ];
+    // "Grouper la sélection" (retour utilisateur du 13/08/2026 : "si je fait clic droit jai rien
+    // pour creer le groupe") — jusqu'ici cette action n'existait QUE via le bouton flottant en haut
+    // à droite du canevas (voir plus bas), jamais accessible depuis le clic droit sur l'un des
+    // nœuds sélectionnés lui-même, contrairement à la règle ≤3 clics. Affiché seulement quand CE
+    // nœud fait partie de la sélection multiple en cours (>= 2, sinon le clic droit reste ambigu :
+    // grouper QUOI ?) — jamais pour un nœud hors sélection, où le clic droit garde son sens habituel
+    // (actions sur ce seul nœud).
+    if (operate && multiSelectedIds.size >= 2 && multiSelectedIds.has(node.id)) {
+      items.push({ label: `Grouper la sélection (${multiSelectedIds.size})`, onClick: () => openCreateGroupPopover(x, y) });
+    }
     if (!operate) return items;
 
     if (node.kind === "container") {
@@ -2865,6 +2886,20 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           y={groupMenu.y}
           onClose={() => setGroupMenu(null)}
           items={groupMenuItems(groupMenu.group, groupMenu.x, groupMenu.y)}
+        />
+      )}
+
+      {selectionMenu && operate && (
+        <ContextMenu
+          x={selectionMenu.x}
+          y={selectionMenu.y}
+          onClose={() => setSelectionMenu(null)}
+          items={[
+            {
+              label: `Grouper la sélection (${multiSelectedIds.size})`,
+              onClick: () => openCreateGroupPopover(selectionMenu.x, selectionMenu.y),
+            },
+          ]}
         />
       )}
 
