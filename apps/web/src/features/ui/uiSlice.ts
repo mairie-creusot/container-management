@@ -5,20 +5,14 @@ export type ViewId =
   | "images"
   | "registries"
   | "containers"
-  | "volumes"
-  | "networks"
-  | "iac"
   | "registry-explorer"
-  | "gitops"
   | "clusters"
   | "notifications"
   | "audit"
   | "secrets"
   | "reverse-proxy"
   | "ad-dns"
-  | "notification-channels"
-  | "backups"
-  | "cron-jobs";
+  | "notification-channels";
 
 interface UiState {
   currentView: ViewId;
@@ -69,11 +63,7 @@ export const NAV_ITEMS: { id: ViewId; label: string }[] = [
   { id: "images", label: "Images" },
   { id: "registries", label: "Registries" },
   { id: "containers", label: "Conteneurs" },
-  { id: "volumes", label: "Volumes" },
-  { id: "networks", label: "Networks" },
   { id: "reverse-proxy", label: "Reverse proxy" },
-  { id: "iac", label: "Infra-as-code" },
-  { id: "gitops", label: "GitOps" },
   { id: "clusters", label: "Environnements" },
 ];
 
@@ -84,8 +74,6 @@ const PAGE_TITLES: Partial<Record<ViewId, string>> = {
   secrets: "Secrets",
   "ad-dns": "DNS Active Directory",
   "notification-channels": "Canaux de notification",
-  backups: "Sauvegardes",
-  "cron-jobs": "Cron Jobs",
 };
 
 export function pageTitle(view: ViewId): string {

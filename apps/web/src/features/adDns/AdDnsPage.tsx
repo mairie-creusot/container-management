@@ -120,6 +120,14 @@ export default function AdDnsPage() {
           </div>
           {admin && configured && !editing && (
             <div style={{ display: "flex", gap: 8 }}>
+              {/* Teste le compte de service déjà enregistré (kinit uniquement, aucun enregistrement
+                  DNS écrit) SANS repasser par "Modifier" — `form` est déjà pré-rempli avec la config
+                  effective (voir l'effet ci-dessus) et `isFormValid()` n'exige pas de mot de passe
+                  quand `configured` est vrai, donc `handleTest()` réutilise tel quel le mot de passe
+                  déjà stocké côté serveur (routes/adDns.ts : password vide = conserver l'existant). */}
+              <button type="button" className="btn btn-ghost" onClick={handleTest} disabled={testing}>
+                {testing ? "Test en cours…" : "Tester la connexion"}
+              </button>
               <button type="button" className="btn btn-ghost" onClick={openForm}>
                 Modifier
               </button>
@@ -154,6 +162,11 @@ export default function AdDnsPage() {
               />
             </div>
             {lastSync?.status === "failed" && lastSync.message && <div className="error-banner">{lastSync.message}</div>}
+            {testResult && (
+              <div className={testResult.ok ? "success-banner" : "error-banner"}>
+                {testResult.ok ? <IconCheck /> : null} {testResult.message}
+              </div>
+            )}
             <KeyValueList
               rows={[
                 { key: "Royaume Kerberos", value: config.realm },

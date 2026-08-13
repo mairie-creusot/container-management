@@ -58,19 +58,14 @@
  * ne sont pas des ressources connectables comme un conteneur/volume/network.
  *
  * Volumes/networks ORPHELINS (existants sur l'hôte Docker mais rattachés à AUCUN conteneur) :
- * délibérément EXCLUS de ce graphe (voir le filtre juste avant leur construction plus bas) pour
- * ne pas le noyer — un hôte de dev peut avoir des dizaines de volumes de cache d'autres projets.
- * Ça ne veut pas dire qu'ils sont invisibles pour l'utilisateur : GET /api/volumes et
- * GET /api/networks renvoient déjà TOUS les volumes/networks réels de l'hôte avec un champ
- * `inUseBy`/`containerCount` calculé à partir des mêmes conteneurs (docker.ts#listVolumes/
- * listNetworks — même logique de rapprochement que referencedVolumeNames/referencedNetworkIds
- * ci-dessous, pas dupliquée : ce fichier ne recalcule rien, il filtre juste le graphe). Un
- * volume/network orphelin est donc `inUseBy === 0` / `containerCount === 0` (networks internes
- * par défaut bridge/host/none exclus de cette notion, jamais des ressources à nettoyer — même
- * exclusion que TopologyGraph.tsx#nodeMenuItems côté suppression). Choix délibéré plutôt qu'une
- * route GET /api/orphans dédiée : VolumesPage.tsx/NetworksPage.tsx (déjà existantes, déjà
- * alimentées par ces mêmes champs) portent le badge "Orphelin" + le filtre + l'action groupée de
- * nettoyage — une vue séparée aurait été une simple redite de ces deux pages.
+ * décision produit du 13/08/2026 (VolumesPage.tsx/NetworksPage.tsx supprimées, "tout est dans le
+ * graphe") — restent de VRAIS nœuds top-level, `orphan: true`, SANS AUCUNE arête (par construction :
+ * une arête suppose un conteneur qui référence la ressource, un orphelin n'en a aucun). Le frontend
+ * les rend visuellement atténués (topologyGraphShared.tsx) plutôt que de les cacher — un hôte de dev
+ * peut en accumuler des dizaines d'autres projets, c'est un compromis de clarté assumé, pas un bug.
+ * `inUseBy === 0` / `containerCount === 0` déterminent l'orphelinage (networks internes par défaut
+ * bridge/host/none jamais orphelins par convention, voir DEFAULT_NETWORK_NAMES — mêmes réseaux déjà
+ * exclus de la notion de "ressource à nettoyer" par TopologyGraph.tsx#nodeMenuItems côté suppression).
  *
  * "Briques" (volumes/networks à conteneur UNIQUE, voir TopologyNode#attachments) : décision prise
  * ICI, côté backend, par ressource — pas au frontend, pour que GET /api/topology reflète déjà le
@@ -90,6 +85,7 @@
  * en plus pour les networks restés des nœuds (partagés/par défaut).
  */
 
+import { config } from "../config.js";
 import { getClient, getDockerHostInfo, isDockerReachable, readContainerHealth, readContainerUsage } from "./docker.js";
 import { getImages } from "./images.js";
 import { listGitOpsFiles } from "./gitops.js";
@@ -101,7 +97,12 @@ import { listGroups } from "./topologyGroupsStore.js";
 import { listRemoteDockerEnvironments } from "./remoteDockerStore.js";
 import { getLxcEnvironment } from "./lxc.js";
 import { getEffectiveLxcConfig } from "./lxcStore.js";
-import type { NutanixVm, ScanResult, Topology, TopologyEdge, TopologyEdgePort, TopologyNode } from "../types.js";
+import { listCronJobs } from "./cronJobsStore.js";
+import { listCronJobRuns } from "./cronJobsScheduler.js";
+import { listBackupDefinitions, listBackupRuns } from "./backupsStore.js";
+import { listWorkspaces } from "./iac/workspaces.js";
+import { listRuns } from "./iac/runner.js";
+import type { IacEngine, NutanixVm, ScanResult, Topology, TopologyEdge, TopologyEdgePort, TopologyNode } from "../types.js";
 
 /**
  * Résumé Critical/High pour l'image `image` ("name:tag", même format que ContainerInfo#Image) à
@@ -346,6 +347,154 @@ async function getAdServerNodes(): Promise<TopologyNode[]> {
   ];
 }
 
+/**
+ * Statut d'un nœud "cron-job"/"backup" dérivé de sa DERNIÈRE exécution réelle connue (le run le
+ * plus récent, `runs[0]` — `listCronJobRuns`/`listBackupRuns` trient déjà du plus récent au plus
+ * ancien) — jamais inventé, voir types.ts#TopologyNodeKind pour la règle complète. Partagée par
+ * getCronJobNodes/getBackupNodes ci-dessous : même trio de statuts "success"/"failed"/"running"
+ * des deux côtés (CronJobRunStatus et BackupRunStatus sont structurellement identiques).
+ */
+function lastRunNodeStatus(lastRun: { status: "running" | "success" | "failed" } | undefined): TopologyNode["status"] {
+  if (!lastRun) return "neutral"; // jamais exécuté
+  if (lastRun.status === "running") return "restarting"; // exécution en cours
+  return lastRun.status === "success" ? "running" : "stopped";
+}
+
+/**
+ * Un nœud "cron-job" par définition RÉELLE de cronJobsStore.ts (jamais modifié par ce chantier,
+ * voir mission "tout devient un nœud du graphe") — indépendant de Docker (comme "ad-server" ci-
+ * dessus, récupéré que le démon local soit joignable ou non) : la LISTE des définitions ne dépend
+ * pas de Docker, même si l'EXÉCUTION d'un job en dépend (docker exec sur son conteneur cible,
+ * inchangé, voir cronJobsScheduler.ts). `status` dérivé de son dernier run réel connu
+ * (listCronJobRuns, lastRunNodeStatus ci-dessus) — [] si aucun cron job n'a jamais été créé.
+ */
+async function getCronJobNodes(): Promise<TopologyNode[]> {
+  const jobs = await listCronJobs();
+  return Promise.all(
+    jobs.map(async (job) => {
+      const runs = await listCronJobRuns(job.id);
+      return {
+        id: `cron-job:${job.id}`,
+        kind: "cron-job",
+        label: job.name,
+        subtitle: `${job.containerName} · ${job.schedule}${job.enabled ? "" : " · désactivé"}`,
+        status: lastRunNodeStatus(runs[0]),
+      } satisfies TopologyNode;
+    }),
+  );
+}
+
+/**
+ * Un nœud "backup" par définition RÉELLE de backupsStore.ts (jamais modifié par ce chantier) —
+ * même principe que getCronJobNodes ci-dessus : indépendant de la joignabilité Docker locale (une
+ * sauvegarde peut cibler un volume/conteneur, mais la LISTE des définitions est une simple lecture
+ * JSON), `status` dérivé du dernier run réel connu (listBackupRuns, lastRunNodeStatus). [] si
+ * aucune définition de sauvegarde n'a jamais été créée.
+ */
+async function getBackupNodes(): Promise<TopologyNode[]> {
+  const definitions = await listBackupDefinitions();
+  return Promise.all(
+    definitions.map(async (def) => {
+      const runs = await listBackupRuns(def.id);
+      const targetLabel = def.target.kind === "volume" ? "Volume" : "Base de données";
+      return {
+        id: `backup:${def.id}`,
+        kind: "backup",
+        label: def.name,
+        subtitle: `${targetLabel} ${def.target.ref} · ${def.schedule}${def.enabled ? "" : " · désactivée"}`,
+        status: lastRunNodeStatus(runs[0]),
+      } satisfies TopologyNode;
+    }),
+  );
+}
+
+/** Libellé humain d'un moteur IaC — même table que côté frontend (TopologyNodeDetailPanel.tsx),
+ * gardée locale ici : un simple sous-titre de nœud, pas une donnée de contrat exposée par types.ts. */
+const IAC_ENGINE_LABEL: Record<IacEngine, string> = { tofu: "OpenTofu", ansible: "Ansible", packer: "Packer" };
+
+/**
+ * Un nœud "iac-workspace" par workspace Infra-as-code RÉEL (services/iac/workspaces.ts) — TOUJOURS
+ * présent dès qu'il est créé (l'utilisateur l'a explicitement créé via POST /api/iac/workspaces),
+ * indépendant de Docker/Nutanix/AD comme "ad-server"/"cron-job"/"backup" ci-dessus (récupéré que
+ * Docker local soit joignable ou non). [] si aucun workspace n'a jamais été créé.
+ *
+ * `status` dérivé du DERNIER run réel de ce workspace (services/iac/runner.ts#listRuns, déjà trié
+ * le plus récent en tête, voir runner.ts#upsertRun) via lastRunNodeStatus ci-dessus — même
+ * convention que getCronJobNodes/getBackupNodes (jamais exécuté -> "neutral" ; en cours ->
+ * "restarting" ; dernier succès -> "running" ; dernier échec -> "stopped"). `iacLastRunStatus`
+ * porte en plus le statut EXACT du dernier run (voir TopologyNode côté types.ts) : le frontend ne
+ * peut pas le redériver depuis les 4 valeurs génériques de `status` (ex: distinguer "jamais
+ * exécuté" de "en cours" nécessite cette valeur précise pour le panneau de détail).
+ *
+ * Aucune arête : QUAI n'a aucune donnée reliant réellement un workspace IaC à une ressource Docker/
+ * Nutanix précise (même principe que "ad-server" ci-dessus) — à l'utilisateur de le reconnaître
+ * visuellement si un `tofu apply` a par exemple provisionné tel conteneur.
+ */
+async function getIacWorkspaceNodes(): Promise<TopologyNode[]> {
+  const workspaces = await listWorkspaces();
+  return Promise.all(
+    workspaces.map(async (w) => {
+      const runs = await listRuns(w.id);
+      const lastRun = runs[0];
+      return {
+        id: `iac-workspace:${w.id}`,
+        kind: "iac-workspace",
+        label: w.name,
+        subtitle: IAC_ENGINE_LABEL[w.engine],
+        status: lastRunNodeStatus(lastRun),
+        iacEngine: w.engine,
+        iacLastRunStatus: lastRun?.status ?? null,
+      } satisfies TopologyNode;
+    }),
+  );
+}
+
+/**
+ * Nœud "gitops-source" (voir services/gitops.ts, config.ts#gitops) : LE dépôt Git configuré comme
+ * source de vérité GitOps — une config globale UNIQUE (comme "ad-server" pour AD DNS ci-dessus),
+ * jamais une liste d'items malgré le nom pluriel du chantier "tout devient un nœud du graphe".
+ *
+ * Gardé sur `config.gitops.repoUrl` précisément (pas juste "un dépôt local existe") : GITOPS_REPO_PATH
+ * a TOUJOURS une valeur par défaut ("./data/gitops", voir config.ts) et gitops.ts l'auto-amorce
+ * silencieusement (bootstrapLocalRepo) même sans configuration explicite de l'utilisateur — ce
+ * comportement de repli reste inchangé (le badge "Dérive GitOps" des conteneurs, ci-dessous, continue
+ * d'en profiter), mais ne justifie PAS d'afficher un nœud dans le graphe : comme pour "ad-server",
+ * un nœud représente une INTÉGRATION EXTERNE délibérément configurée, jamais un mécanisme de repli
+ * automatique. [] si GITOPS_REPO_URL n'a jamais été renseigné.
+ *
+ * `status` dérivé du nombre RÉEL de fichiers actuellement en dérive (listGitOpsFiles().filter(f =>
+ * f.drift), même source que driftFilePaths ci-dessous) : "running" si aucune dérive (sain), "stopped"
+ * dès qu'au moins un fichier dérive (alerte) — toujours déterminable une fois le dépôt configuré,
+ * donc jamais de troisième état "neutral" ici (contrairement à "ad-server", où "neutral" couvre
+ * l'absence de toute tentative de synchro depuis le démarrage du process).
+ *
+ * Appel dédié à listGitOpsFiles() (indépendant de celui du bloc Docker plus bas, qui ne tourne que
+ * si Docker est joignable ET sert un autre usage — le rapprochement de dérive PAR CONTENEUR) : même
+ * principe qu'ad-server/nutanix-vm/host, chaque nœud "statique" récupère sa propre donnée sans
+ * dépendre de la disponibilité de Docker. `ensureRepoReady()` (gitops.ts) protège déjà les appels
+ * concurrents entre eux (garde anti-chevauchement) ; les deux appels ici restent séquentiels, donc
+ * un léger surcoût réseau (un second fetch/pull) uniquement quand GITOPS_REPO_URL est réellement
+ * configuré ET Docker joignable au même cycle — accepté pour ce premier lot plutôt que de complexifier
+ * la fonction pour partager un résultat entre deux préoccupations indépendantes.
+ *
+ * PAS d'arête vers un nœud Docker/Nutanix/host : aucune donnée ne prouve un lien réel (même principe
+ * que "ad-server" ci-dessus).
+ */
+async function getGitOpsSourceNode(): Promise<TopologyNode[]> {
+  if (!config.gitops.repoUrl) return [];
+  const files = await listGitOpsFiles().catch(() => []);
+  const driftCount = files.filter((f) => f.drift).length;
+  return [
+    {
+      id: `gitops-source:${config.gitops.repoUrl}`,
+      kind: "gitops-source",
+      label: config.gitops.repoUrl,
+      subtitle: `Branche ${config.gitops.branch}`,
+      status: driftCount > 0 ? "stopped" : "running",
+    },
+  ];
+}
+
 export async function getTopology(): Promise<Topology> {
   const docker = await getClient();
   const { vmNodes: nutanixVmNodes, hostNodes: nutanixHostNodes, hostEdges: nutanixHostEdges } = await getNutanixTopologyParts();
@@ -355,11 +504,34 @@ export async function getTopology(): Promise<Topology> {
   // Nutanix/ad-server ci-dessus.
   const remoteDockerHostNodes = await getRemoteDockerHostNodes();
   const lxcHostNodes = await getLxcHostNodes();
+  // Cron jobs/sauvegardes (voir getCronJobNodes/getBackupNodes ci-dessus) : indépendants eux
+  // aussi de la joignabilité Docker locale — leurs DÉFINITIONS sont de simples lectures JSON,
+  // même principe que Nutanix/ad-server/host ci-dessus.
+  const cronJobNodes = await getCronJobNodes();
+  const backupNodes = await getBackupNodes();
+  // Workspaces Infra-as-code (voir getIacWorkspaceNodes ci-dessus) : indépendants eux aussi de la
+  // joignabilité Docker locale — une DÉFINITION de workspace est une simple lecture JSON, même
+  // principe que cron jobs/sauvegardes ci-dessus (seule l'EXÉCUTION d'un run dépend d'un binaire
+  // tofu/ansible-playbook/packer, jamais de Docker lui-même).
+  const iacWorkspaceNodes = await getIacWorkspaceNodes();
+  // Dépôt Git source GitOps (voir getGitOpsSourceNode ci-dessus) : indépendant lui aussi de la
+  // joignabilité Docker locale, [] tant que GITOPS_REPO_URL n'a jamais été configuré.
+  const gitopsSourceNodes = await getGitOpsSourceNode();
   // Groupements (voir topologyGroupsStore.ts) : indépendants de la joignabilité Docker (une simple
   // lecture JSON en mémoire), inclus dans les deux chemins de retour pour que le frontend garde
   // toujours la même forme de réponse à traiter.
   const groups = await listGroups();
-  const staticNodes: TopologyNode[] = [...nutanixVmNodes, ...nutanixHostNodes, ...adServerNodes, ...remoteDockerHostNodes, ...lxcHostNodes];
+  const staticNodes: TopologyNode[] = [
+    ...nutanixVmNodes,
+    ...nutanixHostNodes,
+    ...adServerNodes,
+    ...remoteDockerHostNodes,
+    ...lxcHostNodes,
+    ...cronJobNodes,
+    ...backupNodes,
+    ...iacWorkspaceNodes,
+    ...gitopsSourceNodes,
+  ];
   const staticEdges: TopologyEdge[] = [...nutanixHostEdges];
   const empty: Topology = { nodes: staticNodes, edges: staticEdges, generatedAt: new Date().toISOString(), groups };
   if (!(await isDockerReachable(docker))) return empty;
@@ -605,6 +777,34 @@ export async function getTopology(): Promise<Topology> {
         label: n.Name,
         subtitle: n.Driver,
         status: "running",
+        ...(n.Created ? { createdAt: n.Created } : {}),
+      });
+    }
+
+    // Orphelins (0 conteneur) : voir en-tête de fichier — vrais nœuds top-level, jamais d'arête.
+    for (const v of volumesResponse.Volumes ?? []) {
+      if ((volumeContainerIds.get(v.Name)?.size ?? 0) > 0) continue; // référencé par ≥1 conteneur, déjà géré ci-dessus
+      nodes.push({
+        id: `volume:${v.Name}`,
+        kind: "volume",
+        label: v.Name,
+        subtitle: v.Driver,
+        status: "neutral",
+        orphan: true,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ...((v as any).CreatedAt ? { createdAt: (v as any).CreatedAt as string } : {}),
+      });
+    }
+    for (const n of networks) {
+      if (DEFAULT_NETWORK_NAMES.has(n.Name)) continue; // jamais orphelins par convention
+      if ((networkContainerIds.get(n.Id)?.size ?? 0) > 0) continue;
+      nodes.push({
+        id: `network:${n.Id}`,
+        kind: "network",
+        label: n.Name,
+        subtitle: n.Driver,
+        status: "neutral",
+        orphan: true,
         ...(n.Created ? { createdAt: n.Created } : {}),
       });
     }

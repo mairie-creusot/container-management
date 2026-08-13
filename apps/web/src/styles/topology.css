@@ -184,6 +184,47 @@
   color: #14b8a6;
 }
 
+/* Cron job (services/cronJobsStore.ts) — jaune, cohérent avec MINIMAP_NODE_COLOR["cron-job"] dans
+   topologyGraphShared.tsx. */
+.topology-node--cron-job .topology-node__icon {
+  background: rgba(250, 204, 21, 0.16);
+  color: #facc15;
+}
+
+/* Sauvegarde (services/backupsStore.ts) — bleu ciel, distinct des autres couleurs de kind
+   ci-dessus, cohérent avec MINIMAP_NODE_COLOR["backup"] dans topologyGraphShared.tsx. */
+.topology-node--backup .topology-node__icon {
+  background: rgba(14, 165, 233, 0.16);
+  color: #0ea5e9;
+}
+
+/* Dépôt Git source GitOps (services/gitops.ts) — rose/rouge, distinct des autres couleurs de kind
+   ci-dessus, cohérent avec MINIMAP_NODE_COLOR["gitops-source"] dans topologyGraphShared.tsx. */
+.topology-node--gitops-source .topology-node__icon {
+  background: rgba(244, 63, 94, 0.16);
+  color: #f43f5e;
+}
+
+/* Workspace Infra-as-code (OpenTofu/Ansible/Packer réels, services/iac/*) — orange brûlé, distinct
+   des autres couleurs de kind ci-dessus, cohérent avec MINIMAP_NODE_COLOR["iac-workspace"] dans
+   topologyGraphShared.tsx. */
+.topology-node--iac-workspace .topology-node__icon {
+  background: rgba(249, 115, 22, 0.16);
+  color: #f97316;
+}
+
+/* Volume/network orphelin (rattaché à AUCUN conteneur, voir TopologyNode#orphan) — atténué +
+   bordure pointillée plutôt que caché : reste un vrai nœud du graphe (décision produit du
+   13/08/2026), juste visuellement mis en retrait par rapport aux ressources réellement utilisées. */
+.topology-node--orphan {
+  opacity: 0.6;
+  border-style: dashed !important;
+}
+.topology-node--orphan:hover,
+.topology-node--orphan.is-selected {
+  opacity: 0.9;
+}
+
 .topology-node__label {
   font-size: 13.5px;
   font-weight: 600;
@@ -774,6 +815,10 @@
 .topology-detail-panel__icon--nutanix-vm { color: var(--color-success); }
 .topology-detail-panel__icon--ad-server { color: #e879f9; }
 .topology-detail-panel__icon--host { color: #14b8a6; }
+.topology-detail-panel__icon--cron-job { color: #facc15; }
+.topology-detail-panel__icon--backup { color: #0ea5e9; }
+.topology-detail-panel__icon--gitops-source { color: #f43f5e; }
+.topology-detail-panel__icon--iac-workspace { color: #f97316; }
 
 .topology-detail-panel__heading {
   flex: 1;
@@ -1589,5 +1634,50 @@
 .graph-github-modal__body .page-content {
   animation: none;
   padding-top: 6px;
+}
+
+/* --- Nœud "gitops-source" (TopologyNodeDetailPanel.tsx) --------------------------------------
+   Contenu repris tel quel de l'ancienne GitOpsPage.tsx (fichiers/dérive, diff, historique de
+   commits, resynchronisation explicite) — réorganisé en PILE VERTICALE plutôt qu'en grille 3
+   colonnes (.gitops-layout, components.css) : le panneau de détail fait 440px de large, une grille
+   fixe 240px/1fr/260px n'y tiendrait pas. Réutilise les classes existantes (.file-tree/.diff-tabs/
+   .diff-view/.manifest-view/.commit-list, components.css) pour un rendu identique, juste bornées en
+   hauteur ici (chaque section défile indépendamment plutôt que d'étirer tout le panneau). */
+.topology-detail-panel__gitops {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.topology-detail-panel__gitops-sync {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.topology-detail-panel__gitops .file-tree {
+  max-height: 170px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 6px;
+}
+
+.topology-detail-panel__gitops .diff-panel {
+  min-width: 0;
+}
+
+.topology-detail-panel__gitops .diff-view,
+.topology-detail-panel__gitops .manifest-view {
+  max-height: 260px;
+  font-size: 11.5px;
+}
+
+.topology-detail-panel__gitops .commit-list {
+  max-height: 220px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 6px;
 }
 

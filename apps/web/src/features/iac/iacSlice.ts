@@ -5,9 +5,14 @@ import { pushNotification } from "@/features/notifications/notificationsSlice";
 
 interface IacState {
   engines: IacEngineStatus[];
-  workspaces: IacWorkspace[];
-  status: "idle" | "loading" | "ready" | "error";
-  error: string | null;
+  /**
+   * Un seul workspace "actif" à la fois (celui affiché par TopologyNodeDetailPanel.tsx#
+   * IacWorkspacePanel — l'ancienne page dédiée IacPage.tsx, retirée, listait tous les workspaces
+   * ici même ; désormais GET /api/topology fait déjà cette liste sous forme de nœuds
+   * "iac-workspace", plus besoin de la dupliquer dans ce slice) : files/openFile.../runs/selectedRun
+   * ci-dessous décrivent tous CE workspace précis, réinitialisés par `selectWorkspace` à chaque
+   * changement de nœud affiché.
+   */
   selectedWorkspaceId: string | null;
   files: IacFileEntry[];
   openFilePath: string | null;
@@ -18,9 +23,6 @@ interface IacState {
 
 const initialState: IacState = {
   engines: [],
-  workspaces: [],
-  status: "idle",
-  error: null,
   selectedWorkspaceId: null,
   files: [],
   openFilePath: null,
@@ -31,10 +33,6 @@ const initialState: IacState = {
 
 export const fetchEngines = createAsyncThunk<IacEngineStatus[]>("iac/fetchEngines", async () =>
   apiGet<IacEngineStatus[]>("/iac/engines"),
-);
-
-export const fetchWorkspaces = createAsyncThunk<IacWorkspace[]>("iac/fetchWorkspaces", async () =>
-  apiGet<IacWorkspace[]>("/iac/workspaces"),
 );
 
 export const createWorkspace = createAsyncThunk<IacWorkspace, { name: string; engine: IacEngine }, { rejectValue: string }>(
@@ -131,22 +129,7 @@ const iacSlice = createSlice({
       .addCase(fetchEngines.fulfilled, (state, action) => {
         state.engines = action.payload;
       })
-      .addCase(fetchWorkspaces.pending, (state) => {
-        state.status = "loading";
-      })
-      .addCase(fetchWorkspaces.fulfilled, (state, action) => {
-        state.status = "ready";
-        state.workspaces = action.payload;
-      })
-      .addCase(fetchWorkspaces.rejected, (state, action) => {
-        state.status = "error";
-        state.error = action.error.message ?? "Impossible de charger les workspaces.";
-      })
-      .addCase(createWorkspace.fulfilled, (state, action) => {
-        state.workspaces.unshift(action.payload);
-      })
       .addCase(deleteWorkspace.fulfilled, (state, action) => {
-        state.workspaces = state.workspaces.filter((w) => w.id !== action.payload);
         if (state.selectedWorkspaceId === action.payload) state.selectedWorkspaceId = null;
       })
       .addCase(fetchFiles.fulfilled, (state, action) => {

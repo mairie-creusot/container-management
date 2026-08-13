@@ -1,3 +1,10 @@
+/**
+ * Slice Redux GitOps — auparavant consommée par la page dédiée `features/gitops/GitOpsPage.tsx`
+ * (retirée : GitOps est maintenant piloté depuis le nœud "gitops-source" du graphe de topologie,
+ * voir TopologyNodeDetailPanel.tsx). Conservée telle quelle (aucune route/logique dupliquée) : le
+ * panneau de détail dispatch exactement les mêmes thunks/actions qu'avant, seul l'EMPLACEMENT de
+ * l'UI a changé.
+ */
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { apiGet, apiPost } from "@/api/client";
 import type { DiffResult, GitCommit, GitOpsFile } from "@/types";

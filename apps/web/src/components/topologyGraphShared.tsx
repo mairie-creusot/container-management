@@ -12,13 +12,17 @@ import {
   type NodeProps,
 } from "@xyflow/react";
 import {
+  IconBackup,
   IconChevron,
+  IconClock,
   IconContainers,
   IconFolder,
+  IconGitOps,
   IconGlobe,
   IconHostMachine,
   IconNetworks,
   IconServer,
+  IconStack,
   IconVm,
   IconVolumes,
 } from "@/components/icons";
@@ -49,6 +53,20 @@ export const KIND_ICON: Record<TopologyNode["kind"], (props: { className?: strin
   "nutanix-vm": IconVm,
   "ad-server": IconServer,
   host: IconHostMachine,
+  // Icône générique "infra" (empilement de couches) — un seul kind de nœud pour les 3 moteurs
+  // (tofu/ansible/packer, voir TopologyNode#iacEngine), pas d'icône distincte par moteur : IconStack
+  // était déjà l'icône Sidebar de l'ancienne page Infra-as-code (voir Sidebar.tsx), aucune icône
+  // dédiée par outil n'existe dans icons.tsx et en ajouter 3 pour une distinction que le sous-titre
+  // du nœud (label du moteur, services/topology.ts#getIacWorkspaceNodes) porte déjà n'aurait rien
+  // apporté de plus lisible sur une carte de 260px de large.
+  "iac-workspace": IconStack,
+  // Cron job (services/cronJobsStore.ts) — horloge, façon Railway "Cron Jobs".
+  "cron-job": IconClock,
+  // Sauvegarde (services/backupsStore.ts) — même icône que l'ancienne page BackupsPage.tsx/Sidebar.
+  backup: IconBackup,
+  // Dépôt Git source GitOps (services/topology.ts#getGitOpsSourceNode) — même icône que l'ancienne
+  // page GitOps.tsx/Sidebar (voir icons.tsx#IconGitOps), réutilisée telle quelle.
+  "gitops-source": IconGitOps,
 };
 
 /** Couleurs de la MiniMap par type de nœud — mêmes valeurs que celles utilisées pour l'icône du
@@ -62,6 +80,21 @@ export const MINIMAP_NODE_COLOR: Record<TopologyNode["kind"], string> = {
   // Teal — distinct des cinq autres couleurs déjà utilisées ci-dessus, cohérent avec
   // .topology-node--host/.topology-detail-panel__icon--host dans topology.css.
   host: "#14b8a6",
+  // Orange brûlé — distinct des six autres couleurs déjà utilisées ci-dessus (notamment de l'ambre
+  // du volume, #f5a524), cohérent avec .topology-node--iac-workspace/.topology-detail-panel__icon--
+  // iac-workspace dans topology.css.
+  "iac-workspace": "#f97316",
+  // Jaune — distinct des sept autres couleurs déjà utilisées (notamment de l'ambre du volume et de
+  // l'orange brûlé de "iac-workspace" ci-dessus), cohérent avec .topology-node--cron-job/
+  // .topology-detail-panel__icon--cron-job dans topology.css.
+  "cron-job": "#facc15",
+  // Bleu ciel — distinct des huit autres couleurs déjà utilisées (notamment du bleu royal du
+  // conteneur), cohérent avec .topology-node--backup/.topology-detail-panel__icon--backup dans
+  // topology.css.
+  backup: "#0ea5e9",
+  // Rose/rouge — distinct des neuf autres couleurs déjà utilisées ci-dessus, cohérent avec
+  // .topology-node--gitops-source/.topology-detail-panel__icon--gitops-source dans topology.css.
+  "gitops-source": "#f43f5e",
 };
 
 /**
@@ -118,6 +151,23 @@ export const NODE_CAPABILITIES: Record<TopologyNode["kind"], PortSpec[]> = {
   // qui les touche ("hosts", cluster Nutanix -> VM) est posée par le serveur, jamais glissée à la
   // main par l'utilisateur.
   host: [],
+  // Workspaces IaC (voir services/topology.ts#getIacWorkspaceNodes) : indépendants de l'infra Docker
+  // locale comme les VMs Nutanix/le contrôleur AD ci-dessus — un `tofu apply`/`ansible-playbook`/
+  // `packer build` peut provisionner une ressource Docker, mais QUAI n'a aucune donnée reliant
+  // RÉELLEMENT ce workspace à un nœud précis du graphe, jamais d'arête ou de port inventés.
+  "iac-workspace": [],
+  // Cron job/sauvegarde (voir services/topology.ts#getCronJobNodes/getBackupNodes) : même principe
+  // — définitions indépendantes de Docker, jamais reliées par une arête à leur conteneur/volume
+  // cible (QUAI n'a aucune garantie que cette relation reste vraie dans le temps, ex : conteneur
+  // cible renommé/supprimé — voir CronJobDefinition#containerName dénormalisé).
+  "cron-job": [],
+  backup: [],
+  // Dépôt Git source GitOps (voir services/topology.ts#getGitOpsSourceNode) — même principe qu'ad-
+  // server/host/iac-workspace ci-dessus : une config globale indépendante de Docker, jamais reliée
+  // par une arête à un nœud précis du graphe (QUAI n'a aucune donnée reliant réellement un manifeste
+  // à la ressource Docker/Kubernetes qu'il décrit au-delà du rapprochement best-effort déjà utilisé
+  // pour le badge "Dérive GitOps" des conteneurs, jamais assez fiable pour une arête).
+  "gitops-source": [],
 };
 
 export interface CapabilityDef {
@@ -512,7 +562,7 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   const isCompact = zoom < ZOOM_DETAIL_THRESHOLD;
   return (
     <div
-      className={`topology-node topology-node--${node.kind} topology-node--${node.status}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}`}
+      className={`topology-node topology-node--${node.kind} topology-node--${node.status}${node.orphan ? " topology-node--orphan" : ""}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}`}
       title={isCompact ? node.label : undefined}
     >
       {ports.map((port) => (
@@ -533,6 +583,16 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
         </span>
         <span className="topology-node__label">{node.label}</span>
       </div>
+      {node.orphan && (
+        <div className="topology-node__badges">
+          <span
+            className="topology-badge topology-badge--warning"
+            title="Aucun conteneur ne référence cette ressource actuellement — jamais supprimée automatiquement"
+          >
+            Orphelin
+          </span>
+        </div>
+      )}
       {isContainer &&
         (node.updateAvailable ||
           node.drift ||
@@ -667,7 +727,9 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
             : node.status === "stopped"
               ? "Arrêté"
               : node.status === "neutral"
-                ? "Indéterminé"
+                ? node.orphan
+                  ? "Inutilisé"
+                  : "Indéterminé"
                 : node.status}
         </span>
       </div>

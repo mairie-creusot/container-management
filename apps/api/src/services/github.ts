@@ -528,7 +528,16 @@ async function runDeployment(
     // jeton lui-même, fourni séparément via GIT_ASKPASS (askPass ci-dessus) — voir finding E4.
     const cloneUrl = token ? `https://x-access-token@github.com/${owner}/${repo}.git` : `https://github.com/${owner}/${repo}.git`;
     await appendDeploymentLog(deploymentId, `$ git clone --depth 1 --branch ${ref} https://github.com/${owner}/${repo}.git\n`);
-    const cloner = askPass ? simpleGit().env(askPass.env) : simpleGit();
+    // simple-git >=3.16 bloque par défaut l'usage de GIT_ASKPASS (plugin "unsafe operations" —
+    // protection légitime contre une variable d'environnement non maîtrisée injectée dans un
+    // process git arbitraire) : sans `unsafe.allowUnsafeAskPass`, TOUT clone authentifié
+    // échouait avec "Use of \"GIT_ASKPASS\" is not permitted without enabling
+    // allowUnsafeAskPass" — jamais un GIT_ASKPASS "non maîtrisé" ici (script fixe généré par
+    // prepareGitAskPass ci-dessus, jamais construit à partir d'une entrée utilisateur), donc
+    // sans risque à activer explicitement UNIQUEMENT sur ce client dédié au clone authentifié
+    // (jamais globalement). Bug vérifié en conditions réelles (déploiement avec jeton configuré
+    // échouant à 100%) avant ce correctif.
+    const cloner = askPass ? simpleGit({ unsafe: { allowUnsafeAskPass: true } }).env(askPass.env) : simpleGit();
     await withTimeout(
       cloner.clone(cloneUrl, cloneDir, ["--depth", "1", "--branch", ref, "--single-branch"]),
       config.github.cloneTimeoutMs,

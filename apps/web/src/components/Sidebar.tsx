@@ -1,6 +1,6 @@
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import { NAV_ITEMS, pageTitle, setCurrentView, setUnsavedFormActive, type ViewId } from "@/features/ui/uiSlice";
-import { canAdminister, canOperate } from "@/features/auth/authSlice";
+import { canAdminister } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import Brand from "@/components/Brand";
 import {
@@ -8,17 +8,12 @@ import {
   IconImages,
   IconRegistries,
   IconContainers,
-  IconVolumes,
-  IconNetworks,
-  IconStack,
-  IconGitOps,
   IconClusters,
   IconBell,
   IconHistory,
   IconKey,
   IconGlobe,
   IconServer,
-  IconBackup,
 } from "@/components/icons";
 
 const ICONS: Partial<Record<ViewId, (props: { className?: string }) => JSX.Element>> = {
@@ -26,11 +21,7 @@ const ICONS: Partial<Record<ViewId, (props: { className?: string }) => JSX.Eleme
   images: IconImages,
   registries: IconRegistries,
   containers: IconContainers,
-  volumes: IconVolumes,
-  networks: IconNetworks,
   "reverse-proxy": IconGlobe,
-  iac: IconStack,
-  gitops: IconGitOps,
   clusters: IconClusters,
   notifications: IconBell,
   audit: IconHistory,
@@ -142,39 +133,6 @@ export default function Sidebar() {
           </button>
         )}
 
-        {/* Sauvegardes automatiques — operator/admin (même rôle que les mutations de
-            routes/backups.ts, pas admin uniquement contrairement aux entrées ci-dessus). */}
-        {canOperate(session) && (
-          <button
-            type="button"
-            className={`sidebar__item${currentView === "backups" ? " is-active" : ""}`}
-            onClick={() => handleNavigate("backups")}
-            title={pageTitle("backups")}
-          >
-            <span className="sidebar__icon">
-              <IconBackup />
-            </span>
-            {pageTitle("backups")}
-          </button>
-        )}
-
-        {/* Cron Jobs — operator/admin (routes/cronJobs.ts : GET/liste/historique ouverts à toute
-            session, mais le déclenchement manuel POST .../trigger exige operator/admin ; la
-            création/modification/suppression, elles, reste admin uniquement, gérée DANS la page
-            elle-même — voir CronJobsPage.tsx). */}
-        {canOperate(session) && (
-          <button
-            type="button"
-            className={`sidebar__item${currentView === "cron-jobs" ? " is-active" : ""}`}
-            onClick={() => handleNavigate("cron-jobs")}
-            title={pageTitle("cron-jobs")}
-          >
-            <span className="sidebar__icon">
-              <IconHistory />
-            </span>
-            {pageTitle("cron-jobs")}
-          </button>
-        )}
       </div>
       <div className="sidebar__spacer" />
       <div className="sidebar__footer">© 2026 - Mairie Le Creusot</div>

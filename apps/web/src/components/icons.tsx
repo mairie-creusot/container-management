@@ -357,6 +357,19 @@ export function IconServer({ className }: IconProps) {
   );
 }
 
+/** Horloge (cadran + aiguilles) — nœud "cron-job" du graphe de topologie (services/cronJobsStore.ts),
+ * façon Railway "Cron Jobs" : planification récurrente, distincte de IconHistory (liste chronologique
+ * plate, utilisée pour l'audit/l'historique d'exécution) et de IconPlay (déclenchement manuel). */
+export function IconClock({ className }: IconProps) {
+  return base(
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3.5 2" />
+    </>,
+    className,
+  );
+}
+
 /** Sauvegardes automatiques (nuage + flèche descendante, façon upload S3) — Sidebar/BackupsPage.tsx. */
 export function IconBackup({ className }: IconProps) {
   return base(

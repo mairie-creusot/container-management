@@ -191,7 +191,21 @@ export interface AuditEvent {
   ok: boolean;
 }
 
-export type TopologyNodeKind = "container" | "volume" | "network" | "nutanix-vm" | "ad-server" | "host";
+// "cron-job"/"backup" : un nœud par définition réelle (cronJobsStore.ts/backupsStore.ts, voir
+// apps/api/src/types.ts pour la doc complète) — `status` dérivé de la dernière exécution réelle
+// connue (neutral = jamais exécuté, restarting = en cours, running = dernier succès, stopped =
+// dernier échec), jamais inventé.
+export type TopologyNodeKind =
+  | "container"
+  | "volume"
+  | "network"
+  | "nutanix-vm"
+  | "ad-server"
+  | "host"
+  | "cron-job"
+  | "backup"
+  | "iac-workspace"
+  | "gitops-source";
 
 /** Sous-type d'un nœud "host" — voir TopologyNode#hostKind ci-dessous et
  * apps/api/src/services/topology.ts. Champ explicite plutôt qu'une convention dans `subtitle`. */
@@ -262,6 +276,24 @@ export interface TopologyNode {
    * configuré mais injoignable (`status: "stopped"` porte alors seule l'information).
    */
   hostInfo?: DockerHostInfo;
+  /**
+   * Nœuds "iac-workspace" uniquement : moteur réel du workspace (voir apps/api/src/services/iac/
+   * workspaces.ts) — détermine les actions proposées (mêmes que ENGINE_ACTIONS, services/iac/
+   * runner.ts côté API) et son icône.
+   */
+  iacEngine?: IacEngine;
+  /**
+   * Nœuds "iac-workspace" uniquement : statut PRÉCIS du dernier run réel, `null` si jamais exécuté
+   * — `status` ci-dessus n'en est qu'une projection sur les 4 valeurs génériques du graphe (voir
+   * apps/api/src/types.ts#TopologyNode pour le détail complet de la correspondance).
+   */
+  iacLastRunStatus?: IacRunStatus | null;
+  /**
+   * Volumes/networks uniquement : `true` si rattaché à AUCUN conteneur — reste un vrai nœud mais
+   * sans aucune arête (voir apps/api/src/types.ts#TopologyNode pour le détail complet). Rendu
+   * atténué par TopologyGraph.tsx/topologyGraphShared.tsx plutôt qu'un statut fabriqué.
+   */
+  orphan?: boolean;
 }
 
 /** Voir TopologyNode#attachments ci-dessus — même forme que apps/api/src/types.ts#TopologyNodeAttachment. */

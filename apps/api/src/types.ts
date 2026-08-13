@@ -532,8 +532,29 @@ export interface IacRunDetail extends IacRun {
 // --- Topologie (graphe visuel type Railway — voir services/topology.ts) ---
 // Construit à partir des vraies données Docker (docker.listContainers renvoie déjà Mounts et
 // NetworkSettings.Networks dans son résumé, pas besoin d'un inspect() par conteneur).
-
-export type TopologyNodeKind = "container" | "volume" | "network" | "nutanix-vm" | "ad-server" | "host";
+//
+// "cron-job"/"backup" (voir getCronJobNodes/getBackupNodes, services/topology.ts) : un nœud PAR
+// DÉFINITION réelle (cronJobsStore.ts/backupsStore.ts, jamais modifiés par ce chantier — la
+// mission "tout devient un nœud du graphe" ne fait que projeter leurs définitions déjà
+// persistées dans la topologie), indépendants de Docker comme "ad-server"/"nutanix-vm" ci-dessus
+// (récupérés que le démon local soit joignable ou non). `status` dérivé de la DERNIÈRE exécution
+// réelle connue (CronJobRun/BackupRun) — jamais inventé :
+//  - aucune exécution connue -> "neutral" ("jamais exécuté", même convention que "ad-server" sans
+//    tentative de synchro depuis le démarrage du process) ;
+//  - dernière exécution "running" -> "restarting" (exécution en cours) ;
+//  - dernière exécution "success" -> "running" ;
+//  - dernière exécution "failed" -> "stopped".
+export type TopologyNodeKind =
+  | "container"
+  | "volume"
+  | "network"
+  | "nutanix-vm"
+  | "ad-server"
+  | "host"
+  | "cron-job"
+  | "backup"
+  | "iac-workspace"
+  | "gitops-source";
 
 /**
  * Sous-type d'un nœud "host" (voir TopologyNode#hostKind ci-dessous, services/topology.ts) —
@@ -545,7 +566,8 @@ export type TopologyHostKind = "nutanix-cluster" | "remote-docker" | "lxc";
 
 export interface TopologyNode {
   // ex: "container:<id>", "volume:<name>", "network:<id>", "nutanix-vm:<uuid>",
-  // "host:nutanix-cluster:<uuid>", "host:remote-docker:<id>", "host:lxc"
+  // "host:nutanix-cluster:<uuid>", "host:remote-docker:<id>", "host:lxc", "cron-job:<id>",
+  // "backup:<id>"
   id: string;
   kind: TopologyNodeKind;
   label: string;
@@ -626,6 +648,30 @@ export interface TopologyNode {
    * l'information, jamais un hostInfo mis en cache/inventé pour combler l'absence.
    */
   hostInfo?: DockerHostInfo;
+  /**
+   * Nœuds "iac-workspace" UNIQUEMENT (voir services/iac/workspaces.ts, getIacWorkspaceNodes ci-
+   * dessous côté topology.ts) : moteur réel du workspace — détermine les actions proposées par le
+   * frontend (mêmes que ENGINE_ACTIONS, services/iac/runner.ts) et son icône.
+   */
+  iacEngine?: IacEngine;
+  /**
+   * Nœuds "iac-workspace" UNIQUEMENT : statut PRÉCIS du DERNIER run réel de ce workspace (voir
+   * services/iac/runner.ts#listRuns), `null` si ce workspace n'a jamais été exécuté — jamais
+   * inventé. `status` ci-dessus en est une projection sur les 4 valeurs génériques du graphe
+   * (jamais exécuté -> "neutral" ; "running" -> "restarting" [run en cours] ; "success" ->
+   * "running" ; "failed" -> "stopped") ; ce champ porte l'information exacte pour le panneau de
+   * détail (topologyGraphShared.tsx ne peut pas la redériver depuis les 4 valeurs génériques).
+   */
+  iacLastRunStatus?: IacRunStatus | null;
+  /**
+   * Volumes/networks uniquement : `true` si cette ressource n'est actuellement rattachée à AUCUN
+   * conteneur (voir services/topology.ts § "Volumes/networks ORPHELINS") — reste un vrai nœud
+   * top-level mais SANS AUCUNE arête (aucun conteneur ne la référence, il n'y a structurellement
+   * rien à relier). Absent/`false` pour toute ressource utilisée par ≥1 conteneur, et toujours
+   * absent pour les autres kinds. Le frontend s'en sert pour un rendu atténué (topologyGraphShared.
+   * tsx) plutôt qu'un statut/badge fabriqué.
+   */
+  orphan?: boolean;
 }
 
 /**

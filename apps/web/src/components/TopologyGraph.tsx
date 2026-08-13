@@ -22,6 +22,7 @@ import {
 } from "@/features/topology/topologySlice";
 import {
   createContainer,
+  fetchContainers,
   renameContainer,
   runContainerAction,
   type CreateContainerInput,
@@ -50,6 +51,17 @@ import { IconGithub, IconSearch, IconTopology } from "@/components/icons";
 // logique n'est dupliquée ici (voir CreateSpotlight ci-dessous pour le choix "inline vs
 // navigation").
 import GitHubDeployPage from "@/features/github/GitHubDeployPage";
+// "Nouveau workspace Infra-as-code" (CreateSpotlight ci-dessous, point 4 de la mission) : réutilise
+// le thunk existant createWorkspace (iacSlice.ts, déjà utilisé par TopologyNodeDetailPanel.tsx pour
+// le panneau de détail d'un workspace) — POST /api/iac/workspaces réel, aucune route dupliquée.
+import { createWorkspace } from "@/features/iac/iacSlice";
+// "Nouveau Cron Job"/"Nouvelle sauvegarde" (CreateSpotlight ci-dessous, mission A.4/B.4) —
+// réutilisent les thunks existants (cronJobsSlice.ts/backupsSlice.ts, déjà utilisés par
+// TopologyNodeDetailPanel.tsx pour le panneau de détail) : POST /api/cron-jobs/POST /api/backups
+// réels, aucune route dupliquée.
+import { createCronJob } from "@/features/cronJobs/cronJobsSlice";
+import { createBackupDefinition } from "@/features/backups/backupsSlice";
+import type { IacEngine } from "@/types";
 import {
   CAPABILITY_DEFS,
   KIND_ICON,
@@ -69,16 +81,16 @@ import {
   type GroupNodeData,
   type PortSpec,
 } from "@/components/topologyGraphShared";
-import type { TopologyEdge, TopologyGroup, TopologyNode, TopologyNodeAttachment } from "@/types";
+import type { BackupTargetKind, TopologyEdge, TopologyGroup, TopologyNode, TopologyNodeAttachment } from "@/types";
 
 /** Nombre de nœuds squelettes par colonne (volumes / conteneurs / networks) pendant le premier
  * chargement — silhouette approximative, pas besoin de coller exactement au nombre réel. */
 const SKELETON_COLUMN_ROWS = [2, 3, 2];
 
 const REFRESH_INTERVAL_MS = 15_000;
-// Colonnes "nutanix-vm"/"ad-server"/"host" à part, après network — nœuds isolés ou reliés entre eux
-// uniquement (jamais d'arête vers Docker), des colonnes dédiées les gardent lisibles plutôt que de
-// les mélanger aux conteneurs.
+// Colonnes "nutanix-vm"/"ad-server"/"host"/"iac-workspace"/"cron-job"/"backup" à part, après
+// network — nœuds isolés ou reliés entre eux uniquement (jamais d'arête vers Docker), des
+// colonnes dédiées les gardent lisibles plutôt que de les mélanger aux conteneurs.
 const COLUMN_X: Record<TopologyNode["kind"], number> = {
   volume: 0,
   container: 340,
@@ -86,6 +98,10 @@ const COLUMN_X: Record<TopologyNode["kind"], number> = {
   "nutanix-vm": 1020,
   "ad-server": 1360,
   host: 1700,
+  "iac-workspace": 2040,
+  "cron-job": 2380,
+  backup: 2720,
+  "gitops-source": 3060,
 };
 const ROW_HEIGHT = 130;
 const NETWORK_DRIVERS = ["bridge", "overlay", "host", "none"];
@@ -389,6 +405,40 @@ function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
   // instance de popover troque alors sa recherche spotlight contre le flux GitHub réel (voir
   // JSDoc ci-dessus). Reste locale à CreateSpotlight, aucun état ajouté ailleurs dans le fichier.
   const [showGithubDeploy, setShowGithubDeploy] = useState(false);
+  // Même principe pour "Nouveau workspace Infra-as-code" (mission point 4) — mais un simple
+  // formulaire inline (pas de portail document.body comme la modal GitHub ci-dessus) : reste DANS
+  // `ref`, useDismiss continue donc de le fermer normalement au clic extérieur/Échap, aucun garde
+  // supplémentaire nécessaire dans useDismiss ci-dessous.
+  const [showIacCreate, setShowIacCreate] = useState(false);
+  const [iacName, setIacName] = useState("");
+  const [iacEngine, setIacEngine] = useState<IacEngine>("tofu");
+  const [iacBusy, setIacBusy] = useState(false);
+  const [iacError, setIacError] = useState<string | null>(null);
+  // "Nouveau Cron Job" (mission A.4) — même principe de mini-formulaire inline que
+  // "Nouveau workspace Infra-as-code" ci-dessus. Conteneurs "running" chargés à l'ouverture du
+  // formulaire (pas à l'ouverture du spotlight lui-même, inutile tant que ce choix n'est pas fait).
+  const [showCronJobCreate, setShowCronJobCreate] = useState(false);
+  const [cronName, setCronName] = useState("");
+  const [cronContainerId, setCronContainerId] = useState("");
+  const [cronCommand, setCronCommand] = useState("");
+  const [cronSchedule, setCronSchedule] = useState("*/5 * * * *");
+  const [cronBusy, setCronBusy] = useState(false);
+  const [cronError, setCronError] = useState<string | null>(null);
+  const containers = useAppSelector((s) => s.containers.items);
+  const runningContainers = containers.filter((c) => c.state === "running");
+  // "Nouvelle sauvegarde" (mission B.4) — formulaire minimal : region/forcePathStyle/identifiants
+  // S3 restent à leurs valeurs par défaut côté serveur (voir services/backupsStore.ts#
+  // encryptDestination), toujours modifiables ensuite depuis le panneau de détail du nœud créé.
+  const [showBackupCreate, setShowBackupCreate] = useState(false);
+  const [backupName, setBackupName] = useState("");
+  const [backupTargetKind, setBackupTargetKind] = useState<BackupTargetKind>("volume");
+  const [backupTargetRef, setBackupTargetRef] = useState("");
+  const [backupEndpoint, setBackupEndpoint] = useState("");
+  const [backupBucket, setBackupBucket] = useState("");
+  const [backupSchedule, setBackupSchedule] = useState("0 3 * * *");
+  const [backupRetentionCount, setBackupRetentionCount] = useState("7");
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupError, setBackupError] = useState<string | null>(null);
   // useDismiss ferme sur clic hors de `ref`/Échap — mais une fois la modal GitHub ouverte, son
   // contenu vit dans un portail document.body (Modal.tsx), donc HORS de `ref` : sans ce garde-fou,
   // le premier clic à l'intérieur de la modal (un repo, un champ...) la refermerait aussitôt.
@@ -396,6 +446,326 @@ function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
   const ref = useDismiss(() => {
     if (!showGithubDeploy) onClose();
   });
+
+  // Conteneurs "running" pour le sélecteur du formulaire "Nouveau Cron Job" — chargés seulement une
+  // fois ce formulaire effectivement ouvert (inutile tant que ce choix n'a pas été fait).
+  useEffect(() => {
+    if (showCronJobCreate) dispatch(fetchContainers(null));
+  }, [dispatch, showCronJobCreate]);
+
+  async function handleCreateIacWorkspace(event: FormEvent) {
+    event.preventDefault();
+    const trimmed = iacName.trim();
+    if (!trimmed) return;
+    setIacBusy(true);
+    setIacError(null);
+    // createWorkspace (iacSlice.ts) pousse déjà une notification de succès et POST réellement
+    // /api/iac/workspaces — aucune route dupliquée, même thunk que le panneau de détail du nœud créé.
+    const result = await dispatch(createWorkspace({ name: trimmed, engine: iacEngine }));
+    setIacBusy(false);
+    if (createWorkspace.fulfilled.match(result)) {
+      dispatch(fetchTopology());
+      onClose();
+    } else {
+      setIacError(result.payload ?? "Échec de la création du workspace.");
+    }
+  }
+
+  if (showIacCreate) {
+    return (
+      <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+        <div className="graph-popover__title">Nouveau workspace Infra-as-code</div>
+        <form onSubmit={handleCreateIacWorkspace}>
+          <div className="field">
+            <label htmlFor="graph-iac-name">Nom</label>
+            <input
+              id="graph-iac-name"
+              type="text"
+              autoFocus
+              placeholder="ex : infra-prod"
+              value={iacName}
+              onChange={(e) => setIacName(e.target.value)}
+              disabled={iacBusy}
+              required
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="graph-iac-engine">Moteur</label>
+            <select
+              id="graph-iac-engine"
+              value={iacEngine}
+              onChange={(e) => setIacEngine(e.target.value as IacEngine)}
+              disabled={iacBusy}
+            >
+              <option value="tofu">OpenTofu</option>
+              <option value="ansible">Ansible</option>
+              <option value="packer">Packer</option>
+            </select>
+          </div>
+          {iacError && <p className="graph-popover__error">{iacError}</p>}
+          <div className="graph-popover__actions">
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={iacBusy}>
+              Annuler
+            </button>
+            <button type="submit" className="btn btn-primary btn-sm" disabled={iacBusy || !iacName.trim()}>
+              {iacBusy ? "…" : "Créer"}
+            </button>
+          </div>
+        </form>
+      </div>
+    );
+  }
+
+  async function handleCreateCronJob(event: FormEvent) {
+    event.preventDefault();
+    const trimmedName = cronName.trim();
+    const trimmedCommand = cronCommand.trim();
+    const trimmedSchedule = cronSchedule.trim();
+    if (!trimmedName || !cronContainerId || !trimmedCommand || !trimmedSchedule) return;
+    setCronBusy(true);
+    setCronError(null);
+    const containerName = containers.find((c) => c.id === cronContainerId)?.name ?? cronContainerId;
+    // createCronJob (cronJobsSlice.ts) POST réellement /api/cron-jobs — même thunk que le panneau
+    // de détail du nœud créé (TopologyNodeDetailPanel.tsx#CronJobDetailPanel), aucune route dupliquée.
+    const result = await dispatch(
+      createCronJob({ name: trimmedName, containerId: cronContainerId, containerName, command: trimmedCommand, schedule: trimmedSchedule, enabled: true }),
+    );
+    setCronBusy(false);
+    if (createCronJob.fulfilled.match(result)) {
+      dispatch(fetchTopology());
+      onClose();
+    } else {
+      setCronError(result.payload ?? "Échec de la création du cron job.");
+    }
+  }
+
+  if (showCronJobCreate) {
+    return (
+      <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+        <div className="graph-popover__title">Nouveau Cron Job</div>
+        <form onSubmit={handleCreateCronJob}>
+          <div className="field">
+            <label htmlFor="graph-cron-name">Nom</label>
+            <input
+              id="graph-cron-name"
+              type="text"
+              autoFocus
+              placeholder="ex : Purge des logs applicatifs"
+              value={cronName}
+              onChange={(e) => setCronName(e.target.value)}
+              disabled={cronBusy}
+              required
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="graph-cron-container">Conteneur cible</label>
+            <select
+              id="graph-cron-container"
+              value={cronContainerId}
+              onChange={(e) => setCronContainerId(e.target.value)}
+              disabled={cronBusy}
+              required
+            >
+              <option value="">— sélectionner —</option>
+              {runningContainers.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} ({c.image})
+                </option>
+              ))}
+            </select>
+            {runningContainers.length === 0 && (
+              <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+                Aucun conteneur en cours d'exécution connu de QUAI.
+              </span>
+            )}
+          </div>
+          <div className="field">
+            <label htmlFor="graph-cron-command">Commande</label>
+            <textarea
+              id="graph-cron-command"
+              className="iac-editor"
+              style={{ minHeight: 60 }}
+              value={cronCommand}
+              onChange={(e) => setCronCommand(e.target.value)}
+              placeholder="ex : find /var/log/app -mtime +7 -delete"
+              spellCheck={false}
+              required
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="graph-cron-schedule">Planification (cron, 5 champs)</label>
+            <input
+              id="graph-cron-schedule"
+              className="cell-mono"
+              value={cronSchedule}
+              onChange={(e) => setCronSchedule(e.target.value)}
+              placeholder="*/5 * * * *"
+              disabled={cronBusy}
+              required
+            />
+          </div>
+          {cronError && <p className="graph-popover__error">{cronError}</p>}
+          <div className="graph-popover__actions">
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={cronBusy}>
+              Annuler
+            </button>
+            <button
+              type="submit"
+              className="btn btn-primary btn-sm"
+              disabled={cronBusy || !cronName.trim() || !cronContainerId || !cronCommand.trim() || !cronSchedule.trim()}
+            >
+              {cronBusy ? "…" : "Créer"}
+            </button>
+          </div>
+        </form>
+      </div>
+    );
+  }
+
+  async function handleCreateBackup(event: FormEvent) {
+    event.preventDefault();
+    const trimmedName = backupName.trim();
+    const trimmedRef = backupTargetRef.trim();
+    const trimmedEndpoint = backupEndpoint.trim();
+    const trimmedBucket = backupBucket.trim();
+    const trimmedSchedule = backupSchedule.trim();
+    const retentionCount = Number(backupRetentionCount);
+    if (!trimmedName || !trimmedRef || !trimmedEndpoint || !trimmedBucket || !trimmedSchedule || !Number.isInteger(retentionCount) || retentionCount < 1) {
+      return;
+    }
+    setBackupBusy(true);
+    setBackupError(null);
+    // createBackupDefinition (backupsSlice.ts) POST réellement /api/backups — même thunk que le
+    // panneau de détail du nœud créé, aucune route dupliquée. region/forcePathStyle/identifiants S3
+    // omis ici : valeurs par défaut côté serveur, modifiables ensuite depuis le panneau de détail.
+    const result = await dispatch(
+      createBackupDefinition({
+        name: trimmedName,
+        target: { kind: backupTargetKind, ref: trimmedRef },
+        destination: { endpoint: trimmedEndpoint, bucket: trimmedBucket },
+        schedule: trimmedSchedule,
+        retentionCount,
+        enabled: true,
+      }),
+    );
+    setBackupBusy(false);
+    if (createBackupDefinition.fulfilled.match(result)) {
+      dispatch(fetchTopology());
+      onClose();
+    } else {
+      setBackupError(result.payload ?? "Échec de la création de la sauvegarde.");
+    }
+  }
+
+  if (showBackupCreate) {
+    return (
+      <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+        <div className="graph-popover__title">Nouvelle sauvegarde</div>
+        <form onSubmit={handleCreateBackup}>
+          <div className="field">
+            <label htmlFor="graph-backup-name">Nom</label>
+            <input
+              id="graph-backup-name"
+              type="text"
+              autoFocus
+              placeholder="ex : Base citoyens (nocturne)"
+              value={backupName}
+              onChange={(e) => setBackupName(e.target.value)}
+              disabled={backupBusy}
+              required
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="graph-backup-target-kind">Type de cible</label>
+            <select
+              id="graph-backup-target-kind"
+              value={backupTargetKind}
+              onChange={(e) => setBackupTargetKind(e.target.value as BackupTargetKind)}
+              disabled={backupBusy}
+            >
+              <option value="volume">Volume Docker</option>
+              <option value="database">Base de données (conteneur)</option>
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="graph-backup-target-ref">
+              {backupTargetKind === "volume" ? "Nom du volume" : "Conteneur cible"}
+            </label>
+            <input
+              id="graph-backup-target-ref"
+              type="text"
+              value={backupTargetRef}
+              onChange={(e) => setBackupTargetRef(e.target.value)}
+              placeholder={backupTargetKind === "volume" ? "ex : quai_pgdata" : "ex : id ou nom du conteneur postgres"}
+              disabled={backupBusy}
+              required
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="graph-backup-endpoint">Endpoint S3</label>
+            <input
+              id="graph-backup-endpoint"
+              type="text"
+              value={backupEndpoint}
+              onChange={(e) => setBackupEndpoint(e.target.value)}
+              placeholder="https://minio.lecreusot.priv:9000"
+              disabled={backupBusy}
+              required
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="graph-backup-bucket">Bucket</label>
+            <input
+              id="graph-backup-bucket"
+              type="text"
+              value={backupBucket}
+              onChange={(e) => setBackupBucket(e.target.value)}
+              placeholder="quai-backups"
+              disabled={backupBusy}
+              required
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="graph-backup-schedule">Planification (cron, 5 champs)</label>
+            <input
+              id="graph-backup-schedule"
+              className="cell-mono"
+              value={backupSchedule}
+              onChange={(e) => setBackupSchedule(e.target.value)}
+              placeholder="0 3 * * *"
+              disabled={backupBusy}
+              required
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="graph-backup-retention">Rétention (copies conservées)</label>
+            <input
+              id="graph-backup-retention"
+              type="number"
+              min={1}
+              value={backupRetentionCount}
+              onChange={(e) => setBackupRetentionCount(e.target.value)}
+              disabled={backupBusy}
+              required
+            />
+          </div>
+          {backupError && <p className="graph-popover__error">{backupError}</p>}
+          <div className="graph-popover__actions">
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={backupBusy}>
+              Annuler
+            </button>
+            <button
+              type="submit"
+              className="btn btn-primary btn-sm"
+              disabled={backupBusy || !backupName.trim() || !backupTargetRef.trim() || !backupEndpoint.trim() || !backupBucket.trim()}
+            >
+              {backupBusy ? "…" : "Créer"}
+            </button>
+          </div>
+        </form>
+      </div>
+    );
+  }
 
   if (showGithubDeploy) {
     return (
@@ -469,6 +839,35 @@ function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
     onSelect: () => void handleDeployPreset(preset),
   }));
 
+  // "Nouveau workspace Infra-as-code" (OpenTofu/Ansible/Packer réels, voir services/iac/*) —
+  // remplace l'ancienne page dédiée du menu latéral : entièrement pilotable depuis le graphe,
+  // même philosophie produit que "Déployer depuis GitHub"/les presets de base de données ci-dessus.
+  const iacWorkspaceAction: SpotlightAction = {
+    id: "create-iac-workspace",
+    title: "Nouveau workspace Infra-as-code",
+    description: "OpenTofu, Ansible ou Packer réels, pilotés directement depuis un workspace du graphe.",
+    icon: KIND_ICON["iac-workspace"],
+    onSelect: () => setShowIacCreate(true),
+  };
+
+  // "Nouveau Cron Job"/"Nouvelle sauvegarde" (mission A.4/B.4) — remplacent les anciennes pages
+  // dédiées du menu latéral (CronJobsPage.tsx/BackupsPage.tsx, retirées) : entièrement pilotables
+  // depuis le graphe, même philosophie produit que "Nouveau workspace Infra-as-code" ci-dessus.
+  const cronJobAction: SpotlightAction = {
+    id: "create-cron-job",
+    title: "Nouveau Cron Job",
+    description: "Exécute une commande shell selon une expression cron, via un vrai docker exec dans un conteneur déjà démarré.",
+    icon: KIND_ICON["cron-job"],
+    onSelect: () => setShowCronJobCreate(true),
+  };
+  const backupAction: SpotlightAction = {
+    id: "create-backup",
+    title: "Nouvelle sauvegarde",
+    description: "Sauvegarde planifiée d'un volume ou d'une base de données vers un stockage S3-compatible.",
+    icon: KIND_ICON.backup,
+    onSelect: () => setShowBackupCreate(true),
+  };
+
   const normalizedQuery = query.trim().toLowerCase();
   const filterActions = (actions: SpotlightAction[]) =>
     normalizedQuery
@@ -477,7 +876,16 @@ function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
   const filteredGithubActions = filterActions([githubAction]);
   const filteredKindActions = filterActions(kindActions);
   const filteredPresetActions = filterActions(presetActions);
-  const hasResults = filteredGithubActions.length > 0 || filteredKindActions.length > 0 || filteredPresetActions.length > 0;
+  const filteredIacActions = filterActions([iacWorkspaceAction]);
+  const filteredCronJobActions = filterActions([cronJobAction]);
+  const filteredBackupActions = filterActions([backupAction]);
+  const hasResults =
+    filteredGithubActions.length > 0 ||
+    filteredKindActions.length > 0 ||
+    filteredPresetActions.length > 0 ||
+    filteredIacActions.length > 0 ||
+    filteredCronJobActions.length > 0 ||
+    filteredBackupActions.length > 0;
 
   return (
     <div className="graph-popover graph-spotlight" style={{ left: x, top: y }} ref={ref}>
@@ -504,6 +912,27 @@ function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
         {filteredKindActions.length > 0 && (
           <div className="graph-spotlight__group">
             {filteredKindActions.map((action) => (
+              <SpotlightRow key={action.id} action={action} />
+            ))}
+          </div>
+        )}
+        {filteredIacActions.length > 0 && (
+          <div className="graph-spotlight__group">
+            {filteredIacActions.map((action) => (
+              <SpotlightRow key={action.id} action={action} />
+            ))}
+          </div>
+        )}
+        {filteredCronJobActions.length > 0 && (
+          <div className="graph-spotlight__group">
+            {filteredCronJobActions.map((action) => (
+              <SpotlightRow key={action.id} action={action} />
+            ))}
+          </div>
+        )}
+        {filteredBackupActions.length > 0 && (
+          <div className="graph-spotlight__group">
+            {filteredBackupActions.map((action) => (
               <SpotlightRow key={action.id} action={action} />
             ))}
           </div>
@@ -866,6 +1295,10 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       "nutanix-vm": 0,
       "ad-server": 0,
       host: 0,
+      "iac-workspace": 0,
+      "cron-job": 0,
+      backup: 0,
+      "gitops-source": 0,
     };
     // Membres d'un groupe REPLIÉ : n'apparaissent plus comme des nœuds individuels (voir plus bas,
     // un seul nœud "topologyGroupNode" les représente) — un membre d'un groupe DÉPLIÉ continue en

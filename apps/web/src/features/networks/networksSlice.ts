@@ -1,4 +1,4 @@
-import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
+import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import { apiDelete, apiGet, apiPost, ApiError } from "@/api/client";
 import type { DockerNetwork } from "@/types";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
@@ -12,7 +12,6 @@ interface NetworksState {
   items: DockerNetwork[];
   status: "idle" | "loading" | "ready" | "error";
   error: string | null;
-  selectedId: string | null;
   mutatingId: string | null;
 }
 
@@ -20,7 +19,6 @@ const initialState: NetworksState = {
   items: [],
   status: "idle",
   error: null,
-  selectedId: null,
   mutatingId: null,
 };
 
@@ -95,11 +93,7 @@ export const disconnectContainerFromNetwork = createAsyncThunk<
 const networksSlice = createSlice({
   name: "networks",
   initialState,
-  reducers: {
-    selectNetwork(state, action: PayloadAction<string | null>) {
-      state.selectedId = action.payload;
-    },
-  },
+  reducers: {},
   extraReducers: (builder) => {
     builder
       .addCase(fetchNetworks.pending, (state) => {
@@ -123,7 +117,6 @@ const networksSlice = createSlice({
       .addCase(removeNetwork.fulfilled, (state, action) => {
         state.mutatingId = null;
         state.items = state.items.filter((n) => n.id !== action.payload);
-        if (state.selectedId === action.payload) state.selectedId = null;
       })
       .addCase(removeNetwork.rejected, (state) => {
         state.mutatingId = null;
@@ -131,5 +124,4 @@ const networksSlice = createSlice({
   },
 });
 
-export const { selectNetwork } = networksSlice.actions;
 export default networksSlice.reducer;

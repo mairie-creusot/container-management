@@ -20,18 +20,12 @@ const RegistriesPage = lazy(() => import("@/features/registries/RegistriesPage")
 const RegistryExplorerPage = lazy(() => import("@/features/registries/RegistryExplorerPage"));
 const SecretsPage = lazy(() => import("@/features/secrets/SecretsPage"));
 const ContainersPage = lazy(() => import("@/features/containers/ContainersPage"));
-const VolumesPage = lazy(() => import("@/features/volumes/VolumesPage"));
-const NetworksPage = lazy(() => import("@/features/networks/NetworksPage"));
 const ReverseProxyPage = lazy(() => import("@/features/reverseProxy/ReverseProxyPage"));
 const AdDnsPage = lazy(() => import("@/features/adDns/AdDnsPage"));
 const NotificationChannelsPage = lazy(() => import("@/features/notificationChannels/NotificationChannelsPage"));
-const BackupsPage = lazy(() => import("@/features/backups/BackupsPage"));
-const CronJobsPage = lazy(() => import("@/features/cronJobs/CronJobsPage"));
-const GitOpsPage = lazy(() => import("@/features/gitops/GitOpsPage"));
 const EnvironmentsPage = lazy(() => import("@/features/clusters/EnvironmentsPage"));
 const NotificationsPage = lazy(() => import("@/features/notifications/NotificationsPage"));
 const AuditPage = lazy(() => import("@/features/audit/AuditPage"));
-const IacPage = lazy(() => import("@/features/iac/IacPage"));
 
 // Notifications système (watchdog proactif côté API — nouvelle version d'image, intégration
 // devenue injoignable/de nouveau joignable) : câblé ici plutôt que dans une page précise, pour
@@ -67,24 +61,12 @@ function renderView(view: string) {
       return <SecretsPage />;
     case "containers":
       return <ContainersPage />;
-    case "volumes":
-      return <VolumesPage />;
-    case "networks":
-      return <NetworksPage />;
     case "reverse-proxy":
       return <ReverseProxyPage />;
     case "ad-dns":
       return <AdDnsPage />;
     case "notification-channels":
       return <NotificationChannelsPage />;
-    case "backups":
-      return <BackupsPage />;
-    case "cron-jobs":
-      return <CronJobsPage />;
-    case "iac":
-      return <IacPage />;
-    case "gitops":
-      return <GitOpsPage />;
     case "clusters":
       return <EnvironmentsPage />;
     case "notifications":

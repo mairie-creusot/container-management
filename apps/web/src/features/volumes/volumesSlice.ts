@@ -7,7 +7,6 @@ interface VolumesState {
   items: DockerVolume[];
   status: "idle" | "loading" | "ready" | "error";
   error: string | null;
-  selectedName: string | null;
   mutatingName: string | null;
   /** Explorateur de fichiers (lecture seule) — voir VolumeFilesModal.tsx. */
   browser: {
@@ -23,7 +22,6 @@ const initialState: VolumesState = {
   items: [],
   status: "idle",
   error: null,
-  selectedName: null,
   mutatingName: null,
   browser: {
     volumeName: null,
@@ -87,10 +85,8 @@ const volumesSlice = createSlice({
   name: "volumes",
   initialState,
   reducers: {
-    selectVolume(state, action: PayloadAction<string | null>) {
-      state.selectedName = action.payload;
-    },
-    /** Ouvre l'explorateur sur la racine d'un volume — voir VolumesPage.tsx#handleBrowse. */
+    /** Ouvre l'explorateur sur la racine d'un volume — voir TopologyNodeDetailPanel.tsx (bouton
+     * "Parcourir" de la section volume). */
     openVolumeBrowser(state, action: PayloadAction<string>) {
       state.browser = { volumeName: action.payload, path: "", entries: [], status: "idle", error: null };
     },
@@ -121,7 +117,6 @@ const volumesSlice = createSlice({
       .addCase(removeVolume.fulfilled, (state, action) => {
         state.mutatingName = null;
         state.items = state.items.filter((v) => v.name !== action.payload);
-        if (state.selectedName === action.payload) state.selectedName = null;
       })
       .addCase(removeVolume.rejected, (state) => {
         state.mutatingName = null;
@@ -144,5 +139,5 @@ const volumesSlice = createSlice({
   },
 });
 
-export const { selectVolume, openVolumeBrowser, closeVolumeBrowser } = volumesSlice.actions;
+export const { openVolumeBrowser, closeVolumeBrowser } = volumesSlice.actions;
 export default volumesSlice.reducer;
