@@ -5,6 +5,8 @@ import { useAppDispatch, useAppSelector } from "@/hooks";
 import { fetchContainerProcesses } from "@/features/containers/containersSlice";
 import { fetchImageHistory, fetchImages } from "@/features/images/imagesSlice";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
+import { ContainerConsoleBody } from "@/components/ContainerConsole";
+import { ContainerLogsBody } from "@/features/containers/ContainerLogs";
 import {
   attachmentToTopologyNode,
   buildTopologyEdges,
@@ -52,7 +54,7 @@ const DEPENDENCY_RADIUS = 260;
  * serré : les nœuds "processus" sont volontairement plus petits que les nœuds de ressources. */
 const PROCESS_RADIUS = 200;
 
-type ViewMode = "dependencies" | "interior";
+type ViewMode = "shell" | "logs" | "dependencies" | "interior";
 
 /** Colonnes `docker top` identifiées avec confiance (le reste des colonnes réelles — TIME, STIME,
  * PPID... — existe toujours dans `titles`/`processes` mais n'est pas affiché sur le nœud, la carte
@@ -68,11 +70,17 @@ function findColumn(titles: string[], patterns: RegExp[]): number {
  * TopologyGraph.tsx qui gère le montage/démontage et la transition scale+fade "zoom dans le
  * nœud") au double-clic sur un nœud (ou "Visualiser les dépendances" du menu contextuel).
  *
- * Deux vues, choisies par bascule (`viewMode`, uniquement proposée pour un nœud "container") :
- * - "dependencies" (par défaut, TOUS les kinds) : UNIQUEMENT ce nœud + tous les nœuds reliés à lui
- *   par au moins une arête du graphe complet déjà chargé côté client — inchangé par rapport à
- *   l'ancienne TopologySubGraphModal.tsx, disposition radiale, drill-down récursif au double-clic
- *   avec fil d'Ariane + bouton "Retour".
+ * Jusqu'à quatre vues, choisies par bascule (`viewMode`) :
+ * - "shell"/"logs" (conteneurs UNIQUEMENT, vue par défaut à l'ouverture sur un conteneur — retour
+ *   utilisateur du 13/08/2026 : le shell/les logs sont la destination la plus utile pour un
+ *   conteneur, pas une simple carte de dépendances) : mêmes composants RÉELS que les modales
+ *   ContainerConsole.tsx/ContainerLogs.tsx (GET (WS) /api/console/:id,
+ *   /api/containers/:id/logs(/stream)), affichés ici inline (ContainerConsoleBody/
+ *   ContainerLogsBody) plutôt que dans une fenêtre superposée.
+ * - "dependencies" (par défaut pour tout kind AUTRE que "container") : UNIQUEMENT ce nœud + tous
+ *   les nœuds reliés à lui par au moins une arête du graphe complet déjà chargé côté client —
+ *   inchangé par rapport à l'ancienne TopologySubGraphModal.tsx, disposition radiale, drill-down
+ *   récursif au double-clic avec fil d'Ariane + bouton "Retour".
  * - "interior" (conteneurs uniquement) : composition RÉELLE interne — processus en cours
  *   d'exécution (`docker top`, GET /api/containers/:id/processes) rendus comme des nœuds
  *   "processus" reliés au nœud conteneur, et historique des couches de l'image (`docker history`,
@@ -108,7 +116,7 @@ export default function TopologySubGraphPanel({
   const historyError = useAppSelector((s) => s.images.historyError);
 
   // Nouvelle ouverture (nouveau nœud racine imposé par le parent) -> repart d'un historique de
-  // navigation vide et de la vue "dépendances" par défaut.
+  // navigation vide.
   useEffect(() => {
     if (rootId) {
       setCurrentRootId(rootId);
@@ -116,11 +124,16 @@ export default function TopologySubGraphPanel({
     }
   }, [rootId]);
 
-  useEffect(() => {
-    setViewMode("dependencies");
-  }, [currentRootId]);
-
   const nodesById = useMemo(() => new Map(topology.nodes.map((n) => [n.id, n])), [topology]);
+
+  // Nouvelle racine (ouverture initiale OU drill-down récursif, voir drillInto plus bas) -> repart
+  // sur la vue par défaut adaptée à SON kind : "shell" pour un conteneur (retour utilisateur du
+  // 13/08/2026 : c'est la destination la plus utile, jamais une simple carte de dépendances pour
+  // ce kind précis), "dependencies" pour tout le reste (aucun shell/logs/composition interne n'a
+  // de sens pour un volume/network/host/nœud d'automatisation/etc.).
+  useEffect(() => {
+    setViewMode(currentRootId && nodesById.get(currentRootId)?.kind === "container" ? "shell" : "dependencies");
+  }, [currentRootId, nodesById]);
   const rootNode = currentRootId ? nodesById.get(currentRootId) ?? null : null;
   const rawRootId = currentRootId ? idWithoutPrefix(currentRootId) : "";
 
@@ -332,6 +345,24 @@ export default function TopologySubGraphPanel({
               <button
                 type="button"
                 role="tab"
+                aria-selected={viewMode === "shell"}
+                className={`topology-subgraph-panel__mode-btn${viewMode === "shell" ? " is-active" : ""}`}
+                onClick={() => setViewMode("shell")}
+              >
+                Shell
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewMode === "logs"}
+                className={`topology-subgraph-panel__mode-btn${viewMode === "logs" ? " is-active" : ""}`}
+                onClick={() => setViewMode("logs")}
+              >
+                Logs
+              </button>
+              <button
+                type="button"
+                role="tab"
                 aria-selected={viewMode === "dependencies"}
                 className={`topology-subgraph-panel__mode-btn${viewMode === "dependencies" ? " is-active" : ""}`}
                 onClick={() => setViewMode("dependencies")}
@@ -359,6 +390,24 @@ export default function TopologySubGraphPanel({
           </button>
         </div>
       </div>
+
+      {viewMode === "shell" && rootNode && rootNode.status === "running" && (
+        <div className="topology-subgraph-panel__shell">
+          <ContainerConsoleBody containerId={rawRootId} containerName={rootNode.label} />
+        </div>
+      )}
+      {viewMode === "shell" && rootNode && rootNode.status !== "running" && (
+        <div className="empty-state topology-interior__status-message">
+          Ce conteneur est arrêté — un shell interactif nécessite un conteneur en cours d'exécution. Voir l'onglet
+          "Logs" pour comprendre pourquoi il s'est arrêté.
+        </div>
+      )}
+
+      {viewMode === "logs" && rootNode && (
+        <div className="topology-subgraph-panel__shell">
+          <ContainerLogsBody containerId={rawRootId} containerName={rootNode.label} />
+        </div>
+      )}
 
       {viewMode === "dependencies" && (
         <>

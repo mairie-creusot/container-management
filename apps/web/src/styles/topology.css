@@ -1156,6 +1156,25 @@
   background: var(--color-surface-1);
 }
 
+/* Onglets "Shell"/"Logs" (voir TopologySubGraphPanel.tsx) — ContainerConsoleBody/ContainerLogsBody
+   (ContainerConsole.tsx/ContainerLogs.tsx) réutilisés inline plutôt que dans leur Modal d'origine :
+   `.container-console-modal` impose sa propre largeur/hauteur fixes (pensées pour flotter au
+   centre de l'écran) qu'il faut ici laisser remplir tout l'espace disponible du panneau à la
+   place. */
+.topology-subgraph-panel__shell {
+  flex: 1;
+  min-height: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.topology-subgraph-panel__shell .container-console-modal {
+  width: 100%;
+  max-width: none;
+  height: 100%;
+  padding: 12px 14px 14px;
+}
+
 /* Bascule "Dépendances" / "Composition interne" — proposée uniquement pour un nœud "container"
    (voir TopologySubGraphPanel.tsx), même famille visuelle que .context-menu/.graph-popover
    (surface + bordure du thème) mais en groupe de boutons horizontal façon onglets. */

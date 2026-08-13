@@ -21,13 +21,22 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
   error: "Erreur",
 };
 
+interface ContainerConsoleBodyProps {
+  containerId: string;
+  containerName: string;
+  /** Affiché seulement en contexte Modal (bouton "Fermer" + titre porté par le header) — absent en
+   * usage inline (TopologySubGraphPanel.tsx), où le titre/la fermeture sont déjà gérés par l'onglet
+   * parent, un second en-tête ferait doublon. */
+  onClose?: () => void;
+}
+
 /**
- * Terminal interactif réel dans un conteneur (docker exec, voir GET (WS) /api/console/:id) —
- * xterm.js affiché dans un Modal. Monté en permanence par ContainersPage.tsx ; `containerId`
- * pilote l'ouverture/fermeture de la connexion WebSocket (voir useEffect ci-dessous).
+ * Contenu RÉEL du terminal (connexion WebSocket + xterm.js) — extrait de ContainerConsole ci-
+ * dessous pour être réutilisable SANS le wrapper Modal (voir TopologySubGraphPanel.tsx § onglet
+ * "Shell", qui l'affiche inline dans le sous-graphe plutôt que dans une fenêtre superposée). Même
+ * connexion RÉELLE (GET (WS) /api/console/:id) dans les deux cas, aucune logique dupliquée.
  */
-export default function ContainerConsole({ containerId, containerName, onClose }: ContainerConsoleProps) {
-  const open = containerId !== null;
+export function ContainerConsoleBody({ containerId, containerName, onClose }: ContainerConsoleBodyProps) {
   const terminalHostRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -102,28 +111,39 @@ export default function ContainerConsole({ containerId, containerName, onClose }
   }, [containerId]);
 
   return (
-    <Modal open={open} onClose={onClose} labelledBy="container-console-title">
-      {open && (
-        <div className="container-console-modal">
-          <div className="container-console-modal__header">
-            <div>
-              <div id="container-console-title" className="container-console-modal__title">
-                Console — {containerName}
-              </div>
-              <div className="container-console-modal__subtitle">{containerId.slice(0, 12)}</div>
-            </div>
-            <div className={`container-console-modal__status container-console-modal__status--${status}`}>
-              <span className="container-console-modal__status-dot" />
-              {STATUS_LABEL[status]}
-            </div>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
-              Fermer
-            </button>
+    <div className="container-console-modal">
+      <div className="container-console-modal__header">
+        <div>
+          <div id="container-console-title" className="container-console-modal__title">
+            Console — {containerName}
           </div>
-          <div className="container-console-modal__terminal" ref={terminalHostRef} />
-          {errorMessage && <div className="error-banner container-console-modal__error">{errorMessage}</div>}
+          <div className="container-console-modal__subtitle">{containerId.slice(0, 12)}</div>
         </div>
-      )}
+        <div className={`container-console-modal__status container-console-modal__status--${status}`}>
+          <span className="container-console-modal__status-dot" />
+          {STATUS_LABEL[status]}
+        </div>
+        {onClose && (
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
+            Fermer
+          </button>
+        )}
+      </div>
+      <div className="container-console-modal__terminal" ref={terminalHostRef} />
+      {errorMessage && <div className="error-banner container-console-modal__error">{errorMessage}</div>}
+    </div>
+  );
+}
+
+/**
+ * Version Modal (ContainersPage.tsx) — inchangée pour ses appelants existants, délègue tout le
+ * contenu réel à ContainerConsoleBody ci-dessus.
+ */
+export default function ContainerConsole({ containerId, containerName, onClose }: ContainerConsoleProps) {
+  const open = containerId !== null;
+  return (
+    <Modal open={open} onClose={onClose} labelledBy="container-console-title">
+      {open && <ContainerConsoleBody containerId={containerId} containerName={containerName} onClose={onClose} />}
     </Modal>
   );
 }

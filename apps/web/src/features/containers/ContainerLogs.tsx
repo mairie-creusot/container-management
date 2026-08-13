@@ -29,6 +29,15 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
 const MAX_BUFFERED_LINES = 3000;
 const INITIAL_TAIL = 200;
 
+interface ContainerLogsBodyProps {
+  containerId: string;
+  containerName: string;
+  /** Affiché seulement en contexte Modal (bouton "Fermer") — absent en usage inline
+   * (TopologySubGraphPanel.tsx § onglet "Logs"), où la fermeture est déjà gérée par l'onglet
+   * parent. */
+  onClose?: () => void;
+}
+
 /**
  * Visualiseur de logs en direct (équivalent `docker logs -f`), même pattern xterm.js que
  * ContainerConsole.tsx — mais LECTURE SEULE (rien n'est jamais envoyé au serveur) et avec un
@@ -38,9 +47,11 @@ const INITIAL_TAIL = 200;
  * (GET /api/containers/:id/logs) affiché immédiatement, puis le flux WebSocket
  * (GET /api/containers/:id/logs/stream?tail=0 — 0 pour ne pas dupliquer les lignes du snapshot)
  * qui prend le relais pour les nouvelles lignes.
+ *
+ * Extrait du wrapper Modal (voir ContainerConsoleBody dans ContainerConsole.tsx pour le même
+ * principe) : réutilisable inline dans TopologySubGraphPanel.tsx sans fenêtre superposée.
  */
-export default function ContainerLogs({ containerId, containerName, onClose }: ContainerLogsProps) {
-  const open = containerId !== null;
+export function ContainerLogsBody({ containerId, containerName, onClose }: ContainerLogsBodyProps) {
   const terminalHostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
@@ -173,45 +184,54 @@ export default function ContainerLogs({ containerId, containerName, onClose }: C
   }, [filteredLines]);
 
   return (
-    <Modal open={open} onClose={onClose} labelledBy="container-logs-title">
-      {open && (
-        <div className="container-console-modal">
-          <div className="container-console-modal__header">
-            <div>
-              <div id="container-logs-title" className="container-console-modal__title">
-                Logs — {containerName}
-              </div>
-              <div className="container-console-modal__subtitle">{containerId.slice(0, 12)}</div>
-            </div>
-            <div className={`container-console-modal__status container-console-modal__status--${status}`}>
-              <span className="container-console-modal__status-dot" />
-              {STATUS_LABEL[status]}
-            </div>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
-              Fermer
-            </button>
+    <div className="container-console-modal">
+      <div className="container-console-modal__header">
+        <div>
+          <div id="container-logs-title" className="container-console-modal__title">
+            Logs — {containerName}
           </div>
-
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-            <input
-              type="text"
-              placeholder="Rechercher dans les logs affichés…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              style={{ flex: 1 }}
-              aria-label="Rechercher dans les logs"
-            />
-            {search && (
-              <span className="container-console-modal__subtitle">
-                {filteredLines.length} / {lines.length} ligne(s)
-              </span>
-            )}
-          </div>
-
-          <div className="container-console-modal__terminal" ref={terminalHostRef} />
-          {errorMessage && <div className="error-banner container-console-modal__error">{errorMessage}</div>}
+          <div className="container-console-modal__subtitle">{containerId.slice(0, 12)}</div>
         </div>
-      )}
+        <div className={`container-console-modal__status container-console-modal__status--${status}`}>
+          <span className="container-console-modal__status-dot" />
+          {STATUS_LABEL[status]}
+        </div>
+        {onClose && (
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
+            Fermer
+          </button>
+        )}
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <input
+          type="text"
+          placeholder="Rechercher dans les logs affichés…"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          style={{ flex: 1 }}
+          aria-label="Rechercher dans les logs"
+        />
+        {search && (
+          <span className="container-console-modal__subtitle">
+            {filteredLines.length} / {lines.length} ligne(s)
+          </span>
+        )}
+      </div>
+
+      <div className="container-console-modal__terminal" ref={terminalHostRef} />
+      {errorMessage && <div className="error-banner container-console-modal__error">{errorMessage}</div>}
+    </div>
+  );
+}
+
+/** Version Modal (ContainersPage.tsx) — inchangée pour ses appelants existants, délègue tout le
+ * contenu réel à ContainerLogsBody ci-dessus. */
+export default function ContainerLogs({ containerId, containerName, onClose }: ContainerLogsProps) {
+  const open = containerId !== null;
+  return (
+    <Modal open={open} onClose={onClose} labelledBy="container-logs-title">
+      {open && <ContainerLogsBody containerId={containerId} containerName={containerName} onClose={onClose} />}
     </Modal>
   );
 }

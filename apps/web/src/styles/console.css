@@ -95,7 +95,18 @@
   gap: 8px;
 }
 
-/* Console interactive dans un conteneur — ContainerConsole.tsx (xterm.js) */
+/* Console interactive dans un conteneur — ContainerConsole.tsx (xterm.js) — et logs,
+   ContainerLogs.tsx (même classe partagée). `.modal-card` (Modal.tsx) cape à 420px par défaut
+   (pensé pour les petites boîtes de confirmation) : sans cette règle, le `width: 860px` demandé
+   ci-dessous n'a nulle part où s'exprimer (la carte parente reste étroite, le contenu déborde) —
+   constaté en conditions réelles le 13/08/2026, fenêtre de logs illisible. Même pattern `:has()`
+   déjà utilisé pour la modal "Déployer depuis GitHub" (voir topology.css) : élargit CETTE modal
+   précise uniquement, aucune autre (confirmations, renommage, édition d'un secret/registry...)
+   n'est affectée. */
+.modal-card:has(.container-console-modal) {
+  width: 100%;
+  max-width: min(900px, calc(100vw - 40px));
+}
 
 .container-console-modal {
   width: 860px;
