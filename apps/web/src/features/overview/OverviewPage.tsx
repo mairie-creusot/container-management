@@ -25,7 +25,7 @@ export default function OverviewPage() {
       {generatedAt && (
         <span className="overview-refresh-overlay">
           <span className="overview-refresh-dot" />
-          Actualisé à {formatTime(generatedAt)} · toutes les {REFRESH_INTERVAL_MS / 1000}s
+          Actualisé à {formatTime(generatedAt)}
         </span>
       )}
     </div>

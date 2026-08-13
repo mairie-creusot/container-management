@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAppSelector } from "@/hooks";
 import type { AppNotification } from "@/features/notifications/notificationsSlice";
 
@@ -43,6 +43,17 @@ export default function ToastStack() {
   const [leavingIds, setLeavingIds] = useState<Set<string>>(new Set());
   const [seenIds] = useState(() => new Set<string>());
   const [lastToastedAt, setLastToastedAt] = useState(() => loadLastToastedAt());
+  // Un timer de disparition PAR toast, indexé par id — bug réel corrigé le 13/08/2026 (retour
+  // utilisateur : "les notification ne disparaisse pas automatiquement", capture montrant
+  // plusieurs toasts empilés qui ne partaient jamais). Avant : les setTimeout vivaient dans une
+  // variable locale de l'effet ci-dessous, nettoyés en bloc par sa fonction de cleanup à CHAQUE
+  // ré-exécution (déclenchée par tout changement de `items`, y compris l'arrivée d'une notification
+  // SANS RAPPORT) — dès qu'une deuxième notification arrivait avant les 3s du délai de la
+  // première, le timer de la première était annulé et jamais reprogrammé (elle n'était déjà plus
+  // dans `fresh` au tour suivant, seenIds l'ayant marquée) : elle restait affichée indéfiniment.
+  // Une ref (persiste entre rendus, ne déclenche aucun re-render) découple le cycle de vie de
+  // chaque timer de celui de l'effet qui les crée.
+  const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
   useEffect(() => {
     // !n.read exclut les notifications système déjà connues au chargement (fetchSystemNotifications
@@ -60,12 +71,35 @@ export default function ToastStack() {
     setLastToastedAt(newestSeen);
     saveLastToastedAt(newestSeen);
     setVisibleIds((prev) => [...fresh.map((n) => n.id), ...prev]);
-    const timers = fresh.map((n) => setTimeout(() => dismiss(n.id), AUTO_DISMISS_MS));
-    return () => timers.forEach(clearTimeout);
+    // PAS de cleanup ici qui annulerait ces timers : chacun doit survivre indépendamment d'une
+    // future ré-exécution de cet effet (voir timersRef ci-dessus) — seul `dismiss` (départ anticipé
+    // au clic, ou ce même délai qui expire normalement) ou le démontage du composant (effet séparé
+    // juste en dessous) doivent jamais les annuler.
+    for (const n of fresh) {
+      timersRef.current.set(
+        n.id,
+        setTimeout(() => dismiss(n.id), AUTO_DISMISS_MS),
+      );
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items]);
 
+  // Démontage réel du composant UNIQUEMENT (deps []) — évite un setState après unmount, sans
+  // jamais interférer avec le cycle de vie normal de chaque timer individuel ci-dessus.
+  useEffect(() => {
+    const timers = timersRef.current;
+    return () => {
+      timers.forEach(clearTimeout);
+      timers.clear();
+    };
+  }, []);
+
   function dismiss(id: string) {
+    const timer = timersRef.current.get(id);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timersRef.current.delete(id);
+    }
     setLeavingIds((prev) => new Set(prev).add(id));
     setTimeout(() => {
       setVisibleIds((prev) => prev.filter((v) => v !== id));

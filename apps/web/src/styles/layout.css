@@ -452,10 +452,14 @@
   position: relative;
 }
 
+/* Centré en haut plutôt qu'en haut à droite (bug réel corrigé le 13/08/2026, retour utilisateur :
+   texte caché derrière le bouton flottant "Regrouper" — voir .topology-toolbar-top-right,
+   topology.css — qui occupe ce même coin dès qu'une sélection multiple est active). */
 .overview-refresh-overlay {
   position: absolute;
   top: 14px;
-  right: 18px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 5;
   display: flex;
   align-items: center;

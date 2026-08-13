@@ -1073,8 +1073,18 @@ export interface GroupNodeData {
 /** Carte repliée d'un groupe — un seul nœud, comme un vrai TopologyNode, avec ses ports dérivés. */
 function GroupNodeImpl({ data, selected }: NodeProps) {
   const { group, ports, onToggleCollapse, realNodeCount } = data as unknown as GroupNodeData;
+  // Même zoom sémantique que GraphNode ci-dessus (retour utilisateur du 13/08/2026 : une carte de
+  // groupe restait pleine taille/détaillée alors que tous les autres nœuds se réduisaient déjà à
+  // leur icône en dessous du seuil — incohérent une fois dézoomé sur un graphe qui en contient
+  // plusieurs). Même seuil, mêmes classes CSS partagées (.topology-node--compact,
+  // .topology-node__label/__subtitle) : aucune règle CSS dédiée nécessaire.
+  const zoom = useStore(zoomSelector);
+  const isCompact = zoom < ZOOM_DETAIL_THRESHOLD;
   return (
-    <div className={`topology-node topology-group-node${selected ? " is-selected" : ""}`}>
+    <div
+      className={`topology-node topology-group-node${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}`}
+      title={isCompact ? group.label : undefined}
+    >
       {ports.map((port) => (
         <Handle
           key={port.id}

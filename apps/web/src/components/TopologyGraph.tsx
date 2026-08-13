@@ -2847,19 +2847,25 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       )}
 
       {/* Bouton flottant "Nettoyer les orphelins" (voir orphanVolumeNodes/orphanNetworkNodes —
-          services/topology.ts § "Volumes/networks ORPHELINS") — coin bas-droit du canevas, visible
-          UNIQUEMENT quand il existe au moins une ressource orpheline, plutôt qu'un bouton mort la
-          plupart du temps. Style glassmorphisme (fond translucide + flou) distinct des boutons
-          pleins "Regrouper"/toolbar : une action de nettoyage volontairement discrète en overlay,
-          jamais dans le flux normal des nœuds. */}
-      {operate && orphanCount > 0 && (
-        <div className="topology-toolbar-bottom-right">
+          services/topology.ts § "Volumes/networks ORPHELINS") — coin bas-GAUCHE du canevas,
+          PERMANENT (retour utilisateur du 13/08/2026 : découvrabilité, plutôt que masqué tant qu'il
+          n'y a rien à nettoyer) mais désactivé si `orphanCount === 0` (handleCleanOrphans refuse de
+          toute façon toute action à 0, voir sa garde ci-dessus — le bouton reflète honnêtement cet
+          état plutôt que de laisser croire qu'il ferait quelque chose). Style glassmorphisme (fond
+          translucide + flou) distinct des boutons pleins "Regrouper"/toolbar : une action de
+          nettoyage volontairement discrète en overlay, jamais dans le flux normal des nœuds. */}
+      {operate && (
+        <div className="topology-toolbar-bottom-left">
           <button
             type="button"
             className="topology-glass-btn"
-            disabled={cleaningOrphans}
+            disabled={cleaningOrphans || orphanCount === 0}
             onClick={handleCleanOrphans}
-            title="Supprimer tous les volumes/networks non utilisés par aucun conteneur"
+            title={
+              orphanCount === 0
+                ? "Aucun volume/network orphelin à supprimer pour l'instant"
+                : "Supprimer tous les volumes/networks non utilisés par aucun conteneur"
+            }
           >
             <IconTrash />
             {cleaningOrphans ? "Nettoyage…" : `Nettoyer les orphelins (${orphanCount})`}
