@@ -13,6 +13,9 @@ import Gauge from "@/components/Gauge";
 import KeyValueList from "@/components/KeyValueList";
 import MetricsChart from "@/components/MetricsChart";
 import VolumeFilesModal from "@/components/VolumeFilesModal";
+import ContainerConsole from "@/components/ContainerConsole";
+import ContainerLogs from "@/features/containers/ContainerLogs";
+import { IconHistory, IconTerminal } from "@/components/icons";
 import { KIND_ICON, formatMem, idWithoutPrefix } from "@/components/topologyGraphShared";
 // Panneau "iac-workspace" ci-dessous (mission point 3) : réutilise TEL QUEL le state/les thunks
 // déjà exposés par iacSlice.ts (auparavant consommés par la page dédiée IacPage.tsx, retirée —
@@ -1077,6 +1080,13 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
   const gitopsLastCheckedAt = useAppSelector((s) => s.gitops.lastCheckedAt);
 
   const [activeTab, setActiveTab] = useState<TabId>("overview");
+  // Console interactive (docker exec) / logs — mêmes composants EXACTS que ContainersPage.tsx
+  // (ContainerConsole.tsx/ContainerLogs.tsx, déjà réels/fonctionnels : WebSocket GET /api/console/:id
+  // et /api/containers/:id/logs/stream), montés une seule fois ci-dessous et pilotés par ces deux
+  // states — comblent un manque signalé plusieurs fois : ces actions n'étaient accessibles que
+  // depuis l'ancienne page Conteneurs, jamais depuis le panneau de détail du graphe.
+  const [consoleTarget, setConsoleTarget] = useState<{ id: string; name: string } | null>(null);
+  const [logsTarget, setLogsTarget] = useState<{ id: string; name: string } | null>(null);
   const [metricsPoints, setMetricsPoints] = useState<ContainerMetricPoint[]>([]);
   const [metricsStatus, setMetricsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
 
@@ -1343,6 +1353,23 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
               )}
               {node.updateAvailable && <span className="status-pill status-pill--warning">Mise à jour d'image disponible</span>}
               {node.drift && <span className="status-pill status-pill--critical">Dérive GitOps détectée</span>}
+            </div>
+
+            {/* Logs : lecture seule, ouvert à tout rôle authentifié (viewer inclus, voir
+                routes/containerLogs.ts) — utile même sur un conteneur arrêté (comprendre pourquoi
+                il s'est arrêté), jamais conditionné à "running". Console : vrai shell interactif,
+                reste réservée operator/admin ET à un conteneur en cours d'exécution — même garde
+                que ContainersPage.tsx (retirée du menu du graphe, ce panneau est désormais le seul
+                point d'entrée). */}
+            <div className="inspector-actions">
+              <button type="button" className="btn btn-secondary btn-sm" onClick={() => setLogsTarget({ id: rawId, name: node.label })}>
+                <IconHistory /> Logs
+              </button>
+              {operate && node.status === "running" && (
+                <button type="button" className="btn btn-secondary btn-sm" onClick={() => setConsoleTarget({ id: rawId, name: node.label })}>
+                  <IconTerminal /> Console
+                </button>
+              )}
             </div>
 
             {typeof node.cpuPercent === "number" && (
@@ -1895,6 +1922,23 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
           "Parcourir" ci-dessus). Toujours monté avec ce panneau plutôt que dans TopologyGraph.tsx
           (hors du périmètre de fichiers confié pour cette passe, voir mission). */}
       <VolumeFilesModal />
+
+      {/* Console (docker exec) / logs — mêmes composants EXACTS que ContainersPage.tsx, montés
+          une seule fois ici et pilotés par consoleTarget/logsTarget (voir bouton "Logs"/"Console"
+          de l'onglet Aperçu ci-dessus). Indépendants du `node` affiché : rester ouverts si
+          l'utilisateur change de nœud pendant qu'une session est active serait surprenant, mais
+          ContainerConsole/ContainerLogs se referment déjà proprement via `onClose` sans qu'il soit
+          nécessaire de les lier davantage au cycle de vie de ce panneau. */}
+      <ContainerConsole
+        containerId={consoleTarget?.id ?? null}
+        containerName={consoleTarget?.name ?? ""}
+        onClose={() => setConsoleTarget(null)}
+      />
+      <ContainerLogs
+        containerId={logsTarget?.id ?? null}
+        containerName={logsTarget?.name ?? ""}
+        onClose={() => setLogsTarget(null)}
+      />
     </div>
   );
 }
