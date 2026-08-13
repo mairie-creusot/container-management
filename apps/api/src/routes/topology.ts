@@ -17,9 +17,12 @@
  * POST   /api/topology/groups      — { label, nodeIds } crée un groupement RÉEL (sélection
  *                                     multiple + "Regrouper" côté canevas, jamais deviné) —
  *                                     operator/admin (hook global). `nodeIds` doit référencer au
- *                                     moins 2 nœuds RÉELLEMENT présents dans le graphe actuel
- *                                     (`getTopology()`), aucun déjà membre d'un autre groupe —
- *                                     400 explicite sinon, jamais un groupe partiellement inventé.
+ *                                     moins 2 ids RÉELS : soit un nœud présent dans le graphe actuel
+ *                                     (`getTopology()`), soit un TopologyGroup déjà existant
+ *                                     (groupes imbriqués, 13/08/2026) — aucun déjà membre d'un autre
+ *                                     groupe, aucun cycle, profondeur <= 5, <= 256 vrais nœuds
+ *                                     transitivement contenus (voir topologyGroupsStore.ts) — 400
+ *                                     explicite sinon, jamais un groupe partiellement inventé.
  * PATCH  /api/topology/groups/:id  — { label?, collapsed? } renomme et/ou replie/déplie —
  *                                     operator/admin. 404 si le groupe n'existe pas/plus.
  * DELETE /api/topology/groups/:id  — dissocie le groupe (les membres redeviennent des nœuds
@@ -33,7 +36,15 @@ import {
   savePositionsForUser,
   type NodePositions,
 } from "../services/topologyPositionsStore.js";
-import { createGroup, deleteGroup, DuplicateGroupMemberError, updateGroup } from "../services/topologyGroupsStore.js";
+import {
+  createGroup,
+  CyclicGroupError,
+  deleteGroup,
+  DuplicateGroupMemberError,
+  MaxGroupDepthExceededError,
+  MaxGroupSizeExceededError,
+  updateGroup,
+} from "../services/topologyGroupsStore.js";
 
 interface SavePositionsBody {
   positions?: NodePositions;
@@ -75,13 +86,15 @@ export default async function topologyRoutes(fastify: FastifyInstance): Promise<
     if (!Array.isArray(nodeIds) || nodeIds.length < 2) {
       return reply.code(400).send({ error: "nodeIds must contain at least 2 node ids" });
     }
-    // Aucun id inventé : chaque membre doit exister RÉELLEMENT dans le graphe courant (voir
-    // ARCHITECTURE.md § "Graphe de topologie" — un groupement reflète une vraie action utilisateur
-    // sur des nœuds réels, jamais une supposition).
+    // Aucun id inventé : chaque membre doit exister RÉELLEMENT — soit un vrai nœud du graphe
+    // courant, soit l'id d'un TopologyGroup déjà existant (groupes imbriqués, 13/08/2026 — voir
+    // types.ts#TopologyGroup#nodeIds) — jamais une supposition (ARCHITECTURE.md § "Graphe de
+    // topologie").
     const topology = await getTopology();
     const liveNodeIds = new Set(topology.nodes.map((n) => n.id));
+    const existingGroupIds = new Set(topology.groups.map((g) => g.id));
     const uniqueIds = Array.from(new Set(nodeIds));
-    const unknown = uniqueIds.find((id) => !liveNodeIds.has(id));
+    const unknown = uniqueIds.find((id) => !liveNodeIds.has(id) && !existingGroupIds.has(id));
     if (unknown) return reply.code(400).send({ error: `Node "${unknown}" not found` });
     if (uniqueIds.length < 2) return reply.code(400).send({ error: "nodeIds must contain at least 2 distinct node ids" });
     try {
@@ -89,6 +102,12 @@ export default async function topologyRoutes(fastify: FastifyInstance): Promise<
       return reply.code(201).send(group);
     } catch (err) {
       if (err instanceof DuplicateGroupMemberError) return reply.code(409).send({ error: err.message });
+      // Groupes imbriqués (13/08/2026) : anti-cycle/profondeur max/taille max — même pattern de
+      // traduction que DuplicateGroupMemberError ci-dessus, en 400 (erreur de requête du client,
+      // jamais un conflit de concurrence comme l'appartenance déjà existante ci-dessus).
+      if (err instanceof CyclicGroupError || err instanceof MaxGroupDepthExceededError || err instanceof MaxGroupSizeExceededError) {
+        return reply.code(400).send({ error: err.message });
+      }
       throw err;
     }
   });

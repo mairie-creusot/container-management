@@ -84,6 +84,7 @@ import {
   edgeTypes,
   idWithoutPrefix,
   nodeTypes,
+  resolveGroupMemberNodeIds,
   useDismiss,
   usePrefersReducedMotion,
   type CapabilityDef,
@@ -149,6 +150,60 @@ const GROUP_NODE_APPROX_WIDTH = 260;
 const GROUP_NODE_APPROX_HEIGHT = 170;
 const GROUP_FRAME_PADDING = 48;
 const GROUP_FRAME_HEADER_HEIGHT = 44;
+
+// --- Groupes imbriqués (13/08/2026, voir apps/api/src/types.ts#TopologyGroup#nodeIds) -----------
+// Un vrai nœud OU un sous-groupe n'a jamais plus d'un parent à la fois (voir
+// topologyGroupsStore.ts#createGroup, DuplicateGroupMemberError) : ces trois fonctions pures,
+// partagées par la construction de `flowNodes`/`groupFrameNodes`/`groupedTopologyEdges` ci-dessous,
+// s'appuient toutes sur cette même table "membre -> son groupe parent direct".
+
+/** Table "membre (vrai nœud OU sous-groupe) -> son groupe parent direct". */
+function buildParentGroupByMemberId(groups: TopologyGroup[]): Map<string, TopologyGroup> {
+  const map = new Map<string, TopologyGroup>();
+  for (const g of groups) for (const id of g.nodeIds) map.set(id, g);
+  return map;
+}
+
+/**
+ * `id` (vrai nœud OU sous-groupe) est-il masqué du niveau racine du canevas ? Oui dès que son
+ * parent direct est REPLIÉ — un parent replié masque TOUT ce qu'il contient, y compris un
+ * sous-groupe lui-même DÉPLIÉ (retour utilisateur du 13/08/2026). Si le parent est déplié, `id`
+ * reste visible SEULEMENT si ce parent est lui-même visible (récursion vers le haut de la chaîne) —
+ * c'est le cas inverse : un sous-groupe replié dont le PARENT est déplié ne masque, lui, que ses
+ * propres membres (remplacés par sa propre carte repliée, visible dans le cadre du parent).
+ * `guard` protège contre un cycle corrompu déjà visité (jamais censé arriver, la création refuse
+ * déjà tout cycle côté API — voir topologyGroupsStore.ts#CyclicGroupError).
+ */
+function isHiddenAtRoot(id: string, parentGroupByMemberId: Map<string, TopologyGroup>, guard: Set<string> = new Set()): boolean {
+  const parent = parentGroupByMemberId.get(id);
+  if (!parent || guard.has(parent.id)) return false;
+  if (parent.collapsed) return true;
+  return isHiddenAtRoot(parent.id, parentGroupByMemberId, new Set(guard).add(parent.id));
+}
+
+/**
+ * Remonte récursivement la chaîne de parents de `id` (extrémité RÉELLE d'une TopologyEdge) jusqu'à
+ * la carte réellement VISIBLE qui le représente — ex : membre d'un groupe A lui-même membre d'un
+ * groupe B replié -> retourne B, jamais A (une arête touchant ce membre doit se rediriger vers B,
+ * seule carte affichée). Retourne `id` inchangé si aucun ancêtre replié ne le masque.
+ *
+ * Bug réel corrigé le 13/08/2026 : un parent DIRECT déplié (frame, pas de carte de substitution) ne
+ * suffit pas à conclure que `id` reste visible tel quel — si CE parent déplié est lui-même masqué
+ * par un ANCÊTRE plus extérieur replié (cas : sous-groupe A déplié pour consultation via le
+ * sous-graphe, mais A reste membre d'un groupe B replié au niveau racine), `id` est quand même
+ * absent de `flowNodes` (voir isHiddenAtRoot/collapsedMemberIds ci-dessous) et l'arête doit se
+ * rediriger vers B, pas rester accrochée à `id` (qui produirait une arête fantôme, sans nœud
+ * React Flow correspondant). On ne s'arrête donc plus au premier lien déplié : on continue de
+ * remonter tant qu'un parent existe, et on ne redirige vers une carte repliée que si celle-ci est
+ * elle-même réellement visible (isHiddenAtRoot(parent) === false) — sinon on continue au-delà.
+ */
+function resolveVisibleGroupTarget(id: string, parentGroupByMemberId: Map<string, TopologyGroup>, guard: Set<string> = new Set()): string {
+  const parent = parentGroupByMemberId.get(id);
+  if (!parent || guard.has(parent.id)) return id;
+  const nextGuard = new Set(guard).add(parent.id);
+  if (parent.collapsed && !isHiddenAtRoot(parent.id, parentGroupByMemberId, nextGuard)) return parent.id;
+  return resolveVisibleGroupTarget(parent.id, parentGroupByMemberId, nextGuard);
+}
 
 /**
  * Raccourcis "1 clic, 0 champ" de la palette de création (façon Railway "Deploy PostgreSQL"/
@@ -1808,7 +1863,13 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     // Membres d'un groupe REPLIÉ : n'apparaissent plus comme des nœuds individuels (voir plus bas,
     // un seul nœud "topologyGroupNode" les représente) — un membre d'un groupe DÉPLIÉ continue en
     // revanche d'être rendu ici tel quel (voir topologyGraphShared.tsx en-tête § "Regroupement").
-    const collapsedMemberIds = new Set(data.groups.filter((g) => g.collapsed).flatMap((g) => g.nodeIds));
+    // Groupes imbriqués (13/08/2026) : RÉCURSIF via isHiddenAtRoot — un nœud est caché du niveau
+    // racine s'il est membre, directement ou transitivement à travers une chaîne de groupes TOUS
+    // repliés, d'un groupe replié (voir isHiddenAtRoot ci-dessus pour les deux cas limites : parent
+    // replié masquant un sous-groupe déplié, et parent déplié laissant un sous-groupe replié visible
+    // en tant que sa propre carte).
+    const parentGroupByMemberId = buildParentGroupByMemberId(data.groups);
+    const collapsedMemberIds = new Set(data.nodes.filter((n) => isHiddenAtRoot(n.id, parentGroupByMemberId)).map((n) => n.id));
     setFlowNodes((prev) => {
       const prevById = new Map(prev.map((n) => [n.id, n]));
       const nodes: Node[] = data.nodes
@@ -1860,6 +1921,10 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       // hors de leur voisinage.
       for (const group of data.groups) {
         if (!group.collapsed) continue;
+        // Groupes imbriqués (13/08/2026) : un groupe replié lui-même masqué par un ancêtre replié
+        // (nesting collapsed-dans-collapsed) n'a AUCUNE carte propre à ce niveau — il est entièrement
+        // absorbé par la carte de son ancêtre le plus extérieur (voir isHiddenAtRoot ci-dessus).
+        if (isHiddenAtRoot(group.id, parentGroupByMemberId)) continue;
         const prevGroupNode = prevById.get(group.id);
         const memberPositions = group.nodeIds.map((id) => prevById.get(id)?.position).filter((p): p is { x: number; y: number } => !!p);
         const centroid =
@@ -1872,8 +1937,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         const position = positions[group.id] ?? prevGroupNode?.position ?? centroid;
         const groupData: GroupNodeData = {
           group,
-          ports: deriveGroupPorts(group, data.edges),
+          ports: deriveGroupPorts(group, data.edges, data.groups),
           onToggleCollapse: () => handleToggleGroupCollapse(group),
+          realNodeCount: resolveGroupMemberNodeIds(group.nodeIds, data.groups).length,
         };
         nodes.push({ id: group.id, type: "topologyGroupNode", position, data: groupData as unknown as Record<string, unknown> });
       }
@@ -1891,24 +1957,84 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const groupFrameNodes = useMemo<Node[]>(() => {
     if (!data) return [];
     const flowById = new Map(flowNodes.map((n) => [n.id, n]));
+    const groupsById = new Map(data.groups.map((g) => [g.id, g]));
+    const parentGroupByMemberId = buildParentGroupByMemberId(data.groups);
     const frames: Node[] = [];
+
+    function frameRect(inner: { minX: number; minY: number; maxX: number; maxY: number }) {
+      return {
+        x: inner.minX - GROUP_FRAME_PADDING,
+        y: inner.minY - GROUP_FRAME_PADDING - GROUP_FRAME_HEADER_HEIGHT,
+        width: inner.maxX - inner.minX + GROUP_FRAME_PADDING * 2,
+        height: inner.maxY - inner.minY + GROUP_FRAME_PADDING * 2 + GROUP_FRAME_HEADER_HEIGHT,
+      };
+    }
+
+    // Bornes RÉELLES (positions connues) de `group` DÉPLIÉ, à partir de ses membres DIRECTS —
+    // groupes imbriqués (13/08/2026) : un membre qui est lui-même un sous-groupe DÉPLIÉ n'a AUCUNE
+    // carte propre dans `flowById` (seuls ses propres membres, potentiellement plus profonds, en
+    // ont une) — on calcule alors récursivement SON propre cadre (poussé dans `frames` au passage)
+    // et on inclut son rectangle EXTÉRIEUR (padding+en-tête compris) dans le calcul du parent, comme
+    // s'il s'agissait d'une carte de taille variable. Un sous-groupe REPLIÉ, lui, a bien une carte
+    // (poussée par le useEffect ci-dessus, voir collapsedMemberIds) : traité comme un vrai membre.
+    function computeInnerBounds(group: TopologyGroup): { minX: number; minY: number; maxX: number; maxY: number } | null {
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      let any = false;
+      function include(x: number, y: number, w: number, h: number) {
+        any = true;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x + w);
+        maxY = Math.max(maxY, y + h);
+      }
+      for (const memberId of group.nodeIds) {
+        const subGroup = groupsById.get(memberId);
+        if (subGroup && !subGroup.collapsed) {
+          const childInner = computeInnerBounds(subGroup);
+          if (!childInner) continue;
+          const rect = frameRect(childInner);
+          const frameData: GroupFrameNodeData = { group: subGroup, onToggleCollapse: () => handleToggleGroupCollapse(subGroup) };
+          frames.push({
+            id: `group-frame:${subGroup.id}`,
+            type: "topologyGroupFrame",
+            position: { x: rect.x, y: rect.y },
+            style: { width: rect.width, height: rect.height },
+            zIndex: -1,
+            draggable: false,
+            selectable: false,
+            connectable: false,
+            data: frameData as unknown as Record<string, unknown>,
+          });
+          include(rect.x, rect.y, rect.width, rect.height);
+          continue;
+        }
+        const pos = flowById.get(memberId)?.position;
+        if (!pos) continue;
+        include(pos.x, pos.y, GROUP_NODE_APPROX_WIDTH, GROUP_NODE_APPROX_HEIGHT);
+      }
+      return any ? { minX, minY, maxX, maxY } : null;
+    }
+
     for (const group of data.groups) {
       if (group.collapsed) continue;
-      const memberPositions = group.nodeIds.map((id) => flowById.get(id)?.position).filter((p): p is { x: number; y: number } => !!p);
-      if (memberPositions.length === 0) continue;
-      const minX = Math.min(...memberPositions.map((p) => p.x));
-      const minY = Math.min(...memberPositions.map((p) => p.y));
-      const maxX = Math.max(...memberPositions.map((p) => p.x));
-      const maxY = Math.max(...memberPositions.map((p) => p.y));
+      // Un groupe DÉPLIÉ avec un parent est dessiné par récursion DEPUIS ce parent DÉPLIÉ
+      // (computeInnerBounds ci-dessus) — jamais deux fois. S'il n'apparaît jamais dans cette
+      // récursion (son parent est en réalité REPLIÉ, donc ce sous-groupe déplié est entièrement
+      // masqué, voir isHiddenAtRoot), il ne doit lui non plus jamais recevoir de cadre ici : ce cas
+      // est déjà couvert en ne partant QUE des groupes racine (sans parent) ci-dessous.
+      if (parentGroupByMemberId.has(group.id)) continue;
+      const inner = computeInnerBounds(group);
+      if (!inner) continue;
+      const rect = frameRect(inner);
       const frameData: GroupFrameNodeData = { group, onToggleCollapse: () => handleToggleGroupCollapse(group) };
       frames.push({
         id: `group-frame:${group.id}`,
         type: "topologyGroupFrame",
-        position: { x: minX - GROUP_FRAME_PADDING, y: minY - GROUP_FRAME_PADDING - GROUP_FRAME_HEADER_HEIGHT },
-        style: {
-          width: maxX - minX + GROUP_NODE_APPROX_WIDTH + GROUP_FRAME_PADDING * 2,
-          height: maxY - minY + GROUP_NODE_APPROX_HEIGHT + GROUP_FRAME_PADDING * 2 + GROUP_FRAME_HEADER_HEIGHT,
-        },
+        position: { x: rect.x, y: rect.y },
+        style: { width: rect.width, height: rect.height },
         zIndex: -1,
         draggable: false,
         selectable: false,
@@ -1939,19 +2065,25 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
    * `targetHandle` fixés explicitement au nom de la capacité côté groupe : un groupe peut porter
    * plusieurs handles du même type (ex: "network" ET "provide", tous deux source/Right), React Flow
    * ne peut alors plus deviner tout seul lequel utiliser.
+   *
+   * Groupes imbriqués (13/08/2026) : `resolveVisibleGroupTarget` (ci-dessus) remonte RÉCURSIVEMENT
+   * à travers plusieurs niveaux de groupes repliés imbriqués — si un membre appartient à un groupe A
+   * lui-même membre d'un groupe B replié, l'arête est redirigée vers B (la carte réellement
+   * visible), jamais vers A (masqué par B).
    */
   const groupedTopologyEdges = useMemo<(TopologyEdge & { sourceHandle?: string; targetHandle?: string })[]>(() => {
     if (!data) return [];
-    const collapsedGroups = data.groups.filter((g) => g.collapsed);
-    if (collapsedGroups.length === 0) return data.edges;
-    const groupIdByMember = new Map<string, string>();
-    for (const g of collapsedGroups) for (const id of g.nodeIds) groupIdByMember.set(id, g.id);
+    const hasCollapsedGroup = data.groups.some((g) => g.collapsed);
+    if (!hasCollapsedGroup) return data.edges;
+    const parentGroupByMemberId = buildParentGroupByMemberId(data.groups);
     const result: (TopologyEdge & { sourceHandle?: string; targetHandle?: string })[] = [];
     for (const e of data.edges) {
-      const sourceGroupId = groupIdByMember.get(e.source);
-      const targetGroupId = groupIdByMember.get(e.target);
-      if (sourceGroupId && targetGroupId && sourceGroupId === targetGroupId) continue; // interne au groupe, masquée
-      if (!sourceGroupId && !targetGroupId) {
+      const resolvedSource = resolveVisibleGroupTarget(e.source, parentGroupByMemberId);
+      const resolvedTarget = resolveVisibleGroupTarget(e.target, parentGroupByMemberId);
+      const sourceRedirected = resolvedSource !== e.source;
+      const targetRedirected = resolvedTarget !== e.target;
+      if (resolvedSource === resolvedTarget && (sourceRedirected || targetRedirected)) continue; // interne au même groupe visible, masquée
+      if (!sourceRedirected && !targetRedirected) {
         result.push(e);
         continue;
       }
@@ -1966,10 +2098,10 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       result.push({
         ...e,
         id: `${e.id}__grouped`,
-        source: sourceGroupId ?? e.source,
-        target: targetGroupId ?? e.target,
-        ...(sourceGroupId ? { sourceHandle } : {}),
-        ...(targetGroupId ? { targetHandle } : {}),
+        source: resolvedSource,
+        target: resolvedTarget,
+        ...(sourceRedirected ? { sourceHandle } : {}),
+        ...(targetRedirected ? { targetHandle } : {}),
       });
     }
     return result;

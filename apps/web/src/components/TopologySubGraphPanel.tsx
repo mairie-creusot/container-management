@@ -10,16 +10,19 @@ import { ContainerLogsBody } from "@/features/containers/ContainerLogs";
 import {
   attachmentToTopologyNode,
   buildTopologyEdges,
+  deriveGroupPorts,
   edgeTypes,
   formatMem,
   idWithoutPrefix,
   interiorNodeTypes,
   nodeTypes,
   radialPositions,
+  resolveGroupMemberNodeIds,
   type GraphNodeCallbacks,
+  type GroupNodeData,
   type ProcessNodeData,
 } from "@/components/topologyGraphShared";
-import type { Topology, TopologyNode } from "@/types";
+import type { Topology, TopologyGroup, TopologyNode } from "@/types";
 
 interface TopologySubGraphPanelProps {
   /** Graphe complet déjà chargé côté client (state.topology.data) — le sous-graphe est un pur
@@ -77,10 +80,18 @@ function findColumn(titles: string[], patterns: RegExp[]): number {
  *   ContainerConsole.tsx/ContainerLogs.tsx (GET (WS) /api/console/:id,
  *   /api/containers/:id/logs(/stream)), affichés ici inline (ContainerConsoleBody/
  *   ContainerLogsBody) plutôt que dans une fenêtre superposée.
- * - "dependencies" (par défaut pour tout kind AUTRE que "container") : UNIQUEMENT ce nœud + tous
- *   les nœuds reliés à lui par au moins une arête du graphe complet déjà chargé côté client —
- *   inchangé par rapport à l'ancienne TopologySubGraphModal.tsx, disposition radiale, drill-down
- *   récursif au double-clic avec fil d'Ariane + bouton "Retour".
+ * - "dependencies" (par défaut pour tout kind AUTRE que "container", et pour un GROUPE) :
+ *   UNIQUEMENT ce nœud + tous les nœuds reliés à lui par au moins une arête du graphe complet déjà
+ *   chargé côté client — inchangé par rapport à l'ancienne TopologySubGraphModal.tsx, disposition
+ *   radiale, drill-down récursif au double-clic avec fil d'Ariane + bouton "Retour". Groupes
+ *   imbriqués (13/08/2026, voir apps/api/src/types.ts#TopologyGroup) : quand la racine est un
+ *   GROUPE (double-clic sur une carte de groupe repliée), cette vue affiche ses MEMBRES DIRECTS
+ *   (résolus depuis `topology.groups`, jamais depuis les arêtes — un groupe n'est jamais source/
+ *   target d'une vraie TopologyEdge) au lieu du calcul `neighborIds` habituel ; un membre lui-même
+ *   groupe s'affiche comme sa propre carte repliée (GroupNode), drillable à son tour. Le fil
+ *   d'Ariane affiche alors en plus un indicateur "Layer N" (N = profondeur d'imbrication de
+ *   groupes traversée, limite RÉELLE de 5 niveaux/256 nœuds appliquée côté serveur, voir
+ *   topologyGroupsStore.ts).
  * - "interior" (conteneurs uniquement) : composition RÉELLE interne — processus en cours
  *   d'exécution (`docker top`, GET /api/containers/:id/processes) rendus comme des nœuds
  *   "processus" reliés au nœud conteneur, et historique des couches de l'image (`docker history`,
@@ -104,6 +115,9 @@ export default function TopologySubGraphPanel({
   const [stack, setStack] = useState<string[]>([]);
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
   const [nodeMenu, setNodeMenu] = useState<{ x: number; y: number; node: TopologyNode } | null>(null);
+  // Menu contextuel d'une carte de groupe (groupes imbriqués, 13/08/2026) — distinct de `nodeMenu`
+  // ci-dessus (un groupe n'est pas un TopologyNode réel), même principe que TopologyGraph.tsx#groupMenu.
+  const [groupMenu, setGroupMenu] = useState<{ x: number; y: number; group: TopologyGroup } | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("dependencies");
 
   const processes = useAppSelector((s) => s.containers.processes);
@@ -125,12 +139,21 @@ export default function TopologySubGraphPanel({
   }, [rootId]);
 
   const nodesById = useMemo(() => new Map(topology.nodes.map((n) => [n.id, n])), [topology]);
+  // Groupes imbriqués (13/08/2026, voir apps/api/src/types.ts#TopologyGroup) : la racine du
+  // sous-graphe peut désormais être un GROUPE (double-clic sur une carte de groupe repliée, voir
+  // TopologyGraph.tsx#openSubGraph — déjà appelé avec l'id RÉEL du groupe, aucun changement
+  // nécessaire là-bas). `currentGroup` distingue ce cas de celui d'un vrai TopologyNode ci-dessus.
+  const groupsById = useMemo(() => new Map(topology.groups.map((g) => [g.id, g])), [topology]);
+  const currentGroup = currentRootId ? groupsById.get(currentRootId) ?? null : null;
+  /** Libellé d'un id quelconque du sous-graphe (vrai nœud OU groupe) — jamais l'id brut affiché à
+   * l'utilisateur (fil d'Ariane) si un libellé réel existe. */
+  const labelForId = (id: string): string => nodesById.get(id)?.label ?? groupsById.get(id)?.label ?? id;
 
   // Nouvelle racine (ouverture initiale OU drill-down récursif, voir drillInto plus bas) -> repart
   // sur la vue par défaut adaptée à SON kind : "shell" pour un conteneur (retour utilisateur du
   // 13/08/2026 : c'est la destination la plus utile, jamais une simple carte de dépendances pour
   // ce kind précis), "dependencies" pour tout le reste (aucun shell/logs/composition interne n'a
-  // de sens pour un volume/network/host/nœud d'automatisation/etc.).
+  // de sens pour un volume/network/host/nœud d'automatisation/etc., ni pour un groupe).
   useEffect(() => {
     setViewMode(currentRootId && nodesById.get(currentRootId)?.kind === "container" ? "shell" : "dependencies");
   }, [currentRootId, nodesById]);
@@ -139,13 +162,19 @@ export default function TopologySubGraphPanel({
 
   const neighborIds = useMemo(() => {
     if (!currentRootId) return [];
+    // Racine = un groupe (13/08/2026) : ses "voisins" sont ses MEMBRES DIRECTS, résolus depuis
+    // `topology.groups` — un groupe n'est JAMAIS source/target d'une vraie TopologyEdge (voir
+    // services/topology.ts), le calcul habituel par arêtes ne renverrait donc toujours rien pour
+    // lui. Un membre qui est lui-même un groupe reste tel quel dans la liste (rendu comme sa propre
+    // carte repliée, voir flowNodes ci-dessous), jamais déplié ici.
+    if (currentGroup) return [...currentGroup.nodeIds];
     const ids = new Set<string>();
     for (const edge of topology.edges) {
       if (edge.source === currentRootId) ids.add(edge.target);
       else if (edge.target === currentRootId) ids.add(edge.source);
     }
     return Array.from(ids);
-  }, [topology, currentRootId]);
+  }, [topology, currentRootId, currentGroup]);
 
   const subEdges = useMemo(
     () => topology.edges.filter((e) => e.source === currentRootId || e.target === currentRootId),
@@ -156,7 +185,7 @@ export default function TopologySubGraphPanel({
   // persistance (contrairement au graphe principal) : une exploration ponctuelle, pas un canevas
   // durable.
   useEffect(() => {
-    if (!currentRootId || !nodesById.has(currentRootId)) {
+    if (!currentRootId || !(nodesById.has(currentRootId) || groupsById.has(currentRootId))) {
       setFlowNodes([]);
       return;
     }
@@ -164,26 +193,64 @@ export default function TopologySubGraphPanel({
     const ids = [currentRootId, ...neighborIds];
     setFlowNodes(
       ids
-        .map((id) => nodesById.get(id))
-        .filter((n): n is TopologyNode => !!n)
-        .map((n) => ({
-          id: n.id,
-          type: "graphNode",
-          position: positions[n.id] ?? { x: 0, y: 0 },
-          // Briques (voir GraphNode/TopologyNode#attachments) : mêmes callbacks que le graphe
-          // principal (TopologyGraph.tsx) pour rester cliquables/clic-droit-ables ICI aussi — pas
-          // de "Connecter à un network…"/déconnexion depuis ce panneau en revanche (ce sous-graphe
-          // n'a jamais eu d'action de (dé)connexion réseau propre, même pour une arête réelle :
-          // scope volontairement inchangé, seule "Voir le détail" est couverte).
-          data: {
-            ...n,
-            ...(brickCallbacks(n.kind)),
-          } as unknown as Record<string, unknown>,
-        })),
+        .map((id): Node | null => {
+          // Un membre qui est lui-même un groupe (groupes imbriqués, 13/08/2026) s'affiche comme
+          // sa PROPRE carte repliée — même composant GroupNode que le graphe principal, ports
+          // dérivés récursivement (deriveGroupPorts) — reste drillable par un nouveau double-clic
+          // (drillInto ci-dessous, déjà récursif, réutilisé tel quel).
+          const subGroup = groupsById.get(id);
+          if (subGroup) {
+            const groupData: GroupNodeData = {
+              group: subGroup,
+              ports: deriveGroupPorts(subGroup, topology.edges, topology.groups),
+              realNodeCount: resolveGroupMemberNodeIds(subGroup.nodeIds, topology.groups).length,
+            };
+            return {
+              id: subGroup.id,
+              type: "topologyGroupNode",
+              position: positions[id] ?? { x: 0, y: 0 },
+              data: groupData as unknown as Record<string, unknown>,
+            };
+          }
+          const n = nodesById.get(id);
+          if (!n) return null;
+          return {
+            id: n.id,
+            type: "graphNode",
+            position: positions[n.id] ?? { x: 0, y: 0 },
+            // Briques (voir GraphNode/TopologyNode#attachments) : mêmes callbacks que le graphe
+            // principal (TopologyGraph.tsx) pour rester cliquables/clic-droit-ables ICI aussi — pas
+            // de "Connecter à un network…"/déconnexion depuis ce panneau en revanche (ce sous-graphe
+            // n'a jamais eu d'action de (dé)connexion réseau propre, même pour une arête réelle :
+            // scope volontairement inchangé, seule "Voir le détail" est couverte).
+            data: {
+              ...n,
+              ...(brickCallbacks(n.kind)),
+            } as unknown as Record<string, unknown>,
+          };
+        })
+        .filter((n): n is Node => !!n),
     );
-  }, [currentRootId, neighborIds, nodesById]);
+  }, [currentRootId, neighborIds, nodesById, groupsById, topology]);
 
-  const flowEdges = useMemo(() => buildTopologyEdges(subEdges, nodesById), [subEdges, nodesById]);
+  /** Arêtes structurelles "racine -> membre direct" pour une racine GROUPE (groupes imbriqués,
+   * 13/08/2026) — un groupe n'a aucune vraie TopologyEdge (voir neighborIds ci-dessus), ce simple
+   * trait neutre (même style que interiorEdges plus bas, structurel, pas un flux de trafic) fait
+   * seulement office de repère visuel d'appartenance dans la disposition radiale. */
+  const groupMemberEdges = useMemo<Edge[]>(() => {
+    if (!currentGroup || !currentRootId) return [];
+    return currentGroup.nodeIds.map((memberId) => ({
+      id: `group-member-edge:${memberId}`,
+      source: currentRootId,
+      target: memberId,
+      style: { stroke: "var(--color-text-faint)", strokeWidth: 1.2 },
+    }));
+  }, [currentGroup, currentRootId]);
+
+  const flowEdges = useMemo(
+    () => (currentGroup ? groupMemberEdges : buildTopologyEdges(subEdges, nodesById)),
+    [currentGroup, groupMemberEdges, subEdges, nodesById],
+  );
 
   // --- Vue "composition interne" (conteneurs uniquement) ----------------------------------------
   const isContainerRoot = rootNode?.kind === "container";
@@ -276,6 +343,14 @@ export default function TopologySubGraphPanel({
 
   function handleNodeContextMenu(event: React.MouseEvent, node: Node) {
     event.preventDefault();
+    // Une carte de groupe (groupes imbriqués, 13/08/2026, voir GroupNodeData) n'est PAS un vrai
+    // TopologyNode (ni `kind`, ni `label` au même endroit que sur `node.data` d'un vrai nœud) — menu
+    // contextuel dédié, même garde de type que TopologyGraph.tsx#handleNodeContextMenu.
+    if (node.type === "topologyGroupNode") {
+      const group = (node.data as unknown as { group: TopologyGroup }).group;
+      setGroupMenu({ x: event.clientX, y: event.clientY, group });
+      return;
+    }
     setNodeMenu({ x: event.clientX, y: event.clientY, node: node.data as unknown as TopologyNode });
   }
 
@@ -303,7 +378,12 @@ export default function TopologySubGraphPanel({
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [visible, nodeMenu, onRequestClose]);
 
-  const breadcrumbLabels = [...stack, ...(currentRootId ? [currentRootId] : [])].map((id) => nodesById.get(id)?.label ?? id);
+  const breadcrumbLabels = [...stack, ...(currentRootId ? [currentRootId] : [])].map((id) => labelForId(id));
+  // "Layer N" (groupes imbriqués, 13/08/2026) : N = position dans `stack` + 1, le tout premier
+  // niveau ouvert = Layer 1 — affiché SEULEMENT quand la racine actuelle ou une racine de la pile
+  // est un groupe (concept spécifique à l'imbrication de groupes, pas à la navigation générale déjà
+  // existante — jamais affiché pour un simple nœud conteneur/volume/etc.).
+  const isGroupNavigation = [...stack, ...(currentRootId ? [currentRootId] : [])].some((id) => groupsById.has(id));
 
   function nodeMenuItems(node: TopologyNode): ContextMenuItem[] {
     const items: ContextMenuItem[] = [{ label: "Voir le détail", onClick: () => onOpenDetail(node) }];
@@ -314,6 +394,15 @@ export default function TopologySubGraphPanel({
     if (node.id !== currentRootId && nodesById.has(node.id)) {
       items.push({ label: "Visualiser ses dépendances", onClick: () => drillInto(node.id) });
     }
+    return items;
+  }
+
+  /** Menu contextuel d'une carte de groupe (groupes imbriqués, 13/08/2026) — un groupe se drille
+   * comme n'importe quel autre membre (double-clic déjà supporté, voir onNodeDoubleClick plus bas),
+   * cette entrée offre le même geste depuis le clic droit. */
+  function groupMenuItems(group: TopologyGroup): ContextMenuItem[] {
+    const items: ContextMenuItem[] = [];
+    if (group.id !== currentRootId) items.push({ label: "Explorer le groupe", onClick: () => drillInto(group.id) });
     return items;
   }
 
@@ -328,7 +417,7 @@ export default function TopologySubGraphPanel({
       style={{ transformOrigin: `${origin.x}% ${origin.y}%` }}
       onTransitionEnd={reducedMotion ? undefined : handleTransitionEnd}
       role="region"
-      aria-label={`Sous-graphe de « ${rootNode?.label ?? ""} »`}
+      aria-label={`Sous-graphe de « ${rootNode?.label ?? currentGroup?.label ?? ""} »`}
     >
       <div className="topology-subgraph-panel__header">
         <div className="topology-subgraph-panel__breadcrumb">
@@ -338,6 +427,14 @@ export default function TopologySubGraphPanel({
               {label}
             </span>
           ))}
+          {isGroupNavigation && (
+            <span
+              className="topology-subgraph-panel__layer"
+              title="Profondeur d'imbrication de groupes (voir apps/api/src/services/topologyGroupsStore.ts, max 5 niveaux)"
+            >
+              Layer {stack.length + 1}
+            </span>
+          )}
         </div>
         <div className="topology-subgraph-panel__actions">
           {isContainerRoot && (
@@ -507,6 +604,10 @@ export default function TopologySubGraphPanel({
 
       {nodeMenu && (
         <ContextMenu x={nodeMenu.x} y={nodeMenu.y} onClose={() => setNodeMenu(null)} items={nodeMenuItems(nodeMenu.node)} />
+      )}
+
+      {groupMenu && (
+        <ContextMenu x={groupMenu.x} y={groupMenu.y} onClose={() => setGroupMenu(null)} items={groupMenuItems(groupMenu.group)} />
       )}
     </div>
   );

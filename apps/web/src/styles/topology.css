@@ -1220,6 +1220,20 @@
   font-weight: 400;
 }
 
+/* Indicateur "Layer N" (groupes imbriqués, 13/08/2026 — voir TopologySubGraphPanel.tsx) : affiché
+   uniquement quand la navigation courante porte sur un groupe, jamais pour un simple nœud
+   conteneur/volume/etc. — même pill visuelle que .topology-badge, ton neutre (pas d'alerte). */
+.topology-subgraph-panel__layer {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  background: var(--color-surface-2, rgba(255, 255, 255, 0.08));
+  color: var(--color-text-muted);
+}
+
 .topology-subgraph-panel__actions {
   display: flex;
   align-items: center;

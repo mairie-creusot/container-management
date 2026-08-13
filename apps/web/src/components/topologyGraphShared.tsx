@@ -273,12 +273,41 @@ function portOffsetStyle(port: PortSpec, allPorts: PortSpec[]): CSSProperties | 
 }
 
 /**
+ * Déplie récursivement `nodeIds` (membres directs d'un groupe) jusqu'aux vrais ids de TopologyNode
+ * — jamais un id de groupe dans le résultat (groupes imbriqués, 13/08/2026, voir
+ * apps/api/src/types.ts#TopologyGroup#nodeIds) : un membre qui est lui-même l'id d'un AUTRE
+ * TopologyGroup de `allGroups` est déplié à son tour, récursivement, jusqu'à n'obtenir que des ids
+ * de vrais nœuds. Même garde anti-boucle infinie que côté serveur
+ * (topologyGroupsStore.ts#resolveRealNodeIds) même si un cycle existait déjà par erreur — jamais
+ * censé arriver en usage normal (la création refuse déjà tout cycle côté API).
+ */
+export function resolveGroupMemberNodeIds(nodeIds: string[], allGroups: TopologyGroup[], visited: Set<string> = new Set()): string[] {
+  const groupsById = new Map(allGroups.map((g) => [g.id, g]));
+  const result: string[] = [];
+  for (const id of nodeIds) {
+    const subGroup = groupsById.get(id);
+    if (!subGroup) {
+      result.push(id); // vrai TopologyNode
+      continue;
+    }
+    if (visited.has(subGroup.id)) continue; // cycle corrompu : jamais censé arriver, on n'y revient simplement pas
+    result.push(...resolveGroupMemberNodeIds(subGroup.nodeIds, allGroups, new Set(visited).add(subGroup.id)));
+  }
+  return result;
+}
+
+/**
  * Ports d'entrée/sortie d'un groupe (voir TopologyGroup, apps/api/src/types.ts) — DÉRIVÉS des
  * arêtes réelles du graphe complet qui traversent sa frontière (un membre du groupe d'un côté, un
  * nœud extérieur de l'autre), jamais inventés/devinés : un groupe qui ne contient que des nœuds
  * sans aucune connexion externe n'a simplement aucun port. Une arête ENTIÈREMENT interne au groupe
  * (les deux bouts sont membres) ne produit aucun port — elle reste invisible une fois le groupe
  * replié, exactement comme Docker/Railway masquent la plomberie interne d'un service groupé.
+ * `allGroups` (groupes imbriqués, 13/08/2026) : sert à résoudre récursivement (voir
+ * resolveGroupMemberNodeIds ci-dessus) les vrais ids de nœuds membres à travers tout sous-groupe
+ * imbriqué — sans ça un groupe contenant un sous-groupe n'aurait aucun port dérivé pour les arêtes
+ * de ce sous-groupe (ses membres directs seraient des ids de groupe, jamais présents comme source/
+ * target d'une vraie TopologyEdge).
  *
  * Règle de correspondance capacité <-> (kind d'arête, membre source ou cible) — copie directe de
  * NODE_CAPABILITIES pour les kinds connectables (container/network/volume), plus "hosts" (source =
@@ -295,8 +324,8 @@ function portOffsetStyle(port: PortSpec, allPorts: PortSpec[]): CSSProperties | 
  *    un nœud host extérieur, ex: docker-local) — jamais l'inverse dans ce premier lot (grouper un
  *    nœud "host" lui-même avec d'autres nœuds n'est pas un cas réel supporté ici).
  */
-export function deriveGroupPorts(group: Pick<TopologyGroup, "nodeIds">, edges: TopologyEdge[]): PortSpec[] {
-  const memberIds = new Set(group.nodeIds);
+export function deriveGroupPorts(group: Pick<TopologyGroup, "nodeIds">, edges: TopologyEdge[], allGroups: TopologyGroup[]): PortSpec[] {
+  const memberIds = new Set(resolveGroupMemberNodeIds(group.nodeIds, allGroups));
   const capabilities = new Set<CapabilityId>();
   for (const edge of edges) {
     const sourceIn = memberIds.has(edge.source);
@@ -1031,11 +1060,19 @@ export interface GroupNodeData {
   group: TopologyGroup;
   ports: PortSpec[];
   onToggleCollapse?: () => void;
+  /**
+   * Nombre RÉEL de vrais TopologyNode transitivement contenus (groupes imbriqués, 13/08/2026 —
+   * voir resolveGroupMemberNodeIds ci-dessus) — calculé par l'appelant (TopologyGraph.tsx/
+   * TopologySubGraphPanel.tsx, qui seuls ont `allGroups` sous la main) plutôt qu'ici : `group.
+   * nodeIds.length` seul pourrait être un mélange de vrais nœuds ET de sous-groupes, jamais le bon
+   * compte à afficher à l'utilisateur.
+   */
+  realNodeCount: number;
 }
 
 /** Carte repliée d'un groupe — un seul nœud, comme un vrai TopologyNode, avec ses ports dérivés. */
 function GroupNodeImpl({ data, selected }: NodeProps) {
-  const { group, ports, onToggleCollapse } = data as unknown as GroupNodeData;
+  const { group, ports, onToggleCollapse, realNodeCount } = data as unknown as GroupNodeData;
   return (
     <div className={`topology-node topology-group-node${selected ? " is-selected" : ""}`}>
       {ports.map((port) => (
@@ -1067,7 +1104,7 @@ function GroupNodeImpl({ data, selected }: NodeProps) {
         </button>
       </div>
       <div className="topology-node__subtitle">
-        {group.nodeIds.length} élément{group.nodeIds.length > 1 ? "s" : ""} regroupé{group.nodeIds.length > 1 ? "s" : ""}
+        {realNodeCount} élément{realNodeCount > 1 ? "s" : ""} regroupé{realNodeCount > 1 ? "s" : ""}
       </div>
     </div>
   );

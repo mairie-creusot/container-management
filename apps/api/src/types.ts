@@ -873,8 +873,16 @@ export interface Topology {
 export interface TopologyGroup {
   id: string; // "group:<uuid>"
   label: string;
-  /** Ids de TopologyNode RÉELS regroupés — toujours >= 2 (voir topologyGroupsStore.ts#createGroup),
-   * jamais un id inventé ou un nœud déjà membre d'un autre groupe. */
+  /**
+   * Ids RÉELS regroupés — toujours >= 2 (voir topologyGroupsStore.ts#createGroup) : soit l'id d'un
+   * vrai TopologyNode existant dans le graphe actuel (ex "container:<id>"), soit l'id d'un AUTRE
+   * TopologyGroup déjà existant (ex "group:<uuid>") — groupes imbriqués (13/08/2026) : un groupe
+   * peut légitimement contenir d'autres groupes, jusqu'à 5 niveaux de profondeur et 256 vrais
+   * TopologyNode transitivement atteignables au total (voir topologyGroupsStore.ts#createGroup,
+   * CyclicGroupError/MaxGroupDepthExceededError/MaxGroupSizeExceededError). Jamais un id inventé ;
+   * un membre (nœud OU groupe) ne peut jamais être déjà membre d'un AUTRE groupe à la fois — cette
+   * règle-là reste vraie même pour un sous-groupe : il ne peut avoir qu'un seul parent.
+   */
   nodeIds: string[];
   /** Replié (une seule carte compacte) ou déplié (cadre contenant visuellement ses membres). */
   collapsed: boolean;
