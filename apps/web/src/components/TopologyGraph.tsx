@@ -231,7 +231,7 @@ const CREATE_TITLE: Record<CreatableKind, string> = {
  * que ContainersPage/VolumesPage/NetworksPage, en version minimale positionnée près du clic. */
 function CreatePopover({ kind, x, y, onClose }: CreatePopoverProps) {
   const dispatch = useAppDispatch();
-  const ref = useDismiss(onClose);
+  const { ref, style } = useDismiss(onClose, x, y);
   const [image, setImage] = useState("");
   const [name, setName] = useState("");
   const [ports, setPorts] = useState("");
@@ -289,7 +289,7 @@ function CreatePopover({ kind, x, y, onClose }: CreatePopoverProps) {
   const canSubmit = kind === "container" ? image.trim().length > 0 : name.trim().length > 0;
 
   return (
-    <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+    <div className="graph-popover" style={style} ref={ref}>
       <div className="graph-popover__title">{CREATE_TITLE[kind]}</div>
       <form onSubmit={handleSubmit}>
         {kind === "container" && (
@@ -509,9 +509,9 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
   // contenu vit dans un portail document.body (Modal.tsx), donc HORS de `ref` : sans ce garde-fou,
   // le premier clic à l'intérieur de la modal (un repo, un champ...) la refermerait aussitôt.
   // Modal.tsx gère alors seule Échap/clic-extérieur pour son propre contenu.
-  const ref = useDismiss(() => {
+  const { ref, style } = useDismiss(() => {
     if (!showGithubDeploy) onClose();
-  });
+  }, x, y);
 
   // Conteneurs "running" pour le sélecteur du formulaire "Nouveau Cron Job" — chargés seulement une
   // fois ce formulaire effectivement ouvert (inutile tant que ce choix n'a pas été fait). Même
@@ -560,7 +560,7 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
 
   if (showIacCreate) {
     return (
-      <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+      <div className="graph-popover" style={style} ref={ref}>
         <div className="graph-popover__title">Nouveau workspace Infra-as-code</div>
         <form onSubmit={handleCreateIacWorkspace}>
           <div className="field">
@@ -628,7 +628,7 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
 
   if (showCronJobCreate) {
     return (
-      <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+      <div className="graph-popover" style={style} ref={ref}>
         <div className="graph-popover__title">Nouveau Cron Job</div>
         <form onSubmit={handleCreateCronJob}>
           <div className="field">
@@ -746,7 +746,7 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
 
   if (showBackupCreate) {
     return (
-      <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+      <div className="graph-popover" style={style} ref={ref}>
         <div className="graph-popover__title">Nouvelle sauvegarde</div>
         <form onSubmit={handleCreateBackup}>
           <div className="field">
@@ -880,7 +880,7 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
 
   if (showTriggerCreate) {
     return (
-      <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+      <div className="graph-popover" style={style} ref={ref}>
         <div className="graph-popover__title">Nouveau déclencheur</div>
         <form onSubmit={handleCreateTrigger}>
           <div className="field">
@@ -998,7 +998,7 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
 
   if (showConditionCreate) {
     return (
-      <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+      <div className="graph-popover" style={style} ref={ref}>
         <div className="graph-popover__title">Nouvelle condition</div>
         <form onSubmit={handleCreateCondition}>
           <div className="field">
@@ -1071,7 +1071,7 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
 
   if (showActionCreate) {
     return (
-      <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+      <div className="graph-popover" style={style} ref={ref}>
         <div className="graph-popover__title">Nouvelle action</div>
         <form onSubmit={handleCreateAutomationAction}>
           <div className="field">
@@ -1360,7 +1360,7 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
     filteredAutomationActions.length > 0;
 
   return (
-    <div className="graph-popover graph-spotlight" style={{ left: x, top: y }} ref={ref}>
+    <div className="graph-popover graph-spotlight" style={style} ref={ref}>
       <div className="graph-spotlight__search">
         <IconSearch className="graph-spotlight__search-icon" />
         <input
@@ -1456,7 +1456,7 @@ interface RenamePopoverProps {
 /** Popover de renommage (menu contextuel d'un nœud conteneur) — POST /api/containers/:id/rename. */
 function RenamePopover({ containerId, initialName, x, y, onClose }: RenamePopoverProps) {
   const dispatch = useAppDispatch();
-  const ref = useDismiss(onClose);
+  const { ref, style } = useDismiss(onClose, x, y);
   const [name, setName] = useState(initialName);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1481,7 +1481,7 @@ function RenamePopover({ containerId, initialName, x, y, onClose }: RenamePopove
   }
 
   return (
-    <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+    <div className="graph-popover" style={style} ref={ref}>
       <div className="graph-popover__title">Renommer le conteneur</div>
       <form onSubmit={handleSubmit}>
         <div className="field">
@@ -1526,7 +1526,7 @@ interface GroupLabelPopoverProps {
  * Même pattern que RenamePopover ci-dessus (un seul champ texte).
  */
 function GroupLabelPopover({ title, initialLabel, submitLabel, x, y, onSubmit, onClose }: GroupLabelPopoverProps) {
-  const ref = useDismiss(onClose);
+  const { ref, style } = useDismiss(onClose, x, y);
   const [label, setLabel] = useState(initialLabel);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1544,7 +1544,7 @@ function GroupLabelPopover({ title, initialLabel, submitLabel, x, y, onSubmit, o
   }
 
   return (
-    <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+    <div className="graph-popover" style={style} ref={ref}>
       <div className="graph-popover__title">{title}</div>
       <form onSubmit={handleSubmit}>
         <div className="field">
@@ -1594,7 +1594,7 @@ interface NetworkConnectPopoverProps {
  */
 function NetworkConnectPopover({ containerId, excludeNetworkIds, x, y, onClose }: NetworkConnectPopoverProps) {
   const dispatch = useAppDispatch();
-  const ref = useDismiss(onClose);
+  const { ref, style } = useDismiss(onClose, x, y);
   const networks = useAppSelector((s) => s.networks.items);
   const [networkId, setNetworkId] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1627,7 +1627,7 @@ function NetworkConnectPopover({ containerId, excludeNetworkIds, x, y, onClose }
   }
 
   return (
-    <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+    <div className="graph-popover" style={style} ref={ref}>
       <div className="graph-popover__title">Connecter à un network</div>
       <form onSubmit={handleSubmit}>
         {options.length === 0 ? (

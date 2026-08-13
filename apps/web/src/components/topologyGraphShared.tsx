@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
+import { memo, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import {
   BaseEdge,
   EdgeLabelRenderer,
@@ -968,7 +968,38 @@ export const interiorNodeTypes = { graphNode: GraphNode, processNode: ProcessNod
 
 /** Ferme un popover au clic en dehors ou à Échap — même pattern que ContextMenu/Topbar. Partagé
  * par les popovers de création/renommage du graphe principal et par tout futur usage similaire. */
-export function useDismiss(onClose: () => void) {
+/**
+ * Position d'un popover ancré à un point de clic (x, y) TOUJOURS entièrement visible dans le
+ * viewport — bascule vers le haut/la gauche quand il n'y a pas la place en dessous/à droite
+ * (jamais un simple `Math.min` qui couperait quand même le popover, juste déplacé de l'autre
+ * côté). Suit la taille RÉELLE du contenu via ResizeObserver plutôt qu'une hauteur estimée à
+ * l'avance : un popover dont le contenu change après le premier rendu (recherche filtrée dans
+ * CreateSpotlight, formulaire qui affiche un champ de plus, message d'erreur qui apparaît...)
+ * reste entièrement visible à tout moment, pas seulement à l'ouverture — voir capture d'écran
+ * utilisateur du 13/08/2026 : la palette de création dépassait en bas de l'écran, rendant les
+ * dernières options (et le bouton de soumission des mini-formulaires) inatteignables.
+ */
+function useClampedPosition(ref: RefObject<HTMLElement>, x: number, y: number): CSSProperties {
+  const [size, setSize] = useState<{ width: number; height: number } | null>(null);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (entry) setSize({ width: entry.contentRect.width, height: entry.contentRect.height });
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [ref]);
+
+  const margin = 12;
+  if (!size) return { left: x, top: y };
+  const left = x + size.width + margin > window.innerWidth ? Math.max(margin, x - size.width) : x;
+  const top = y + size.height + margin > window.innerHeight ? Math.max(margin, y - size.height) : y;
+  return { left, top };
+}
+
+export function useDismiss(onClose: () => void, x: number, y: number): { ref: RefObject<HTMLDivElement>; style: CSSProperties } {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     function handlePointerDown(event: PointerEvent) {
@@ -984,5 +1015,6 @@ export function useDismiss(onClose: () => void) {
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [onClose]);
-  return ref;
+  const style = useClampedPosition(ref, x, y);
+  return { ref, style };
 }
