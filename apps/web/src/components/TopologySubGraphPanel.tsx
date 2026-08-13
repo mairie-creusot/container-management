@@ -1,13 +1,22 @@
 import { useEffect, useMemo, useState } from "react";
-import { ReactFlow, Background, applyNodeChanges, type Edge, type Node, type NodeChange } from "@xyflow/react";
+import { ReactFlow, Background, MiniMap, applyNodeChanges, type Edge, type Node, type NodeChange } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useAppDispatch, useAppSelector } from "@/hooks";
-import { fetchContainerProcesses } from "@/features/containers/containersSlice";
+import { apiGet, apiPut } from "@/api/client";
+import { canOperate } from "@/features/auth/authSlice";
+import { useConfirm } from "@/components/ConfirmProvider";
+import { fetchContainerProcesses, runContainerAction, type LifecycleAction } from "@/features/containers/containersSlice";
+import { removeVolume } from "@/features/volumes/volumesSlice";
+import { removeNetwork } from "@/features/networks/networksSlice";
+import { pushNotification } from "@/features/notifications/notificationsSlice";
+import { fetchTopology } from "@/features/topology/topologySlice";
 import { fetchImageHistory, fetchImages } from "@/features/images/imagesSlice";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import { ContainerConsoleBody } from "@/components/ContainerConsole";
 import { ContainerLogsBody } from "@/features/containers/ContainerLogs";
 import {
+  ACTION_LABEL,
+  MINIMAP_NODE_COLOR,
   attachmentToTopologyNode,
   buildTopologyEdges,
   deriveGroupPorts,
@@ -112,6 +121,7 @@ export default function TopologySubGraphPanel({
   onOpenDetail,
 }: TopologySubGraphPanelProps) {
   const dispatch = useAppDispatch();
+  const confirm = useConfirm();
   const [currentRootId, setCurrentRootId] = useState<string | null>(null);
   const [stack, setStack] = useState<string[]>([]);
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
@@ -120,6 +130,18 @@ export default function TopologySubGraphPanel({
   // ci-dessus (un groupe n'est pas un TopologyNode réel), même principe que TopologyGraph.tsx#groupMenu.
   const [groupMenu, setGroupMenu] = useState<{ x: number; y: number; group: TopologyGroup } | null>(null);
   const [viewMode, setViewMode] = useState<ViewMode>("dependencies");
+  const session = useAppSelector((s) => s.auth.session);
+  const operate = canOperate(session);
+  /**
+   * Disposition des membres DIRECTS d'un groupe déplacés à la main dans SA vue "composition
+   * interne" (retour utilisateur du 13/08/2026 : "laisse à l'utilisateur le choix de le replacer
+   * et de mémoriser leur emplacement") — GET/PUT /api/topology/groups/:id/positions, par
+   * utilisateur ET par groupe (voir services/topologyGroupInteriorPositionsStore.ts) : jamais le
+   * même stockage que `positions` du graphe principal (TopologyGraph.tsx), un même conteneur y a
+   * une position complètement différente selon le contexte. Prioritaire sur la disposition
+   * calculée (layeredGroupPositions) quand elle existe pour ce membre précis.
+   */
+  const [groupInteriorPositions, setGroupInteriorPositions] = useState<Record<string, { x: number; y: number }>>({});
 
   const processes = useAppSelector((s) => s.containers.processes);
   const processesStatus = useAppSelector((s) => s.containers.processesStatus);
@@ -150,14 +172,47 @@ export default function TopologySubGraphPanel({
    * l'utilisateur (fil d'Ariane) si un libellé réel existe. */
   const labelForId = (id: string): string => nodesById.get(id)?.label ?? groupsById.get(id)?.label ?? id;
 
+  // Recharge la disposition mémorisée dès qu'on entre dans un groupe différent (ou qu'on en sort) —
+  // {} tant que rien n'a encore été déplacé à la main dans CE groupe précis (voir
+  // groupInteriorPositions ci-dessus).
+  useEffect(() => {
+    if (!currentGroup) {
+      setGroupInteriorPositions({});
+      return;
+    }
+    let cancelled = false;
+    apiGet<Record<string, { x: number; y: number }>>(`/topology/groups/${encodeURIComponent(currentGroup.id)}/positions`)
+      .then((positions) => {
+        if (!cancelled) setGroupInteriorPositions(positions);
+      })
+      .catch(() => {
+        // Échec silencieux : la disposition calculée (layeredGroupPositions) reste un repli honnête,
+        // même pattern que le reste de ce panneau (aucune persistance n'est bloquante ici).
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentGroup?.id]);
+
   // Nouvelle racine (ouverture initiale OU drill-down récursif, voir drillInto plus bas) -> repart
   // sur la vue par défaut adaptée à SON kind : "shell" pour un conteneur (retour utilisateur du
   // 13/08/2026 : c'est la destination la plus utile, jamais une simple carte de dépendances pour
   // ce kind précis), "dependencies" pour tout le reste (aucun shell/logs/composition interne n'a
   // de sens pour un volume/network/host/nœud d'automatisation/etc., ni pour un groupe).
+  //
+  // Bug réel corrigé le 13/08/2026 (retour utilisateur : l'onglet Logs/Dépendances/Composition
+  // interne "se remet sur Shell" tout seul après quelques secondes, tuant au passage la connexion
+  // Logs avant même qu'elle ait fini de s'établir) : `nodesById` était en dépendance — recréé à
+  // CHAQUE rafraîchissement de la topologie (poll périodique de TopologyGraph.tsx, ~15s), donc
+  // d'IDENTITÉ toujours nouvelle même quand son CONTENU est inchangé. Cet effet se redéclenchait
+  // alors en boucle, réinitialisant `viewMode` sur la valeur par défaut à chaque poll — écrasant
+  // tout choix manuel de l'utilisateur (Logs, Dépendances, Composition interne) quelques secondes
+  // après l'avoir fait. Seul un changement RÉEL de racine (nouvelle navigation) doit rejouer ce
+  // calcul — `nodesById` reste lu à l'intérieur (closure), jamais dans les dépendances.
   useEffect(() => {
     setViewMode(currentRootId && nodesById.get(currentRootId)?.kind === "container" ? "shell" : "dependencies");
-  }, [currentRootId, nodesById]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentRootId]);
   const rootNode = currentRootId ? nodesById.get(currentRootId) ?? null : null;
   const rawRootId = currentRootId ? idWithoutPrefix(currentRootId) : "";
 
@@ -258,9 +313,13 @@ export default function TopologySubGraphPanel({
       setFlowNodes([]);
       return;
     }
-    const positions = currentGroup
+    // `groupInteriorPositions` (mémorisée, voir sa définition plus haut) est prioritaire membre par
+    // membre sur la disposition calculée — un membre jamais déplacé à la main retombe sur
+    // layeredGroupPositions, jamais une position vide/inventée.
+    const computedPositions = currentGroup
       ? layeredGroupPositions(neighborIds, groupInternalEdges)
       : radialPositions(currentRootId, neighborIds, DEPENDENCY_RADIUS);
+    const positions = currentGroup ? { ...computedPositions, ...groupInteriorPositions } : computedPositions;
     const ids = currentGroup ? neighborIds : [currentRootId, ...neighborIds];
     setFlowNodes(
       ids
@@ -387,6 +446,19 @@ export default function TopologySubGraphPanel({
     setFlowNodes((nds) => applyNodeChanges(changes, nds));
   }
 
+  /** Mémorise la position d'UN membre glissé à la main dans la vue "composition interne" d'un
+   * groupe (retour utilisateur du 13/08/2026) — PUT /api/topology/groups/:id/positions, fusion
+   * plutôt que remplacement complet pour ne jamais perdre le placement déjà mémorisé d'un AUTRE
+   * membre non touché par ce geste précis. No-op hors du contexte "racine = groupe" (la vue
+   * dépendances classique reste, comme avant, une exploration ponctuelle sans persistance) et pour
+   * un viewer (operate false, aucune route mutante ne doit être appelée pour ce rôle). */
+  function handleNodeDragStop(_event: unknown, node: Node) {
+    if (!currentGroup || !operate) return;
+    const next = { ...groupInteriorPositions, [node.id]: { x: node.position.x, y: node.position.y } };
+    setGroupInteriorPositions(next);
+    void apiPut(`/topology/groups/${encodeURIComponent(currentGroup.id)}/positions`, { positions: next });
+  }
+
   /** Re-centre le sous-graphe sur `id` (drill-down récursif) — double-clic sur un nœud du
    * sous-graphe ou "Visualiser ses dépendances" du menu contextuel. No-op sur la racine actuelle
    * (déjà affichée). Continue de fonctionner à l'identique dans ce panneau plein écran. */
@@ -447,6 +519,57 @@ export default function TopologySubGraphPanel({
   // existante — jamais affiché pour un simple nœud conteneur/volume/etc.).
   const isGroupNavigation = [...stack, ...(currentRootId ? [currentRootId] : [])].some((id) => groupsById.has(id));
 
+  /** Actions réelles conteneur/volume/network — retour utilisateur du 13/08/2026 : "le clic droit
+   * n'est pas sur le node il manque supprimer ou autre element aussi", le menu contextuel de ce
+   * panneau se limitait à "Voir le détail"/"Visualiser ses dépendances", contrairement à celui du
+   * graphe principal (TopologyGraph.tsx#handleContainerAction/handleRemoveVolume/
+   * handleRemoveNetwork, mêmes thunks/confirmations réutilisés ici à l'identique — aucune logique
+   * dupliquée avec un comportement différent). `dispatch(fetchTopology())` après succès : ce
+   * panneau reçoit `topology` en PROP depuis TopologyGraph.tsx (pas de fetch propre), il faut donc
+   * explicitement redéclencher le rafraîchissement partagé pour voir l'effet ici aussi. */
+  async function handleContainerAction(id: string, name: string, action: LifecycleAction) {
+    if (action === "stop" || action === "remove") {
+      const ok = await confirm({
+        title: `${ACTION_LABEL[action]} le conteneur`,
+        description:
+          action === "remove"
+            ? `Confirmer la suppression de "${name}" ? Cette action est irréversible.`
+            : `Confirmer l'arrêt de "${name}" ?`,
+        confirmLabel: ACTION_LABEL[action],
+        variant: "danger",
+      });
+      if (!ok) return;
+    }
+    const result = await dispatch(runContainerAction({ id, action }));
+    if (runContainerAction.fulfilled.match(result)) dispatch(fetchTopology());
+  }
+
+  async function handleRemoveVolume(name: string) {
+    const ok = await confirm({
+      title: "Supprimer le volume",
+      description: `Confirmer la suppression du volume "${name}" ? Les données qu'il contient seront perdues.`,
+      confirmLabel: "Supprimer",
+      variant: "danger",
+    });
+    if (!ok) return;
+    const result = await dispatch(removeVolume({ name }));
+    if (removeVolume.fulfilled.match(result)) dispatch(fetchTopology());
+    else dispatch(pushNotification({ level: "error", message: result.payload ?? "Échec de la suppression du volume." }));
+  }
+
+  async function handleRemoveNetwork(id: string, name: string) {
+    const ok = await confirm({
+      title: "Supprimer le network",
+      description: `Confirmer la suppression du network "${name}" ?`,
+      confirmLabel: "Supprimer",
+      variant: "danger",
+    });
+    if (!ok) return;
+    const result = await dispatch(removeNetwork({ id, name }));
+    if (removeNetwork.fulfilled.match(result)) dispatch(fetchTopology());
+    else dispatch(pushNotification({ level: "error", message: result.payload ?? "Échec de la suppression du network." }));
+  }
+
   function nodeMenuItems(node: TopologyNode): ContextMenuItem[] {
     const items: ContextMenuItem[] = [{ label: "Voir le détail", onClick: () => onOpenDetail(node) }];
     // `nodesById.has(node.id)` exclut le drilldown sur une brique (TopologyNode synthétique
@@ -455,6 +578,28 @@ export default function TopologySubGraphPanel({
     // sous-graphe n'aurait rien de réel à recentrer dessus.
     if (node.id !== currentRootId && nodesById.has(node.id)) {
       items.push({ label: "Visualiser ses dépendances", onClick: () => drillInto(node.id) });
+    }
+    if (!operate) return items;
+    // Une brique (id absent de `nodesById`, voir ci-dessus) n'est qu'une vue de lecture d'un
+    // attachement — aucune action de cycle de vie propre ici (déjà proposées, le cas échéant,
+    // depuis le vrai nœud conteneur qui la porte).
+    if (!nodesById.has(node.id)) return items;
+    if (node.kind === "container") {
+      const id = idWithoutPrefix(node.id);
+      if (node.status === "running") {
+        items.push({ label: "Arrêter", onClick: () => void handleContainerAction(id, node.label, "stop") });
+      } else {
+        items.push({ label: "Démarrer", onClick: () => void handleContainerAction(id, node.label, "start") });
+      }
+      items.push({ label: "Redémarrer", onClick: () => void handleContainerAction(id, node.label, "restart") });
+      items.push({ label: "Supprimer", danger: true, onClick: () => void handleContainerAction(id, node.label, "remove") });
+    } else if (node.kind === "volume") {
+      items.push({ label: "Supprimer", danger: true, onClick: () => void handleRemoveVolume(idWithoutPrefix(node.id)) });
+    } else if (node.kind === "network") {
+      const id = idWithoutPrefix(node.id);
+      if (!["bridge", "host", "none"].includes(node.label)) {
+        items.push({ label: "Supprimer", danger: true, onClick: () => void handleRemoveNetwork(id, node.label) });
+      }
     }
     return items;
   }
@@ -584,6 +729,7 @@ export default function TopologySubGraphPanel({
               nodeTypes={nodeTypes}
               edgeTypes={edgeTypes}
               onNodesChange={handleNodesChange}
+              onNodeDragStop={handleNodeDragStop}
               onNodeDoubleClick={(_event, node) => drillInto(node.id)}
               onNodeContextMenu={handleNodeContextMenu}
               nodesConnectable={false}
@@ -593,6 +739,21 @@ export default function TopologySubGraphPanel({
               minZoom={0.3}
             >
               <Background gap={20} size={1.6} color="var(--color-text-faint)" />
+              {/* Manquait (retour utilisateur du 13/08/2026) — même composant/couleurs que le
+                  graphe principal (TopologyGraph.tsx), pas de bouton "grille" ici en revanche
+                  (toujours affichée : ce sous-graphe reste une exploration ponctuelle et
+                  généralement bien plus petite que le graphe principal). */}
+              <MiniMap
+                position="top-left"
+                nodeColor={(n) =>
+                  n.type === "topologyGroupNode" ? "#e879f9" : MINIMAP_NODE_COLOR[(n.data as unknown as TopologyNode).kind]
+                }
+                nodeStrokeWidth={0}
+                nodeBorderRadius={4}
+                maskColor="rgba(11, 12, 16, 0.75)"
+                pannable
+                zoomable
+              />
             </ReactFlow>
           </div>
         </>

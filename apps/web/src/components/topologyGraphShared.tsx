@@ -30,6 +30,7 @@ import {
   IconVolumes,
 } from "@/components/icons";
 import type { TopologyEdge, TopologyEdgePort, TopologyGroup, TopologyNode, TopologyNodeAttachment } from "@/types";
+import type { LifecycleAction } from "@/features/containers/containersSlice";
 
 /**
  * Éléments du graphe de topologie partagés entre le graphe principal (TopologyGraph.tsx) et le
@@ -82,6 +83,18 @@ export const KIND_ICON: Record<TopologyNode["kind"], (props: { className?: strin
   // utilisée pour "Démarrer"/"Exécuter maintenant" ailleurs dans l'appli), même sens ici : cette
   // action "joue" la commande configurée.
   "automation-action": IconPlay,
+};
+
+/** Libellés d'action conteneur (start/stop/restart/remove) — source UNIQUE partagée entre
+ * TopologyGraph.tsx (menu contextuel du graphe principal) et TopologySubGraphPanel.tsx (menu
+ * contextuel du sous-graphe, retour utilisateur du 13/08/2026 : "le clic droit n'est pas sur le
+ * node il manque supprimer ou autre element aussi" — les mêmes actions doivent être accessibles
+ * aux DEUX endroits, jamais une liste dupliquée qui pourrait diverger). */
+export const ACTION_LABEL: Record<LifecycleAction, string> = {
+  start: "Démarrer",
+  stop: "Arrêter",
+  restart: "Redémarrer",
+  remove: "Supprimer",
 };
 
 /** Couleurs de la MiniMap par type de nœud — mêmes valeurs que celles utilisées pour l'icône du
@@ -1220,8 +1233,14 @@ export function layeredGroupPositions(
     const layer = layerById.get(id) ?? 0;
     (membersByLayer.get(layer) ?? membersByLayer.set(layer, []).get(layer)!).push(id);
   }
-  const LAYER_WIDTH = 260;
-  const ROW_HEIGHT = 110;
+  // Espacement TRÈS généreux (retour utilisateur du 13/08/2026, deux fois confirmé : les cartes se
+  // touchaient encore avec un espacement plus timide) — une carte conteneur avec plusieurs badges
+  // ET plusieurs attachements volumes (ex : quai-dev-ldap-1, 2 badges + 2 volumes) peut dépasser
+  // 300px de hauteur réelle. Mieux vaut trop d'espace par défaut que des cartes qui se chevauchent :
+  // l'utilisateur peut de toute façon resserrer lui-même et mémoriser sa propre disposition ensuite
+  // (voir persistance côté TopologySubGraphPanel.tsx).
+  const LAYER_WIDTH = 420;
+  const ROW_HEIGHT = 320;
   const positions: Record<string, { x: number; y: number }> = {};
   for (const [layer, ids] of membersByLayer) {
     ids.forEach((id, row) => {

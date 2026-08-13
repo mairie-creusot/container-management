@@ -74,6 +74,7 @@ import { fetchRoutes } from "@/features/reverseProxy/reverseProxySlice";
 import { fetchNotificationChannels } from "@/features/notificationChannels/notificationChannelsSlice";
 import type { IacEngine } from "@/types";
 import {
+  ACTION_LABEL,
   CAPABILITY_DEFS,
   KIND_ICON,
   MINIMAP_NODE_COLOR,
@@ -132,12 +133,6 @@ const COLUMN_X: Record<TopologyNode["kind"], number> = {
 };
 const ROW_HEIGHT = 130;
 const NETWORK_DRIVERS = ["bridge", "overlay", "host", "none"];
-const ACTION_LABEL: Record<LifecycleAction, string> = {
-  start: "Démarrer",
-  stop: "Arrêter",
-  restart: "Redémarrer",
-  remove: "Supprimer",
-};
 
 // --- Regroupement de nœuds ("encapsulation façon Railway/Logisim", voir topologyGraphShared.tsx
 // et TopologyGroup) — largeur/hauteur APPROXIMATIVES d'une carte .topology-node (voir topology.css,

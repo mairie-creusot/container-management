@@ -27,6 +27,13 @@
  *                                     operator/admin. 404 si le groupe n'existe pas/plus.
  * DELETE /api/topology/groups/:id  — dissocie le groupe (les membres redeviennent des nœuds
  *                                     autonomes, jamais supprimés) — operator/admin.
+ *
+ * GET /api/topology/groups/:id/positions — disposition des MEMBRES DIRECTS de ce groupe déplacés à
+ *                                 la main dans sa vue "composition interne" (retour utilisateur du
+ *                                 13/08/2026), par utilisateur ET par groupe — jamais mélangée avec
+ *                                 /api/topology/positions (graphe principal, voir
+ *                                 topologyGroupInteriorPositionsStore.ts). {} si rien déplacé.
+ * PUT /api/topology/groups/:id/positions — { positions } remplace cette disposition — operator/admin.
  */
 
 import type { FastifyInstance } from "fastify";
@@ -36,6 +43,11 @@ import {
   savePositionsForUser,
   type NodePositions,
 } from "../services/topologyPositionsStore.js";
+import {
+  getGroupInteriorPositions,
+  purgeStaleGroupInteriorPositions,
+  saveGroupInteriorPositions,
+} from "../services/topologyGroupInteriorPositionsStore.js";
 import {
   createGroup,
   CyclicGroupError,
@@ -127,6 +139,27 @@ export default async function topologyRoutes(fastify: FastifyInstance): Promise<
   fastify.delete<{ Params: { id: string } }>("/api/topology/groups/:id", async (request, reply) => {
     const ok = await deleteGroup(request.params.id);
     if (!ok) return reply.code(404).send({ error: "Group not found" });
+    return reply.send({ ok: true });
+  });
+
+  fastify.get<{ Params: { id: string } }>("/api/topology/groups/:id/positions", async (request, reply) => {
+    // Purge d'abord silencieusement les entrées dont l'id de membre n'est plus un membre DIRECT
+    // actuel de CE groupe (même esprit que GET /api/topology/positions ci-dessus) — 404 explicite si
+    // le groupe lui-même n'existe plus/pas (jamais une réponse {} trompeuse qui laisserait croire
+    // qu'il existe simplement sans rien de déplacé).
+    const topology = await getTopology();
+    const group = topology.groups.find((g) => g.id === request.params.id);
+    if (!group) return reply.code(404).send({ error: "Group not found" });
+    const liveMemberIds = new Set(group.nodeIds);
+    return reply.send(await purgeStaleGroupInteriorPositions(request.authSession!.username, group.id, liveMemberIds));
+  });
+
+  fastify.put<{ Params: { id: string }; Body: SavePositionsBody }>("/api/topology/groups/:id/positions", async (request, reply) => {
+    const topology = await getTopology();
+    const group = topology.groups.find((g) => g.id === request.params.id);
+    if (!group) return reply.code(404).send({ error: "Group not found" });
+    const positions = request.body?.positions ?? {};
+    await saveGroupInteriorPositions(request.authSession!.username, group.id, positions);
     return reply.send({ ok: true });
   });
 }
