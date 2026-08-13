@@ -24,12 +24,14 @@ import type {
   ContainerDetail,
   ContainerMount,
   ContainerPortMapping,
+  ContainerProcessInspection,
   ContainerProcessList,
   ContainerRef,
   DockerHostInfo,
   DockerNetwork,
   DockerVolume,
   Environment,
+  FileHexdump,
   ImageHistoryLayer,
   VolumeFileEntry,
 } from "../types.js";
@@ -825,6 +827,318 @@ export async function getContainerProcesses(id: string): Promise<ContainerProces
   };
 }
 
+// ---------------------------------------------------------------------------------------
+// Actions sur UN process précis d'un conteneur (inspect/kill/restart) — voir
+// routes/containers.ts#POST /api/containers/:id/processes/:pid/{kill,restart} et GET .../inspect.
+//
+// IMPORTANT — convention de PID (vérifié en direct) : `docker top`/getContainerProcesses ci-dessus
+// renvoie des PID côté HÔTE (ce que le noyau hôte voit). Ce n'est PAS ce qu'on utilise ici : les
+// fonctions ci-dessous attendent un `pid` dans la numérotation que LE CONTENEUR CIBLE SE VOIT
+// LUI-MÊME (son propre namespace PID) — exactement la même convention que
+// services/containerInternals.ts#getContainerProcessDetails, qui est la source attendue de ce
+// `pid` côté frontend. Un `docker exec <container> kill <pid>` avec cette valeur agit alors
+// directement dans le bon espace de noms, sans aucune traduction hôte<->conteneur : les deux
+// numérotations sont totalement différentes (un même process peut porter un PID à 6 chiffres côté
+// hôte et un PID à un chiffre côté conteneur) et ne doivent jamais être mélangées.
+//
+// `ps` n'est volontairement jamais requis ici (souvent absent des images minimales) : uniquement
+// `kill` (quasi toujours un builtin de `sh`, sinon résolu via PATH comme `/bin/kill`) et des
+// lectures brutes de /proc, même esprit que containerInternals.ts.
+// ---------------------------------------------------------------------------------------
+
+/** Code de sortie CONVENTIONNEL (choisi ici, pas un standard POSIX) utilisé par CMDLINE_SCRIPT
+ * ci-dessous pour signaler que `/proc/<pid>` n'existe plus — distinct de tout code de sortie que
+ * `cat`/le shell pourraient eux-mêmes produire (1, 2, 126, 127...). */
+const PROC_ENOENT_EXIT = 91;
+/** Code de sortie générique pour "ce sous-chemin de /proc/<pid> est illisible" (permission refusée
+ * par le noyau pour CE process précis, ou process disparu entre deux exec séparés — voir
+ * inspectContainerProcess : les deux causes sont traitées de la même façon, honnêtement, en
+ * omettant juste le champ concerné plutôt qu'en les distinguant à tort). */
+const PROC_UNREADABLE_EXIT = 92;
+
+const CMDLINE_SCRIPT = `pid="$1"
+if [ ! -d "/proc/$pid" ]; then
+  exit ${PROC_ENOENT_EXIT}
+fi
+cat "/proc/$pid/cmdline" 2>/dev/null
+exit 0
+`;
+
+const ENVIRON_SCRIPT = `pid="$1"
+if [ ! -r "/proc/$pid/environ" ]; then
+  exit ${PROC_UNREADABLE_EXIT}
+fi
+cat "/proc/$pid/environ" 2>/dev/null
+exit 0
+`;
+
+/** `readlink` brut (pas `-f`) sur chaque `/proc/<pid>/fd/N` — c'est la cible TELLE QUE le noyau la
+ * rapporte (chemin de fichier réel, ou `socket:[inode]`/`pipe:[inode]` pour un non-fichier), jamais
+ * résolue plus loin. Glob `/proc/$pid/fd/*` littéral si le dossier est vide/inaccessible : le
+ * `[ -e "$f" ]` suivant l'ignore silencieusement (même tolérance que LIST_DIR_SCRIPT plus haut). */
+const FD_SCRIPT = `pid="$1"
+if [ ! -d "/proc/$pid/fd" ]; then
+  exit ${PROC_UNREADABLE_EXIT}
+fi
+for f in "/proc/$pid/fd"/*; do
+  [ -e "$f" ] || continue
+  readlink "$f" 2>/dev/null
+done
+exit 0
+`;
+
+/** `kill -s <signal> <pid>` — POSIX, fonctionne aussi bien comme builtin `sh` que via `/bin/kill`
+ * résolu par PATH, jamais besoin de dépendre de `ps`. Code de sortie non-zéro = échec RÉEL (process
+ * déjà mort -> "No such process", permission refusée...), jamais avalé. */
+const KILL_SCRIPT = `sig="$1"
+pid="$2"
+kill -s "$sig" "$pid"
+exit $?
+`;
+
+/** Simple test d'existence — utilisé par restartContainerProcess pour vérifier RÉELLEMENT (pas
+ * juste supposer depuis le code de sortie de `kill`, qui ne confirme que la LIVRAISON du signal)
+ * qu'un process a bien disparu après un signal TERM. */
+const PROC_EXISTS_SCRIPT = `pid="$1"
+if [ -d "/proc/$pid" ]; then
+  exit 0
+else
+  exit 1
+fi
+`;
+
+const EXEC_CAPTURE_TIMEOUT_MS = 5000;
+
+interface ExecCaptureResult {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * Exécute une commande non interactive dans un conteneur et capture stdout/stderr SÉPARÉMENT
+ * (contrairement à cronJobsScheduler.ts#runCommandInContainer qui les entrelace pour l'affichage
+ * humain : ici on a besoin de distinguer un message d'erreur `kill`/`cat` précis du reste). Même
+ * mécanisme dockerode que openContainerConsole/listVolumeFiles ci-dessus (container.exec +
+ * exec.start hijacké + docker.modem.demuxStream), Tty:false. Bornée par un timeout (même esprit que
+ * PING_TIMEOUT_MS/STATS_TIMEOUT_MS) : une lecture /proc ou un envoi de signal ne devrait jamais
+ * bloquer, mais un exec qui ne rendrait jamais la main ne doit pas geler la requête HTTP.
+ */
+async function execCapture(docker: Docker, container: Docker.Container, cmd: string[]): Promise<ExecCaptureResult> {
+  const exec = await container.exec({ Cmd: cmd, AttachStdout: true, AttachStderr: true, Tty: false });
+  const stream: NodeJS.ReadableStream = await exec.start({ hijack: true, Tty: false });
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  const stdoutSink = new PassThrough();
+  const stderrSink = new PassThrough();
+  stdoutSink.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+  stderrSink.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (docker.modem as any).demuxStream(stream, stdoutSink, stderrSink);
+
+  await withTimeout(
+    new Promise<void>((resolve) => stream.once("end", () => resolve())),
+    EXEC_CAPTURE_TIMEOUT_MS,
+    "docker exec (process action)",
+  );
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const inspectResult: any = await exec.inspect();
+  const exitCode: number | null = typeof inspectResult?.ExitCode === "number" ? inspectResult.ExitCode : null;
+  return {
+    exitCode,
+    stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+    stderr: Buffer.concat(stderrChunks).toString("utf8"),
+  };
+}
+
+function assertValidPid(pid: number): void {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw new Error(`Invalid pid: ${pid}`);
+  }
+}
+
+/** /proc/<pid>/cmdline et /proc/<pid>/environ terminent par un octet NUL final (convention noyau) —
+ * on ne retire QUE ce dernier séparateur avant de découper, pour ne jamais perdre un champ vide
+ * légitime au milieu (ex: un argument "" explicite). Chaîne vide en entrée -> [] (pas [""]). */
+export function parseNulSeparated(raw: string): string[] {
+  const trimmed = raw.endsWith("\0") ? raw.slice(0, -1) : raw;
+  if (trimmed.length === 0) return [];
+  return trimmed.split("\0");
+}
+
+/** `/proc/<pid>/environ` est une suite de `CLE=valeur` séparés par NUL — une entrée sans `=` (ne
+ * devrait normalement jamais arriver) est ignorée plutôt que de fausser le résultat. */
+export function parseEnviron(raw: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const entry of parseNulSeparated(raw)) {
+    const eq = entry.indexOf("=");
+    if (eq <= 0) continue;
+    result[entry.slice(0, eq)] = entry.slice(eq + 1);
+  }
+  return result;
+}
+
+async function requireRunningContainer(docker: Docker, id: string): Promise<Docker.Container> {
+  const container = docker.getContainer(id);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const info: any = await container.inspect();
+  if (info?.State?.Status !== "running") {
+    throw new Error(`Container "${id}" is not running (state: ${info?.State?.Status ?? "unknown"})`);
+  }
+  return container;
+}
+
+/** Lit la cmdline d'un pid (utilisée par inspectContainerProcess ET restartContainerProcess) — lève
+ * une erreur "process not found" honnête (jamais un tableau vide silencieux) si `/proc/<pid>` n'existe
+ * déjà plus. */
+async function readCmdline(docker: Docker, container: Docker.Container, id: string, pid: number): Promise<string[]> {
+  const result = await execCapture(docker, container, ["/bin/sh", "-c", CMDLINE_SCRIPT, "quai-proc", String(pid)]);
+  if (result.exitCode === PROC_ENOENT_EXIT) {
+    throw new Error(`Process ${pid} not found in container "${id}" (already exited)`);
+  }
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr.trim() || `Failed to read /proc/${pid}/cmdline in container "${id}" (exit code ${result.exitCode})`);
+  }
+  return parseNulSeparated(result.stdout);
+}
+
+/**
+ * Détail d'UN process (`/proc/<pid>/{cmdline,environ,fd}`), lu DEPUIS L'INTÉRIEUR du conteneur —
+ * voir ContainerProcessInspection (types.ts) pour le contrat exact, notamment `partial`. 404 honnête
+ * (erreur "not found... already exited") si le pid a disparu entre l'affichage de la liste et cet
+ * appel — situation normale, jamais masquée par un résultat vide.
+ */
+export async function inspectContainerProcess(id: string, pid: number): Promise<ContainerProcessInspection> {
+  assertValidPid(pid);
+  const docker = await requireReachableClient();
+  const container = await requireRunningContainer(docker, id);
+
+  const cmdline = await readCmdline(docker, container, id, pid);
+
+  const [environResult, fdResult] = await Promise.all([
+    execCapture(docker, container, ["/bin/sh", "-c", ENVIRON_SCRIPT, "quai-proc", String(pid)]),
+    execCapture(docker, container, ["/bin/sh", "-c", FD_SCRIPT, "quai-proc", String(pid)]),
+  ]);
+  const environAvailable = environResult.exitCode === 0;
+  const fdAvailable = fdResult.exitCode === 0;
+
+  return {
+    pid,
+    cmdline,
+    ...(environAvailable ? { environ: parseEnviron(environResult.stdout) } : {}),
+    ...(fdAvailable
+      ? { openFiles: fdResult.stdout.split("\n").map((line) => line.trim()).filter((line) => line.length > 0) }
+      : {}),
+    ...(!environAvailable || !fdAvailable ? { partial: true } : {}),
+  };
+}
+
+/**
+ * Résultat d'une action de kill/restart de process — `wasPidOne: true` signifie qu'AUCUNE action
+ * n'a été exécutée (garde-fou, voir ci-dessous) : c'est à l'appelant (routes/containers.ts) de
+ * rediriger explicitement vers l'action existante d'arrêt/redémarrage de conteneur, jamais un
+ * effet de bord silencieux ici.
+ */
+export interface ContainerProcessActionResult {
+  wasPidOne: boolean;
+}
+
+/**
+ * Envoie un signal RÉEL à un process du conteneur (`docker exec <id> kill -s <signal> <pid>`).
+ *
+ * GARDE-FOU CRITIQUE : pid===1 n'est JAMAIS tué ici — tuer le PID 1 d'un conteneur revient à
+ * l'arrêter entièrement (le noyau termine le namespace dès que son process racine meurt), une
+ * action bien plus lourde déjà couverte par POST /api/containers/:id/stop (stopContainer
+ * ci-dessus, réutilisée telle quelle par la route, jamais dupliquée ici via un second chemin
+ * `docker stop`). On retourne `{ wasPidOne: true }` sans exécuter le moindre `kill`.
+ *
+ * Un exit code non-zéro de `kill` (process déjà mort -> "No such process", permission refusée...)
+ * fait toujours lever une erreur honnête — jamais un succès silencieux.
+ */
+export async function killContainerProcess(
+  id: string,
+  pid: number,
+  signal: "TERM" | "KILL",
+): Promise<ContainerProcessActionResult> {
+  assertValidPid(pid);
+  if (pid === 1) {
+    return { wasPidOne: true };
+  }
+  const docker = await requireReachableClient();
+  const container = await requireRunningContainer(docker, id);
+
+  const result = await execCapture(docker, container, ["/bin/sh", "-c", KILL_SCRIPT, "quai-kill", signal, String(pid)]);
+  if (result.exitCode !== 0) {
+    const detail = result.stderr.trim() || result.stdout.trim();
+    throw new Error(detail || `kill -${signal} ${pid} failed in container "${id}" (exit code ${result.exitCode})`);
+  }
+  return { wasPidOne: false };
+}
+
+/** Le TERM initial de restartContainerProcess ci-dessous laisse une seconde au process pour
+ * s'arrêter proprement avant de vérifier (RÉELLEMENT, via /proc — pas en supposant depuis le code
+ * de sortie de `kill`) s'il faut escalader en KILL. */
+const RESTART_TERM_GRACE_MS = 1000;
+
+/**
+ * Redémarre un process précis : tue-le (TERM, une seconde de grâce, KILL si toujours là) PUIS
+ * relance EXACTEMENT la même ligne de commande (lue depuis /proc AVANT de tuer quoi que ce soit —
+ * "devis de faisabilité d'abord", voir ci-dessous) via un nouvel exec DÉTACHÉ (on ne veut pas
+ * attendre la fin d'un process qui, par nature, tourne indéfiniment).
+ *
+ * GARDE-FOU CRITIQUE (même principe que killContainerProcess) : pid===1 n'est JAMAIS relancé ici —
+ * "redémarrer" le PID 1 revient à redémarrer le conteneur entier, déjà couvert par
+ * POST /api/containers/:id/restart (restartContainer ci-dessus). `{ wasPidOne: true }` sans aucune
+ * action, à l'appelant de rediriger.
+ *
+ * Si la cmdline est vide/introuvable, échoue EXPLICITEMENT avant tout kill : on ne devine jamais
+ * une commande de remplacement, et on ne veut surtout pas tuer un process qu'on ne pourra plus
+ * relancer derrière.
+ */
+export async function restartContainerProcess(id: string, pid: number): Promise<ContainerProcessActionResult> {
+  assertValidPid(pid);
+  if (pid === 1) {
+    return { wasPidOne: true };
+  }
+  const docker = await requireReachableClient();
+  const container = await requireRunningContainer(docker, id);
+
+  // Devis de faisabilité D'ABORD : lu avant tout kill (voir docstring ci-dessus).
+  const cmdline = await readCmdline(docker, container, id, pid);
+  if (cmdline.length === 0) {
+    throw new Error(
+      `Cannot restart process ${pid} in container "${id}": its command line is empty/unreadable — refusing to guess a replacement command`,
+    );
+  }
+
+  const termResult = await execCapture(docker, container, ["/bin/sh", "-c", KILL_SCRIPT, "quai-restart", "TERM", String(pid)]);
+  if (termResult.exitCode !== 0) {
+    const detail = termResult.stderr.trim() || termResult.stdout.trim();
+    throw new Error(detail || `kill -TERM ${pid} failed in container "${id}" (exit code ${termResult.exitCode})`);
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, RESTART_TERM_GRACE_MS));
+
+  const stillAlive = await execCapture(docker, container, ["/bin/sh", "-c", PROC_EXISTS_SCRIPT, "quai-restart", String(pid)]);
+  if (stillAlive.exitCode === 0) {
+    const killResult = await execCapture(docker, container, ["/bin/sh", "-c", KILL_SCRIPT, "quai-restart", "KILL", String(pid)]);
+    if (killResult.exitCode !== 0) {
+      const detail = killResult.stderr.trim() || killResult.stdout.trim();
+      throw new Error(
+        detail || `kill -KILL ${pid} failed in container "${id}" after TERM did not stop it (exit code ${killResult.exitCode})`,
+      );
+    }
+  }
+
+  // Relance EXACTEMENT la même cmdline — argv brut lu depuis /proc, jamais rejoué via un shell (pas
+  // de "sh -c", pas de ré-interprétation/échappement). Détaché : on ne veut pas attendre sa fin.
+  const newExec = await container.exec({ Cmd: cmdline, AttachStdout: false, AttachStderr: false, Tty: false });
+  await newExec.start({ Detach: true });
+
+  return { wasPidOne: false };
+}
+
 /**
  * Historique des couches de l'image d'un conteneur (équivalent `docker history <image>`) — voir
  * types.ts#ImageHistoryLayer. `reference` est une référence Docker réelle ("name:tag" ou id),
@@ -1288,4 +1602,200 @@ export async function getDockerEnvironments(): Promise<Environment[]> {
   } catch {
     return demoStore.environments.filter((e) => e.orchestrator === "swarm" || e.orchestrator === "compose");
   }
+}
+
+// ---------------------------------------------------------------------------------------
+// Hexdump en lecture seule d'un fichier ARBITRAIRE dans un conteneur EN COURS D'EXÉCUTION —
+// voir routes/containers.ts#GET /api/containers/:id/files/hexdump (ADMIN UNIQUEMENT côté route :
+// surface plus sensible que listVolumeFiles ci-dessus, qui ne fait que lister des noms/tailles —
+// ici on lit du contenu binaire brut, potentiellement un secret sur disque). `docker exec`
+// (container.exec, même mécanisme que openContainerConsole plus haut) plutôt qu'un conteneur
+// helper séparé : contrairement à un volume, un fichier "dans un conteneur" n'a de sens que dans
+// le namespace de CE conteneur précis (pas de montage générique équivalent).
+// ---------------------------------------------------------------------------------------
+
+/**
+ * Plafond DUR, jamais dépassé même si le client demande plus (voir readContainerFileHexdump) —
+ * un dump illimité pourrait exfiltrer un fichier entier gigantesque ou saturer la mémoire du
+ * process API (tout le stdout de l'exec est bufferisé en mémoire avant d'être renvoyé, voir
+ * plus bas). Une demande au-delà est plafonnée SILENCIEUSEMENT à cette valeur plutôt que
+ * rejetée en erreur — `truncated` dans la réponse le signale honnêtement au frontend.
+ */
+const HEXDUMP_MAX_LENGTH = 8192;
+
+/**
+ * Valide le chemin absolu demandé par le client. Plus strict encore que resolveVolumeSubPath
+ * ci-dessus (lecture de contenu binaire arbitraire, pas juste un listing de noms) :
+ * - DOIT commencer par "/" (chemin absolu POSIX dans le conteneur cible) — un chemin relatif
+ *   dépendrait du répertoire de travail du conteneur, jamais garanti/prévisible depuis l'API.
+ * - AUCUN segment ".." toléré, MÊME S'IL SE RÉSOUDRAIT DE MANIÈRE INOFFENSIVE une fois normalisé
+ *   (contrairement à resolveVolumeSubPath qui normalise puis vérifie le résultat) : on rejette
+ *   ici sur la présence brute d'un segment "..", avant toute normalisation — la règle la plus
+ *   simple à auditer, donc la moins susceptible de laisser passer un contournement subtil.
+ * - Aucun caractère de contrôle (0x00-0x1F, 0x7F) : sans objet légitime dans un chemin de
+ *   fichier réel, et le chemin est de toute façon passé en argument SÉPARÉ de `docker exec`
+ *   (tableau Cmd, jamais interpolé dans une chaîne shell — voir HEXDUMP_SCRIPT plus bas), donc
+ *   aucune injection shell n'est possible ici ; ce filtre est une défense en profondeur
+ *   supplémentaire, pas la seule ligne de défense contre l'injection.
+ */
+function assertValidAbsoluteFilePath(rawPath: string | undefined): string {
+  if (!rawPath || !rawPath.startsWith("/")) {
+    throw new Error('Invalid path: must be an absolute path starting with "/"');
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\x7f]/.test(rawPath)) {
+    throw new Error("Invalid path: contains control characters");
+  }
+  if (rawPath.split("/").includes("..")) {
+    throw new Error('Invalid path: ".." segments are not allowed');
+  }
+  // Cosmétique uniquement à ce stade (slashes multiples, segments "." redondants) : ne peut pas
+  // réintroduire de ".." puisqu'on vient de les rejeter explicitement ci-dessus.
+  const normalized = path.posix.normalize(rawPath);
+  if (!normalized.startsWith("/")) {
+    throw new Error('Invalid path: must be an absolute path starting with "/"');
+  }
+  return normalized;
+}
+
+/**
+ * Script exécuté dans le conteneur cible via `sh -c` : `$1`=chemin, `$2`=offset, `$3`=longueur —
+ * liés plus bas via l'argv de `docker exec` (Cmd en TABLEAU), JAMAIS interpolés dans la chaîne
+ * du script ci-dessous, même principe que LIST_DIR_SCRIPT plus haut : aucune injection shell
+ * possible via le chemin, quel que soit son contenu. Sortie sur stdout : une ligne
+ * "SIZE:<taille totale réelle du fichier en octets>" puis une ligne de hex minuscule sans
+ * séparateur (chaîne vide si `length`=0 octet lu). `dd bs=1 skip=... count=...` lit précisément
+ * la fenêtre [offset, offset+length) sans risque de déborder par alignement de bloc — un `bs`
+ * plus large serait plus rapide mais négligeable ici (8192 octets max, voir HEXDUMP_MAX_LENGTH).
+ * Outil de conversion hex choisi dynamiquement (jamais supposé présent) : `xxd -p` si disponible
+ * (compact), sinon repli sur `od -An -tx1 -v` (POSIX, présent même sur un busybox minimal type
+ * alpine) ; erreur honnête (ENOTOOL) si NI L'UN NI L'AUTRE n'est présent, plutôt que d'échouer
+ * silencieusement ou de deviner un octet fabriqué.
+ */
+const HEXDUMP_SCRIPT = `f="$1"
+off="$2"
+len="$3"
+if [ ! -e "$f" ]; then echo ENOENT >&2; exit 2; fi
+if [ -d "$f" ]; then echo EISDIR >&2; exit 3; fi
+if [ ! -r "$f" ]; then echo EACCES >&2; exit 4; fi
+size=$(wc -c < "$f" 2>/dev/null | tr -d ' \t')
+echo "SIZE:$size"
+if command -v xxd >/dev/null 2>&1; then
+  dd if="$f" bs=1 skip="$off" count="$len" 2>/dev/null | xxd -p | tr -d '\\n '
+elif command -v od >/dev/null 2>&1; then
+  dd if="$f" bs=1 skip="$off" count="$len" 2>/dev/null | od -An -tx1 -v | tr -d '\\n '
+else
+  echo ENOTOOL >&2
+  exit 5
+fi
+echo
+exit 0
+`;
+
+/**
+ * Hexdump en lecture seule d'une fenêtre [offset, offset+length) d'un fichier ARBITRAIRE dans un
+ * conteneur EN COURS D'EXÉCUTION (équivalent `docker exec <id> sh -c "dd bs=1 skip=<offset>
+ * count=<length> if=<path> | xxd -p"`, outil choisi dynamiquement — voir HEXDUMP_SCRIPT). `length`
+ * est plafonné à HEXDUMP_MAX_LENGTH quoi qu'il arrive (voir plus haut). Lève une erreur honnête et
+ * distincte pour : chemin/offset/length invalides (avant tout appel Docker), conteneur non
+ * `running`, fichier absent, fichier = dossier, fichier non lisible, ni xxd ni od disponibles.
+ */
+export async function readContainerFileHexdump(
+  id: string,
+  rawPath: string,
+  offset = 0,
+  length = 512,
+): Promise<FileHexdump> {
+  // Validation AVANT tout appel Docker — un chemin invalide (".." notamment) ne doit JAMAIS
+  // atteindre `docker exec`, même conteneur inexistant ou démon injoignable (vérifié par les
+  // tests : voir test/containerFilesHexdump.test.ts).
+  const targetPath = assertValidAbsoluteFilePath(rawPath);
+  if (!Number.isInteger(offset) || offset < 0) {
+    throw new Error("Invalid offset: must be a non-negative integer");
+  }
+  if (!Number.isInteger(length) || length <= 0) {
+    throw new Error("Invalid length: must be a positive integer");
+  }
+  const effectiveLength = Math.min(length, HEXDUMP_MAX_LENGTH);
+
+  const docker = await requireReachableClient();
+  const container = docker.getContainer(id);
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const info: any = await container.inspect();
+  if (info?.State?.Status !== "running") {
+    throw new Error(`Container "${id}" is not running (state: ${info?.State?.Status ?? "unknown"})`);
+  }
+
+  const exec = await container.exec({
+    // "quai-hexdump" = $0 (argv[0] du script, jamais utilisé) ; targetPath/offset/length = $1/$2/$3
+    // — voir HEXDUMP_SCRIPT : passés en ARGUMENTS SÉPARÉS du tableau Cmd, jamais interpolés dans
+    // la chaîne `sh -c`, donc aucune injection shell possible quel que soit le contenu du chemin.
+    Cmd: ["/bin/sh", "-c", HEXDUMP_SCRIPT, "quai-hexdump", targetPath, String(offset), String(effectiveLength)],
+    AttachStdout: true,
+    AttachStderr: true,
+    Tty: false,
+  });
+
+  const attachStream: NodeJS.ReadableStream = await exec.start({ hijack: true, Tty: false });
+
+  // Non-Tty -> flux multiplexé stdout/stderr (en-tête 8 octets par frame, même mécanisme que
+  // streamContainerLogs/listVolumeFiles ci-dessus) : démultiplexage obligatoire, sans quoi les
+  // en-têtes binaires seraient interprétés comme du texte et corrompraient la sortie hex.
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  const stdoutSink = new PassThrough();
+  const stderrSink = new PassThrough();
+  stdoutSink.on("data", (chunk: Buffer) => stdoutChunks.push(chunk));
+  stderrSink.on("data", (chunk: Buffer) => stderrChunks.push(chunk));
+  docker.modem.demuxStream(attachStream, stdoutSink, stderrSink);
+
+  await new Promise<void>((resolve, reject) => {
+    attachStream.once("end", () => resolve());
+    attachStream.once("error", reject);
+  });
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const inspectResult: any = await exec.inspect();
+  const exitCode: number = inspectResult?.ExitCode ?? 0;
+
+  const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+  const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
+
+  if (exitCode === 2) throw new Error(`File not found: "${targetPath}"`);
+  if (exitCode === 3) throw new Error(`Path is a directory, not a file: "${targetPath}"`);
+  if (exitCode === 4) throw new Error(`File is not readable: "${targetPath}"`);
+  if (exitCode === 5) throw new Error("Neither xxd nor od is available in this container — cannot hexdump");
+  if (exitCode !== 0) {
+    throw new Error(stderr || `hexdump failed with exit code ${exitCode}`);
+  }
+
+  const lines = stdout.split("\n").filter((line) => line.length > 0);
+  const sizeLine = lines.find((line) => line.startsWith("SIZE:"));
+  const sizeBytes = sizeLine ? Number(sizeLine.slice("SIZE:".length)) : NaN;
+  if (!Number.isFinite(sizeBytes)) {
+    throw new Error("Unable to determine file size (unexpected hexdump script output)");
+  }
+  const hexLine = lines.find((line) => !line.startsWith("SIZE:")) ?? "";
+  const bytes = hexLine.trim().toLowerCase();
+  if (!/^[0-9a-f]*$/.test(bytes) || bytes.length % 2 !== 0) {
+    throw new Error("Unexpected hexdump output (not valid hex)");
+  }
+
+  // Nombre d'octets RÉELLEMENT renvoyés (peut être < effectiveLength si le fichier est plus
+  // court que offset+effectiveLength — dd s'arrête simplement à EOF, count est un maximum, pas
+  // une garantie). `truncated` reflète l'écart réel entre ce qui a été lu et la taille totale du
+  // fichier, que la cause soit le plafond serveur (HEXDUMP_MAX_LENGTH) ou une simple fin de
+  // fichier — les deux cas signifient honnêtement "bytes n'est pas le fichier entier".
+  const bytesReturned = bytes.length / 2;
+  const truncated = sizeBytes > offset + bytesReturned;
+
+  return {
+    path: targetPath,
+    sizeBytes,
+    truncated,
+    offset,
+    length: bytesReturned,
+    bytes,
+  };
 }

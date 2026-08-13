@@ -13,29 +13,70 @@
  *                                         voir services/docker.ts#getContainerProcesses — 409 si le
  *                                         conteneur n'est pas démarré (docker top l'exige), jamais une
  *                                         liste vide silencieuse.
+ * GET    /api/containers/:id/processes/detailed — mêmes processus mais vus DEPUIS L'INTÉRIEUR du
+ *                                         conteneur cible (PID dans SA PROPRE numérotation, CPU/âge/
+ *                                         ports en LISTEN réels) — voir services/containerInternals.ts#
+ *                                         getContainerProcessDetails. Même niveau d'accès que
+ *                                         GET /processes ci-dessus (authentifié, tous rôles). 409 si le
+ *                                         conteneur n'est pas démarré ; `shellAvailable: false` (200,
+ *                                         liste vide) si aucun shell POSIX n'est disponible dans l'image
+ *                                         cible — jamais une liste vide silencieuse sans distinction.
  * POST   /api/containers/:id/start     — démarre un conteneur arrêté.
  * POST   /api/containers/:id/stop      — arrête un conteneur en cours d'exécution.
  * POST   /api/containers/:id/restart   — redémarre un conteneur.
  * POST   /api/containers/:id/rename    — renomme un conteneur (équivalent `docker rename`).
  * DELETE /api/containers/:id           — supprime un conteneur (?force=true pour un conteneur en cours d'exécution).
+ * GET    /api/containers/:id/files/hexdump — hexdump en lecture seule d'une fenêtre d'octets d'un
+ *                                         fichier ARBITRAIRE dans le conteneur (équivalent `docker
+ *                                         exec <id> sh -c "dd ... | xxd -p"`), voir
+ *                                         services/docker.ts#readContainerFileHexdump pour la
+ *                                         validation stricte du chemin (absolu, aucun "..") et le
+ *                                         plafonnement de `length`. ADMIN UNIQUEMENT (pas operator,
+ *                                         voir rejectIfNotAdmin ci-dessous) : surface plus sensible
+ *                                         que /processes(/detailed) ci-dessus — lecture de contenu
+ *                                         binaire brut potentiellement un secret sur disque, même
+ *                                         sensibilité que POST /api/secrets/:id/reveal.
+ * GET    /api/containers/:id/processes/:pid/inspect — cmdline/environ/fd RÉELS d'UN process précis,
+ *                                         lus DEPUIS L'INTÉRIEUR du conteneur (voir
+ *                                         services/docker.ts#inspectContainerProcess). `pid` suit la
+ *                                         numérotation vue PAR LE CONTENEUR LUI-MÊME (celle de
+ *                                         GET /processes/detailed), PAS celle de GET /processes
+ *                                         (docker top, PID hôte) — les deux ne sont JAMAIS
+ *                                         interchangeables. Même niveau d'accès que /processes
+ *                                         (tous rôles authentifiés, lecture seule).
+ * POST   /api/containers/:id/processes/:pid/kill — envoie un signal RÉEL (`{ signal?: "TERM"|"KILL"
+ *                                         }`, "TERM" par défaut) — operator/admin (garde globale
+ *                                         plugins/auth.ts sur toute méthode mutante, même pattern
+ *                                         que /start,/stop,/restart ci-dessus). 409 dédié avec
+ *                                         `useContainerStopInstead: true` si `pid` vaut 1 (voir
+ *                                         services/docker.ts#killContainerProcess pour le garde-fou).
+ * POST   /api/containers/:id/processes/:pid/restart — tue puis relance EXACTEMENT la même cmdline
+ *                                         (voir services/docker.ts#restartContainerProcess) —
+ *                                         mêmes rôles que kill ci-dessus. 409 dédié avec
+ *                                         `useContainerRestartInstead: true` si `pid` vaut 1.
  *
  * `secretEnv` résolu avec succès sur POST /api/containers enregistre aussi le lien secret<->
  * conteneur (services/secretsStore.ts#recordSecretUsage, exposé via `usedBy` sur SecretRef) —
  * maintenu à jour par renameSecretUsageContainer/removeSecretUsagesForContainer sur rename/delete.
  */
 
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   createAndStartContainer,
   getContainerProcesses,
   getDockerContainers,
+  inspectContainerProcess,
   inspectDockerContainer,
+  killContainerProcess,
+  readContainerFileHexdump,
   removeContainer,
   renameContainer,
   restartContainer,
+  restartContainerProcess,
   startContainer,
   stopContainer,
 } from "../services/docker.js";
+import { getContainerProcessDetails } from "../services/containerInternals.js";
 import { getKubernetesContainers } from "../services/kubernetes.js";
 import {
   getDecryptedSecretValue,
@@ -109,6 +150,51 @@ interface RenameContainerBody {
   name?: string;
 }
 
+interface FileHexdumpQuery {
+  path?: string;
+  offset?: string;
+  length?: string;
+}
+
+/**
+ * true (et réponse 403 déjà envoyée) si la session n'a pas le rôle admin — même pattern que
+ * routes/secrets.ts#rejectIfNotAdmin. Le hook global (plugins/auth.ts) n'exige operator/admin
+ * QUE pour les méthodes mutantes (POST/PUT/PATCH/DELETE) ; cette route est un GET, donc sans ce
+ * garde local elle serait accessible à TOUT rôle authentifié (comme /processes(/detailed)
+ * ci-dessus, volontairement ouverts eux). Lire le contenu binaire arbitraire d'un fichier dans
+ * un conteneur est plus sensible qu'un redémarrage/exec shell (operator suffit pour
+ * /api/console) : accès direct potentiel à un secret sur disque (clé privée, .env, etc.) —
+ * admin uniquement, même sensibilité que POST /api/secrets/:id/reveal (routes/secrets.ts).
+ */
+function rejectIfNotAdmin(request: FastifyRequest, reply: FastifyReply): boolean {
+  if (!request.authSession!.roles.includes("admin")) {
+    reply.code(403).send({ error: "Insufficient role: admin required" });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Traduit une erreur de readContainerFileHexdump (services/docker.ts) en réponse HTTP. Distincte
+ * de sendDockerActionError ci-dessus (messages et codes propres à cette route) plutôt que de la
+ * modifier : sendDockerActionError est partagée par toutes les autres routes de ce fichier, la
+ * faire évoluer pour un seul endpoint risquerait de changer leur comportement par effet de bord.
+ */
+function sendFileHexdumpError(reply: FastifyReply, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  // Validation chemin/offset/length (services/docker.ts#assertValidAbsoluteFilePath et
+  // readContainerFileHexdump) ou tentative de hexdump d'un dossier -> 400, requête mal formée.
+  const isBadRequest = /^Invalid (path|offset|length)|is a directory, not a file/i.test(message);
+  // Fichier présent mais illisible côté conteneur (permissions Unix internes) -> 403, distinct
+  // du 403 "rôle insuffisant" ci-dessus mais même code HTTP (accès refusé), message différent.
+  const isForbidden = /is not readable/i.test(message);
+  const isNotFound = /^File not found|no such container|404/i.test(message);
+  // "is not running" : même convention que sendDockerActionError ci-dessus (409, conflit d'état).
+  const isConflict = /is not running/i.test(message);
+  const status = isBadRequest ? 400 : isForbidden ? 403 : isNotFound ? 404 : isConflict ? 409 : 502;
+  reply.code(status).send({ error: message });
+}
+
 /** Traduit une erreur dockerode/moteur Docker en réponse HTTP — 404 si le conteneur n'existe
  * plus (course possible entre la liste affichée et l'action), 502 pour le reste (démon
  * injoignable, conteneur déjà dans l'état demandé, volume/réseau en cours d'utilisation...). */
@@ -119,6 +205,24 @@ function sendDockerActionError(reply: import("fastify").FastifyReply, err: unkno
   // (conflit d'état), un message plus honnête qu'un 502 générique pour ce cas très courant.
   const notRunning = /is not running/i.test(message);
   reply.code(notFound ? 404 : notRunning ? 409 : 502).send({ error: message });
+}
+
+/**
+ * Traduit une erreur de inspectContainerProcess/killContainerProcess/restartContainerProcess
+ * (services/docker.ts) en réponse HTTP. Distincte de sendDockerActionError ci-dessus : un process
+ * "introuvable" (déjà mort, course normale entre l'affichage de la liste et l'action) doit rendre
+ * un 404 propre au PROCESS, jamais confondu avec "conteneur introuvable" (404 aussi, mais un
+ * message différent) ni avaler comme un succès.
+ */
+function sendProcessActionError(reply: FastifyReply, err: unknown): void {
+  const message = err instanceof Error ? err.message : String(err);
+  const containerNotFound = /no such container|404/i.test(message);
+  const containerNotRunning = /is not running/i.test(message);
+  // "Process <pid> not found... already exited" (voir readCmdline, services/docker.ts) : le pid a
+  // disparu entre temps — situation normale, traduite honnêtement en 404, jamais un 502 générique.
+  const processGone = /process \d+ not found|no such process/i.test(message);
+  const status = containerNotFound ? 404 : containerNotRunning ? 409 : processGone ? 404 : 502;
+  reply.code(status).send({ error: message });
 }
 
 /**
@@ -258,6 +362,97 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
     }
   });
 
+  // Même niveau d'accès que GET /processes ci-dessus (voir plugins/auth.ts : les GET ne sont
+  // gardés que par l'authentification, pas par un rôle operator/admin — aucune route existante
+  // similaire n'ajoute de garde supplémentaire pour de la lecture seule, contrairement à
+  // routes/console.ts qui, lui, ouvre un accès INTERACTIF).
+  fastify.get<{ Params: { id: string } }>("/api/containers/:id/processes/detailed", async (request, reply) => {
+    try {
+      const list = await getContainerProcessDetails(request.params.id);
+      return reply.send(list);
+    } catch (err) {
+      sendDockerActionError(reply, err);
+    }
+  });
+
+  // Voir en-tête de fichier — mêmes rôles/lecture que /processes(/detailed) : `pid` doit être
+  // celui vu PAR LE CONTENEUR LUI-MÊME (namespace PID interne), PAS le pid hôte de /processes.
+  fastify.get<{ Params: { id: string; pid: string } }>(
+    "/api/containers/:id/processes/:pid/inspect",
+    async (request, reply) => {
+      const pid = Number(request.params.pid);
+      if (!Number.isInteger(pid) || pid <= 0) {
+        return reply.code(400).send({ error: "pid must be a positive integer" });
+      }
+      try {
+        const detail = await inspectContainerProcess(request.params.id, pid);
+        return reply.send(detail);
+      } catch (err) {
+        sendProcessActionError(reply, err);
+      }
+    },
+  );
+
+  // operator/admin (garde globale plugins/auth.ts sur POST, même pattern que /start,/stop,/restart
+  // ci-dessus — aucun garde local supplémentaire nécessaire ici). Voir
+  // services/docker.ts#killContainerProcess pour le garde-fou pid===1 : dans ce cas AUCUN kill n'a
+  // été exécuté, on répond 409 avec `useContainerStopInstead: true` plutôt qu'un succès ambigu qui
+  // laisserait croire que le process a été tué.
+  fastify.post<{ Params: { id: string; pid: string }; Body: { signal?: "TERM" | "KILL" } }>(
+    "/api/containers/:id/processes/:pid/kill",
+    async (request, reply) => {
+      const pid = Number(request.params.pid);
+      if (!Number.isInteger(pid) || pid <= 0) {
+        return reply.code(400).send({ error: "pid must be a positive integer" });
+      }
+      const rawSignal = request.body?.signal;
+      if (rawSignal !== undefined && rawSignal !== "TERM" && rawSignal !== "KILL") {
+        return reply.code(400).send({ error: 'signal must be "TERM" or "KILL" (default "TERM")' });
+      }
+      const signal: "TERM" | "KILL" = rawSignal === "KILL" ? "KILL" : "TERM";
+
+      try {
+        const result = await killContainerProcess(request.params.id, pid, signal);
+        if (result.wasPidOne) {
+          return reply.code(409).send({
+            error: "Refusing to kill PID 1 directly: this would stop the entire container. Use the container stop action instead.",
+            useContainerStopInstead: true,
+          });
+        }
+        return reply.send({ ok: true });
+      } catch (err) {
+        sendProcessActionError(reply, err);
+      }
+    },
+  );
+
+  // Même garde/rôles que kill ci-dessus. Voir services/docker.ts#restartContainerProcess pour le
+  // garde-fou pid===1 (même principe : { wasPidOne: true } sans AUCUNE action, 409 avec
+  // `useContainerRestartInstead: true`) et pour l'échec explicite si la cmdline du process est
+  // vide/introuvable (jamais une commande de remplacement devinée).
+  fastify.post<{ Params: { id: string; pid: string } }>(
+    "/api/containers/:id/processes/:pid/restart",
+    async (request, reply) => {
+      const pid = Number(request.params.pid);
+      if (!Number.isInteger(pid) || pid <= 0) {
+        return reply.code(400).send({ error: "pid must be a positive integer" });
+      }
+
+      try {
+        const result = await restartContainerProcess(request.params.id, pid);
+        if (result.wasPidOne) {
+          return reply.code(409).send({
+            error: "Refusing to restart PID 1 directly: this would restart the entire container. Use the container restart action instead.",
+            useContainerRestartInstead: true,
+          });
+        }
+        return reply.send({ ok: true });
+      } catch (err) {
+        sendProcessActionError(reply, err);
+      }
+    },
+  );
+
   fastify.post<{ Params: { id: string } }>("/api/containers/:id/start", async (request, reply) => {
     try {
       await startContainer(request.params.id);
@@ -316,6 +511,35 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
         return reply.send({ ok: true });
       } catch (err) {
         sendDockerActionError(reply, err);
+      }
+    },
+  );
+
+  // Hexdump en lecture seule d'un fichier ARBITRAIRE dans un conteneur — voir en-tête de fichier
+  // et services/docker.ts#readContainerFileHexdump. ADMIN UNIQUEMENT (rejectIfNotAdmin ci-dessus) ;
+  // `path` (obligatoire) validé/normalisé côté service (jamais ici) — toute tentative de ".."
+  // ou de chemin relatif est rejetée en 400 AVANT tout appel Docker. `offset`/`length` en
+  // querystring (chaînes) -> Number() ci-dessous ; NaN/valeurs invalides sont rejetées par
+  // readContainerFileHexdump lui-même (Number.isInteger), jamais tolérées silencieusement.
+  fastify.get<{ Params: { id: string }; Querystring: FileHexdumpQuery }>(
+    "/api/containers/:id/files/hexdump",
+    async (request, reply) => {
+      if (rejectIfNotAdmin(request, reply)) return;
+
+      const rawPath = request.query?.path;
+      if (!rawPath) {
+        return reply.code(400).send({ error: "path is required" });
+      }
+      const offsetRaw = request.query?.offset;
+      const lengthRaw = request.query?.length;
+      const offset = offsetRaw !== undefined ? Number(offsetRaw) : 0;
+      const length = lengthRaw !== undefined ? Number(lengthRaw) : 512;
+
+      try {
+        const dump = await readContainerFileHexdump(request.params.id, rawPath, offset, length);
+        return reply.send(dump);
+      } catch (err) {
+        sendFileHexdumpError(reply, err);
       }
     },
   );

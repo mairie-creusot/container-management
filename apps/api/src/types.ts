@@ -109,6 +109,76 @@ export interface ContainerProcessList {
 }
 
 /**
+ * Détail d'UN process précis d'un conteneur, lu directement dans `/proc/<pid>` DEPUIS L'INTÉRIEUR
+ * du conteneur cible (via `docker exec`, jamais `docker top`/dockerode `container.top()`) — voir
+ * GET /api/containers/:id/processes/:pid/inspect et services/docker.ts#inspectContainerProcess.
+ * `pid` suit donc la numérotation vue PAR LE CONTENEUR LUI-MÊME (son propre namespace PID), PAS
+ * les PID hôte que renvoie `docker top` — ces deux numérotations sont complètement différentes
+ * (un même process peut porter un PID à 6 chiffres côté hôte et un PID à un chiffre côté
+ * conteneur). Toute action sur un process (kill/restart, voir plus bas) utilise cette même
+ * convention "vue conteneur", jamais de traduction hôte<->conteneur.
+ */
+export interface ContainerProcessInspection {
+  pid: number;
+  /** Ligne de commande RÉELLE (`/proc/<pid>/cmdline`, champs déjà séparés) — toujours présente si
+   * le process existe encore (contrairement à environ/openFiles ci-dessous, jamais verrouillée
+   * pour un process qu'on peut par ailleurs lister). */
+  cmdline: string[];
+  /** Variables d'environnement RÉELLES du process (`/proc/<pid>/environ`) — absent si le noyau a
+   * refusé la lecture pour CE process précis (permission refusée, ex: process ayant changé d'UID
+   * via setuid) : dans ce cas le champ est omis, JAMAIS un objet vide fabriqué comme s'il n'avait
+   * aucune variable d'environnement. Voir `partial` ci-dessous. */
+  environ?: Record<string, string>;
+  /** Cibles réelles des descripteurs de fichier ouverts (`/proc/<pid>/fd/*`, résolues via
+   * `readlink`) — chemins de fichiers réels, ou `socket:[inode]`/`pipe:[inode]` pour les
+   * descripteurs qui ne pointent pas vers un fichier. Mêmes conditions d'absence qu`environ`
+   * ci-dessus (jamais un tableau vide fabriqué en cas d'échec de lecture). */
+  openFiles?: string[];
+  /** true si `environ` et/ou `openFiles` a dû être omis faute de permission sur ce process précis
+   * — honnêteté explicite plutôt qu'un échec silencieux de toute la requête : `cmdline` reste
+   * fiable dans tous les cas où ce type est renvoyé. Absent/false = les trois champs sont complets. */
+  partial?: boolean;
+}
+
+/**
+ * Détail enrichi d'un processus RÉEL en cours d'exécution DANS le conteneur cible — voir GET
+ * /api/containers/:id/processes/detailed et services/containerInternals.ts. Contrairement à
+ * ContainerProcessList ci-dessus (qui reflète `docker top`, donc des PID côté HÔTE — inutilisables
+ * pour agir dessus depuis l'intérieur du conteneur), `pid`/`ppid` ici sont lus DEPUIS `/proc` À
+ * L'INTÉRIEUR du conteneur cible (via un `docker exec`) : ce sont les PID tels que le conteneur se
+ * voit lui-même, les SEULS utilisables pour un futur `docker exec <container> kill <pid>`.
+ */
+export interface ContainerProcessDetail {
+  pid: number;
+  ppid: number;
+  /** Nom résolu depuis /etc/passwd si lisible dans le conteneur cible (best-effort) ; sinon l'uid
+   * numérique brut sous forme de chaîne — jamais un nom fabriqué. */
+  user: string;
+  /** `comm` tel que rapporté par /proc/<pid>/stat — peut contenir espaces/parenthèses. */
+  command: string;
+  /** Code d'état process brut (`man 5 proc`, ex: "S", "R", "Z"...), jamais traduit/deviné. */
+  state: string;
+  /** Temps CPU cumulé RÉEL (utime+stime, convertis via CLK_TCK lu dans le conteneur cible). */
+  cpuTimeMs: number;
+  /** Âge réel = uptime système (lu dans le conteneur cible) - starttime du process, en secondes. */
+  ageSeconds: number;
+  /** Ports RÉELLEMENT en LISTEN possédés par ce process (croisement /proc/net/tcp[6] <-> /proc/<pid>/fd/*,
+   * voir containerInternals.ts) — absent si ce process ne détient aucun socket en LISTEN. */
+  listenPorts?: number[];
+}
+
+/**
+ * Voir GET /api/containers/:id/processes/detailed. `shellAvailable: false` (processes toujours [])
+ * signifie qu'aucun shell POSIX (`sh`) n'a pu être exécuté dans le conteneur cible (image
+ * "distroless"/scratch, typiquement) — le frontend doit alors afficher un message honnête plutôt
+ * qu'une liste vide silencieuse qui laisserait croire qu'aucun processus ne tourne.
+ */
+export interface ContainerProcessDetailList {
+  processes: ContainerProcessDetail[];
+  shellAvailable: boolean;
+}
+
+/**
  * Une couche de l'image d'un conteneur (équivalent `docker history <image>`) — voir
  * GET /api/images/:id/history et services/docker.ts#getImageHistory. `id` vaut souvent
  * "<missing>" pour une couche intermédiaire sans image id propre (comportement natif Docker,
@@ -157,6 +227,31 @@ export interface VolumeFileEntry {
   sizeBytes: number;
   /** ISO 8601 ; chaîne vide si le mtime n'a pas pu être déterminé. */
   modifiedAt: string;
+}
+
+/**
+ * Hexdump en lecture seule d'une fenêtre d'octets d'un fichier ARBITRAIRE dans un conteneur —
+ * voir GET /api/containers/:id/files/hexdump et services/docker.ts#readContainerFileHexdump.
+ * ADMIN UNIQUEMENT côté route (surface plus sensible que VolumeFileEntry ci-dessus : lecture de
+ * contenu binaire brut, pas juste un listing de noms/tailles — peut exposer un secret sur disque).
+ */
+export interface FileHexdump {
+  /** Chemin absolu normalisé réellement lu (voir assertValidAbsoluteFilePath, services/docker.ts). */
+  path: string;
+  /** Taille RÉELLE et totale du fichier dans le conteneur (indépendante de `length`/`offset` demandés). */
+  sizeBytes: number;
+  /** true si `sizeBytes > offset + (length octets réellement renvoyés)` — le fichier est plus
+   * gros que la fenêtre lue, que ce soit parce que le client a demandé moins que le fichier entier
+   * ou parce que `length` a été plafonné côté serveur (voir HEXDUMP_MAX_LENGTH). Le frontend s'en
+   * sert pour afficher "fichier tronqué" plutôt que de laisser croire que `bytes` est le fichier entier. */
+  truncated: boolean;
+  offset: number;
+  /** Nombre d'octets RÉELLEMENT renvoyés dans `bytes` (donc bytes.length === length * 2) — peut
+   * être inférieur à la longueur demandée par le client (fin de fichier atteinte, ou plafonnement). */
+  length: number;
+  /** Représentation hexadécimale minuscule, sans espaces ni séparateurs (ex: "deadbeef...") — le
+   * frontend formate lui-même l'affichage colonnes/ASCII à partir de cette chaîne brute. */
+  bytes: string;
 }
 
 /** Infos hôte du démon Docker d'un environnement (équivalent `docker info`) — CPU/RAM totaux, version, socket... */
@@ -937,6 +1032,36 @@ export interface ScanResult {
   vulnerabilities: Vulnerability[];
   summary: Record<VulnSeverity, number>;
   trigger?: ScanTrigger;
+}
+
+// --- Fichiers réels d'un paquet vulnérable dans une image (voir
+// apps/api/src/services/packageInspector.ts, GET /api/images/:id/packages/:packageName/files) ---
+// Complète scan.ts : Grype/OSV-Scanner rapportent un `Vulnerability#packageName` mais jamais SES
+// fichiers réels dans l'image. Ce module retrouve cette information EN INSPECTANT RÉELLEMENT
+// l'image (`docker run --rm --entrypoint sh <image> -c "..."`, jamais une supposition sur la
+// présence d'un outil sans l'avoir testé) : apt/dpkg, npm (node_modules), pip, dans cet ordre,
+// en s'arrêtant à la première stratégie qui trouve réellement quelque chose.
+//
+// Honnêteté : un paquet Go (chemin de module type "github.com/...") ou un crate Rust compilé
+// n'a JAMAIS de code source récupérable dans l'image finale (compilé statiquement dans le
+// binaire) — `available: false` avec un `reason` concret dans ce cas, JAMAIS un `files: []` qui
+// laisserait croire à tort à un paquet réellement vide plutôt qu'à une impossibilité technique.
+
+export type PackageEcosystem = "apt" | "npm" | "pip" | "unknown";
+
+export interface PackageFilesResult {
+  ecosystem: PackageEcosystem;
+  available: boolean;
+  /** Message honnête et concret expliquant pourquoi `available` est false (ou une précision sur
+   * la résolution, ex: nom de paquet Debian réel utilisé s'il diffère du nom Grype/OSV d'origine)
+   * — absent si tout s'est bien passé sans rien à préciser. */
+  reason?: string;
+  /** Chemins réels à l'intérieur de l'image — absent/vide si `available` est false. */
+  files?: string[];
+  /** Racine réelle sous laquelle `files` a été trouvé (ex: "node_modules/<pkg>" pour npm,
+   * `Location:` de `pip show` pour pip) — absent pour apt (dpkg -L liste des chemins dispersés
+   * sous /usr, /etc, /lib... : aucune racine unique n'existe pour un paquet système). */
+  packageRoot?: string;
 }
 
 // --- Notifications système (watchdog proactif + scanScheduler) — voir
