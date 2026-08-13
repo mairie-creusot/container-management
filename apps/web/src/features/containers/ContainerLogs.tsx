@@ -102,6 +102,11 @@ export function ContainerLogsBody({ containerId, containerName, onClose }: Conta
     });
     resizeObserver.observe(terminalHostRef.current);
 
+    // Même garde que ContainerConsole.tsx#ContainerConsoleBody (voir son commentaire détaillé) :
+    // `cancelled` protège déjà le fetch du snapshot ci-dessous, mais PAS (avant ce correctif) les
+    // handlers du WebSocket — un `socket.close()` déclenché par le nettoyage (démontage/remontage,
+    // ex sous React.StrictMode en dev) appelle quand même `onclose`/`onerror` de façon asynchrone,
+    // pouvant écraser à tort le statut d'une connexion suivante déjà établie.
     let cancelled = false;
     let socket: WebSocket | null = null;
     const decoder = new TextDecoder();
@@ -122,16 +127,20 @@ export function ContainerLogsBody({ containerId, containerName, onClose }: Conta
       socket = new WebSocket(wsUrl(`/containers/${encodeURIComponent(containerId!)}/logs/stream?tail=0`));
       socket.binaryType = "arraybuffer";
 
-      socket.onopen = () => setStatus("connected");
+      socket.onopen = () => {
+        if (!cancelled) setStatus("connected");
+      };
       socket.onmessage = (event) => {
         const text = typeof event.data === "string" ? event.data : decoder.decode(event.data as ArrayBuffer);
         flushChunk(text);
       };
       socket.onerror = () => {
+        if (cancelled) return;
         setStatus("error");
         setErrorMessage("Connexion au flux de logs interrompue.");
       };
       socket.onclose = (event) => {
+        if (cancelled) return; // fermeture volontaire par le nettoyage, voir le commentaire de tête d'effet
         setStatus((current) => (current === "error" ? current : "closed"));
         // Même remarque que ContainerConsole.tsx : un rejet avant l'upgrade (401, conteneur
         // introuvable...) n'expose pas de `reason` exploitable ici ; seul le cas "conteneur

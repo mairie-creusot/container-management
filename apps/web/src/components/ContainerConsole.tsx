@@ -44,6 +44,17 @@ export function ContainerConsoleBody({ containerId, containerName, onClose }: Co
   useEffect(() => {
     if (!containerId || !terminalHostRef.current) return;
 
+    // Garde-fou contre la fermeture d'UNE ANCIENNE connexion qui écrase le state d'une NOUVELLE
+    // déjà en place — un effet React est démonté/remonté plus souvent qu'il n'y paraît (double
+    // montage de développement sous React.StrictMode, voir main.tsx ; ou ce composant réutilisé
+    // inline dans un onglet qui se re-rend, TopologySubGraphPanel.tsx) : le nettoyage ci-dessous
+    // appelle `socket.close()`, ce qui déclenche quand même `onclose`/`onerror` de FAÇON
+    // ASYNCHRONE — sans cette garde, ce close "normal" (fermeture volontaire par le nettoyage)
+    // pouvait arriver APRÈS qu'un nouvel effet ait déjà ouvert une connexion suivante, écrasant à
+    // tort son statut "connecté" par "Connexion interrompue" (constaté en conditions réelles le
+    // 13/08/2026 : invite affichée puis bandeau d'erreur alors que la session restait utilisable).
+    let active = true;
+
     setStatus("connecting");
     setErrorMessage(null);
 
@@ -67,7 +78,9 @@ export function ContainerConsoleBody({ containerId, containerName, onClose }: Co
     const socket = new WebSocket(wsUrl(`/console/${encodeURIComponent(containerId)}`));
     socket.binaryType = "arraybuffer";
 
-    socket.onopen = () => setStatus("connected");
+    socket.onopen = () => {
+      if (active) setStatus("connected");
+    };
     socket.onmessage = (event) => {
       if (typeof event.data === "string") {
         terminal.write(event.data);
@@ -76,10 +89,12 @@ export function ContainerConsoleBody({ containerId, containerName, onClose }: Co
       }
     };
     socket.onerror = () => {
+      if (!active) return;
       setStatus("error");
       setErrorMessage("Connexion au conteneur interrompue.");
     };
     socket.onclose = (event) => {
+      if (!active) return; // fermeture volontaire par le nettoyage ci-dessous, voir le commentaire de tête d'effet
       setStatus((current) => (current === "error" ? current : "closed"));
       // Un rejet d'authentification/rôle (401/403) empêche l'upgrade WebSocket lui-même —
       // il se manifeste ici comme un onerror/onclose générique du navigateur (pas de `reason`
@@ -103,6 +118,7 @@ export function ContainerConsoleBody({ containerId, containerName, onClose }: Co
     resizeObserver.observe(terminalHostRef.current);
 
     return () => {
+      active = false;
       resizeObserver.disconnect();
       dataDisposable.dispose();
       socket.close();
