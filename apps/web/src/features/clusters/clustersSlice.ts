@@ -1,6 +1,14 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
-import { apiGet } from "@/api/client";
-import type { ClusterNode, Environment, NutanixVm } from "@/types";
+import { apiDelete, apiGet, apiPut, ApiError } from "@/api/client";
+import type { ClusterNode, Environment, NutanixConfig, NutanixStatus, NutanixVm } from "@/types";
+
+/** Formulaire de configuration Nutanix (routes/nutanix.ts côté API) — `password` vide = conserver
+ * le mot de passe déjà enregistré (même convention que le reste du projet, voir AdDnsFormInput). */
+export interface NutanixConfigFormInput {
+  prismCentralUrl: string;
+  username: string;
+  password?: string;
+}
 
 interface ClustersState {
   environments: Environment[];
@@ -16,6 +24,14 @@ interface ClustersState {
   nutanixVms: NutanixVm[];
   nutanixVmsStatus: "idle" | "loading" | "ready" | "error";
   selectedVmId: string | null;
+  // Configuration Nutanix elle-même (routes/nutanix.ts) — permet de l'ajouter/la modifier EN
+  // DEHORS de l'assistant de premier lancement (avant cette section, seule cette étape-là pouvait
+  // la définir, invisible une fois l'assistant terminé sans tout rouvrir).
+  nutanixConfigured: boolean;
+  nutanixConfig: NutanixConfig | null;
+  nutanixConfigStatus: "idle" | "loading" | "ready" | "error";
+  nutanixConfigSaving: boolean;
+  nutanixConfigError: string | null;
 }
 
 const initialState: ClustersState = {
@@ -28,6 +44,11 @@ const initialState: ClustersState = {
   nutanixVms: [],
   nutanixVmsStatus: "idle",
   selectedVmId: null,
+  nutanixConfigured: false,
+  nutanixConfig: null,
+  nutanixConfigStatus: "idle",
+  nutanixConfigSaving: false,
+  nutanixConfigError: null,
 };
 
 export const fetchEnvironments = createAsyncThunk<Environment[]>(
@@ -46,6 +67,35 @@ export const fetchEnvironmentNodes = createAsyncThunk<
 export const fetchNutanixVms = createAsyncThunk<NutanixVm[]>(
   "clusters/fetchNutanixVms",
   async () => apiGet<NutanixVm[]>("/nutanix/vms"),
+);
+
+export const fetchNutanixConfig = createAsyncThunk<NutanixStatus>(
+  "clusters/fetchNutanixConfig",
+  async () => apiGet<NutanixStatus>("/nutanix/config"),
+);
+
+export const saveNutanixConfig = createAsyncThunk<NutanixStatus, NutanixConfigFormInput, { rejectValue: string }>(
+  "clusters/saveNutanixConfig",
+  async (input, { rejectWithValue }) => {
+    try {
+      return await apiPut<NutanixStatus>("/nutanix/config", input);
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : "Impossible d'enregistrer la configuration Nutanix.";
+      return rejectWithValue(message);
+    }
+  },
+);
+
+export const disableNutanix = createAsyncThunk<void, void, { rejectValue: string }>(
+  "clusters/disableNutanix",
+  async (_arg, { rejectWithValue }) => {
+    try {
+      await apiDelete<{ ok: boolean }>("/nutanix/config");
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : "Impossible de désactiver Nutanix.";
+      return rejectWithValue(message);
+    }
+  },
 );
 
 const clustersSlice = createSlice({
@@ -101,6 +151,37 @@ const clustersSlice = createSlice({
       })
       .addCase(fetchNutanixVms.rejected, (state) => {
         state.nutanixVmsStatus = "error";
+      })
+      .addCase(fetchNutanixConfig.pending, (state) => {
+        state.nutanixConfigStatus = "loading";
+      })
+      .addCase(fetchNutanixConfig.fulfilled, (state, action) => {
+        state.nutanixConfigStatus = "ready";
+        state.nutanixConfigured = action.payload.configured;
+        state.nutanixConfig = action.payload.config ?? null;
+      })
+      .addCase(fetchNutanixConfig.rejected, (state) => {
+        state.nutanixConfigStatus = "error";
+      })
+      .addCase(saveNutanixConfig.pending, (state) => {
+        state.nutanixConfigSaving = true;
+        state.nutanixConfigError = null;
+      })
+      .addCase(saveNutanixConfig.fulfilled, (state, action) => {
+        state.nutanixConfigSaving = false;
+        state.nutanixConfigured = action.payload.configured;
+        state.nutanixConfig = action.payload.config ?? null;
+      })
+      .addCase(saveNutanixConfig.rejected, (state, action) => {
+        state.nutanixConfigSaving = false;
+        state.nutanixConfigError = action.payload ?? "Impossible d'enregistrer la configuration Nutanix.";
+      })
+      .addCase(disableNutanix.fulfilled, (state) => {
+        state.nutanixConfigured = false;
+        state.nutanixConfig = null;
+      })
+      .addCase(disableNutanix.rejected, (state, action) => {
+        state.nutanixConfigError = action.payload ?? "Impossible de désactiver Nutanix.";
       });
   },
 });

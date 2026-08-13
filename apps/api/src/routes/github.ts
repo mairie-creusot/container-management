@@ -43,6 +43,7 @@ import {
 } from "../services/github.js";
 import { isValidSubdomain } from "../services/reverseProxy.js";
 import { RegistryCredentialsMissingError, RegistryHttpError } from "../services/registries/http.js";
+import { remoteDockerIdFromEnvironmentId } from "../utils/environmentId.js";
 import type { GithubAutoDeployStatus } from "../types.js";
 
 /** true (et réponse 403 déjà envoyée) si la session n'a pas le rôle admin — même pattern que routes/secrets.ts. */
@@ -116,12 +117,22 @@ export default async function githubRoutes(fastify: FastifyInstance): Promise<vo
     if (port !== undefined && !isValidPort(port)) {
       return reply.code(400).send({ error: "port must be a valid port number (1-65535)" });
     }
+    // services/github.ts#deployViaDockerBuild passe targetEnvironmentId TEL QUEL à
+    // services/docker.ts#getClient(remoteEnvironmentId), qui attend l'id BRUT d'un environnement
+    // Docker distant persisté (remoteDockerStore.ts) — jamais la forme préfixée
+    // "remote-docker:<id>" exposée par GET /api/environments (voir
+    // apps/web/src/features/github/GitHubDeployPage.tsx, sélecteur de cible). Sans cette
+    // résolution, TOUTE cible autre que "Docker local" (id vide) levait "Remote Docker environment
+    // "remote-docker:<id>" not found" — même utilitaire déjà utilisé par routes/containers.ts,
+    // volumes.ts, networks.ts pour exactement ce même besoin. `undefined` pour un id local
+    // ("prod-swarm"/"dev-compose") : retombe sur le démon local, comportement inchangé.
+    const resolvedTargetEnvironmentId = remoteDockerIdFromEnvironmentId(request.body?.targetEnvironmentId);
     try {
       const deployment = await startDeployment({
         owner: request.params.owner,
         repo: request.params.repo,
         ...(request.body?.ref ? { ref: request.body.ref } : {}),
-        ...(request.body?.targetEnvironmentId ? { targetEnvironmentId: request.body.targetEnvironmentId } : {}),
+        ...(resolvedTargetEnvironmentId ? { targetEnvironmentId: resolvedTargetEnvironmentId } : {}),
         ...(subdomain ? { subdomain } : {}),
         ...(port !== undefined ? { port } : {}),
         startedBy: request.authSession!.username,
@@ -179,6 +190,12 @@ export default async function githubRoutes(fastify: FastifyInstance): Promise<vo
       return reply.code(400).send({ error: "port must be a valid port number (1-65535)" });
     }
 
+    // Même résolution que POST .../deploy ci-dessus (voir son commentaire) : autoDeploy.targetEnvironmentId
+    // est repris TEL QUEL par routes/githubWebhook.ts au prochain push, donc c'est ICI, à
+    // l'enregistrement, qu'il faut le convertir en id brut attendu par getClient() — jamais au
+    // moment du webhook (pas de session HTTP là-bas pour refaire cette traduction).
+    const resolvedTargetEnvironmentId = remoteDockerIdFromEnvironmentId(request.body?.targetEnvironmentId);
+
     try {
       const effective = await getEffectiveToken();
       const token = effective?.token;
@@ -207,7 +224,7 @@ export default async function githubRoutes(fastify: FastifyInstance): Promise<vo
           enabled: true,
           hookId,
           secret,
-          ...(request.body?.targetEnvironmentId ? { targetEnvironmentId: request.body.targetEnvironmentId } : {}),
+          ...(resolvedTargetEnvironmentId ? { targetEnvironmentId: resolvedTargetEnvironmentId } : {}),
           ...(subdomain ? { subdomain } : {}),
           ...(port !== undefined ? { port } : {}),
         });
@@ -228,7 +245,7 @@ export default async function githubRoutes(fastify: FastifyInstance): Promise<vo
         branch,
         enabled: false,
         secret,
-        ...(request.body?.targetEnvironmentId ? { targetEnvironmentId: request.body.targetEnvironmentId } : {}),
+        ...(resolvedTargetEnvironmentId ? { targetEnvironmentId: resolvedTargetEnvironmentId } : {}),
         ...(subdomain ? { subdomain } : {}),
         ...(port !== undefined ? { port } : {}),
       });

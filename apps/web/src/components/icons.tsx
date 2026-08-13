@@ -329,6 +329,20 @@ export function IconCheck({ className }: IconProps) {
   return base(<path d="M4 12.5l5 5L20 6" />, className);
 }
 
+/** Hôte générique (cluster Nutanix physique / environnement Docker distant / hôte LXD) — façon
+ * "puce de calcul" (boîtier + broches), nœud "host" du graphe de topologie, distincte de IconServer
+ * (rack, contrôleur de domaine) et IconVm (poste virtuel Nutanix) : ce n'est ni un rack ni un
+ * poste, mais la machine/le cluster hôte qui HÉBERGE ces ressources. */
+export function IconHostMachine({ className }: IconProps) {
+  return base(
+    <>
+      <rect x="7" y="7" width="10" height="10" rx="1.2" />
+      <path d="M4 9h2M4 15h2M18 9h2M18 15h2M9 4v2M15 4v2M9 18v2M15 18v2" />
+    </>,
+    className,
+  );
+}
+
 /** Serveur/contrôleur de domaine (façon rack empilé) — nœud "ad-server" du graphe de topologie et
  * page de configuration DNS AD, distincte de IconVm (poste virtuel Nutanix). */
 export function IconServer({ className }: IconProps) {

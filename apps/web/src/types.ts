@@ -108,6 +108,9 @@ export interface NutanixVm {
   numVcpus: number;
   memoryMib: number;
   cluster: string;
+  /** uuid réel du cluster physique (cluster_reference) — absent seulement si Prism Central ne l'a
+   * pas renvoyé. Sert à relier une VM à son nœud "host" de cluster dans le graphe de topologie. */
+  clusterUuid?: string;
 }
 
 export interface ContainerPortMapping {
@@ -188,7 +191,11 @@ export interface AuditEvent {
   ok: boolean;
 }
 
-export type TopologyNodeKind = "container" | "volume" | "network" | "nutanix-vm" | "ad-server";
+export type TopologyNodeKind = "container" | "volume" | "network" | "nutanix-vm" | "ad-server" | "host";
+
+/** Sous-type d'un nœud "host" — voir TopologyNode#hostKind ci-dessous et
+ * apps/api/src/services/topology.ts. Champ explicite plutôt qu'une convention dans `subtitle`. */
+export type TopologyHostKind = "nutanix-cluster" | "remote-docker" | "lxc";
 
 export interface TopologyNode {
   id: string;
@@ -244,6 +251,17 @@ export interface TopologyNode {
    * aucune route ne cible ce conteneur — jamais un domaine inventé.
    */
   domains?: string[];
+  /**
+   * Nœuds "host" uniquement : sous-type explicite (cluster Nutanix physique, environnement Docker
+   * distant, hôte LXD) — voir apps/api/src/services/topology.ts et topologyGraphShared.tsx#KIND_ICON.
+   */
+  hostKind?: TopologyHostKind;
+  /**
+   * Nœuds "host" de sous-type "remote-docker" uniquement, et seulement si ce démon distant est
+   * réellement joignable — mêmes infos hôte réelles que Environment#hostInfo. Absent si l'hôte est
+   * configuré mais injoignable (`status: "stopped"` porte alors seule l'information).
+   */
+  hostInfo?: DockerHostInfo;
 }
 
 /** Voir TopologyNode#attachments ci-dessus — même forme que apps/api/src/types.ts#TopologyNodeAttachment. */
@@ -269,7 +287,9 @@ export interface TopologyEdge {
   id: string;
   source: string;
   target: string;
-  kind: "mount" | "network";
+  /** "hosts" : relation réelle cluster Nutanix -> VM qu'il héberge (rapprochée par uuid de cluster,
+   * jamais construite si non déterminable) — voir apps/api/src/types.ts pour le détail complet. */
+  kind: "mount" | "network" | "hosts";
   /** "network" uniquement : ports réellement publiés par le conteneur à l'une des deux extrémités
    * (voir doc complète côté apps/api/src/types.ts). */
   ports?: TopologyEdgePort[];
@@ -438,6 +458,20 @@ export interface ReverseProxyStatus {
   reachable: boolean;
   adminUrl: string;
   httpsEnabled: boolean;
+}
+
+// --- Config Nutanix, éditable en dehors de l'assistant de premier lancement — voir
+// apps/api/src/types.ts pour la doc complète (routes/nutanix.ts).
+
+/** Jamais le mot de passe (write-only). */
+export interface NutanixConfig {
+  prismCentralUrl: string;
+  username: string;
+}
+
+export interface NutanixStatus {
+  configured: boolean;
+  config?: NutanixConfig;
 }
 
 // --- DNS Active Directory (mise à jour dynamique sécurisée, RFC 2136 + GSS-TSIG) --------------

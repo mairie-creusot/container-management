@@ -131,6 +131,12 @@ function mapVmEntity(entity: NutanixVmEntity): NutanixVm {
   const resources = entity.status?.resources ?? entity.spec?.resources ?? {};
   const numSockets = resources.num_sockets ?? 0;
   const numVcpusPerSocket = resources.num_vcpus_per_socket ?? 0;
+  // uuid du cluster physique réel qui héberge cette VM (cluster_reference) — absent seulement si
+  // Prism Central ne l'a pas renvoyé (rare) : jamais déduit/inventé. Exposé en plus de `cluster`
+  // (le NOM, déjà utilisé pour l'affichage) pour que services/topology.ts puisse relier une VM à
+  // son VRAI nœud "host" de cluster par identité stable (uuid), pas par un rapprochement de nom
+  // fragile (deux clusters pourraient théoriquement partager un nom).
+  const clusterUuid = entity.status?.cluster_reference?.uuid ?? entity.spec?.cluster_reference?.uuid;
   return {
     id: entity.metadata?.uuid ?? entity.status?.name ?? entity.spec?.name ?? "unknown-vm",
     name: entity.status?.name ?? entity.spec?.name ?? "VM sans nom",
@@ -138,6 +144,7 @@ function mapVmEntity(entity: NutanixVmEntity): NutanixVm {
     numVcpus: numSockets * numVcpusPerSocket,
     memoryMib: resources.memory_size_mib ?? 0,
     cluster: entity.status?.cluster_reference?.name ?? entity.spec?.cluster_reference?.name ?? "unknown-cluster",
+    ...(clusterUuid ? { clusterUuid } : {}),
   };
 }
 
@@ -207,6 +214,42 @@ export async function getNutanixVms(): Promise<NutanixVm[]> {
       { kind: "vm", length: 500, offset: 0 },
     );
     return (data.entities ?? []).map(mapVmEntity);
+  } catch {
+    return [];
+  }
+}
+
+/** uuid + nom réel d'un cluster physique Nutanix — voir getNutanixClusters ci-dessous. */
+export interface NutanixClusterSummary {
+  uuid: string;
+  name: string;
+}
+
+/**
+ * Liste les clusters physiques réels pilotés par Prism Central (uuid + nom) — factorisation
+ * minimale de l'appel "/clusters/list" déjà fait par getNutanixEnvironment ci-dessous, ajoutée
+ * pour services/topology.ts (un TopologyNode "host" par cluster réel, cf. ARCHITECTURE.md §
+ * "Graphe de topologie") : topology.ts a besoin du NOM du cluster (pour le label du nœud), pas
+ * seulement de son compteur de VMs déjà exposé par getNutanixEnvironment/ClusterNode — d'où cette
+ * fonction dédiée plutôt qu'un élargissement de ClusterNode (qui resterait sans nom, un concept
+ * générique partagé avec Kubernetes/Docker Swarm). [] si Nutanix n'a jamais été configuré ou si
+ * configuré mais injoignable — même garde que getNutanixVms, jamais de cluster inventé.
+ */
+export async function getNutanixClusters(): Promise<NutanixClusterSummary[]> {
+  const effective = await loadNutanixConfig();
+  if (!effective) return [];
+
+  try {
+    const data = await nutanixPost<NutanixClustersListResponse>(
+      effective.prismCentralUrl,
+      "/api/nutanix/v3/clusters/list",
+      effective.username,
+      effective.password,
+      { kind: "cluster", length: 100, offset: 0 },
+    );
+    return (data.entities ?? [])
+      .filter((c): c is NutanixClusterEntity & { metadata: { uuid: string } } => Boolean(c.metadata?.uuid))
+      .map((c) => ({ uuid: c.metadata.uuid, name: c.status?.name ?? c.spec?.name ?? c.metadata.uuid }));
   } catch {
     return [];
   }

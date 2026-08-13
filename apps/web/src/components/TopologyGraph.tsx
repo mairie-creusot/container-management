@@ -39,10 +39,17 @@ import { pushNotification } from "@/features/notifications/notificationsSlice";
 import { canOperate } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
+import Modal from "@/components/Modal";
 import Skeleton from "@/components/Skeleton";
 import TopologyNodeDetailPanel from "@/components/TopologyNodeDetailPanel";
 import TopologySubGraphPanel from "@/components/TopologySubGraphPanel";
-import { IconSearch, IconTopology } from "@/components/icons";
+import { IconGithub, IconSearch, IconTopology } from "@/components/icons";
+// Réutilise TEL QUEL le flux de déploiement GitHub existant (détection Dockerfile/compose/
+// Terraform, build, déploiement, déploiement auto sur push — voir ARCHITECTURE.md § "Intégration
+// GitHub") : CreateSpotlight ne fait que le monter dans une modal par-dessus le canevas, aucune
+// logique n'est dupliquée ici (voir CreateSpotlight ci-dessous pour le choix "inline vs
+// navigation").
+import GitHubDeployPage from "@/features/github/GitHubDeployPage";
 import {
   CAPABILITY_DEFS,
   KIND_ICON,
@@ -69,14 +76,16 @@ import type { TopologyEdge, TopologyGroup, TopologyNode, TopologyNodeAttachment 
 const SKELETON_COLUMN_ROWS = [2, 3, 2];
 
 const REFRESH_INTERVAL_MS = 15_000;
-// Colonnes "nutanix-vm"/"ad-server" à part, après network — nœuds isolés (jamais d'arête vers
-// Docker), des colonnes dédiées les gardent lisibles plutôt que de les mélanger aux conteneurs.
+// Colonnes "nutanix-vm"/"ad-server"/"host" à part, après network — nœuds isolés ou reliés entre eux
+// uniquement (jamais d'arête vers Docker), des colonnes dédiées les gardent lisibles plutôt que de
+// les mélanger aux conteneurs.
 const COLUMN_X: Record<TopologyNode["kind"], number> = {
   volume: 0,
   container: 340,
   network: 680,
   "nutanix-vm": 1020,
   "ad-server": 1360,
+  host: 1700,
 };
 const ROW_HEIGHT = 130;
 const NETWORK_DRIVERS = ["bridge", "overlay", "host", "none"];
@@ -355,15 +364,58 @@ interface CreateSpotlightProps {
  * d'une liste d'actions — les 3 types de nœud "classiques" (ouvrent le formulaire détaillé existant,
  * CreatePopover, inchangé) PLUS des raccourcis "1 clic, 0 champ" pour les bases de données les plus
  * courantes (QUICK_DEPLOY_PRESETS ci-dessus, réutilisent EXACTEMENT la même route de création de
- * conteneur que le formulaire détaillé). Remplace l'ancien menu contextuel plat (3 entrées) du
- * clic droit sur le canevas — ET accessible par un bouton "+ Créer" toujours visible (voir
- * TopologyGraph.tsx#return), pas seulement via clic droit.
+ * conteneur que le formulaire détaillé) PLUS, tout en haut (façon Railway "Deploy from GitHub repo"),
+ * "Déployer depuis GitHub". Remplace l'ancien menu contextuel plat (3 entrées) du clic droit sur le
+ * canevas — ET accessible par un bouton "+ Créer" toujours visible (voir TopologyGraph.tsx#return),
+ * pas seulement via clic droit.
+ *
+ * Approche choisie pour "Déployer depuis GitHub" (voir mission) : INLINE, pas navigation. Vérifié
+ * avant d'écrire une seule ligne que GitHubDeployPage.tsx (détection Dockerfile/compose/Terraform,
+ * build, déploiement, déploiement auto sur push — TOUT entièrement fonctionnel côté
+ * services/github.ts) n'était en fait rattachée à AUCUNE vue navigable (`ViewId`
+ * apps/web/src/features/ui/uiSlice.ts, `App.tsx#renderView`, Sidebar.tsx) : l'alternative
+ * "navigation" documentée dans la mission comme repli acceptable aurait donc exigé de créer cette
+ * vue de toutes pièces (uiSlice.ts + App.tsx + Sidebar.tsx), hors du périmètre de fichiers confié
+ * ici. Monter <GitHubDeployPage/> INCHANGÉ dans une <Modal> (composant partagé déjà utilisé
+ * ailleurs dans l'appli, focus trap/Échap/clic-extérieur déjà gérés) est le chemin qui ne
+ * duplique ni ne réimplémente RIEN de sa logique — seul un nouveau bloc CSS (topology.css,
+ * `.graph-github-modal*`) l'élargit au-delà des 420px par défaut d'une modal de confirmation.
  */
 function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
   const dispatch = useAppDispatch();
-  const ref = useDismiss(onClose);
   const [query, setQuery] = useState("");
   const [deployingId, setDeployingId] = useState<string | null>(null);
+  // Bascule interne : true dès que "Déployer depuis GitHub" est choisi ci-dessous — la MÊME
+  // instance de popover troque alors sa recherche spotlight contre le flux GitHub réel (voir
+  // JSDoc ci-dessus). Reste locale à CreateSpotlight, aucun état ajouté ailleurs dans le fichier.
+  const [showGithubDeploy, setShowGithubDeploy] = useState(false);
+  // useDismiss ferme sur clic hors de `ref`/Échap — mais une fois la modal GitHub ouverte, son
+  // contenu vit dans un portail document.body (Modal.tsx), donc HORS de `ref` : sans ce garde-fou,
+  // le premier clic à l'intérieur de la modal (un repo, un champ...) la refermerait aussitôt.
+  // Modal.tsx gère alors seule Échap/clic-extérieur pour son propre contenu.
+  const ref = useDismiss(() => {
+    if (!showGithubDeploy) onClose();
+  });
+
+  if (showGithubDeploy) {
+    return (
+      <Modal open onClose={onClose} labelledBy="graph-github-deploy-title">
+        <div className="graph-github-modal">
+          <div className="graph-github-modal__head">
+            <h3 id="graph-github-deploy-title">
+              <IconGithub className="inline-icon" /> Déployer depuis GitHub
+            </h3>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
+              Fermer
+            </button>
+          </div>
+          <div className="graph-github-modal__body">
+            <GitHubDeployPage />
+          </div>
+        </div>
+      </Modal>
+    );
+  }
 
   async function handleDeployPreset(preset: QuickDeployPreset) {
     setDeployingId(preset.id);
@@ -385,6 +437,16 @@ function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
       dispatch(pushNotification({ level: "error", message: result.payload ?? `Échec du déploiement de ${preset.title}.` }));
     }
   }
+
+  // Tout en haut de la liste, façon Railway "Deploy from GitHub repo" — voir JSDoc au-dessus de
+  // cette fonction pour le choix inline (modal) vs navigation.
+  const githubAction: SpotlightAction = {
+    id: "deploy-github",
+    title: "Déployer depuis GitHub",
+    description: "Détecte Dockerfile/docker-compose/Terraform sur un vrai dépôt, build et déploie réellement.",
+    icon: IconGithub,
+    onSelect: () => setShowGithubDeploy(true),
+  };
 
   const kindActions: SpotlightAction[] = (["container", "volume", "network"] as CreatableKind[]).map((kind) => ({
     id: `kind-${kind}`,
@@ -412,9 +474,10 @@ function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
     normalizedQuery
       ? actions.filter((a) => a.title.toLowerCase().includes(normalizedQuery) || a.description.toLowerCase().includes(normalizedQuery))
       : actions;
+  const filteredGithubActions = filterActions([githubAction]);
   const filteredKindActions = filterActions(kindActions);
   const filteredPresetActions = filterActions(presetActions);
-  const hasResults = filteredKindActions.length > 0 || filteredPresetActions.length > 0;
+  const hasResults = filteredGithubActions.length > 0 || filteredKindActions.length > 0 || filteredPresetActions.length > 0;
 
   return (
     <div className="graph-popover graph-spotlight" style={{ left: x, top: y }} ref={ref}>
@@ -431,6 +494,13 @@ function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
       </div>
       <div className="graph-spotlight__list">
         {!hasResults && <div className="graph-spotlight__empty">Aucun résultat pour « {query} ».</div>}
+        {filteredGithubActions.length > 0 && (
+          <div className="graph-spotlight__group">
+            {filteredGithubActions.map((action) => (
+              <SpotlightRow key={action.id} action={action} />
+            ))}
+          </div>
+        )}
         {filteredKindActions.length > 0 && (
           <div className="graph-spotlight__group">
             {filteredKindActions.map((action) => (
@@ -789,7 +859,14 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       setFlowNodes([]);
       return;
     }
-    const columnCounters: Record<TopologyNode["kind"], number> = { volume: 0, container: 0, network: 0, "nutanix-vm": 0, "ad-server": 0 };
+    const columnCounters: Record<TopologyNode["kind"], number> = {
+      volume: 0,
+      container: 0,
+      network: 0,
+      "nutanix-vm": 0,
+      "ad-server": 0,
+      host: 0,
+    };
     // Membres d'un groupe REPLIÉ : n'apparaissent plus comme des nœuds individuels (voir plus bas,
     // un seul nœud "topologyGroupNode" les représente) — un membre d'un groupe DÉPLIÉ continue en
     // revanche d'être rendu ici tel quel (voir topologyGraphShared.tsx en-tête § "Regroupement").

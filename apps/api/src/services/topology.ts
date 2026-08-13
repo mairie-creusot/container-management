@@ -26,15 +26,36 @@
  * chiffré" inventé hors sujet). Aucune mesure de latence : QUAI ne fait aucun sondage réseau actif,
  * ce chiffre serait inventé — volontairement absent du badge plutôt que fabriqué.
  *
- * Nœuds "nutanix-vm" (voir getNutanixVmNodes ci-dessous) : source totalement indépendante de
- * Docker — récupérés et ajoutés au graphe que Docker soit joignable ou non, jamais reliés par une
- * arête aux nœuds Docker (aucune relation réelle entre les deux dans ce projet), [] tant que
- * Nutanix n'a jamais été configuré ou si configuré mais injoignable (nutanix.ts#getNutanixVms).
+ * Nœuds "nutanix-vm" (voir getNutanixTopologyParts ci-dessous) : source totalement indépendante de
+ * Docker — récupérés et ajoutés au graphe que Docker soit joignable ou non, [] tant que Nutanix
+ * n'a jamais été configuré ou si configuré mais injoignable (nutanix.ts#getNutanixVms). Reliées à
+ * leur nœud "host" de cluster (voir juste en dessous) par une VRAIE arête `kind: "hosts"` quand le
+ * cluster de la VM est déterminable — jamais reliées aux nœuds Docker (aucune relation réelle).
  *
  * Nœud "ad-server" (voir getAdServerNodes ci-dessous) : le contrôleur de domaine/DNS Active
  * Directory synchronisé par les routes de reverse proxy (services/adDns.ts) — même principe que
  * "nutanix-vm" (indépendant de Docker, [] tant que jamais configuré), jamais relié par une arête
  * à un nœud Docker ou Nutanix (aucune donnée ne prouve que c'est la même machine physique/VM).
+ *
+ * Nœuds "host" (kind "host", champ `hostKind` — voir getNutanixTopologyParts/
+ * getRemoteDockerHostNodes/getLxcHostNodes ci-dessous) : une machine/cluster HÔTE réelle, PAS une
+ * ressource applicative — trois sous-types possibles, un nœud par ressource RÉELLEMENT configurée,
+ * jamais fabriquée :
+ *  - "nutanix-cluster" : un nœud par cluster physique réellement listé par Prism Central
+ *    (nutanix.ts#getNutanixClusters), status toujours "running" (un cluster qu'on a pu lister est
+ *    par définition joignable) — [] si Nutanix n'a jamais été configuré ou si injoignable, comme
+ *    les VMs. Relié à ses VMs par une arête "hosts" (voir ci-dessus).
+ *  - "remote-docker" : un nœud par environnement Docker distant PERSISTÉ (remoteDockerStore.ts,
+ *    SSH ou TCP+TLS) — TOUJOURS présent dès qu'il est configuré (l'utilisateur l'a créé, il
+ *    existe), `status` reflète honnêtement la joignabilité RÉELLE au moment de la construction du
+ *    graphe (docker.ts#getDockerHostInfo, même mécanisme que Environment#hostInfo) : "running" +
+ *    `hostInfo` rempli si joignable, "stopped" + `hostInfo` absent sinon — jamais de hostInfo
+ *    inventé/mis en cache pour un hôte injoignable.
+ *  - "lxc" : au plus un nœud (LXD n'a qu'une seule config dans ce premier lot, comme Nutanix),
+ *    présent dès que LXD est configuré (lxcStore.ts), status honnête selon la joignabilité réelle
+ *    (lxc.ts#getLxcEnvironment).
+ * Aucun nœud "host" n'a de port de connexion (NODE_CAPABILITIES["host"] = [] côté frontend) : ce
+ * ne sont pas des ressources connectables comme un conteneur/volume/network.
  *
  * Volumes/networks ORPHELINS (existants sur l'hôte Docker mais rattachés à AUCUN conteneur) :
  * délibérément EXCLUS de ce graphe (voir le filtre juste avant leur construction plus bas) pour
@@ -69,14 +90,17 @@
  * en plus pour les networks restés des nœuds (partagés/par défaut).
  */
 
-import { getClient, isDockerReachable, readContainerHealth, readContainerUsage } from "./docker.js";
+import { getClient, getDockerHostInfo, isDockerReachable, readContainerHealth, readContainerUsage } from "./docker.js";
 import { getImages } from "./images.js";
 import { listGitOpsFiles } from "./gitops.js";
 import { listAllScans } from "./scan.js";
-import { getNutanixVms, isNutanixConfigured } from "./nutanix.js";
+import { getNutanixClusters, getNutanixVms, isNutanixConfigured } from "./nutanix.js";
 import { getEffectiveAdDnsConfig } from "./setupStore.js";
 import { lastKnownDnsSync, listRoutes } from "./reverseProxy.js";
 import { listGroups } from "./topologyGroupsStore.js";
+import { listRemoteDockerEnvironments } from "./remoteDockerStore.js";
+import { getLxcEnvironment } from "./lxc.js";
+import { getEffectiveLxcConfig } from "./lxcStore.js";
 import type { NutanixVm, ScanResult, Topology, TopologyEdge, TopologyEdgePort, TopologyNode } from "../types.js";
 
 /**
@@ -172,17 +196,125 @@ function nutanixVmToNode(vm: NutanixVm): TopologyNode {
   };
 }
 
+function nutanixClusterHostNodeId(clusterUuid: string): string {
+  return `host:nutanix-cluster:${clusterUuid}`;
+}
+
 /**
- * Nœuds VM Nutanix, indépendants de Docker (voir en-tête de fichier) — jamais d'arête forcée
- * vers les nœuds Docker, de simples nœuds isolés dans le graphe. [] si Nutanix n'a jamais été
- * configuré via l'assistant (isNutanixConfigured, même garde que nutanix.ts#getNutanixEnvironment)
- * ou si configuré mais injoignable (getNutanixVms() retombe déjà sur [] dans ce cas) — jamais de
- * VM inventée.
+ * Nœuds VM Nutanix + nœuds "host" de cluster physique + arêtes réelles qui les relient — une seule
+ * fonction pour les trois (plutôt que trois appels séparés) : les arêtes VM->cluster ont besoin des
+ * VMs ET des clusters en même temps, autant récupérer les deux d'un coup et les combiner ici.
+ *
+ * [] partout si Nutanix n'a jamais été configuré via l'assistant (isNutanixConfigured, même garde
+ * que nutanix.ts#getNutanixEnvironment) — ni VM, ni cluster, ni arête inventée. Si configuré mais
+ * injoignable, getNutanixVms()/getNutanixClusters() retombent chacun sur [] indépendamment (même
+ * garde intrinsèque à chacun) : le graphe reste honnêtement vide plutôt que partiellement peuplé
+ * avec des données obsolètes.
+ *
+ * Une arête `kind: "hosts"` (nœud host cluster -> nœud nutanix-vm) n'est créée QUE si le
+ * `clusterUuid` de la VM (voir nutanix.ts#NutanixVm) correspond à un cluster RÉELLEMENT présent
+ * dans la réponse de getNutanixClusters() à cet instant — jamais d'arête vers un cluster qu'on n'a
+ * pas pu lister soi-même (course entre les deux appels, cluster supprimé entre-temps...).
  */
-async function getNutanixVmNodes(): Promise<TopologyNode[]> {
-  if (!(await isNutanixConfigured())) return [];
-  const vms = await getNutanixVms();
-  return vms.map(nutanixVmToNode);
+async function getNutanixTopologyParts(): Promise<{ vmNodes: TopologyNode[]; hostNodes: TopologyNode[]; hostEdges: TopologyEdge[] }> {
+  if (!(await isNutanixConfigured())) return { vmNodes: [], hostNodes: [], hostEdges: [] };
+
+  const [vms, clusters] = await Promise.all([getNutanixVms(), getNutanixClusters()]);
+  const vmNodes = vms.map(nutanixVmToNode);
+
+  // Nombre RÉEL de VMs par cluster, déduit des VMs déjà récupérées ci-dessus (pas un second appel
+  // réseau) — utilisé uniquement pour un sous-titre informatif sur le nœud "host".
+  const vmCountByClusterUuid = new Map<string, number>();
+  for (const vm of vms) {
+    if (!vm.clusterUuid) continue;
+    vmCountByClusterUuid.set(vm.clusterUuid, (vmCountByClusterUuid.get(vm.clusterUuid) ?? 0) + 1);
+  }
+
+  const hostNodes: TopologyNode[] = clusters.map((c) => {
+    const vmCount = vmCountByClusterUuid.get(c.uuid) ?? 0;
+    return {
+      id: nutanixClusterHostNodeId(c.uuid),
+      kind: "host",
+      hostKind: "nutanix-cluster",
+      label: c.name,
+      subtitle: `Cluster Nutanix · ${vmCount} VM${vmCount > 1 ? "s" : ""}`,
+      // Un cluster qu'on vient de lister via l'API v3 est par définition joignable à cet instant —
+      // pas de notion de "cluster configuré mais injoignable" séparée ici (contrairement à
+      // "remote-docker"/"lxc" ci-dessous) : s'il ne l'était pas, getNutanixClusters() ne l'aurait
+      // simplement pas renvoyé.
+      status: "running",
+    };
+  });
+
+  const knownClusterUuids = new Set(clusters.map((c) => c.uuid));
+  const hostEdges: TopologyEdge[] = [];
+  for (const vm of vms) {
+    if (!vm.clusterUuid || !knownClusterUuids.has(vm.clusterUuid)) continue; // cluster non déterminable : jamais d'arête inventée
+    hostEdges.push({
+      id: `hosts:${vm.clusterUuid}:${vm.id}`,
+      source: nutanixClusterHostNodeId(vm.clusterUuid),
+      target: `nutanix-vm:${vm.id}`,
+      kind: "hosts",
+    });
+  }
+
+  return { vmNodes, hostNodes, hostEdges };
+}
+
+/**
+ * Un nœud "host" par environnement Docker distant PERSISTÉ (remoteDockerStore.ts, SSH ou
+ * TCP+TLS) — TOUJOURS présent dès qu'il est configuré : contrairement à Nutanix/LXC, l'existence
+ * du nœud ne dépend pas de la joignabilité (l'utilisateur a explicitement ajouté cet hôte, il doit
+ * rester visible même injoignable), seul `status`/`hostInfo` en dépendent :
+ *  - joignable : `status: "running"` + `hostInfo` réel (docker.ts#getDockerHostInfo — mêmes CPU/
+ *    RAM/version/conteneurs que Environment#hostInfo pour ce même hôte, GET /api/environments) ;
+ *  - injoignable : `status: "stopped"`, `hostInfo` absent (jamais de dernière valeur connue mise en
+ *    cache : ce serait mentir sur l'état actuel).
+ * [] si aucun environnement Docker distant n'a jamais été configuré.
+ */
+async function getRemoteDockerHostNodes(): Promise<TopologyNode[]> {
+  const envs = await listRemoteDockerEnvironments();
+  return Promise.all(
+    envs.map(async (env) => {
+      const hostInfo = await getDockerHostInfo(env.id);
+      const endpoint =
+        env.transport === "ssh" ? `ssh://${env.sshUsername ?? "?"}@${env.host}:${env.port}` : `tcp://${env.host}:${env.port}`;
+      return {
+        id: `host:remote-docker:${env.id}`,
+        kind: "host",
+        hostKind: "remote-docker",
+        label: env.name,
+        subtitle: endpoint,
+        status: hostInfo ? "running" : "stopped",
+        ...(hostInfo ? { hostInfo } : {}),
+      } satisfies TopologyNode;
+    }),
+  );
+}
+
+/**
+ * Nœud "host" LXD (au plus un — LXD n'a qu'une seule config dans ce premier lot, cf. lxcStore.ts,
+ * même principe que Nutanix) — présent dès que LXD est configuré, `status` honnête selon la
+ * joignabilité réelle au moment de la construction du graphe (lxc.ts#getLxcEnvironment, même appel
+ * que GET /api/environments). [] si LXD n'a jamais été configuré.
+ */
+async function getLxcHostNodes(): Promise<TopologyNode[]> {
+  const env = await getLxcEnvironment();
+  if (!env) return [];
+  const effective = await getEffectiveLxcConfig();
+  const endpoint = effective?.endpoint ?? "LXD";
+  const reachable = env.status === "ok";
+  const instanceCount = env.nodes[0]?.containerCount;
+  return [
+    {
+      id: "host:lxc",
+      kind: "host",
+      hostKind: "lxc",
+      label: "LXD",
+      subtitle: reachable && instanceCount !== undefined ? `${endpoint} · ${instanceCount} instance(s)` : endpoint,
+      status: reachable ? "running" : "stopped",
+    },
+  ];
 }
 
 /**
@@ -216,13 +348,20 @@ async function getAdServerNodes(): Promise<TopologyNode[]> {
 
 export async function getTopology(): Promise<Topology> {
   const docker = await getClient();
-  const nutanixVmNodes = await getNutanixVmNodes();
+  const { vmNodes: nutanixVmNodes, hostNodes: nutanixHostNodes, hostEdges: nutanixHostEdges } = await getNutanixTopologyParts();
   const adServerNodes = await getAdServerNodes();
+  // Nœuds "host" Docker distant/LXD : indépendants eux aussi de la joignabilité du démon LOCAL
+  // (ce sont d'autres hôtes) — récupérés que Docker local soit joignable ou non, même principe que
+  // Nutanix/ad-server ci-dessus.
+  const remoteDockerHostNodes = await getRemoteDockerHostNodes();
+  const lxcHostNodes = await getLxcHostNodes();
   // Groupements (voir topologyGroupsStore.ts) : indépendants de la joignabilité Docker (une simple
   // lecture JSON en mémoire), inclus dans les deux chemins de retour pour que le frontend garde
   // toujours la même forme de réponse à traiter.
   const groups = await listGroups();
-  const empty: Topology = { nodes: [...nutanixVmNodes, ...adServerNodes], edges: [], generatedAt: new Date().toISOString(), groups };
+  const staticNodes: TopologyNode[] = [...nutanixVmNodes, ...nutanixHostNodes, ...adServerNodes, ...remoteDockerHostNodes, ...lxcHostNodes];
+  const staticEdges: TopologyEdge[] = [...nutanixHostEdges];
+  const empty: Topology = { nodes: staticNodes, edges: staticEdges, generatedAt: new Date().toISOString(), groups };
   if (!(await isDockerReachable(docker))) return empty;
 
   try {
@@ -470,7 +609,7 @@ export async function getTopology(): Promise<Topology> {
       });
     }
 
-    return { nodes: [...nodes, ...nutanixVmNodes, ...adServerNodes], edges, generatedAt: new Date().toISOString(), groups };
+    return { nodes: [...nodes, ...staticNodes], edges: [...edges, ...staticEdges], generatedAt: new Date().toISOString(), groups };
   } catch {
     return empty;
   }

@@ -22,9 +22,16 @@ import type { GithubDeployment, GithubDeploymentStatus } from "@/types";
 
 const DEPLOYMENT_POLL_MS = 2000;
 
-// Cibles de déploiement pertinentes pour un build Docker réel — mêmes orchestrateurs que le
-// sélecteur existant, inchangé.
-const DEPLOY_TARGET_ORCHESTRATORS = new Set(["docker-remote", "compose", "swarm"]);
+// Cibles de déploiement RÉELLEMENT supportées par ce flux (services/github.ts#deployViaDockerBuild
+// -> services/docker.ts#getClient) : UNIQUEMENT les hôtes Docker distants persistés
+// ("docker-remote", GET /api/environments — Environnements Docker distants). "Docker local" est
+// déjà l'option par défaut ci-dessous (targetEnvironmentId vide -> démon local, TOUJOURS
+// fonctionnel) : "compose"/"swarm" désignent CE MÊME démon local (un seul environnement Docker
+// local existe jamais à la fois, cf. services/docker.ts#getDockerEnvironments) — les lister comme
+// options supplémentaires serait un doublon pur, retiré. Kubernetes/Nutanix/LXC sont des plans de
+// contrôle entièrement différents que ce flux ne sait pas piloter (dockerode ne leur parle pas) :
+// jamais listés ici, quelle que soit leur configuration — une option qui échouerait à coup sûr.
+const DEPLOY_TARGET_ORCHESTRATORS = new Set(["docker-remote"]);
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString("fr-FR", {
@@ -412,15 +419,20 @@ export default function GitHubDeployPage() {
                                   value={targetEnvironmentId}
                                   onChange={(e) => setTargetEnvironmentId(e.target.value)}
                                 >
-                                  <option value="">Docker local</option>
+                                  <option value="">🖥️ Docker local</option>
                                   {environments
                                     .filter((e) => DEPLOY_TARGET_ORCHESTRATORS.has(e.orchestrator))
                                     .map((e) => (
                                       <option key={e.id} value={e.id}>
-                                        {e.name}
+                                        🌐 {e.name} (hôte Docker distant)
                                       </option>
                                     ))}
                                 </select>
+                                <p className="create-container-hint">
+                                  Seuls les hôtes Docker réellement pilotables par ce flux sont proposés (Docker
+                                  local, ou un hôte Docker distant configuré dans Environnements). Kubernetes/
+                                  Nutanix/LXC ne sont pas des cibles Docker et n'apparaissent jamais ici.
+                                </p>
                               </div>
                               <div className="field">
                                 <label htmlFor="gh-port">Port du conteneur (pour le sous-domaine)</label>

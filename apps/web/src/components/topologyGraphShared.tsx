@@ -11,7 +11,17 @@ import {
   type EdgeProps,
   type NodeProps,
 } from "@xyflow/react";
-import { IconChevron, IconContainers, IconFolder, IconGlobe, IconNetworks, IconServer, IconVm, IconVolumes } from "@/components/icons";
+import {
+  IconChevron,
+  IconContainers,
+  IconFolder,
+  IconGlobe,
+  IconHostMachine,
+  IconNetworks,
+  IconServer,
+  IconVm,
+  IconVolumes,
+} from "@/components/icons";
 import type { TopologyEdge, TopologyEdgePort, TopologyGroup, TopologyNode, TopologyNodeAttachment } from "@/types";
 
 /**
@@ -38,6 +48,7 @@ export const KIND_ICON: Record<TopologyNode["kind"], (props: { className?: strin
   network: IconNetworks,
   "nutanix-vm": IconVm,
   "ad-server": IconServer,
+  host: IconHostMachine,
 };
 
 /** Couleurs de la MiniMap par type de nœud — mêmes valeurs que celles utilisées pour l'icône du
@@ -48,6 +59,9 @@ export const MINIMAP_NODE_COLOR: Record<TopologyNode["kind"], string> = {
   network: "#7c5cfc",
   "nutanix-vm": "#22c55e",
   "ad-server": "#e879f9",
+  // Teal — distinct des cinq autres couleurs déjà utilisées ci-dessus, cohérent avec
+  // .topology-node--host/.topology-detail-panel__icon--host dans topology.css.
+  host: "#14b8a6",
 };
 
 /**
@@ -99,6 +113,11 @@ export const NODE_CAPABILITIES: Record<TopologyNode["kind"], PortSpec[]> = {
   // Même principe pour le contrôleur de domaine/DNS AD (services/adDns.ts) : jamais relié par une
   // arête (aucune donnée ne prouve un lien réel avec un nœud Docker/Nutanix précis).
   "ad-server": [],
+  // Nœuds "host" (cluster Nutanix / environnement Docker distant / hôte LXD, voir
+  // services/topology.ts) : pas connectables comme un conteneur/volume/network — la seule arête
+  // qui les touche ("hosts", cluster Nutanix -> VM) est posée par le serveur, jamais glissée à la
+  // main par l'utilisateur.
+  host: [],
 };
 
 export interface CapabilityDef {
@@ -221,6 +240,10 @@ export function buildTopologyEdges(
     const state: EdgeHealthState = stopped ? "stopped" : (containerNode?.healthStatus ?? "none");
     const color = EDGE_STATE_COLOR[state];
     const isMount = e.kind === "mount";
+    // "hosts" (cluster Nutanix -> VM, voir services/topology.ts) : relation structurelle statique,
+    // pas un flux de trafic — jamais de tirets défilants (contrairement à "network") ni de
+    // particules (contrairement à "mount") pour ne pas laisser croire à une activité mesurée.
+    const isHostsEdge = e.kind === "hosts";
     // "stopped" prime sur le type : tirets larges et espacés, quel que soit mount/network.
     // Sinon : réseau garde ses tirets fins animés (existant) ; mount reste en trait plein — les
     // particules de MountFlowEdge assurent seules l'impression de flux, un dasharray en plus
@@ -233,7 +256,7 @@ export function buildTopologyEdges(
       ...(e.sourceHandle ? { sourceHandle: e.sourceHandle } : {}),
       ...(e.targetHandle ? { targetHandle: e.targetHandle } : {}),
       type: isMount ? "mountFlow" : "networkEdge",
-      animated: !isMount,
+      animated: !isMount && !isHostsEdge,
       className: `topology-edge topology-edge--${e.kind} topology-edge--${state}`,
       style: { stroke: color, ...(strokeDasharray ? { strokeDasharray } : {}) },
       markerEnd: { type: MarkerType.ArrowClosed, color, width: 16, height: 16 },

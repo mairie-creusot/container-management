@@ -176,6 +176,14 @@
   color: #e879f9;
 }
 
+/* Hôte (cluster Nutanix physique / environnement Docker distant / hôte LXD, voir hostKind sur
+   TopologyNode) — teal, distinct des cinq autres couleurs de kind ci-dessus, cohérent avec
+   MINIMAP_NODE_COLOR["host"] dans topologyGraphShared.tsx. */
+.topology-node--host .topology-node__icon {
+  background: rgba(20, 184, 166, 0.16);
+  color: #14b8a6;
+}
+
 .topology-node__label {
   font-size: 13.5px;
   font-weight: 600;
@@ -451,6 +459,14 @@
 
 .react-flow__edge.topology-edge--network .react-flow__edge-path {
   stroke-width: 1.5;
+}
+
+/* "hosts" (cluster Nutanix -> VM qu'il héberge, voir services/topology.ts) : relation structurelle
+   statique, plus fine que "network" et volontairement non animée (buildTopologyEdges,
+   topologyGraphShared.tsx) — pas un flux de trafic, juste une hiérarchie physique. */
+.react-flow__edge.topology-edge--hosts .react-flow__edge-path {
+  stroke-width: 1.25;
+  opacity: 0.85;
 }
 
 /* Conteneur arrêté (status !== "running") : arrêt souvent volontaire, pas une panne — donc pas de
@@ -757,6 +773,7 @@
 .topology-detail-panel__icon--network { color: var(--accent-end, #7c5cfc); }
 .topology-detail-panel__icon--nutanix-vm { color: var(--color-success); }
 .topology-detail-panel__icon--ad-server { color: #e879f9; }
+.topology-detail-panel__icon--host { color: #14b8a6; }
 
 .topology-detail-panel__heading {
   flex: 1;
@@ -804,7 +821,7 @@
 
 /* Onglets réels (façon Railway : Deployments/Variables/Metrics/Settings) — adaptés au kind du
    nœud (TopologyNodeDetailPanel.tsx#tabsForKind), pas affichés du tout s'il n'y en a qu'un seul
-   (volume/network/nutanix-vm : rien d'autre de pertinent à montrer). */
+   (volume/network/nutanix-vm/ad-server/host : rien d'autre de pertinent à montrer). */
 .topology-detail-panel__tabs {
   display: flex;
   flex-wrap: wrap;
@@ -1528,5 +1545,49 @@
 .graph-spotlight__row-busy {
   flex: none;
   color: var(--color-text-faint);
+}
+
+/* --- Flux "Déployer depuis GitHub" inline (CreateSpotlight, voir TopologyGraph.tsx) -----------
+   GitHubDeployPage.tsx (page complète, colonnes 220px/1fr/340px) est monté TEL QUEL dans la
+   <Modal> partagée (Modal.tsx, INCHANGÉE) : elle est bien trop à l'étroit dans les 420px par
+   défaut d'une modal de confirmation classique. `:has()` déjà utilisé ailleurs dans l'appli
+   (layout.css, `.inspector:has(.inspector__empty)`) : élargit CETTE modal précise uniquement,
+   aucune autre modal de l'appli (confirmations, renommage...) n'est affectée. */
+.modal-card:has(.graph-github-modal) {
+  width: 100%;
+  max-width: min(1180px, calc(100vw - 40px));
+}
+
+.graph-github-modal {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.graph-github-modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 0;
+}
+
+.graph-github-modal__head h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 15px;
+}
+
+.graph-github-modal__body {
+  min-height: 0;
+}
+
+/* La page a son propre padding (.page-content) — l'animation d'entrée "changement de vue" n'a en
+   revanche pas de sens ici (c'est la modal elle-même qui joue déjà une transition d'ouverture). */
+.graph-github-modal__body .page-content {
+  animation: none;
+  padding-top: 6px;
 }
 

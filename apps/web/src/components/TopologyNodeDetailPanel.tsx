@@ -11,7 +11,7 @@ import Gauge from "@/components/Gauge";
 import KeyValueList from "@/components/KeyValueList";
 import MetricsChart from "@/components/MetricsChart";
 import { KIND_ICON, formatMem, idWithoutPrefix } from "@/components/topologyGraphShared";
-import type { ContainerMetricPoint, Topology, TopologyNode, TopologyNodeKind, VulnSeverity } from "@/types";
+import type { ContainerMetricPoint, Topology, TopologyHostKind, TopologyNode, TopologyNodeKind, VulnSeverity } from "@/types";
 
 /** Rafraîchissement de l'onglet "Métriques" pendant qu'il est affiché — même ordre de grandeur que
  * config.metrics.intervalMs côté API (30s par défaut) : inutile de sonder plus vite qu'un nouveau
@@ -61,6 +61,14 @@ const HEALTH_SEMANTIC: Record<string, "success" | "critical" | "warning" | "neut
   none: "neutral",
 };
 
+/** Libellé du sous-type d'un nœud "host" (voir TopologyNode#hostKind) — affiché en badge à côté du
+ * statut, pour distinguer les trois sources possibles sans dépendre du libellé/sous-titre libre. */
+const HOST_KIND_LABEL: Record<TopologyHostKind, string> = {
+  "nutanix-cluster": "Cluster Nutanix",
+  "remote-docker": "Docker distant",
+  lxc: "Hôte LXD",
+};
+
 /** Heuristique de masquage des variables d'environnement qui RESSEMBLENT à un secret par leur nom
  * de clé — ce composant n'a aucune idée de ce qui est un VRAI secret géré par le gestionnaire de
  * secrets de l'app (SecretRef, écrit-seul côté API) : mieux vaut masquer par prudence une variable
@@ -75,8 +83,9 @@ interface TabDef {
 }
 
 /** Onglets réels (pas de simples sections empilées) — adaptés au kind : un conteneur a les six,
- * les autres kinds (volume/network/nutanix-vm/ad-server) n'ont qu'un seul aperçu, rien d'autre à montrer de
- * pertinent (pas de ports/volumes/variables/vulnérabilités/métriques pour une ressource qui n'en a pas). */
+ * les autres kinds (volume/network/nutanix-vm/ad-server/host) n'ont qu'un seul aperçu, rien d'autre
+ * à montrer de pertinent (pas de ports/volumes/variables/vulnérabilités/métriques pour une ressource
+ * qui n'en a pas). */
 const CONTAINER_TABS: TabDef[] = [
   { id: "overview", label: "Aperçu" },
   { id: "network", label: "Réseau" },
@@ -191,7 +200,7 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
     } else if (node.kind === "network") {
       dispatch(fetchNetworks());
     }
-    // nutanix-vm/ad-server : rien à charger, TopologyNode porte déjà tout le détail disponible.
+    // nutanix-vm/ad-server/host : rien à charger, TopologyNode porte déjà tout le détail disponible.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dispatch, node?.id, node?.kind]);
 
@@ -682,6 +691,51 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
                 },
               ]}
             />
+          </>
+        )}
+
+        {/* --- Hôte (cluster Nutanix physique / environnement Docker distant / hôte LXD) ---------- */}
+        {node.kind === "host" && (
+          <>
+            <div className="chip-row topology-detail-panel__chips">
+              <StatusPill status={node.status} />
+              <span className="status-pill status-pill--neutral">{HOST_KIND_LABEL[node.hostKind ?? "remote-docker"]}</span>
+            </div>
+            <KeyValueList
+              rows={[
+                { key: "Nom", value: node.label },
+                { key: "Adresse / description", value: node.subtitle },
+                {
+                  key: "Joignabilité",
+                  value: node.status === "running" ? "Joignable" : node.status === "stopped" ? "Injoignable" : "Indéterminée",
+                },
+              ]}
+            />
+            {node.hostKind === "remote-docker" && node.hostInfo && (
+              <>
+                <div className="inspector-section-title">Démon Docker (infos réelles)</div>
+                <KeyValueList
+                  rows={[
+                    { key: "Endpoint", value: node.hostInfo.endpoint },
+                    { key: "Version serveur", value: node.hostInfo.serverVersion },
+                    { key: "Version API", value: node.hostInfo.apiVersion },
+                    { key: "OS / architecture", value: `${node.hostInfo.os} (${node.hostInfo.architecture})` },
+                    { key: "CPUs", value: String(node.hostInfo.cpus) },
+                    { key: "Mémoire totale", value: formatMem(node.hostInfo.totalMemBytes) },
+                    { key: "Conteneurs actifs / arrêtés", value: `${node.hostInfo.containersRunning} / ${node.hostInfo.containersStopped}` },
+                    { key: "Images", value: String(node.hostInfo.imagesCount) },
+                    { key: "Volumes", value: String(node.hostInfo.volumesCount) },
+                    { key: "Swarm actif", value: node.hostInfo.swarmActive ? "Oui" : "Non" },
+                  ]}
+                />
+              </>
+            )}
+            {node.hostKind === "remote-docker" && !node.hostInfo && (
+              <div className="empty-state">
+                Cet hôte Docker distant est configuré mais actuellement injoignable — aucune information en direct
+                disponible (voir Paramètres › Environnements Docker distants).
+              </div>
+            )}
           </>
         )}
       </div>

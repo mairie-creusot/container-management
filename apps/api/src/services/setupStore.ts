@@ -348,6 +348,34 @@ export async function getEffectiveNutanixConfig(): Promise<SetupNutanixConfig | 
   return { ...current.nutanix, password: decryptSecret(current.nutanix.password) };
 }
 
+/**
+ * PUT /api/nutanix/config — configure/remplace Nutanix EN DEHORS de l'assistant de premier
+ * lancement (mot de passe chiffré avant écriture). Avant l'ajout de cette fonction, la SEULE
+ * façon de configurer Nutanix était l'étape "Orchestrateurs" de l'assistant — donc invisible/
+ * inaccessible pour un admin qui a déjà terminé la configuration initiale sans Nutanix et veut
+ * l'ajouter ensuite (page Environnements) sans repasser par un `POST /api/setup/reset` complet
+ * (qui rouvre TOUT l'assistant, LDAP compris). Même principe que setAdDnsConfig ci-dessous :
+ * n'affecte aucune autre section de la config.
+ */
+export async function setNutanixConfig(input: SetupNutanixConfig): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const next: SetupConfig = encryptSecrets({ ...current, nutanix: input });
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/** DELETE /api/nutanix/config — retire la configuration Nutanix (retour à "jamais configuré",
+ * GET /api/nutanix/vms et le nœud de topologie associé redeviennent [] / absent). */
+export async function clearNutanixConfig(): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const { nutanix: _removed, ...rest } = current;
+  const next: SetupConfig = rest;
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
 /** Config DNS AD effective (mot de passe déchiffré), ou `null` si jamais configurée — même
  * principe que getEffectiveNutanixConfig (aucun mécanisme de bootstrap par variable
  * d'environnement pour cette intégration, toujours saisie explicitement). */

@@ -243,6 +243,10 @@ export interface NutanixVm {
   memoryMib: number;
   /** Nom du cluster Nutanix physique hébergeant la VM. */
   cluster: string;
+  /** uuid réel du cluster physique (cluster_reference) — absent seulement si Prism Central ne l'a
+   * pas renvoyé (rare). Sert à relier une VM à son VRAI nœud "host" de cluster par identité stable
+   * dans le graphe de topologie (services/topology.ts), jamais par rapprochement de nom. */
+  clusterUuid?: string;
 }
 
 export interface GitOpsFile {
@@ -329,6 +333,23 @@ export interface ReverseProxyStatus {
    * reverseProxy.ts). Toujours true dès que Caddy est joignable (poussé à chaque configuration
    * depuis le durcissement TLS de ce jour), false si injoignable (inconnu plutôt qu'affirmé). */
   httpsEnabled: boolean;
+}
+
+// --- Config Nutanix, éditable EN DEHORS de l'assistant de premier lancement (routes/nutanix.ts,
+// services/setupStore.ts#setNutanixConfig/clearNutanixConfig) — avant ces routes, la seule façon
+// de configurer Nutanix était l'étape "Orchestrateurs" de l'assistant, invisible/inaccessible une
+// fois celui-ci terminé sans tout rouvrir (POST /api/setup/reset, LDAP compris).
+
+/** Jamais le mot de passe (write-only, comme AdDnsConfig ci-dessous). */
+export interface NutanixConfig {
+  prismCentralUrl: string;
+  username: string;
+}
+
+/** GET /api/nutanix/config */
+export interface NutanixStatus {
+  configured: boolean;
+  config?: NutanixConfig;
 }
 
 // --- DNS Active Directory (mise à jour dynamique sécurisée, RFC 2136 + GSS-TSIG) --------------
@@ -512,13 +533,24 @@ export interface IacRunDetail extends IacRun {
 // Construit à partir des vraies données Docker (docker.listContainers renvoie déjà Mounts et
 // NetworkSettings.Networks dans son résumé, pas besoin d'un inspect() par conteneur).
 
-export type TopologyNodeKind = "container" | "volume" | "network" | "nutanix-vm" | "ad-server";
+export type TopologyNodeKind = "container" | "volume" | "network" | "nutanix-vm" | "ad-server" | "host";
+
+/**
+ * Sous-type d'un nœud "host" (voir TopologyNode#hostKind ci-dessous, services/topology.ts) —
+ * champ explicite plutôt qu'une convention de préfixe dans `subtitle` (fragile, pas typé) : le
+ * frontend choisit l'icône/couleur/contenu du panneau de détail sur CE champ, jamais en parsant du
+ * texte libre.
+ */
+export type TopologyHostKind = "nutanix-cluster" | "remote-docker" | "lxc";
 
 export interface TopologyNode {
-  id: string; // ex: "container:<id>", "volume:<name>", "network:<id>", "nutanix-vm:<uuid>"
+  // ex: "container:<id>", "volume:<name>", "network:<id>", "nutanix-vm:<uuid>",
+  // "host:nutanix-cluster:<uuid>", "host:remote-docker:<id>", "host:lxc"
+  id: string;
   kind: TopologyNodeKind;
   label: string;
-  /** Sous-titre affiché sous le label (ex: image du conteneur, driver du volume, cluster physique pour une VM Nutanix). */
+  /** Sous-titre affiché sous le label (ex: image du conteneur, driver du volume, cluster physique
+   * pour une VM Nutanix, adresse/description réelle pour un nœud "host"). */
   subtitle: string;
   status: "running" | "stopped" | "restarting" | "neutral";
   /** Conteneurs uniquement : utilisation courante (docker.ts#readContainerUsage), pour affichage direct sur le nœud du graphe. */
@@ -579,6 +611,21 @@ export interface TopologyNode {
    * aucune route ne cible ce conteneur — jamais un domaine inventé.
    */
   domains?: string[];
+  /**
+   * Nœuds "host" uniquement (voir services/topology.ts) : sous-type explicite d'hôte — cluster
+   * Nutanix physique, environnement Docker distant (SSH/TCP+TLS, remoteDockerStore.ts) ou hôte LXD
+   * (lxcStore.ts). Le frontend s'en sert pour choisir l'icône/couleur/contenu du panneau de détail
+   * (topologyGraphShared.tsx#KIND_ICON), jamais en devinant depuis `subtitle`.
+   */
+  hostKind?: TopologyHostKind;
+  /**
+   * Nœuds "host" de sous-type "remote-docker" UNIQUEMENT, et seulement si ce démon distant est
+   * RÉELLEMENT joignable au moment de la construction du graphe (docker.ts#getDockerHostInfo,
+   * même appel que pour Environment#hostInfo) — CPU/RAM/version/conteneurs réels de cet hôte.
+   * Absent si l'hôte est configuré mais injoignable : `status: "stopped"` porte alors seule
+   * l'information, jamais un hostInfo mis en cache/inventé pour combler l'absence.
+   */
+  hostInfo?: DockerHostInfo;
 }
 
 /**
@@ -611,7 +658,14 @@ export interface TopologyEdge {
   id: string;
   source: string; // id de TopologyNode
   target: string; // id de TopologyNode
-  kind: "mount" | "network";
+  /**
+   * "hosts" : relation RÉELLE cluster Nutanix -> VM qu'il héberge (rapprochée par uuid de cluster,
+   * `NutanixVm#clusterUuid` — jamais construite si ce uuid n'est pas déterminable ou ne correspond
+   * à aucun cluster réellement listé). Nœud "host" (source) -> nœud "nutanix-vm" (target), sans
+   * port/badge (pas de notion de trafic ici, juste une hiérarchie physique) — voir
+   * services/topology.ts et topologyGraphShared.tsx#buildTopologyEdges.
+   */
+  kind: "mount" | "network" | "hosts";
   /**
    * "network" uniquement : ports RÉELLEMENT publiés par le conteneur à l'une des deux extrémités
    * (docker.listContainers()[].Ports, dédupliqués) — affiché façon Railway comme un badge flottant
