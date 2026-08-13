@@ -1376,9 +1376,32 @@
   z-index: 1;
 }
 
-.topology-interior__history {
-  width: 300px;
+/* Colonne latérale de la vue "composition interne" (retour utilisateur du 13/08/2026 : vraies
+   vulnérabilités Grype/OSV-Scanner ajoutées au-dessus de l'historique des couches déjà existant) —
+   les deux blocs défilent chacun indépendamment (voir overflow-y sur chacun ci-dessous), la colonne
+   elle-même ne scrolle jamais en bloc. */
+.topology-interior__sidebar {
+  width: 320px;
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+}
+
+.topology-interior__vulns {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 12px;
+  overflow-y: auto;
+  background: var(--color-surface-1);
+  flex-shrink: 0;
+  max-height: 45%;
+}
+
+.topology-interior__history {
+  flex: 1;
+  min-height: 0;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   padding: 12px;
@@ -1439,8 +1462,13 @@
   .topology-interior__body {
     flex-direction: column;
   }
-  .topology-interior__history {
+  .topology-interior__sidebar {
     width: auto;
+  }
+  .topology-interior__vulns {
+    max-height: 240px;
+  }
+  .topology-interior__history {
     max-height: 200px;
   }
 }

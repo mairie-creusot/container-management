@@ -14,6 +14,7 @@ import { fetchImageHistory, fetchImages } from "@/features/images/imagesSlice";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import { ContainerConsoleBody } from "@/components/ContainerConsole";
 import { ContainerLogsBody } from "@/features/containers/ContainerLogs";
+import VulnerabilitiesPanel from "@/components/VulnerabilitiesPanel";
 import {
   ACTION_LABEL,
   MINIMAP_NODE_COLOR,
@@ -799,27 +800,36 @@ export default function TopologySubGraphPanel({
               )}
             </div>
 
-            <div className="topology-interior__history">
-              <div className="topology-interior__history-title">
-                Historique des couches de l'image — <code>docker history</code>
+            <div className="topology-interior__sidebar">
+              {/* Retour utilisateur du 13/08/2026 : "il faut grâce à grype/syft/osv... voir quel
+                  paquet est critique et pourquoi" — même composant que l'onglet "Vulnérabilités" du
+                  panneau de détail (voir VulnerabilitiesPanel.tsx), pas une seconde implémentation. */}
+              <div className="topology-interior__vulns">
+                <VulnerabilitiesPanel imageRef={imageRef} operate={operate} />
               </div>
-              {!imageRef && <div className="empty-state">Image introuvable parmi les images suivies.</div>}
-              {imageRef && historyStatus === "loading" && !historyLayers && (
-                <div className="empty-state">Chargement…</div>
-              )}
-              {imageRef && historyStatus === "error" && <div className="error-banner">{historyError}</div>}
-              {historyLayers && (
-                <ol className="topology-interior__layers">
-                  {historyLayers.map((layer, index) => (
-                    <li key={`${layer.id}-${index}`} className="topology-interior__layer">
-                      <span className="topology-interior__layer-size">{formatMem(layer.sizeBytes)}</span>
-                      <span className="topology-interior__layer-cmd" title={layer.createdBy}>
-                        {layer.createdBy || "—"}
-                      </span>
-                    </li>
-                  ))}
-                </ol>
-              )}
+
+              <div className="topology-interior__history">
+                <div className="topology-interior__history-title">
+                  Historique des couches de l'image — <code>docker history</code>
+                </div>
+                {!imageRef && <div className="empty-state">Image introuvable parmi les images suivies.</div>}
+                {imageRef && historyStatus === "loading" && !historyLayers && (
+                  <div className="empty-state">Chargement…</div>
+                )}
+                {imageRef && historyStatus === "error" && <div className="error-banner">{historyError}</div>}
+                {historyLayers && (
+                  <ol className="topology-interior__layers">
+                    {historyLayers.map((layer, index) => (
+                      <li key={`${layer.id}-${index}`} className="topology-interior__layer">
+                        <span className="topology-interior__layer-size">{formatMem(layer.sizeBytes)}</span>
+                        <span className="topology-interior__layer-cmd" title={layer.createdBy}>
+                          {layer.createdBy || "—"}
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
             </div>
           </div>
         </div>

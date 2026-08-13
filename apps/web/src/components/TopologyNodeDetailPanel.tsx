@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import { fetchContainerDetail } from "@/features/containers/containersSlice";
-import { fetchImages, fetchScanDetail, fetchScans, scanImage } from "@/features/images/imagesSlice";
+import { fetchImages } from "@/features/images/imagesSlice";
 import { fetchVolumes, openVolumeBrowser, removeVolume } from "@/features/volumes/volumesSlice";
 import { fetchNetworks, removeNetwork } from "@/features/networks/networksSlice";
 import { fetchTopology } from "@/features/topology/topologySlice";
@@ -15,6 +15,7 @@ import MetricsChart from "@/components/MetricsChart";
 import VolumeFilesModal from "@/components/VolumeFilesModal";
 import ContainerConsole from "@/components/ContainerConsole";
 import ContainerLogs from "@/features/containers/ContainerLogs";
+import VulnerabilitiesPanel from "@/components/VulnerabilitiesPanel";
 import { IconHistory, IconTerminal } from "@/components/icons";
 import { KIND_ICON, formatMem, idWithoutPrefix } from "@/components/topologyGraphShared";
 // Panneau "iac-workspace" ci-dessous (mission point 3) : réutilise TEL QUEL le state/les thunks
@@ -71,7 +72,7 @@ import { deleteAutomationNode, fetchAutomationRuns } from "@/features/automation
 // GitHubDeployPage.tsx (étape "Déploiement") — le réutiliser ici écraserait silencieusement son
 // état si la modal GitHub est rouverte ensuite.
 import { deployGithubRepo, fetchGithubDeployments } from "@/features/github/githubSlice";
-import type { ContainerMetricPoint, Topology, TopologyHostKind, TopologyNode, TopologyNodeKind, VulnSeverity } from "@/types";
+import type { ContainerMetricPoint, Topology, TopologyHostKind, TopologyNode, TopologyNodeKind } from "@/types";
 import type { AutomationRunLogEntry, BackupRun, CronJobRun } from "@/types";
 import type { GithubDeployment, GithubDeploymentDetail } from "@/types";
 import type { IacEngine, IacRunStatus } from "@/types";
@@ -116,16 +117,6 @@ interface TopologyNodeDetailPanelProps {
    * pour ouvrir directement sur "metrics" plutôt que de forcer un clic supplémentaire. */
   initialTab?: TabId | undefined;
 }
-
-const SEVERITY_ORDER: VulnSeverity[] = ["Critical", "High", "Medium", "Low", "Negligible", "Unknown"];
-const SEVERITY_SEMANTIC: Record<VulnSeverity, "critical" | "warning" | "neutral"> = {
-  Critical: "critical",
-  High: "critical",
-  Medium: "warning",
-  Low: "neutral",
-  Negligible: "neutral",
-  Unknown: "neutral",
-};
 
 const HEALTH_LABEL: Record<string, string> = {
   healthy: "Healthcheck OK",
@@ -1071,9 +1062,6 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
   const admin = canAdminister(session);
   const { detail, detailStatus } = useAppSelector((s) => s.containers);
   const images = useAppSelector((s) => s.images.items);
-  const scansByImageId = useAppSelector((s) => s.images.scansByImageId);
-  const scanStatus = useAppSelector((s) => s.images.scanStatus);
-  const scanError = useAppSelector((s) => s.images.scanError);
   const volumes = useAppSelector((s) => s.volumes.items);
   const mutatingVolumeName = useAppSelector((s) => s.volumes.mutatingName);
   // Volume dont l'explorateur de fichiers est ouvert (state.volumes.browser, voir
@@ -1210,12 +1198,11 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
 
   // Image suivie (ImageRef) correspondant à "name:tag" du conteneur — même rapprochement par nom
   // que services/topology.ts#vulnSummaryForImage côté serveur (node.subtitle = c.Image = "name:tag").
+  // Le fetch/polling des scans (GET /api/images/:id/scans) est désormais entièrement délégué à
+  // VulnerabilitiesPanel (13/08/2026, voir son en-tête — extrait pour être aussi réutilisé par
+  // TopologySubGraphPanel.tsx § "Composition interne"), qui n'a besoin que de cet `imageRef` déjà
+  // résolu ici.
   const imageRef = kind === "container" ? images.find((i) => `${i.name}:${i.currentTag}` === node!.subtitle) ?? null : null;
-
-  useEffect(() => {
-    if (imageRef) dispatch(fetchScans(imageRef.id));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dispatch, imageRef?.id]);
 
   // Déploiement GitHub réel dont `containerId` correspond à CE conteneur, s'il y en a un — jamais
   // affiché pour un conteneur créé autrement (voir la garde `githubDeployment &&` dans le JSX de
@@ -1252,22 +1239,6 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
       clearInterval(interval);
     };
   }, [node, activeTab, rawId]);
-
-  const scans = imageRef ? scansByImageId[imageRef.id] ?? [] : [];
-  // "Dernier scan réussi" au sens strict — pas juste le plus récent des scans (qui peut être un
-  // scan en cours ou échoué alors qu'un scan plus ancien, réussi, a de vraies données à montrer).
-  const latestSuccess = scans.find((s) => s.status === "success") ?? null;
-  const latestOverall = scans[0] ?? null;
-
-  // Poll pendant qu'un scan tourne — même principe que ImagesPage.tsx, pour que le panneau se
-  // mette à jour tout seul si l'utilisateur vient de lancer un scan depuis ici.
-  useEffect(() => {
-    if (!imageRef || !latestOverall || latestOverall.status !== "running") return;
-    const interval = setInterval(() => {
-      dispatch(fetchScanDetail({ imageId: imageRef.id, scanId: latestOverall.id }));
-    }, 2000);
-    return () => clearInterval(interval);
-  }, [dispatch, imageRef, latestOverall]);
 
   // Reconstruction de la liste RÉELLE des networks connectés à ce conteneur : les networks restés
   // "vrais nœuds" (partagés/par défaut) via les arêtes de `topology`, PLUS les networks "briqués"
@@ -1309,10 +1280,6 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
   const maxCpuPercent =
     isContainerDetailReady && detail?.nanoCpus ? (detail.nanoCpus / 1_000_000_000) * 100 : undefined;
   const maxMemBytes = isContainerDetailReady ? detail?.memoryLimitBytes : undefined;
-
-  function handleLaunchScan() {
-    if (imageRef) dispatch(scanImage({ id: imageRef.id }));
-  }
 
   /** Charge (à la demande, une seule fois) puis bascule l'affichage du log complet du déploiement
    * GitHub trouvé pour ce conteneur — GET /api/github/deployments/:id, même route que
@@ -1639,93 +1606,9 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
           </>
         )}
 
-        {node.kind === "container" && activeTab === "vulnerabilities" && (
-          <div className="topology-detail-panel__vulns">
-            <div className="inspector-section-title">
-              {imageRef ? `Image ${imageRef.name}:${imageRef.currentTag}` : "Vulnérabilités"}
-            </div>
-            {!imageRef && <div className="empty-state">Image introuvable parmi les images suivies.</div>}
-            {imageRef && scans.length === 0 && (
-              <div className="empty-state">
-                Aucun scan n'a jamais été effectué pour cette image.
-                {operate && (
-                  <div className="topology-detail-panel__scan-cta">
-                    <button type="button" className="btn btn-secondary btn-sm" disabled={scanStatus === "starting"} onClick={handleLaunchScan}>
-                      {scanStatus === "starting" ? "Lancement…" : "Lancer un scan (Grype)"}
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-            {imageRef && scans.length > 0 && !latestSuccess && (
-              <div className="empty-state">
-                {latestOverall?.status === "running"
-                  ? "Un scan est en cours pour cette image…"
-                  : "Le dernier scan de cette image a échoué, aucune vulnérabilité connue à afficher."}
-                {operate && latestOverall?.status !== "running" && (
-                  <div className="topology-detail-panel__scan-cta">
-                    <button type="button" className="btn btn-secondary btn-sm" disabled={scanStatus === "starting"} onClick={handleLaunchScan}>
-                      {scanStatus === "starting" ? "Lancement…" : "Relancer un scan (Grype)"}
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-            {scanStatus === "error" && scanError && <div className="error-banner">{scanError}</div>}
-            {latestSuccess && (
-              <>
-                <div className="scan-summary">
-                  {latestSuccess.vulnerabilities.length === 0 ? (
-                    <span className="status-pill status-pill--success">Aucune vulnérabilité connue</span>
-                  ) : (
-                    SEVERITY_ORDER.filter((sev) => latestSuccess.summary[sev] > 0).map((sev) => (
-                      <span key={sev} className={`status-pill status-pill--${SEVERITY_SEMANTIC[sev]}`}>
-                        {sev} · {latestSuccess.summary[sev]}
-                      </span>
-                    ))
-                  )}
-                </div>
-                {latestSuccess.vulnerabilities.length > 0 && (
-                  // Scroll INTERNE cantonné à cette table (max-height, voir topology.css) plutôt
-                  // que le panneau entier — la seule section qui peut légitimement dépasser sa
-                  // hauteur (des dizaines de CVE sur une image mal maintenue).
-                  <div className="data-table-wrap scan-vuln-table-wrap topology-detail-panel__vuln-table-wrap">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>CVE</th>
-                          <th>Sévérité</th>
-                          <th>Paquet</th>
-                          <th>Version</th>
-                          <th>Corrigé</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {latestSuccess.vulnerabilities
-                          .slice()
-                          .sort((a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity))
-                          .map((vuln) => (
-                            <tr key={`${vuln.id}-${vuln.packageName}-${vuln.installedVersion}`}>
-                              <td className="cell-mono">{vuln.id}</td>
-                              <td>
-                                <span className={`status-pill status-pill--${SEVERITY_SEMANTIC[vuln.severity]}`}>{vuln.severity}</span>
-                              </td>
-                              <td>{vuln.packageName}</td>
-                              <td className="cell-mono">{vuln.installedVersion}</td>
-                              <td className="cell-mono">{vuln.fixedInVersion ?? "—"}</td>
-                            </tr>
-                          ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-                <p className="topology-detail-panel__hint">
-                  {latestSuccess.scanner === "grype" ? "Grype" : "OSV-Scanner"} · terminé {formatDate(latestSuccess.finishedAt)}
-                </p>
-              </>
-            )}
-          </div>
-        )}
+        {/* Extrait le 13/08/2026 vers VulnerabilitiesPanel (voir son en-tête) — même composant
+            réutilisé par TopologySubGraphPanel.tsx § "Composition interne". */}
+        {node.kind === "container" && activeTab === "vulnerabilities" && <VulnerabilitiesPanel imageRef={imageRef} operate={operate} />}
 
         {node.kind === "container" && activeTab === "metrics" && (
           <div className="topology-detail-panel__metrics">
