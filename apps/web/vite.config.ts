@@ -29,5 +29,18 @@ export default defineConfig({
     // (Dockerfile.web) sert le build statique via un serveur HTTP classique, jamais ce serveur
     // de dev — donc `true` (aucune restriction) reste raisonnable ici, pas en prod.
     allowedHosts: true,
+    // Proxy interne vers le conteneur API (nom de service docker-compose "api", résolu par le
+    // DNS interne Docker — même principe que "caddy"/"quai-dev-web-1" ailleurs dans ce fichier)
+    // pour que le frontend puisse appeler une URL RELATIVE ("/api/...", voir api/client.ts) plutôt
+    // qu'une URL absolue "http://localhost:3000" figée. Sans ça, une page chargée en HTTPS via le
+    // reverse proxy interne (ex: https://quai.lecreusot.priv, services/reverseProxy.ts) voit ses
+    // appels vers "http://localhost:3000" bloqués par le navigateur comme contenu mixte (HTTP
+    // actif depuis une page HTTPS) — constaté en conditions réelles le 13/08/2026 : la connexion
+    // LDAP échouait silencieusement ("Connexion impossible") sans qu'aucune requête n'atteigne
+    // jamais l'API. `ws: true` couvre aussi les deux WebSocket de l'app (console, logs stream —
+    // voir api/client.ts#wsUrl) qui passent par ce même préfixe "/api".
+    proxy: {
+      "/api": { target: "http://api:3000", changeOrigin: true, ws: true },
+    },
   },
 });

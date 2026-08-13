@@ -345,8 +345,14 @@ interface CaddyFallbackRoute {
 
 type CaddyRoute = CaddyProxyRoute | CaddyFallbackRoute;
 
-/** Upstream `host:port` réel pour une route — résolution EN DIRECT (jamais mise en cache), voir docstring de tête de fichier. */
-async function resolveUpstream(route: ReverseProxyRoute): Promise<string | null> {
+/**
+ * Upstream `host:port` réel pour une route — résolution EN DIRECT (jamais mise en cache), voir
+ * docstring de tête de fichier. Exportée (en plus de son usage interne par pushConfigToCaddy
+ * ci-dessous) pour être réutilisée TELLE QUELLE par services/automationEngine.ts, qui a besoin de
+ * la même résolution avant sa propre sonde TCP réelle de joignabilité — jamais une réimplémentation
+ * parallèle de cette logique.
+ */
+export async function resolveUpstream(route: ReverseProxyRoute): Promise<string | null> {
   if (route.targetHost) return `${route.targetHost}:${route.targetPort}`;
   if (route.targetContainerId) {
     const ip = await getContainerNetworkAddress(route.targetContainerId);

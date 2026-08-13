@@ -51,8 +51,13 @@ import {
   setActiveTab as setGitopsActiveTab,
   syncGitops,
 } from "@/features/gitops/gitopsSlice";
+// Panneaux "automation-trigger"/"automation-condition"/"automation-action" ci-dessous (câblage
+// frontend du moteur d'automatisation, apps/api/src/routes/automation.ts) — réutilise le nouveau
+// slice dédié (automationSlice.ts) : DELETE /api/automation/nodes/:id réel pour la suppression,
+// GET /api/automation/runs réel pour l'historique d'exécution affiché sur trigger/action.
+import { deleteAutomationNode, fetchAutomationRuns } from "@/features/automation/automationSlice";
 import type { ContainerMetricPoint, Topology, TopologyHostKind, TopologyNode, TopologyNodeKind, VulnSeverity } from "@/types";
-import type { BackupRun, CronJobRun } from "@/types";
+import type { AutomationRunLogEntry, BackupRun, CronJobRun } from "@/types";
 import type { IacEngine, IacRunStatus } from "@/types";
 
 /** Les 3 networks internes par défaut de Docker ne sont jamais supprimables — même exclusion que
@@ -734,6 +739,285 @@ function BackupDetailPanel({ node, operate, onClose }: { node: TopologyNode; ope
   );
 }
 
+/** "abcd1234" -> libellé du nœud d'automatisation correspondant, pour afficher le chemin RÉEL
+ * (AutomationRunLogEntry#path, voir @/types) d'une exécution en libellés lisibles plutôt qu'en ids
+ * bruts — construit depuis `topology.nodes` déjà chargé (aucun appel réseau supplémentaire). Un id
+ * de path sans correspondance (nœud supprimé depuis) retombe sur l'id brut lui-même côté appelant,
+ * jamais un libellé inventé. */
+function automationLabelById(topology: Topology | null): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!topology) return map;
+  for (const n of topology.nodes) {
+    if (n.kind === "automation-trigger" || n.kind === "automation-condition" || n.kind === "automation-action") {
+      map.set(idWithoutPrefix(n.id), n.label);
+    }
+  }
+  return map;
+}
+
+/** Historique d'exécution partagé trigger/action (voir AutomationTriggerPanel/AutomationActionPanel
+ * ci-dessous) — même rendu que .iac-run-list ailleurs dans ce fichier, `ok`/`échec` au lieu d'un
+ * statut à 3 valeurs (une exécution d'automatisation n'a pas d'état "en cours", voir
+ * AutomationRunLogEntry#ok, @/types). `[]` -> "Aucune exécution enregistrée.", jamais un historique
+ * inventé (voir mission). */
+function AutomationRunHistory({
+  runs,
+  loading,
+  labelById,
+}: {
+  runs: AutomationRunLogEntry[];
+  loading: boolean;
+  labelById: Map<string, string>;
+}) {
+  return (
+    <>
+      <div className="inspector-section-title">Dernières exécutions</div>
+      {loading && runs.length === 0 && <div className="empty-state">Chargement…</div>}
+      {!loading && runs.length === 0 && <div className="empty-state">Aucune exécution enregistrée.</div>}
+      {runs.length > 0 && (
+        <div className="iac-run-list">
+          {runs.slice(0, 15).map((run) => (
+            <div key={run.id} className={`iac-run-item iac-run-item--${run.ok ? "success" : "failed"}`} style={{ cursor: "default" }}>
+              <span>
+                {run.ok ? "Réussie" : "Échec"} · {run.path.map((id) => labelById.get(id) ?? id).join(" → ")}
+              </span>
+              <span className="iac-run-item__meta">
+                {formatDate(run.at)}
+                {run.message ? ` · ${run.message}` : ""}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * Contenu complet du nœud "automation-trigger" pour CE déclencheur précis (voir
+ * services/automationStore.ts/services/automationEngine.ts) — source surveillée déjà lisible dans
+ * `node.subtitle` (RÉUTILISÉE telle quelle, jamais recalculée ici), dernier état RÉEL observé par
+ * le moteur (`automationLastStatus`/`automationLastFired`, déjà posés sur TopologyNode par
+ * services/topology.ts#getAutomationNodes — aucun appel réseau supplémentaire nécessaire pour ça),
+ * historique RÉEL des dernières chaînes déclenchées PAR CE trigger précis (GET /api/automation/runs,
+ * filtré par `triggerNodeId`). Sous-composant dédié, même raison que CronJobDetailPanel/
+ * BackupDetailPanel ci-dessus : lui seul pilote `state.automation` (automationSlice.ts).
+ */
+function AutomationTriggerPanel({
+  node,
+  topology,
+  operate,
+  onClose,
+}: {
+  node: TopologyNode;
+  topology: Topology | null;
+  operate: boolean;
+  onClose: () => void;
+}) {
+  const dispatch = useAppDispatch();
+  const confirm = useConfirm();
+  const rawId = idWithoutPrefix(node.id);
+  const { runs, runsStatus, deletingNodeId } = useAppSelector((s) => s.automation);
+
+  useEffect(() => {
+    dispatch(fetchAutomationRuns());
+  }, [dispatch]);
+
+  const ownRuns = runs.filter((r) => r.triggerNodeId === rawId);
+  const labelById = useMemo(() => automationLabelById(topology), [topology]);
+
+  async function handleDelete() {
+    const ok = await confirm({
+      title: "Supprimer ce déclencheur",
+      description: `Confirmer la suppression de "${node.label}" ? Les connexions qui le touchent seront supprimées avec lui.`,
+      confirmLabel: "Supprimer",
+      variant: "danger",
+    });
+    if (!ok) return;
+    const result = await dispatch(deleteAutomationNode(rawId));
+    if (deleteAutomationNode.fulfilled.match(result)) {
+      dispatch(fetchTopology());
+      onClose();
+    }
+  }
+
+  return (
+    <>
+      <div className="chip-row topology-detail-panel__chips">
+        <StatusPill
+          status={
+            node.automationLastStatus === "ok" ? "running" : node.automationLastStatus === "failing" ? "stopped" : "unconfigured"
+          }
+          label={
+            node.automationLastStatus === "ok"
+              ? "Dernier état : sain"
+              : node.automationLastStatus === "failing"
+                ? "Dernier état : en échec"
+                : "Jamais évalué"
+          }
+        />
+      </div>
+      <KeyValueList
+        rows={[
+          { key: "Source surveillée", value: node.subtitle },
+          { key: "Dernier déclenchement", value: node.automationLastFired ? formatDate(node.automationLastFired) : "Jamais déclenché" },
+        ]}
+      />
+      <AutomationRunHistory runs={ownRuns} loading={runsStatus === "loading"} labelById={labelById} />
+      {operate && (
+        <div className="inspector-actions">
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            style={{ color: "var(--color-critical)" }}
+            disabled={deletingNodeId === rawId}
+            onClick={() => void handleDelete()}
+          >
+            {deletingNodeId === rawId ? "…" : "Supprimer"}
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * Contenu complet du nœud "automation-condition" pour CETTE condition précise — condition minimale
+ * v1 (voir @/types#AutomationConditionInvert doc), en LECTURE SEULE : routes/automation.ts n'expose
+ * QUE POST/DELETE pour un nœud d'automatisation, aucune route PATCH n'existe pour modifier
+ * `conditionInvert` après coup (vérifié avant d'écrire ce panneau — hors de la mission frontend de
+ * l'inventer côté API) — reflète honnêtement cette limitation v1 plutôt que d'appeler un endpoint
+ * qui n'existe pas.
+ */
+function AutomationConditionPanel({
+  node,
+  operate,
+  onClose,
+}: {
+  node: TopologyNode;
+  operate: boolean;
+  onClose: () => void;
+}) {
+  const dispatch = useAppDispatch();
+  const confirm = useConfirm();
+  const rawId = idWithoutPrefix(node.id);
+  const deletingNodeId = useAppSelector((s) => s.automation.deletingNodeId);
+
+  async function handleDelete() {
+    const ok = await confirm({
+      title: "Supprimer cette condition",
+      description: `Confirmer la suppression de "${node.label}" ? Les connexions qui la touchent seront supprimées avec elle.`,
+      confirmLabel: "Supprimer",
+      variant: "danger",
+    });
+    if (!ok) return;
+    const result = await dispatch(deleteAutomationNode(rawId));
+    if (deleteAutomationNode.fulfilled.match(result)) {
+      dispatch(fetchTopology());
+      onClose();
+    }
+  }
+
+  return (
+    <>
+      <div className="chip-row topology-detail-panel__chips">
+        <span className="status-pill status-pill--neutral">
+          {node.automationConditionInvert ? "Condition inversée" : "Condition normale"}
+        </span>
+      </div>
+      <KeyValueList
+        rows={[
+          { key: "Comportement", value: node.subtitle },
+          { key: "Inversée", value: node.automationConditionInvert ? "Oui" : "Non" },
+        ]}
+      />
+      <div className="empty-state">
+        Réglage en lecture seule — aucune route de modification n'existe pour l'instant côté API. Pour changer ce
+        réglage, supprime et recrée ce nœud.
+      </div>
+      {operate && (
+        <div className="inspector-actions">
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            style={{ color: "var(--color-critical)" }}
+            disabled={deletingNodeId === rawId}
+            onClick={() => void handleDelete()}
+          >
+            {deletingNodeId === rawId ? "…" : "Supprimer"}
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * Contenu complet du nœud "automation-action" pour CETTE action précise — type d'action + cible
+ * déjà lisibles dans `node.subtitle` (RÉUTILISÉ tel quel, jamais recalculé ici), même historique
+ * d'exécution que AutomationTriggerPanel ci-dessus mais filtré par PRÉSENCE de cet id dans le
+ * chemin parcouru (`path`, voir mission — plus simple et tout aussi correct que de retrouver le
+ * trigger parent). Sous-composant dédié, même raison que les autres panneaux ci-dessus.
+ */
+function AutomationActionPanel({
+  node,
+  topology,
+  operate,
+  onClose,
+}: {
+  node: TopologyNode;
+  topology: Topology | null;
+  operate: boolean;
+  onClose: () => void;
+}) {
+  const dispatch = useAppDispatch();
+  const confirm = useConfirm();
+  const rawId = idWithoutPrefix(node.id);
+  const { runs, runsStatus, deletingNodeId } = useAppSelector((s) => s.automation);
+
+  useEffect(() => {
+    dispatch(fetchAutomationRuns());
+  }, [dispatch]);
+
+  const ownRuns = runs.filter((r) => r.path.includes(rawId));
+  const labelById = useMemo(() => automationLabelById(topology), [topology]);
+
+  async function handleDelete() {
+    const ok = await confirm({
+      title: "Supprimer cette action",
+      description: `Confirmer la suppression de "${node.label}" ? Les connexions qui la touchent seront supprimées avec elle.`,
+      confirmLabel: "Supprimer",
+      variant: "danger",
+    });
+    if (!ok) return;
+    const result = await dispatch(deleteAutomationNode(rawId));
+    if (deleteAutomationNode.fulfilled.match(result)) {
+      dispatch(fetchTopology());
+      onClose();
+    }
+  }
+
+  return (
+    <>
+      <KeyValueList rows={[{ key: "Action", value: node.subtitle }]} />
+      <AutomationRunHistory runs={ownRuns} loading={runsStatus === "loading"} labelById={labelById} />
+      {operate && (
+        <div className="inspector-actions">
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            style={{ color: "var(--color-critical)" }}
+            disabled={deletingNodeId === rawId}
+            onClick={() => void handleDelete()}
+          >
+            {deletingNodeId === rawId ? "…" : "Supprimer"}
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
 interface NetworkAttachmentRow {
   id: string; // "network:<id>"
   label: string;
@@ -991,7 +1275,7 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
       variant: "danger",
     });
     if (!ok) return;
-    const result = await dispatch(removeVolume(name));
+    const result = await dispatch(removeVolume({ name }));
     if (removeVolume.fulfilled.match(result)) onClose();
   }
 
@@ -1485,6 +1769,16 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
 
         {/* --- Workspace Infra-as-code (OpenTofu/Ansible/Packer réels, services/iac/*) ---------- */}
         {node.kind === "iac-workspace" && <IacWorkspacePanel node={node} operate={operate} onClose={onClose} />}
+
+        {/* --- Moteur d'automatisation (trigger -> condition -> action, services/automationStore.ts/
+            services/automationEngine.ts) ------------------------------------------------------- */}
+        {node.kind === "automation-trigger" && (
+          <AutomationTriggerPanel node={node} topology={topology} operate={operate} onClose={onClose} />
+        )}
+        {node.kind === "automation-condition" && <AutomationConditionPanel node={node} operate={operate} onClose={onClose} />}
+        {node.kind === "automation-action" && (
+          <AutomationActionPanel node={node} topology={topology} operate={operate} onClose={onClose} />
+        )}
 
         {/* --- Dépôt Git source GitOps (services/gitops.ts) ------------------------------------
             Contenu repris TEL QUEL de l'ancienne GitOpsPage.tsx (retirée, voir mission point 5) :

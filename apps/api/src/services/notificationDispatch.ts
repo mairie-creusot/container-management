@@ -171,3 +171,34 @@ export async function sendTestNotification(channelId: string): Promise<{ ok: boo
     return { ok: false, message: `Échec de l'envoi de test vers "${channel.name}" : ${reason}` };
   }
 }
+
+/**
+ * Envoi RÉEL d'un message libre vers un canal — réutilisé par le moteur d'automatisation
+ * (services/automationEngine.ts, action "send-notification") : même fonction bas niveau
+ * (`sendToChannel`) que dispatchNotificationEvent/sendTestNotification ci-dessus, donc mêmes
+ * formats de payload par type de canal (Slack/Discord/webhook générique/SMTP). Ignore `enabled`/
+ * `filter` du canal, exactement comme sendTestNotification : une action d'automatisation qui
+ * cible explicitement ce canal doit toujours partir. Jamais persisté dans le journal de
+ * notifications système (ce n'est pas un SystemNotificationEvent détecté tout seul par le
+ * watchdog/scanScheduler, mais un envoi explicitement déclenché par une chaîne d'automatisation).
+ */
+export async function sendChannelNotification(channelId: string, message: string): Promise<{ ok: boolean; message: string }> {
+  const channel = await getEffectiveNotificationChannel(channelId);
+  if (!channel) {
+    return { ok: false, message: `Notification channel "${channelId}" not found` };
+  }
+  const event: Omit<SystemNotificationEvent, "read"> = {
+    id: "automation",
+    timestamp: new Date().toISOString(),
+    kind: "automation_triggered",
+    level: "error",
+    message,
+  };
+  try {
+    await sendToChannel(channel, event);
+    return { ok: true, message: `Notification envoyée vers "${channel.name}"` };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { ok: false, message: `Échec de l'envoi vers "${channel.name}" : ${reason}` };
+  }
+}

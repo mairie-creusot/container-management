@@ -102,7 +102,19 @@ import { listCronJobRuns } from "./cronJobsScheduler.js";
 import { listBackupDefinitions, listBackupRuns } from "./backupsStore.js";
 import { listWorkspaces } from "./iac/workspaces.js";
 import { listRuns } from "./iac/runner.js";
-import type { IacEngine, NutanixVm, ScanResult, Topology, TopologyEdge, TopologyEdgePort, TopologyNode } from "../types.js";
+import { listAutomationEdges, listAutomationNodes } from "./automationStore.js";
+import type { AutomationNode } from "./automationStore.js";
+import type {
+  AutomationActionConfig,
+  AutomationTriggerSource,
+  IacEngine,
+  NutanixVm,
+  ScanResult,
+  Topology,
+  TopologyEdge,
+  TopologyEdgePort,
+  TopologyNode,
+} from "../types.js";
 
 /**
  * Résumé Critical/High pour l'image `image` ("name:tag", même format que ContainerInfo#Image) à
@@ -495,6 +507,87 @@ async function getGitOpsSourceNode(): Promise<TopologyNode[]> {
   ];
 }
 
+/** Libellé humain de la source d'un trigger — simple sous-titre de nœud (pas une donnée de
+ * contrat exposée par types.ts, même principe que IAC_ENGINE_LABEL ci-dessus). */
+function automationTriggerSourceLabel(source: AutomationTriggerSource | undefined): string {
+  if (!source) return "Aucune source configurée";
+  if (source.kind === "topology-node") return `Surveille ${source.nodeId}`;
+  return `Surveille la route de reverse proxy ${source.routeId}`;
+}
+
+/** Libellé humain d'une action — même principe que automationTriggerSourceLabel ci-dessus. */
+function automationActionConfigLabel(cfg: AutomationActionConfig | undefined): string {
+  if (!cfg) return "Aucune action configurée";
+  if (cfg.kind === "run-cron-job") return `Déclenche le cron job ${cfg.cronJobId}`;
+  if (cfg.kind === "send-notification") return `Notifie via le canal ${cfg.channelId}`;
+  return `Conteneur ${cfg.containerId} : ${cfg.action}`;
+}
+
+/**
+ * Nœuds "automation-trigger"/"automation-condition"/"automation-action" + arêtes
+ * "automation-flow" par nœud/arête RÉEL du moteur d'automatisation (services/automationStore.ts,
+ * jamais modifié par ce chantier — même principe que getCronJobNodes/getBackupNodes ci-dessus :
+ * simple projection de définitions déjà persistées). Indépendant de Docker (récupéré que le
+ * démon local soit joignable ou non), comme les autres nœuds "statiques" de ce fichier.
+ *
+ * `status` d'un trigger dérivé de son DERNIER état réel connu par le moteur
+ * (services/automationEngine.ts, `lastStatus`) : "unknown" -> "neutral" (jamais évalué depuis le
+ * démarrage du process), "ok" -> "running", "failing" -> "stopped". Une condition/action n'a pas
+ * d'état permanent qui lui soit propre (son "exécution" n'a de sens que ponctuellement, dans le
+ * journal de runs — GET /api/automation/runs) : toujours "neutral", jamais un statut fabriqué.
+ */
+async function getAutomationNodes(): Promise<{ nodes: TopologyNode[]; edges: TopologyEdge[] }> {
+  const [nodes, edges] = await Promise.all([listAutomationNodes(), listAutomationEdges()]);
+  const topologyId = (node: AutomationNode) => `${node.kind}:${node.id}`;
+
+  const topologyNodes: TopologyNode[] = nodes.map((node) => {
+    if (node.kind === "automation-trigger") {
+      const status: TopologyNode["status"] =
+        node.lastStatus === "ok" ? "running" : node.lastStatus === "failing" ? "stopped" : "neutral";
+      return {
+        id: topologyId(node),
+        kind: "automation-trigger",
+        label: node.label,
+        subtitle: automationTriggerSourceLabel(node.triggerConfig?.source),
+        status,
+        ...(node.triggerConfig ? { automationTriggerConfig: node.triggerConfig } : {}),
+        automationLastFired: node.lastFired ?? null,
+        automationLastStatus: node.lastStatus ?? "unknown",
+      } satisfies TopologyNode;
+    }
+    if (node.kind === "automation-condition") {
+      return {
+        id: topologyId(node),
+        kind: "automation-condition",
+        label: node.label,
+        subtitle: node.conditionInvert ? "Bloque la chaîne (condition inversée)" : "Laisse passer la chaîne",
+        status: "neutral",
+        automationConditionInvert: node.conditionInvert ?? false,
+      } satisfies TopologyNode;
+    }
+    return {
+      id: topologyId(node),
+      kind: "automation-action",
+      label: node.label,
+      subtitle: automationActionConfigLabel(node.actionConfig),
+      status: "neutral",
+      ...(node.actionConfig ? { automationActionConfig: node.actionConfig } : {}),
+    } satisfies TopologyNode;
+  });
+
+  const topologyIdByAutomationId = new Map(nodes.map((node) => [node.id, topologyId(node)]));
+  const topologyEdges: TopologyEdge[] = edges
+    .filter((edge) => topologyIdByAutomationId.has(edge.source) && topologyIdByAutomationId.has(edge.target))
+    .map((edge) => ({
+      id: `automation-flow:${edge.id}`,
+      source: topologyIdByAutomationId.get(edge.source)!,
+      target: topologyIdByAutomationId.get(edge.target)!,
+      kind: "automation-flow",
+    }));
+
+  return { nodes: topologyNodes, edges: topologyEdges };
+}
+
 export async function getTopology(): Promise<Topology> {
   const docker = await getClient();
   const { vmNodes: nutanixVmNodes, hostNodes: nutanixHostNodes, hostEdges: nutanixHostEdges } = await getNutanixTopologyParts();
@@ -517,6 +610,11 @@ export async function getTopology(): Promise<Topology> {
   // Dépôt Git source GitOps (voir getGitOpsSourceNode ci-dessus) : indépendant lui aussi de la
   // joignabilité Docker locale, [] tant que GITOPS_REPO_URL n'a jamais été configuré.
   const gitopsSourceNodes = await getGitOpsSourceNode();
+  // Nœuds/arêtes du moteur d'automatisation (voir getAutomationNodes ci-dessus) : indépendants
+  // eux aussi de la joignabilité Docker locale — une DÉFINITION de nœud est une simple lecture
+  // JSON, seule l'EXÉCUTION d'une action en dépend parfois (ex: container-action), jamais la
+  // liste elle-même.
+  const automationParts = await getAutomationNodes();
   // Groupements (voir topologyGroupsStore.ts) : indépendants de la joignabilité Docker (une simple
   // lecture JSON en mémoire), inclus dans les deux chemins de retour pour que le frontend garde
   // toujours la même forme de réponse à traiter.
@@ -531,8 +629,9 @@ export async function getTopology(): Promise<Topology> {
     ...backupNodes,
     ...iacWorkspaceNodes,
     ...gitopsSourceNodes,
+    ...automationParts.nodes,
   ];
-  const staticEdges: TopologyEdge[] = [...nutanixHostEdges];
+  const staticEdges: TopologyEdge[] = [...nutanixHostEdges, ...automationParts.edges];
   const empty: Topology = { nodes: staticNodes, edges: staticEdges, generatedAt: new Date().toISOString(), groups };
   if (!(await isDockerReachable(docker))) return empty;
 

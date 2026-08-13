@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useAppSelector } from "@/hooks";
 import type { AppNotification } from "@/features/notifications/notificationsSlice";
 
-const AUTO_DISMISS_MS = 6000;
+const AUTO_DISMISS_MS = 3000;
 // Doit correspondre à la durée de @keyframes toast-out (apps/web/src/styles/base.css) — le
 // toast reste dans le DOM le temps de l'animation de sortie avant d'être vraiment retiré.
 const LEAVE_ANIMATION_MS = 180;

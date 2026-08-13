@@ -94,8 +94,14 @@ services:
       - "5173:5173"
     environment:
       NODE_ENV: development
-      # Doit correspondre à apps/web/.env.example (préfixe /api inclus).
-      VITE_API_BASE_URL: http://localhost:3000/api
+      # VITE_API_BASE_URL délibérément absent : apps/web/src/api/client.ts retombe alors sur une
+      # URL RELATIVE ("/api"), servie par le proxy Vite (voir apps/web/vite.config.ts#server.proxy)
+      # vers le conteneur api — fonctionne aussi bien via http://localhost:5173 que via le reverse
+      # proxy interne en HTTPS (ex: https://quai.lecreusot.priv, services/reverseProxy.ts). Une
+      # valeur absolue figée ("http://localhost:3000/api") cassait ce second cas : le navigateur
+      # bloque en contenu mixte tout appel http:// actif depuis une page https:// — constaté en
+      # conditions réelles le 13/08/2026, la connexion LDAP échouait silencieusement. Ne réintroduis
+      # cette variable que pour pointer explicitement vers une API qui ne passe PAS par ce proxy.
     depends_on:
       - api
     networks:

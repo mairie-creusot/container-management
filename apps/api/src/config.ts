@@ -263,6 +263,26 @@ export const config = {
     // indéfiniment le run, ni bloquer le slot d'anti-chevauchement du job pour toujours).
     execTimeoutMs: readNumber("CRON_JOBS_EXEC_TIMEOUT_MS", 300_000),
   },
+  automation: {
+    // Persistance des nœuds/arêtes du moteur d'automatisation (trigger -> condition -> action,
+    // cf. services/automationStore.ts) — même pattern que cron-jobs.json : JSON simple sur
+    // disque, aucune valeur sensible à chiffrer au repos (une config de trigger/action ne fait
+    // que référencer des ids de ressources déjà existantes, jamais un secret en clair).
+    storePath: readString("AUTOMATION_STORE_PATH", "./data/automation.json"),
+    // Historique d'exécution — JSON Lines append-only, même pattern que cron-jobs-history.jsonl/
+    // audit-log.jsonl (une ligne par exécution réelle de chaîne, jamais réécrit).
+    historyPath: readString("AUTOMATION_HISTORY_PATH", "./data/automation-runs.jsonl"),
+    // Cadence du cycle du moteur (services/automationEngine.ts) — même ordre de grandeur que
+    // watchdog.ts (75s) mais volontairement plus réactif par défaut : un trigger câblé sur un
+    // conteneur/route déjà surveillé ailleurs doit réagir raisonnablement vite à une vraie panne,
+    // sans pour autant interroger Docker/le reverse proxy en boucle serrée.
+    pollIntervalMs: readNumber("AUTOMATION_POLL_INTERVAL_MS", 30_000),
+    // Délai max accordé à la sonde TCP réelle vers l'upstream d'une route de reverse proxy
+    // surveillée par un trigger "reverse-proxy-route" (net.Socket) — même principe que
+    // reverseProxy.requestTimeoutMs/nutanix.requestTimeoutMs : un upstream qui ne répond jamais
+    // ne doit jamais bloquer indéfiniment un cycle du moteur.
+    probeTimeoutMs: readNumber("AUTOMATION_PROBE_TIMEOUT_MS", 3000),
+  },
 } as const;
 
 export type Config = typeof config;

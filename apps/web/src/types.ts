@@ -205,7 +205,10 @@ export type TopologyNodeKind =
   | "cron-job"
   | "backup"
   | "iac-workspace"
-  | "gitops-source";
+  | "gitops-source"
+  | "automation-trigger"
+  | "automation-condition"
+  | "automation-action";
 
 /** Sous-type d'un nœud "host" — voir TopologyNode#hostKind ci-dessous et
  * apps/api/src/services/topology.ts. Champ explicite plutôt qu'une convention dans `subtitle`. */
@@ -294,6 +297,66 @@ export interface TopologyNode {
    * atténué par TopologyGraph.tsx/topologyGraphShared.tsx plutôt qu'un statut fabriqué.
    */
   orphan?: boolean;
+  /**
+   * Nœuds "automation-trigger" uniquement (voir apps/api/src/services/automationStore.ts,
+   * apps/api/src/services/automationEngine.ts) : ce que ce déclencheur surveille réellement — un
+   * autre TopologyNode déjà existant sur le graphe, ou une route de reverse proxy. Jamais une
+   * nouvelle métrique inventée.
+   */
+  automationTriggerConfig?: AutomationTriggerConfig;
+  /**
+   * Nœuds "automation-condition" uniquement : condition minimale v1 — laisse passer la chaîne si
+   * la valeur amont est "en échec", ou l'inverse (bloque) si `true`.
+   */
+  automationConditionInvert?: boolean;
+  /**
+   * Nœuds "automation-action" uniquement : action RÉELLEMENT exécutée par le moteur sur
+   * transition du déclencheur amont vers l'échec — appelle toujours une fonction de service déjà
+   * existante ailleurs dans QUAI.
+   */
+  automationActionConfig?: AutomationActionConfig;
+  /**
+   * Nœuds "automation-trigger" uniquement : horodatage ISO de la dernière fois où ce déclencheur a
+   * RÉELLEMENT exécuté sa chaîne d'actions (voir apps/api/src/types.ts pour le détail complet),
+   * `null` tant qu'aucune action n'a encore été déclenchée depuis le démarrage du process — jamais
+   * le simple fait d'avoir été évalué (le moteur évalue chaque trigger toutes les ~30s).
+   */
+  automationLastFired?: string | null;
+  /**
+   * Nœuds "automation-trigger" uniquement : dernier état RÉEL observé par le moteur au dernier
+   * cycle ("failing" = source en échec, "ok" = source saine, "unknown" = jamais encore évalué).
+   */
+  automationLastStatus?: "ok" | "failing" | "unknown";
+}
+
+// --- Moteur d'automatisation (trigger -> condition -> action) — voir
+// apps/api/src/services/automationStore.ts et apps/api/src/services/automationEngine.ts pour la
+// doc complète (mirroir exact de apps/api/src/types.ts).
+
+/** Ce qu'un nœud "automation-trigger" surveille réellement — voir apps/api/src/types.ts pour le
+ * détail complet. */
+export type AutomationTriggerSource =
+  | { kind: "topology-node"; nodeId: string }
+  | { kind: "reverse-proxy-route"; routeId: string };
+
+export interface AutomationTriggerConfig {
+  source: AutomationTriggerSource;
+}
+
+/** Action RÉELLEMENT exécutée — chacune appelle une fonction de service DÉJÀ existante côté API,
+ * jamais une nouvelle implémentation d'effet de bord. */
+export type AutomationActionConfig =
+  | { kind: "run-cron-job"; cronJobId: string }
+  | { kind: "send-notification"; channelId: string; message: string }
+  | { kind: "container-action"; containerId: string; action: "start" | "stop" | "restart" };
+
+export interface AutomationRunLogEntry {
+  id: string;
+  at: string; // ISO
+  triggerNodeId: string;
+  path: string[]; // ids des nœuds traversés dans l'ordre (trigger -> [condition] -> action(s))
+  ok: boolean;
+  message?: string; // détail réel de l'échec le cas échéant, jamais fabriqué
 }
 
 /** Voir TopologyNode#attachments ci-dessus — même forme que apps/api/src/types.ts#TopologyNodeAttachment. */
@@ -321,7 +384,9 @@ export interface TopologyEdge {
   target: string;
   /** "hosts" : relation réelle cluster Nutanix -> VM qu'il héberge (rapprochée par uuid de cluster,
    * jamais construite si non déterminable) — voir apps/api/src/types.ts pour le détail complet. */
-  kind: "mount" | "network" | "hosts";
+  /** "automation-flow" : arête RÉELLE entre deux nœuds d'automatisation (trigger -> condition,
+   * trigger -> action, condition -> action) — voir apps/api/src/types.ts pour le détail complet. */
+  kind: "mount" | "network" | "hosts" | "automation-flow";
   /** "network" uniquement : ports réellement publiés par le conteneur à l'une des deux extrémités
    * (voir doc complète côté apps/api/src/types.ts). */
   ports?: TopologyEdgePort[];
@@ -685,7 +750,10 @@ export type SystemNotificationKind =
   | "integration_unreachable"
   | "integration_reachable"
   | "gitops_drift_detected"
-  | "vulnerability_detected";
+  | "vulnerability_detected"
+  // Émis par une action "send-notification" du moteur d'automatisation — voir
+  // apps/api/src/services/automationEngine.ts pour le détail complet.
+  | "automation_triggered";
 
 export interface SystemNotificationEvent {
   id: string;

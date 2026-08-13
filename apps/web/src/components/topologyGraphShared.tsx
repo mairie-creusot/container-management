@@ -13,6 +13,8 @@ import {
 } from "@xyflow/react";
 import {
   IconBackup,
+  IconBell,
+  IconBranch,
   IconChevron,
   IconClock,
   IconContainers,
@@ -21,6 +23,7 @@ import {
   IconGlobe,
   IconHostMachine,
   IconNetworks,
+  IconPlay,
   IconServer,
   IconStack,
   IconVm,
@@ -67,6 +70,18 @@ export const KIND_ICON: Record<TopologyNode["kind"], (props: { className?: strin
   // Dépôt Git source GitOps (services/topology.ts#getGitOpsSourceNode) — même icône que l'ancienne
   // page GitOps.tsx/Sidebar (voir icons.tsx#IconGitOps), réutilisée telle quelle.
   "gitops-source": IconGitOps,
+  // Déclenchement d'une automatisation (services/automationStore.ts) — cloche d'alerte (IconBell,
+  // déjà utilisée par Topbar.tsx pour les notifications) : un trigger surveille un état et "sonne
+  // l'alarme", aucune icône éclair dédiée n'existe dans ce fichier, IconBell porte déjà ce sens.
+  "automation-trigger": IconBell,
+  // Condition d'une automatisation — point de décision qui divise la chaîne en deux issues
+  // possibles (voir icons.tsx#IconBranch, ajoutée pour ce chantier faute d'icône de fourche déjà
+  // disponible dans icons.tsx).
+  "automation-condition": IconBranch,
+  // Action d'une automatisation — déclenchement/exécution réelle (voir icons.tsx#IconPlay, déjà
+  // utilisée pour "Démarrer"/"Exécuter maintenant" ailleurs dans l'appli), même sens ici : cette
+  // action "joue" la commande configurée.
+  "automation-action": IconPlay,
 };
 
 /** Couleurs de la MiniMap par type de nœud — mêmes valeurs que celles utilisées pour l'icône du
@@ -95,6 +110,19 @@ export const MINIMAP_NODE_COLOR: Record<TopologyNode["kind"], string> = {
   // Rose/rouge — distinct des neuf autres couleurs déjà utilisées ci-dessus, cohérent avec
   // .topology-node--gitops-source/.topology-detail-panel__icon--gitops-source dans topology.css.
   "gitops-source": "#f43f5e",
+  // Rouge vif "alerte" — distinct des dix autres couleurs déjà utilisées ci-dessus (notamment du
+  // rose/rouge de gitops-source, plus froid), cohérent avec .topology-node--automation-trigger/
+  // .topology-detail-panel__icon--automation-trigger dans topology.css.
+  "automation-trigger": "#dc2626",
+  // Gris-bleu neutre — une condition n'a pas d'état "positif/négatif" propre, distinct des onze
+  // autres couleurs déjà utilisées, cohérent avec .topology-node--automation-condition/
+  // .topology-detail-panel__icon--automation-condition dans topology.css.
+  "automation-condition": "#64748b",
+  // Vert vif (lime) — volontairement une nuance DIFFÉRENTE de --color-success (#22c55e, déjà pris
+  // par le statut "running"/nutanix-vm) pour ne pas laisser croire à un statut, distinct des douze
+  // autres couleurs déjà utilisées, cohérent avec .topology-node--automation-action/
+  // .topology-detail-panel__icon--automation-action dans topology.css.
+  "automation-action": "#84cc16",
 };
 
 /**
@@ -168,6 +196,18 @@ export const NODE_CAPABILITIES: Record<TopologyNode["kind"], PortSpec[]> = {
   // à la ressource Docker/Kubernetes qu'il décrit au-delà du rapprochement best-effort déjà utilisé
   // pour le badge "Dérive GitOps" des conteneurs, jamais assez fiable pour une arête).
   "gitops-source": [],
+  // Nœuds d'automatisation (trigger/condition/action, voir services/automationStore.ts) : PAS de
+  // "port" de connexion typé réseau/volume comme un conteneur — restent [] ici, comme host/
+  // iac-workspace/cron-job/backup/gitops-source ci-dessus. Ils sont néanmoins bien connectables
+  // entre eux par glisser-déposer (trigger->condition, trigger->action, condition->action) : ce
+  // câblage est géré directement par GraphNode (Handles génériques posés ci-dessous, hors de cette
+  // table de capacités typées) et par TopologyGraph.tsx#classifyConnection/handleConnect (cas
+  // spécial "les deux bouts sont des nœuds d'automatisation", POST /api/automation/edges — voir
+  // apps/api/src/routes/automation.ts#isValidConnection pour la même règle d'ordre appliquée ici
+  // côté UI avant tout appel réseau).
+  "automation-trigger": [],
+  "automation-condition": [],
+  "automation-action": [],
 };
 
 export interface CapabilityDef {
@@ -256,6 +296,17 @@ export const EDGE_STATE_COLOR: Record<EdgeHealthState, string> = {
   stopped: "var(--color-text-faint)",
 };
 
+/**
+ * Arête "automation-flow" (trigger -> condition -> action, voir services/automationStore.ts) : ni
+ * un mount ni un network, aucun nœud conteneur à l'une de ses deux extrémités (edgeContainerNode
+ * ci-dessous retourne toujours `null`) — sans ce cas particulier elle retomberait sur la couleur
+ * "none" (gris fade), indiscernable des arêtes "hosts". Couleur fixe volontairement distincte de
+ * toutes celles de EDGE_STATE_COLOR ci-dessus ET de MINIMAP_NODE_COLOR (aucune reprise exacte
+ * d'une couleur de kind déjà utilisée), cohérente avec .topology-edge--automation-flow dans
+ * topology.css.
+ */
+const AUTOMATION_FLOW_EDGE_COLOR = "#fb923e";
+
 export interface TopologyEdgeLike {
   source: string;
   target: string;
@@ -288,7 +339,10 @@ export function buildTopologyEdges(
     const containerNode = edgeContainerNode(e, nodesById);
     const stopped = containerNode ? containerNode.status !== "running" : false;
     const state: EdgeHealthState = stopped ? "stopped" : (containerNode?.healthStatus ?? "none");
-    const color = EDGE_STATE_COLOR[state];
+    // "automation-flow" (voir AUTOMATION_FLOW_EDGE_COLOR ci-dessus) : jamais dérivée de la santé
+    // d'un conteneur, toujours sa propre couleur fixe distincte.
+    const isAutomationFlowEdge = e.kind === "automation-flow";
+    const color = isAutomationFlowEdge ? AUTOMATION_FLOW_EDGE_COLOR : EDGE_STATE_COLOR[state];
     const isMount = e.kind === "mount";
     // "hosts" (cluster Nutanix -> VM, voir services/topology.ts) : relation structurelle statique,
     // pas un flux de trafic — jamais de tirets défilants (contrairement à "network") ni de
@@ -297,8 +351,9 @@ export function buildTopologyEdges(
     // "stopped" prime sur le type : tirets larges et espacés, quel que soit mount/network.
     // Sinon : réseau garde ses tirets fins animés (existant) ; mount reste en trait plein — les
     // particules de MountFlowEdge assurent seules l'impression de flux, un dasharray en plus
-    // ferait double emploi visuel.
-    const strokeDasharray = state === "stopped" ? "2 8" : isMount ? undefined : "4 4";
+    // ferait double emploi visuel. "automation-flow" : tirets plus serrés (2 4), distincts du
+    // "4 4" réseau, pour rester reconnaissable au premier coup d'œil.
+    const strokeDasharray = isAutomationFlowEdge ? "2 4" : state === "stopped" ? "2 8" : isMount ? undefined : "4 4";
     return {
       id: e.id,
       source: e.source,
@@ -556,6 +611,18 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   const Icon = KIND_ICON[node.kind];
   const isContainer = node.kind === "container";
   const ports = NODE_CAPABILITIES[node.kind];
+  // Nœuds d'automatisation (voir NODE_CAPABILITIES ci-dessus pour le pourquoi de leur entrée []) :
+  // Handles génériques posés directement ici plutôt que via la table de ports typés réseau/volume —
+  // un trigger n'est jamais une cible (toujours la racine d'une chaîne), une action n'est jamais
+  // une source (toujours une feuille, voir isValidConnection côté routes/automation.ts), une
+  // condition a les deux. classifyConnection (TopologyGraph.tsx) ne lit jamais ces ids de Handle
+  // (aucune entrée NODE_CAPABILITIES correspondante) : la validation/le POST réel d'une connexion
+  // entre deux nœuds d'automatisation passe par un chemin dédié dans handleConnect, qui ne se fie
+  // qu'au kind des deux nœuds visés, jamais à l'id du Handle glissé.
+  const isAutomationTrigger = node.kind === "automation-trigger";
+  const isAutomationCondition = node.kind === "automation-condition";
+  const isAutomationAction = node.kind === "automation-action";
+  const isAutomationNode = isAutomationTrigger || isAutomationCondition || isAutomationAction;
   // Zoom sémantique : en dessous du seuil, on masque libellé/badges/métriques et on ne garde que
   // l'icône + le point de statut — évite un canevas illisible une fois dézoomé sur toute l'infra.
   const zoom = useStore(zoomSelector);
@@ -577,6 +644,24 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
           title={port.label}
         />
       ))}
+      {isAutomationNode && !isAutomationAction && (
+        <Handle
+          id="automation-out"
+          type="source"
+          position={Position.Right}
+          className="topology-handle topology-handle--automation"
+          title="Relier vers une condition/action"
+        />
+      )}
+      {isAutomationNode && !isAutomationTrigger && (
+        <Handle
+          id="automation-in"
+          type="target"
+          position={Position.Left}
+          className="topology-handle topology-handle--automation"
+          title="Relié depuis un déclencheur/une condition"
+        />
+      )}
       <div className="topology-node__head">
         <span className="topology-node__icon">
           <Icon />

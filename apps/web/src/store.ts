@@ -21,6 +21,7 @@ import adDnsReducer from "@/features/adDns/adDnsSlice";
 import notificationChannelsReducer from "@/features/notificationChannels/notificationChannelsSlice";
 import backupsReducer from "@/features/backups/backupsSlice";
 import cronJobsReducer from "@/features/cronJobs/cronJobsSlice";
+import automationReducer from "@/features/automation/automationSlice";
 import { errorNotificationMiddleware } from "@/features/notifications/errorNotificationMiddleware";
 
 export const store = configureStore({
@@ -47,6 +48,7 @@ export const store = configureStore({
     notificationChannels: notificationChannelsReducer,
     backups: backupsReducer,
     cronJobs: cronJobsReducer,
+    automation: automationReducer,
   },
   middleware: (getDefaultMiddleware) => getDefaultMiddleware().concat(errorNotificationMiddleware),
 });

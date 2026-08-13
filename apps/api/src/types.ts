@@ -554,7 +554,10 @@ export type TopologyNodeKind =
   | "cron-job"
   | "backup"
   | "iac-workspace"
-  | "gitops-source";
+  | "gitops-source"
+  | "automation-trigger"
+  | "automation-condition"
+  | "automation-action";
 
 /**
  * Sous-type d'un nœud "host" (voir TopologyNode#hostKind ci-dessous, services/topology.ts) —
@@ -672,6 +675,78 @@ export interface TopologyNode {
    * tsx) plutôt qu'un statut/badge fabriqué.
    */
   orphan?: boolean;
+  /**
+   * Nœuds "automation-trigger" UNIQUEMENT (voir services/automationStore.ts,
+   * services/automationEngine.ts) : ce que ce déclencheur surveille réellement — soit un autre
+   * TopologyNode déjà existant sur le graphe, soit une route de reverse proxy. Jamais une
+   * nouvelle métrique inventée : le moteur relit l'état déjà calculé ailleurs (topology.ts pour
+   * un nœud, une VRAIE sonde TCP pour une route).
+   */
+  automationTriggerConfig?: AutomationTriggerConfig;
+  /**
+   * Nœuds "automation-condition" UNIQUEMENT : condition minimale v1 — laisse passer la chaîne si
+   * la valeur amont est "en échec", ou l'inverse (bloque) si `true`. Pas de moteur de règles
+   * complexe dans ce premier lot.
+   */
+  automationConditionInvert?: boolean;
+  /**
+   * Nœuds "automation-action" UNIQUEMENT : action RÉELLEMENT exécutée par le moteur sur
+   * transition du déclencheur amont vers l'échec (voir services/automationEngine.ts) — appelle
+   * toujours une fonction de service déjà existante ailleurs dans QUAI, jamais un nouvel effet
+   * de bord.
+   */
+  automationActionConfig?: AutomationActionConfig;
+  /**
+   * Nœuds "automation-trigger" UNIQUEMENT : horodatage ISO de la dernière fois où ce déclencheur a
+   * RÉELLEMENT exécuté sa chaîne d'actions (transition ok/unknown -> failing, voir
+   * services/automationEngine.ts#evaluateTrigger) — `null` tant qu'aucune action n'a encore été
+   * déclenchée depuis le démarrage du process. Distinct du simple fait d'avoir été évalué : le
+   * moteur évalue CHAQUE trigger à CHAQUE cycle (~30s), mais ne déclenche la chaîne que sur cette
+   * transition précise — afficher l'horodatage de la dernière évaluation serait quasi toujours
+   * "il y a 30s" et n'informerait de rien d'utile pour l'administrateur.
+   */
+  automationLastFired?: string | null;
+  /**
+   * Nœuds "automation-trigger" UNIQUEMENT : dernier état RÉEL observé par le moteur au dernier
+   * cycle ("failing" = source en échec, "ok" = source saine, "unknown" = jamais encore évalué).
+   */
+  automationLastStatus?: "ok" | "failing" | "unknown";
+}
+
+// --- Moteur d'automatisation (trigger -> condition -> action), façon n8n mais câblé UNIQUEMENT
+// sur les capacités RÉELLES déjà existantes de QUAI — voir apps/api/src/services/automationStore.ts
+// et apps/api/src/services/automationEngine.ts. Un "trigger" surveille l'état RÉEL déjà calculé
+// ailleurs (un TopologyNode existant, ou une VRAIE sonde TCP d'une route de reverse proxy) ; une
+// "condition" est un NON logique minimal (v1, pas un moteur de règles) ; une "action" appelle
+// toujours une fonction de service DÉJÀ existante (cron job, notification, action conteneur) —
+// jamais une nouvelle implémentation d'effet de bord.
+
+/** Ce qu'un nœud "automation-trigger" surveille réellement — v1 : soit un AUTRE TopologyNode déjà
+ * existant sur le graphe (conteneur/host/vm nutanix/ad-server — évalué via son `status`/`healthStatus`
+ * déjà calculés par services/topology.ts, jamais une nouvelle métrique inventée), soit une route de
+ * reverse proxy (évaluée via une VRAIE sonde de joignabilité de son upstream, voir plus bas). */
+export type AutomationTriggerSource =
+  | { kind: "topology-node"; nodeId: string } // ex: "container:<id>", "host:nutanix-cluster:<uuid>"
+  | { kind: "reverse-proxy-route"; routeId: string };
+
+export interface AutomationTriggerConfig {
+  source: AutomationTriggerSource;
+}
+
+/** Action RÉELLEMENT exécutée — chacune appelle une fonction de service DÉJÀ existante dans QUAI,
+ * jamais une nouvelle implémentation d'effet de bord. */
+export type AutomationActionConfig =
+  | { kind: "run-cron-job"; cronJobId: string }
+  | { kind: "send-notification"; channelId: string; message: string }
+  | { kind: "container-action"; containerId: string; action: "start" | "stop" | "restart" };
+
+export interface AutomationRunLogEntry {
+  id: string;
+  at: string; // ISO
+  triggerNodeId: string;
+  path: string[]; // ids des nœuds traversés dans l'ordre (trigger -> [condition] -> action(s))
+  ok: boolean;
+  message?: string; // détail réel de l'échec le cas échéant, jamais fabriqué
 }
 
 /**
@@ -711,7 +786,13 @@ export interface TopologyEdge {
    * port/badge (pas de notion de trafic ici, juste une hiérarchie physique) — voir
    * services/topology.ts et topologyGraphShared.tsx#buildTopologyEdges.
    */
-  kind: "mount" | "network" | "hosts";
+  /**
+   * "automation-flow" : arête RÉELLE entre deux nœuds d'automatisation (trigger -> condition,
+   * trigger -> action, condition -> action — voir services/automationStore.ts,
+   * services/automationEngine.ts) : simple lien de flux, sans port/badge (même sobriété que
+   * "hosts" ci-dessus).
+   */
+  kind: "mount" | "network" | "hosts" | "automation-flow";
   /**
    * "network" uniquement : ports RÉELLEMENT publiés par le conteneur à l'une des deux extrémités
    * (docker.listContainers()[].Ports, dédupliqués) — affiché façon Railway comme un badge flottant
@@ -842,7 +923,13 @@ export type SystemNotificationKind =
   | "integration_unreachable"
   | "integration_reachable"
   | "gitops_drift_detected"
-  | "vulnerability_detected";
+  | "vulnerability_detected"
+  // Émis par une action "send-notification" du moteur d'automatisation (voir
+  // services/automationEngine.ts) sur transition RÉELLE d'un trigger vers l'échec — jamais
+  // persisté dans le journal de notifications système (envoi direct au canal choisi, même
+  // principe que le test de canal, voir notificationDispatch.ts#sendChannelNotification), mais
+  // partage la même forme d'événement pour rester cohérent avec les autres kinds.
+  | "automation_triggered";
 
 export interface SystemNotificationEvent {
   id: string;

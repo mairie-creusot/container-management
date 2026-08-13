@@ -50,12 +50,17 @@ export const createVolume = createAsyncThunk<DockerVolume, string, { rejectValue
   },
 );
 
-export const removeVolume = createAsyncThunk<string, string, { rejectValue: string }>(
+/** `silent: true` (nettoyage groupé, ex "Nettoyer les orphelins" du graphe) : pas de toast
+ * individuel par volume — sinon une suppression de dizaines de ressources d'un coup en fait
+ * pleuvoir autant, voir TopologyGraph.tsx#handleCleanOrphans qui pousse déjà son propre résumé
+ * agrégé une fois la boucle terminée. Un appel isolé (détail d'un nœud, menu contextuel) omet ce
+ * champ et garde le toast individuel, comportement inchangé. */
+export const removeVolume = createAsyncThunk<string, { name: string; silent?: boolean }, { rejectValue: string }>(
   "volumes/remove",
-  async (name, { rejectWithValue, dispatch }) => {
+  async ({ name, silent }, { rejectWithValue, dispatch }) => {
     try {
       await apiDelete(`/volumes/${encodeURIComponent(name)}`);
-      dispatch(pushNotification({ level: "success", message: `Volume "${name}" supprimé.` }));
+      if (!silent) dispatch(pushNotification({ level: "success", message: `Volume "${name}" supprimé.` }));
       return name;
     } catch (error) {
       const message = error instanceof ApiError ? error.message : "Échec de la suppression du volume.";
@@ -112,7 +117,7 @@ const volumesSlice = createSlice({
         state.items.unshift(action.payload);
       })
       .addCase(removeVolume.pending, (state, action) => {
-        state.mutatingName = action.meta.arg;
+        state.mutatingName = action.meta.arg.name;
       })
       .addCase(removeVolume.fulfilled, (state, action) => {
         state.mutatingName = null;

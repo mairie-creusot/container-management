@@ -382,6 +382,25 @@ export function IconBackup({ className }: IconProps) {
   );
 }
 
+/** Nœud "automation-condition" du graphe de topologie (services/automationStore.ts) — point de
+ * décision qui se divise en deux branches, façon organigramme : aucune icône de fourche/branchement
+ * n'existait déjà dans ce fichier (IconChevron est un simple chevron directionnel, pas un point de
+ * décision), ajoutée ici en suivant EXACTEMENT le même style que les autres (base(), 3 points +
+ * tracés, mêmes proportions viewBox 24 que IconKey/IconSettings ci-dessus). */
+export function IconBranch({ className }: IconProps) {
+  return base(
+    <>
+      <circle cx="12" cy="5" r="2.2" />
+      <circle cx="6" cy="19" r="2.2" />
+      <circle cx="18" cy="19" r="2.2" />
+      <path d="M12 7.2v3" />
+      <path d="M12 10.2c0 2-2.3 3-4.8 4.7" />
+      <path d="M12 10.2c0 2 2.3 3 4.8 4.7" />
+    </>,
+    className,
+  );
+}
+
 /** GitHub (marque octocat simplifiée, tracé plein — pas base(), les autres icônes sont en contour) : Sidebar/GitHubDeployPage.tsx. */
 export function IconGithub({ className }: IconProps) {
   return (

@@ -40,12 +40,13 @@ export const createNetwork = createAsyncThunk<DockerNetwork, CreateNetworkInput,
   },
 );
 
-export const removeNetwork = createAsyncThunk<string, { id: string; name: string }, { rejectValue: string }>(
+/** `silent: true` (nettoyage groupé, voir volumesSlice.ts#removeVolume) : pas de toast individuel. */
+export const removeNetwork = createAsyncThunk<string, { id: string; name: string; silent?: boolean }, { rejectValue: string }>(
   "networks/remove",
-  async ({ id, name }, { rejectWithValue, dispatch }) => {
+  async ({ id, name, silent }, { rejectWithValue, dispatch }) => {
     try {
       await apiDelete(`/networks/${id}`);
-      dispatch(pushNotification({ level: "success", message: `Network "${name}" supprimé.` }));
+      if (!silent) dispatch(pushNotification({ level: "success", message: `Network "${name}" supprimé.` }));
       return id;
     } catch (error) {
       const message = error instanceof ApiError ? error.message : "Échec de la suppression du network.";

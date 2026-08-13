@@ -17,6 +17,7 @@ import authPlugin from "./plugins/auth.js";
 import adDnsRoutes from "./routes/adDns.js";
 import auditRoutes from "./routes/audit.js";
 import authRoutes from "./routes/auth.js";
+import automationRoutes from "./routes/automation.js";
 import backupsRoutes from "./routes/backups.js";
 import consoleRoutes from "./routes/console.js";
 import containerLogsRoutes from "./routes/containerLogs.js";
@@ -42,6 +43,7 @@ import secretsRoutes from "./routes/secrets.js";
 import setupRoutes from "./routes/setup.js";
 import topologyRoutes from "./routes/topology.js";
 import volumesRoutes from "./routes/volumes.js";
+import { startAutomationEngine } from "./services/automationEngine.js";
 import { startBackupScheduler } from "./services/backupScheduler.js";
 import { startCronJobsScheduler } from "./services/cronJobsScheduler.js";
 import { startGitopsReconciler } from "./services/gitopsReconciler.js";
@@ -101,6 +103,7 @@ export function buildServer() {
   void fastify.register(metricsRoutes);
   void fastify.register(cronJobsRoutes);
   void fastify.register(backupsRoutes);
+  void fastify.register(automationRoutes);
 
   // /health : chemin attendu par les healthchecks Docker et les probes Kubernetes (voir deploy/).
   // /healthz : alias conservé au cas où un outil externe le suppose (convention courante).
@@ -156,6 +159,13 @@ async function main(): Promise<void> {
   // vraie sauvegarde réseau pendant les tests qui construisent juste le serveur avec `app.inject`.
   const stopBackupScheduler = startBackupScheduler();
 
+  // Moteur d'automatisation (trigger -> condition -> action, voir services/automationEngine.ts) :
+  // même câblage que les schedulers ci-dessus, démarré seulement ici pour ne jamais évaluer un
+  // vrai trigger (sonde TCP réelle, lecture de topologie) ni exécuter une vraie action (docker
+  // exec, envoi de notification, start/stop/restart conteneur) pendant les tests qui construisent
+  // juste le serveur avec `app.inject`.
+  const stopAutomationEngine = startAutomationEngine();
+
   // Sans ceci, un SIGTERM (docker stop, ou nodemon qui redémarre le process en dev) tue le
   // process sans libérer explicitement le port avant que le suivant ne démarre — source
   // d'EADDRINUSE intermittents observés avec `nodemon --legacy-watch` (voir package.json,
@@ -168,6 +178,7 @@ async function main(): Promise<void> {
     stopMetricsCollector();
     stopCronJobsScheduler();
     stopBackupScheduler();
+    stopAutomationEngine();
     void fastify.close().then(() => process.exit(0));
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));

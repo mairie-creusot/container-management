@@ -213,6 +213,42 @@
   color: #f97316;
 }
 
+/* Déclenchement d'une automatisation (services/automationStore.ts) — rouge vif "alerte", distinct
+   des autres couleurs de kind ci-dessus, cohérent avec MINIMAP_NODE_COLOR["automation-trigger"]
+   dans topologyGraphShared.tsx. */
+.topology-node--automation-trigger .topology-node__icon {
+  background: rgba(220, 38, 38, 0.16);
+  color: #dc2626;
+}
+
+/* Condition d'une automatisation — gris-bleu neutre (pas d'état positif/négatif propre), cohérent
+   avec MINIMAP_NODE_COLOR["automation-condition"] dans topologyGraphShared.tsx. */
+.topology-node--automation-condition .topology-node__icon {
+  background: rgba(100, 116, 139, 0.16);
+  color: #64748b;
+}
+
+/* Action d'une automatisation — vert lime, volontairement une nuance différente de --color-success
+   (déjà pris par le statut "running") pour ne pas laisser croire à un statut, cohérent avec
+   MINIMAP_NODE_COLOR["automation-action"] dans topologyGraphShared.tsx. */
+.topology-node--automation-action .topology-node__icon {
+  background: rgba(132, 204, 22, 0.16);
+  color: #84cc16;
+}
+
+/* Handles génériques de connexion des nœuds d'automatisation (voir GraphNode,
+   topologyGraphShared.tsx) — même mécanique visuelle que .topology-handle--network/--volume
+   ci-dessus, couleur reprise de l'icône "automation-trigger" (rouge) : un seul token de couleur
+   pour les 3 kinds, la distinction trigger/condition/action est déjà portée par l'icône/couleur du
+   nœud lui-même, pas besoin d'un token par kind ici. */
+.topology-handle--automation.react-flow__handle {
+  border-color: #dc2626;
+}
+
+.topology-handle--automation.react-flow__handle:hover {
+  background: #dc2626;
+}
+
 /* Volume/network orphelin (rattaché à AUCUN conteneur, voir TopologyNode#orphan) — atténué +
    bordure pointillée plutôt que caché : reste un vrai nœud du graphe (décision produit du
    13/08/2026), juste visuellement mis en retrait par rapport aux ressources réellement utilisées. */
@@ -508,6 +544,14 @@
 .react-flow__edge.topology-edge--hosts .react-flow__edge-path {
   stroke-width: 1.25;
   opacity: 0.85;
+}
+
+/* "automation-flow" (trigger -> condition -> action, voir AUTOMATION_FLOW_EDGE_COLOR dans
+   topologyGraphShared.tsx) : couleur déjà fixe/distincte posée en inline style, cette règle ne
+   gère que l'épaisseur du trait — un peu plus marquée que "network" pour rester lisible malgré son
+   dasharray plus serré ("2 4", voir buildTopologyEdges). */
+.react-flow__edge.topology-edge--automation-flow .react-flow__edge-path {
+  stroke-width: 1.75;
 }
 
 /* Conteneur arrêté (status !== "running") : arrêt souvent volontaire, pas une panne — donc pas de
@@ -819,6 +863,9 @@
 .topology-detail-panel__icon--backup { color: #0ea5e9; }
 .topology-detail-panel__icon--gitops-source { color: #f43f5e; }
 .topology-detail-panel__icon--iac-workspace { color: #f97316; }
+.topology-detail-panel__icon--automation-trigger { color: #dc2626; }
+.topology-detail-panel__icon--automation-condition { color: #64748b; }
+.topology-detail-panel__icon--automation-action { color: #84cc16; }
 
 .topology-detail-panel__heading {
   flex: 1;

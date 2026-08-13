@@ -1,21 +1,34 @@
 // Client HTTP minimal pour l'API QUAI (apps/api).
-// Base URL configurable via VITE_API_BASE_URL (défaut http://localhost:3000/api).
+// Base URL configurable via VITE_API_BASE_URL — sinon RELATIVE ("/api", jamais une URL absolue
+// "http://localhost:3000" en dur) : le serveur de dev Vite proxy déjà "/api" vers le conteneur
+// API (voir vite.config.ts), et une URL relative reste valide quel que soit l'hôte/schéma depuis
+// lequel la page est chargée. Une URL absolue figée cassait l'accès via le reverse proxy interne
+// en HTTPS (ex: https://quai.lecreusot.priv, services/reverseProxy.ts) : le navigateur bloque en
+// contenu mixte tout appel http:// actif depuis une page https:// — constaté en conditions
+// réelles le 13/08/2026, la connexion LDAP échouait silencieusement, aucune requête n'atteignait
+// jamais l'API. La sortie de la construction de production (Dockerfile.web, fichiers statiques
+// sans serveur de dev/proxy) continue de fournir VITE_API_BASE_URL explicitement, inchangé.
 // La session est portée par un cookie httpOnly côté serveur (auth LDAP) :
 // toutes les requêtes doivent donc inclure les credentials.
 
 const BASE_URL: string =
-  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, "") ??
-  "http://localhost:3000/api";
+  (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/+$/, "") ?? "/api";
 
 /**
  * Base URL WebSocket dérivée de BASE_URL (même hôte/port que l'API HTTP, schéma ws(s)://
- * à la place de http(s)://) — utilisée par la console conteneur (ContainerConsole.tsx).
+ * à la place de http(s)://) — utilisée par la console conteneur (ContainerConsole.tsx) et le
+ * flux de logs temps réel (ContainerLogs.tsx). BASE_URL absolue (VITE_API_BASE_URL positionné) :
+ * simple substitution de schéma. BASE_URL relative (cas par défaut, voir ci-dessus) : reconstruite
+ * depuis `window.location` — le schéma ws(s) suit le schéma de la page (wss:// sur une page
+ * https://, jamais un mélange de contenu qui serait bloqué comme pour l'appel HTTP ci-dessus).
  * Le cookie de session est envoyé automatiquement par le navigateur avec la requête d'upgrade
  * WebSocket (même domaine, `credentials: "include"` n'existe pas pour l'API WebSocket — le
  * cookie httpOnly part de toute façon avec toute requête vers ce host).
  */
 export function wsUrl(path: string): string {
-  return `${BASE_URL.replace(/^http/, "ws")}${path}`;
+  if (/^https?:/.test(BASE_URL)) return `${BASE_URL.replace(/^http/, "ws")}${path}`;
+  const wsScheme = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${wsScheme}//${window.location.host}${BASE_URL}${path}`;
 }
 
 /** URL absolue vers une route de l'API — pour un lien de téléchargement direct (ex: le certificat

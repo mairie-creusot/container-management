@@ -59,8 +59,18 @@ import { createWorkspace } from "@/features/iac/iacSlice";
 // réutilisent les thunks existants (cronJobsSlice.ts/backupsSlice.ts, déjà utilisés par
 // TopologyNodeDetailPanel.tsx pour le panneau de détail) : POST /api/cron-jobs/POST /api/backups
 // réels, aucune route dupliquée.
-import { createCronJob } from "@/features/cronJobs/cronJobsSlice";
+import { createCronJob, fetchCronJobs } from "@/features/cronJobs/cronJobsSlice";
 import { createBackupDefinition } from "@/features/backups/backupsSlice";
+// "Nouveau déclencheur"/"Nouvelle condition"/"Nouvelle action" (câblage frontend du moteur
+// d'automatisation, voir apps/api/src/routes/automation.ts) — même principe que les imports
+// ci-dessus : réutilise le nouveau slice dédié (automationSlice.ts, POST /api/automation/nodes
+// réel), ainsi que fetchRoutes (reverseProxySlice.ts, déjà utilisé par ReverseProxyPage.tsx) et
+// fetchNotificationChannels (notificationChannelsSlice.ts, déjà utilisé par
+// NotificationChannelsPage.tsx) pour peupler les select de source/action avec des ressources RÉELLES,
+// jamais une liste inventée.
+import { createAutomationEdge, createAutomationNode, deleteAutomationEdge, deleteAutomationNode } from "@/features/automation/automationSlice";
+import { fetchRoutes } from "@/features/reverseProxy/reverseProxySlice";
+import { fetchNotificationChannels } from "@/features/notificationChannels/notificationChannelsSlice";
 import type { IacEngine } from "@/types";
 import {
   CAPABILITY_DEFS,
@@ -81,7 +91,15 @@ import {
   type GroupNodeData,
   type PortSpec,
 } from "@/components/topologyGraphShared";
-import type { BackupTargetKind, TopologyEdge, TopologyGroup, TopologyNode, TopologyNodeAttachment } from "@/types";
+import type {
+  AutomationActionConfig,
+  AutomationTriggerSource,
+  BackupTargetKind,
+  TopologyEdge,
+  TopologyGroup,
+  TopologyNode,
+  TopologyNodeAttachment,
+} from "@/types";
 
 /** Nombre de nœuds squelettes par colonne (volumes / conteneurs / networks) pendant le premier
  * chargement — silhouette approximative, pas besoin de coller exactement au nombre réel. */
@@ -102,6 +120,13 @@ const COLUMN_X: Record<TopologyNode["kind"], number> = {
   "cron-job": 2380,
   backup: 2720,
   "gitops-source": 3060,
+  // Zone "Automatisation" (trigger -> condition -> action, voir services/automationStore.ts) —
+  // 3 colonnes adjacentes après gitops-source, dans l'ordre de lecture naturel de la chaîne
+  // (gauche = déclencheur, milieu = condition, droite = action), même largeur de colonne (340) que
+  // le reste de ce tableau.
+  "automation-trigger": 3400,
+  "automation-condition": 3740,
+  "automation-action": 4080,
 };
 const ROW_HEIGHT = 130;
 const NETWORK_DRIVERS = ["bridge", "overlay", "host", "none"];
@@ -372,6 +397,10 @@ interface CreateSpotlightProps {
   /** Ouvre le formulaire détaillé existant (CreatePopover) pour ce kind — conteneur/volume/network
    * "classiques", inchangés, juste précédés désormais d'un champ de recherche pour les retrouver. */
   onPickKind: (kind: CreatableKind) => void;
+  /** Nœuds RÉELS du graphe déjà chargés (voir TopologyGraph.tsx#return, `data?.nodes ?? []`) —
+   * uniquement pour peupler le select "Surveiller un nœud du graphe" du formulaire "Nouveau
+   * déclencheur" ci-dessous, jamais une liste inventée/recalculée. */
+  topologyNodes: TopologyNode[];
 }
 
 /**
@@ -397,7 +426,7 @@ interface CreateSpotlightProps {
  * duplique ni ne réimplémente RIEN de sa logique — seul un nouveau bloc CSS (topology.css,
  * `.graph-github-modal*`) l'élargit au-delà des 420px par défaut d'une modal de confirmation.
  */
-function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
+function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpotlightProps) {
   const dispatch = useAppDispatch();
   const [query, setQuery] = useState("");
   const [deployingId, setDeployingId] = useState<string | null>(null);
@@ -439,6 +468,43 @@ function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
   const [backupRetentionCount, setBackupRetentionCount] = useState("7");
   const [backupBusy, setBackupBusy] = useState(false);
   const [backupError, setBackupError] = useState<string | null>(null);
+  // "Nouveau déclencheur"/"Nouvelle condition"/"Nouvelle action" (câblage frontend du moteur
+  // d'automatisation) — même principe de mini-formulaire inline que "Nouveau workspace
+  // Infra-as-code"/"Nouveau Cron Job"/"Nouvelle sauvegarde" ci-dessus. Réutilise createAutomationNode
+  // (automationSlice.ts) — POST /api/automation/nodes réel, aucune route dupliquée.
+  const [showTriggerCreate, setShowTriggerCreate] = useState(false);
+  const [triggerName, setTriggerName] = useState("");
+  const [triggerSourceKind, setTriggerSourceKind] = useState<AutomationTriggerSource["kind"]>("topology-node");
+  const [triggerSourceNodeId, setTriggerSourceNodeId] = useState("");
+  const [triggerSourceRouteId, setTriggerSourceRouteId] = useState("");
+  const [triggerBusy, setTriggerBusy] = useState(false);
+  const [triggerError, setTriggerError] = useState<string | null>(null);
+  // Nœuds du graphe surveillables par un trigger "topology-node" — mêmes 4 kinds qui portent un
+  // état réel et durable, jamais un autre nœud d'automatisation (voir mission). `nodeId` envoyé au
+  // serveur est l'id COMPLET préfixé du nœud (ex: "container:abcd1234"), pas un id brut : c'est ce
+  // que services/automationEngine.ts#resolveTopologyNodeState recherche directement dans
+  // `topology.nodes` (`topology.nodes.find(n => n.id === nodeId)`), jamais un id Docker nu.
+  const watchableTopologyNodes = topologyNodes.filter(
+    (n) => n.kind === "container" || n.kind === "host" || n.kind === "nutanix-vm" || n.kind === "ad-server",
+  );
+  const routes = useAppSelector((s) => s.reverseProxy.items);
+  const [showConditionCreate, setShowConditionCreate] = useState(false);
+  const [conditionName, setConditionName] = useState("");
+  const [conditionInvert, setConditionInvert] = useState(false);
+  const [conditionBusy, setConditionBusy] = useState(false);
+  const [conditionError, setConditionError] = useState<string | null>(null);
+  const [showActionCreate, setShowActionCreate] = useState(false);
+  const [automationActionName, setAutomationActionName] = useState("");
+  const [automationActionKind, setAutomationActionKind] = useState<AutomationActionConfig["kind"]>("run-cron-job");
+  const [automationActionCronJobId, setAutomationActionCronJobId] = useState("");
+  const [automationActionChannelId, setAutomationActionChannelId] = useState("");
+  const [automationActionMessage, setAutomationActionMessage] = useState("");
+  const [automationActionContainerId, setAutomationActionContainerId] = useState("");
+  const [automationActionLifecycle, setAutomationActionLifecycle] = useState<"start" | "stop" | "restart">("restart");
+  const [automationActionBusy, setAutomationActionBusy] = useState(false);
+  const [automationActionError, setAutomationActionError] = useState<string | null>(null);
+  const cronJobs = useAppSelector((s) => s.cronJobs.items);
+  const notificationChannels = useAppSelector((s) => s.notificationChannels.items);
   // useDismiss ferme sur clic hors de `ref`/Échap — mais une fois la modal GitHub ouverte, son
   // contenu vit dans un portail document.body (Modal.tsx), donc HORS de `ref` : sans ce garde-fou,
   // le premier clic à l'intérieur de la modal (un repo, un champ...) la refermerait aussitôt.
@@ -448,10 +514,31 @@ function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
   });
 
   // Conteneurs "running" pour le sélecteur du formulaire "Nouveau Cron Job" — chargés seulement une
-  // fois ce formulaire effectivement ouvert (inutile tant que ce choix n'a pas été fait).
+  // fois ce formulaire effectivement ouvert (inutile tant que ce choix n'a pas été fait). Même
+  // chargement paresseux pour le formulaire "Nouvelle action" quand son type "Action sur un
+  // conteneur" est sélectionné (state.containers.items, TOUS les conteneurs connus — pas seulement
+  // "running", une action peut aussi bien démarrer un conteneur arrêté).
   useEffect(() => {
-    if (showCronJobCreate) dispatch(fetchContainers(null));
-  }, [dispatch, showCronJobCreate]);
+    if (showCronJobCreate || (showActionCreate && automationActionKind === "container-action")) {
+      dispatch(fetchContainers(null));
+    }
+  }, [dispatch, showCronJobCreate, showActionCreate, automationActionKind]);
+
+  // "Nouveau déclencheur" (source "reverse-proxy-route") — routes réelles chargées seulement une
+  // fois ce choix effectivement fait, même principe que les conteneurs ci-dessus. Réutilise
+  // fetchRoutes (reverseProxySlice.ts), déjà utilisé par ReverseProxyPage.tsx.
+  useEffect(() => {
+    if (showTriggerCreate && triggerSourceKind === "reverse-proxy-route") dispatch(fetchRoutes());
+  }, [dispatch, showTriggerCreate, triggerSourceKind]);
+
+  // "Nouvelle action" — cron jobs/canaux de notification réels chargés seulement une fois le type
+  // d'action correspondant effectivement sélectionné, même principe. Réutilise fetchCronJobs
+  // (cronJobsSlice.ts)/fetchNotificationChannels (notificationChannelsSlice.ts), déjà utilisés par
+  // TopologyNodeDetailPanel.tsx/NotificationChannelsPage.tsx.
+  useEffect(() => {
+    if (showActionCreate && automationActionKind === "run-cron-job") dispatch(fetchCronJobs());
+    if (showActionCreate && automationActionKind === "send-notification") dispatch(fetchNotificationChannels());
+  }, [dispatch, showActionCreate, automationActionKind]);
 
   async function handleCreateIacWorkspace(event: FormEvent) {
     event.preventDefault();
@@ -767,6 +854,364 @@ function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
     );
   }
 
+  async function handleCreateTrigger(event: FormEvent) {
+    event.preventDefault();
+    const trimmed = triggerName.trim();
+    if (!trimmed) return;
+    if (triggerSourceKind === "topology-node" && !triggerSourceNodeId) return;
+    if (triggerSourceKind === "reverse-proxy-route" && !triggerSourceRouteId) return;
+    setTriggerBusy(true);
+    setTriggerError(null);
+    const source: AutomationTriggerSource =
+      triggerSourceKind === "topology-node"
+        ? { kind: "topology-node", nodeId: triggerSourceNodeId }
+        : { kind: "reverse-proxy-route", routeId: triggerSourceRouteId };
+    // createAutomationNode (automationSlice.ts) POST réellement /api/automation/nodes — aucune
+    // route dupliquée, même thunk que le panneau de détail du nœud créé (TopologyNodeDetailPanel.tsx).
+    const result = await dispatch(createAutomationNode({ kind: "automation-trigger", label: trimmed, triggerConfig: { source } }));
+    setTriggerBusy(false);
+    if (createAutomationNode.fulfilled.match(result)) {
+      dispatch(fetchTopology());
+      onClose();
+    } else {
+      setTriggerError(result.payload ?? "Échec de la création du déclencheur.");
+    }
+  }
+
+  if (showTriggerCreate) {
+    return (
+      <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+        <div className="graph-popover__title">Nouveau déclencheur</div>
+        <form onSubmit={handleCreateTrigger}>
+          <div className="field">
+            <label htmlFor="graph-trigger-name">Nom</label>
+            <input
+              id="graph-trigger-name"
+              type="text"
+              autoFocus
+              placeholder="ex : Panne du serveur web"
+              value={triggerName}
+              onChange={(e) => setTriggerName(e.target.value)}
+              disabled={triggerBusy}
+              required
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="graph-trigger-source-kind">Source surveillée</label>
+            <select
+              id="graph-trigger-source-kind"
+              value={triggerSourceKind}
+              onChange={(e) => setTriggerSourceKind(e.target.value as AutomationTriggerSource["kind"])}
+              disabled={triggerBusy}
+            >
+              <option value="topology-node">Un nœud du graphe</option>
+              <option value="reverse-proxy-route">Une route de reverse proxy</option>
+            </select>
+          </div>
+          {triggerSourceKind === "topology-node" && (
+            <div className="field">
+              <label htmlFor="graph-trigger-node">Nœud surveillé</label>
+              <select
+                id="graph-trigger-node"
+                value={triggerSourceNodeId}
+                onChange={(e) => setTriggerSourceNodeId(e.target.value)}
+                disabled={triggerBusy}
+                required
+              >
+                <option value="">— sélectionner —</option>
+                {watchableTopologyNodes.map((n) => (
+                  <option key={n.id} value={n.id}>
+                    {n.label} ({n.kind})
+                  </option>
+                ))}
+              </select>
+              {watchableTopologyNodes.length === 0 && (
+                <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+                  Aucun conteneur/hôte/VM Nutanix/contrôleur AD connu de QUAI.
+                </span>
+              )}
+            </div>
+          )}
+          {triggerSourceKind === "reverse-proxy-route" && (
+            <div className="field">
+              <label htmlFor="graph-trigger-route">Route surveillée</label>
+              <select
+                id="graph-trigger-route"
+                value={triggerSourceRouteId}
+                onChange={(e) => setTriggerSourceRouteId(e.target.value)}
+                disabled={triggerBusy}
+                required
+              >
+                <option value="">— sélectionner —</option>
+                {routes.map((r) => (
+                  <option key={r.id} value={r.id}>
+                    {r.subdomain}
+                  </option>
+                ))}
+              </select>
+              {routes.length === 0 && (
+                <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+                  Aucune route de reverse proxy connue de QUAI.
+                </span>
+              )}
+            </div>
+          )}
+          {triggerError && <p className="graph-popover__error">{triggerError}</p>}
+          <div className="graph-popover__actions">
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={triggerBusy}>
+              Annuler
+            </button>
+            <button
+              type="submit"
+              className="btn btn-primary btn-sm"
+              disabled={
+                triggerBusy ||
+                !triggerName.trim() ||
+                (triggerSourceKind === "topology-node" ? !triggerSourceNodeId : !triggerSourceRouteId)
+              }
+            >
+              {triggerBusy ? "…" : "Créer"}
+            </button>
+          </div>
+        </form>
+      </div>
+    );
+  }
+
+  async function handleCreateCondition(event: FormEvent) {
+    event.preventDefault();
+    const trimmed = conditionName.trim();
+    if (!trimmed) return;
+    setConditionBusy(true);
+    setConditionError(null);
+    // createAutomationNode (automationSlice.ts) POST réellement /api/automation/nodes — même thunk
+    // que "Nouveau déclencheur" ci-dessus, aucune route dupliquée.
+    const result = await dispatch(createAutomationNode({ kind: "automation-condition", label: trimmed, conditionInvert }));
+    setConditionBusy(false);
+    if (createAutomationNode.fulfilled.match(result)) {
+      dispatch(fetchTopology());
+      onClose();
+    } else {
+      setConditionError(result.payload ?? "Échec de la création de la condition.");
+    }
+  }
+
+  if (showConditionCreate) {
+    return (
+      <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+        <div className="graph-popover__title">Nouvelle condition</div>
+        <form onSubmit={handleCreateCondition}>
+          <div className="field">
+            <label htmlFor="graph-condition-name">Nom</label>
+            <input
+              id="graph-condition-name"
+              type="text"
+              autoFocus
+              placeholder="ex : Uniquement si en échec"
+              value={conditionName}
+              onChange={(e) => setConditionName(e.target.value)}
+              disabled={conditionBusy}
+              required
+            />
+          </div>
+          <label className="filter-toggle">
+            <input
+              type="checkbox"
+              checked={conditionInvert}
+              onChange={(e) => setConditionInvert(e.target.checked)}
+              disabled={conditionBusy}
+            />
+            Inverser (bloquer la chaîne si la source est en échec, au lieu de la laisser passer)
+          </label>
+          {conditionError && <p className="graph-popover__error">{conditionError}</p>}
+          <div className="graph-popover__actions">
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={conditionBusy}>
+              Annuler
+            </button>
+            <button type="submit" className="btn btn-primary btn-sm" disabled={conditionBusy || !conditionName.trim()}>
+              {conditionBusy ? "…" : "Créer"}
+            </button>
+          </div>
+        </form>
+      </div>
+    );
+  }
+
+  async function handleCreateAutomationAction(event: FormEvent) {
+    event.preventDefault();
+    const trimmed = automationActionName.trim();
+    if (!trimmed) return;
+    let actionConfig: AutomationActionConfig;
+    if (automationActionKind === "run-cron-job") {
+      if (!automationActionCronJobId) return;
+      actionConfig = { kind: "run-cron-job", cronJobId: automationActionCronJobId };
+    } else if (automationActionKind === "send-notification") {
+      const trimmedMessage = automationActionMessage.trim();
+      if (!automationActionChannelId || !trimmedMessage) return;
+      actionConfig = { kind: "send-notification", channelId: automationActionChannelId, message: trimmedMessage };
+    } else {
+      if (!automationActionContainerId) return;
+      actionConfig = { kind: "container-action", containerId: automationActionContainerId, action: automationActionLifecycle };
+    }
+    setAutomationActionBusy(true);
+    setAutomationActionError(null);
+    // createAutomationNode (automationSlice.ts) POST réellement /api/automation/nodes — même thunk
+    // que "Nouveau déclencheur"/"Nouvelle condition" ci-dessus, aucune route dupliquée. L'action
+    // RÉELLEMENT exécutée (cron job/notification/action conteneur) appelle toujours une route déjà
+    // existante et déjà soumise à ses propres gardes de rôle, voir routes/automation.ts.
+    const result = await dispatch(createAutomationNode({ kind: "automation-action", label: trimmed, actionConfig }));
+    setAutomationActionBusy(false);
+    if (createAutomationNode.fulfilled.match(result)) {
+      dispatch(fetchTopology());
+      onClose();
+    } else {
+      setAutomationActionError(result.payload ?? "Échec de la création de l'action.");
+    }
+  }
+
+  if (showActionCreate) {
+    return (
+      <div className="graph-popover" style={{ left: x, top: y }} ref={ref}>
+        <div className="graph-popover__title">Nouvelle action</div>
+        <form onSubmit={handleCreateAutomationAction}>
+          <div className="field">
+            <label htmlFor="graph-automation-action-name">Nom</label>
+            <input
+              id="graph-automation-action-name"
+              type="text"
+              autoFocus
+              placeholder="ex : Redémarrer le service"
+              value={automationActionName}
+              onChange={(e) => setAutomationActionName(e.target.value)}
+              disabled={automationActionBusy}
+              required
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="graph-automation-action-kind">Type d'action</label>
+            <select
+              id="graph-automation-action-kind"
+              value={automationActionKind}
+              onChange={(e) => setAutomationActionKind(e.target.value as AutomationActionConfig["kind"])}
+              disabled={automationActionBusy}
+            >
+              <option value="run-cron-job">Déclencher un cron job</option>
+              <option value="send-notification">Envoyer une notification</option>
+              <option value="container-action">Action sur un conteneur</option>
+            </select>
+          </div>
+          {automationActionKind === "run-cron-job" && (
+            <div className="field">
+              <label htmlFor="graph-automation-action-cronjob">Cron job</label>
+              <select
+                id="graph-automation-action-cronjob"
+                value={automationActionCronJobId}
+                onChange={(e) => setAutomationActionCronJobId(e.target.value)}
+                disabled={automationActionBusy}
+                required
+              >
+                <option value="">— sélectionner —</option>
+                {cronJobs.map((j) => (
+                  <option key={j.id} value={j.id}>
+                    {j.name}
+                  </option>
+                ))}
+              </select>
+              {cronJobs.length === 0 && (
+                <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>Aucun cron job connu de QUAI.</span>
+              )}
+            </div>
+          )}
+          {automationActionKind === "send-notification" && (
+            <>
+              <div className="field">
+                <label htmlFor="graph-automation-action-channel">Canal de notification</label>
+                <select
+                  id="graph-automation-action-channel"
+                  value={automationActionChannelId}
+                  onChange={(e) => setAutomationActionChannelId(e.target.value)}
+                  disabled={automationActionBusy}
+                  required
+                >
+                  <option value="">— sélectionner —</option>
+                  {notificationChannels.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+                {notificationChannels.length === 0 && (
+                  <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+                    Aucun canal de notification connu de QUAI.
+                  </span>
+                )}
+              </div>
+              <div className="field">
+                <label htmlFor="graph-automation-action-message">Message</label>
+                <textarea
+                  id="graph-automation-action-message"
+                  className="iac-editor"
+                  style={{ minHeight: 60 }}
+                  value={automationActionMessage}
+                  onChange={(e) => setAutomationActionMessage(e.target.value)}
+                  placeholder="ex : Le serveur web est injoignable"
+                  disabled={automationActionBusy}
+                  required
+                />
+              </div>
+            </>
+          )}
+          {automationActionKind === "container-action" && (
+            <>
+              <div className="field">
+                <label htmlFor="graph-automation-action-container">Conteneur cible</label>
+                <select
+                  id="graph-automation-action-container"
+                  value={automationActionContainerId}
+                  onChange={(e) => setAutomationActionContainerId(e.target.value)}
+                  disabled={automationActionBusy}
+                  required
+                >
+                  <option value="">— sélectionner —</option>
+                  {containers.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({c.image})
+                    </option>
+                  ))}
+                </select>
+                {containers.length === 0 && (
+                  <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>Aucun conteneur connu de QUAI.</span>
+                )}
+              </div>
+              <div className="field">
+                <label htmlFor="graph-automation-action-lifecycle">Action</label>
+                <select
+                  id="graph-automation-action-lifecycle"
+                  value={automationActionLifecycle}
+                  onChange={(e) => setAutomationActionLifecycle(e.target.value as "start" | "stop" | "restart")}
+                  disabled={automationActionBusy}
+                >
+                  <option value="start">Démarrer</option>
+                  <option value="stop">Arrêter</option>
+                  <option value="restart">Redémarrer</option>
+                </select>
+              </div>
+            </>
+          )}
+          {automationActionError && <p className="graph-popover__error">{automationActionError}</p>}
+          <div className="graph-popover__actions">
+            <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={automationActionBusy}>
+              Annuler
+            </button>
+            <button type="submit" className="btn btn-primary btn-sm" disabled={automationActionBusy || !automationActionName.trim()}>
+              {automationActionBusy ? "…" : "Créer"}
+            </button>
+          </div>
+        </form>
+      </div>
+    );
+  }
+
   if (showGithubDeploy) {
     return (
       <Modal open onClose={onClose} labelledBy="graph-github-deploy-title">
@@ -868,6 +1313,31 @@ function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
     onSelect: () => setShowBackupCreate(true),
   };
 
+  // "Nouveau déclencheur"/"Nouvelle condition"/"Nouvelle action" (moteur d'automatisation réel,
+  // voir apps/api/src/routes/automation.ts) — remplacent le menu contextuel plat d'origine, même
+  // philosophie produit que les entrées ci-dessus.
+  const triggerAction: SpotlightAction = {
+    id: "create-automation-trigger",
+    title: "Nouveau déclencheur",
+    description: "Surveille un nœud du graphe ou une route de reverse proxy pour démarrer une chaîne d'automatisation.",
+    icon: KIND_ICON["automation-trigger"],
+    onSelect: () => setShowTriggerCreate(true),
+  };
+  const conditionAction: SpotlightAction = {
+    id: "create-automation-condition",
+    title: "Nouvelle condition",
+    description: "Filtre une chaîne d'automatisation selon l'état (échec/sain) de ce qui la précède.",
+    icon: KIND_ICON["automation-condition"],
+    onSelect: () => setShowConditionCreate(true),
+  };
+  const automationActionSpotlightAction: SpotlightAction = {
+    id: "create-automation-action",
+    title: "Nouvelle action",
+    description: "Déclenche réellement un cron job, une notification ou une action sur un conteneur.",
+    icon: KIND_ICON["automation-action"],
+    onSelect: () => setShowActionCreate(true),
+  };
+
   const normalizedQuery = query.trim().toLowerCase();
   const filterActions = (actions: SpotlightAction[]) =>
     normalizedQuery
@@ -879,13 +1349,15 @@ function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
   const filteredIacActions = filterActions([iacWorkspaceAction]);
   const filteredCronJobActions = filterActions([cronJobAction]);
   const filteredBackupActions = filterActions([backupAction]);
+  const filteredAutomationActions = filterActions([triggerAction, conditionAction, automationActionSpotlightAction]);
   const hasResults =
     filteredGithubActions.length > 0 ||
     filteredKindActions.length > 0 ||
     filteredPresetActions.length > 0 ||
     filteredIacActions.length > 0 ||
     filteredCronJobActions.length > 0 ||
-    filteredBackupActions.length > 0;
+    filteredBackupActions.length > 0 ||
+    filteredAutomationActions.length > 0;
 
   return (
     <div className="graph-popover graph-spotlight" style={{ left: x, top: y }} ref={ref}>
@@ -933,6 +1405,13 @@ function CreateSpotlight({ x, y, onClose, onPickKind }: CreateSpotlightProps) {
         {filteredBackupActions.length > 0 && (
           <div className="graph-spotlight__group">
             {filteredBackupActions.map((action) => (
+              <SpotlightRow key={action.id} action={action} />
+            ))}
+          </div>
+        )}
+        {filteredAutomationActions.length > 0 && (
+          <div className="graph-spotlight__group">
+            {filteredAutomationActions.map((action) => (
               <SpotlightRow key={action.id} action={action} />
             ))}
           </div>
@@ -1214,7 +1693,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [canvasMenu, setCanvasMenu] = useState<{ x: number; y: number } | null>(null);
   const [nodeMenu, setNodeMenu] = useState<{ x: number; y: number; node: TopologyNode } | null>(null);
-  const [edgeMenu, setEdgeMenu] = useState<{ x: number; y: number; source: string; target: string; kind: string } | null>(null);
+  const [edgeMenu, setEdgeMenu] = useState<{ x: number; y: number; id: string; source: string; target: string; kind: string } | null>(
+    null,
+  );
   const [popover, setPopover] = useState<{ kind: CreatableKind; x: number; y: number } | null>(null);
   const [renamePopover, setRenamePopover] = useState<{ containerId: string; initialName: string; x: number; y: number } | null>(
     null,
@@ -1307,6 +1788,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       "cron-job": 0,
       backup: 0,
       "gitops-source": 0,
+      "automation-trigger": 0,
+      "automation-condition": 0,
+      "automation-action": 0,
     };
     // Membres d'un groupe REPLIÉ : n'apparaissent plus comme des nœuds individuels (voir plus bas,
     // un seul nœud "topologyGroupNode" les représente) — un membre d'un groupe DÉPLIÉ continue en
@@ -1514,11 +1998,65 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     return CAPABILITY_DEFS[sourcePort.capability];
   }
 
+  /** true si ce kind est l'un des 3 nœuds du moteur d'automatisation (voir
+   * services/automationStore.ts) — jamais connectés via NODE_CAPABILITIES/CAPABILITY_DEFS (ports
+   * typés réseau/volume, sans objet ici), toujours via ce chemin dédié. */
+  function isAutomationNodeKind(kind: TopologyNode["kind"] | undefined): boolean {
+    return kind === "automation-trigger" || kind === "automation-condition" || kind === "automation-action";
+  }
+
+  /** Même règle EXACTE que routes/automation.ts#isValidConnection côté serveur (qui reste la
+   * validation faisant foi, celle-ci n'est qu'un message d'erreur immédiat côté UI) : trigger ->
+   * condition/action, condition -> action, tout le reste refusé (notamment une action, toujours
+   * une feuille, ne peut jamais être une source). */
+  function isAutomationConnectionAllowed(sourceKind: TopologyNode["kind"], targetKind: TopologyNode["kind"]): boolean {
+    if (sourceKind === "automation-trigger") return targetKind === "automation-condition" || targetKind === "automation-action";
+    if (sourceKind === "automation-condition") return targetKind === "automation-action";
+    return false;
+  }
+
   function isValidConnection(connection: Edge | Connection): boolean {
+    if (!connection.source || !connection.target || connection.source === connection.target) return false;
+    const sourceNode = data?.nodes.find((n) => n.id === connection.source);
+    const targetNode = data?.nodes.find((n) => n.id === connection.target);
+    if (isAutomationNodeKind(sourceNode?.kind) || isAutomationNodeKind(targetNode?.kind)) {
+      // Les deux bouts doivent être des nœuds d'automatisation (jamais un mélange avec un nœud
+      // Docker/Nutanix classique) — l'ordre précis (trigger->condition/action, condition->action)
+      // est vérifié dans handleConnect ci-dessous, avec un message d'erreur clair plutôt qu'un
+      // simple refus silencieux du glisser-déposer (voir mission).
+      return isAutomationNodeKind(sourceNode?.kind) && isAutomationNodeKind(targetNode?.kind);
+    }
     return classifyConnection(connection) !== null;
   }
 
   function handleConnect(connection: Connection) {
+    if (!connection.source || !connection.target) return;
+    const sourceNode = data?.nodes.find((n) => n.id === connection.source);
+    const targetNode = data?.nodes.find((n) => n.id === connection.target);
+    if (isAutomationNodeKind(sourceNode?.kind) || isAutomationNodeKind(targetNode?.kind)) {
+      if (!sourceNode || !targetNode) return;
+      if (!isAutomationConnectionAllowed(sourceNode.kind, targetNode.kind)) {
+        dispatch(
+          pushNotification({
+            level: "error",
+            message: `Connexion invalide : ${sourceNode.kind} → ${targetNode.kind}. Ordre autorisé : déclencheur → condition/action, condition → action.`,
+          }),
+        );
+        return;
+      }
+      // createAutomationEdge (automationSlice.ts) POST réellement /api/automation/edges avec les
+      // ids BRUTS du store (idWithoutPrefix retire le préfixe `${kind}:` posé côté graphe par
+      // services/topology.ts#getAutomationNodes) — le backend revalide de toute façon la même règle
+      // en dernier recours (routes/automation.ts#isValidConnection).
+      dispatch(
+        createAutomationEdge({ source: idWithoutPrefix(connection.source), target: idWithoutPrefix(connection.target) }),
+      ).then((result) => {
+        if (createAutomationEdge.fulfilled.match(result)) dispatch(fetchTopology());
+        else dispatch(pushNotification({ level: "error", message: result.payload ?? "Impossible de créer cette connexion." }));
+      });
+      return;
+    }
+
     const def = classifyConnection(connection);
     if (!def) return;
     if (!def.interactive) {
@@ -1526,7 +2064,6 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       return;
     }
     // Seule capacité interactive à ce jour : container <-> network (docker network connect réel).
-    const sourceNode = data?.nodes.find((n) => n.id === connection.source);
     const containerNodeId = sourceNode?.kind === "container" ? connection.source! : connection.target!;
     const networkNodeId = containerNodeId === connection.source ? connection.target! : connection.source!;
     const containerId = idWithoutPrefix(containerNodeId);
@@ -1582,7 +2119,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     event.preventDefault();
     if (!operate) return;
     const kind = (edge.data as { kind?: string } | undefined)?.kind ?? "mount";
-    setEdgeMenu({ x: event.clientX, y: event.clientY, source: edge.source, target: edge.target, kind });
+    setEdgeMenu({ x: event.clientX, y: event.clientY, id: edge.id, source: edge.source, target: edge.target, kind });
   }
 
   async function handleContainerAction(id: string, name: string, action: LifecycleAction) {
@@ -1610,7 +2147,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       variant: "danger",
     });
     if (!ok) return;
-    const result = await dispatch(removeVolume(name));
+    const result = await dispatch(removeVolume({ name }));
     if (removeVolume.fulfilled.match(result)) dispatch(fetchTopology());
   }
 
@@ -1643,11 +2180,11 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     setCleaningOrphans(true);
     let failures = 0;
     for (const node of orphanVolumeNodes) {
-      const result = await dispatch(removeVolume(idWithoutPrefix(node.id)));
+      const result = await dispatch(removeVolume({ name: idWithoutPrefix(node.id), silent: true }));
       if (!removeVolume.fulfilled.match(result)) failures++;
     }
     for (const node of orphanNetworkNodes) {
-      const result = await dispatch(removeNetwork({ id: idWithoutPrefix(node.id), name: node.label }));
+      const result = await dispatch(removeNetwork({ id: idWithoutPrefix(node.id), name: node.label, silent: true }));
       if (!removeNetwork.fulfilled.match(result)) failures++;
     }
     setCleaningOrphans(false);
@@ -1675,6 +2212,22 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     if (!ok) return;
     const result = await dispatch(disconnectContainerFromNetwork({ networkId, containerId }));
     if (disconnectContainerFromNetwork.fulfilled.match(result)) dispatch(fetchTopology());
+  }
+
+  /** Menu contextuel d'une arête "automation-flow" (voir edgeMenu ci-dessus) — DELETE
+   * /api/automation/edges/:id réel (automationSlice.ts), id BRUT extrait de l'id préfixé du graphe
+   * (`automation-flow:<uuid>`, voir services/topology.ts#getAutomationNodes), même garde
+   * `useConfirm` que handleDisconnectEdge ci-dessus. */
+  async function handleDisconnectAutomationEdge(edgeId: string) {
+    const ok = await confirm({
+      title: "Déconnecter",
+      description: "Cette connexion d'automatisation sera supprimée.",
+      confirmLabel: "Déconnecter",
+      variant: "danger",
+    });
+    if (!ok) return;
+    const result = await dispatch(deleteAutomationEdge(idWithoutPrefix(edgeId)));
+    if (deleteAutomationEdge.fulfilled.match(result)) dispatch(fetchTopology());
   }
 
   /** "Voir le détail" ouvre TopologyNodeDetailPanel (contenu complet — env/ports/mounts/
@@ -1859,6 +2412,23 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     return items;
   }
 
+  /** Menu contextuel d'un nœud d'automatisation (voir nodeMenuItems ci-dessous) — DELETE
+   * /api/automation/nodes/:id réel (automationSlice.ts), avec confirmation `useConfirm` comme les
+   * autres kinds (handleRemoveVolume/handleRemoveNetwork ci-dessus). Supprime aussi côté serveur
+   * toute arête qui touchait ce nœud (services/automationStore.ts#deleteAutomationNode) — un
+   * rafraîchissement de la topologie suffit donc à refléter l'état complet. */
+  async function handleDeleteAutomationNode(node: TopologyNode) {
+    const ok = await confirm({
+      title: "Supprimer ce nœud d'automatisation",
+      description: `Confirmer la suppression de "${node.label}" ? Les connexions qui le touchent seront supprimées avec lui.`,
+      confirmLabel: "Supprimer",
+      variant: "danger",
+    });
+    if (!ok) return;
+    const result = await dispatch(deleteAutomationNode(idWithoutPrefix(node.id)));
+    if (deleteAutomationNode.fulfilled.match(result)) dispatch(fetchTopology());
+  }
+
   function nodeMenuItems(node: TopologyNode, x: number, y: number): ContextMenuItem[] {
     const items: ContextMenuItem[] = [
       { label: "Voir le détail", onClick: () => openNodeDetail(node) },
@@ -1898,6 +2468,8 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       if (!["bridge", "host", "none"].includes(node.label)) {
         items.push({ label: "Supprimer", danger: true, onClick: () => handleRemoveNetwork(id, node.label) });
       }
+    } else if (node.kind === "automation-trigger" || node.kind === "automation-condition" || node.kind === "automation-action") {
+      items.push({ label: "Supprimer", danger: true, onClick: () => void handleDeleteAutomationNode(node) });
     }
     return items;
   }
@@ -2059,6 +2631,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
             setPopover({ kind, x: canvasMenu.x, y: canvasMenu.y });
             setCanvasMenu(null);
           }}
+          topologyNodes={data?.nodes ?? []}
         />
       )}
 
@@ -2100,7 +2673,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           items={
             edgeMenu.kind === "network"
               ? [{ label: "Déconnecter du network", danger: true, onClick: () => handleDisconnectEdge(edgeMenu.source, edgeMenu.target) }]
-              : [{ label: "Détachement impossible sans recréer le conteneur", onClick: () => {}, disabled: true }]
+              : edgeMenu.kind === "automation-flow"
+                ? [{ label: "Déconnecter", danger: true, onClick: () => void handleDisconnectAutomationEdge(edgeMenu.id) }]
+                : [{ label: "Détachement impossible sans recréer le conteneur", onClick: () => {}, disabled: true }]
           }
         />
       )}
