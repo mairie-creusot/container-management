@@ -112,10 +112,27 @@ export async function updateDeploymentRecord(id: string, patch: Partial<GithubDe
   await writeIndex(all);
 }
 
+/**
+ * Séquences d'échappement ANSI CSI (couleurs/style terminal — SGR de type "ESC[91m", mais aussi
+ * le déplacement de curseur/effacement de ligne, toutes de la forme ESC + "[" + paramètres +
+ * une lettre finale — la famille de très loin la plus fréquente en pratique). `cargo`/`rustc`/
+ * `docker build` colorent leur sortie par défaut pour un VRAI terminal (xterm.js, voir
+ * Console/Logs de ce dépôt, les interprète nativement) — mais ce flux de déploiement s'affiche
+ * dans un simple `<pre>` HTML (GitHubDeployPage.tsx) qui ne les interprète pas du tout : elles
+ * apparaissaient littéralement en clair dans le journal, rendant un VRAI échec de compilation
+ * (bug réel constaté le 13/08/2026 sur mairie-creusot/SpacetimeDB, voir plus haut dans ce
+ * fichier) difficile à lire malgré un contenu par ailleurs déjà correct. Le caractère ESC
+ * (0x1B) est construit via `String.fromCharCode` plutôt qu'écrit en clair dans le code source,
+ * pour ne jamais y laisser un caractère de contrôle brut.
+ */
+const ANSI_ESCAPE_CHAR = String.fromCharCode(27);
+// eslint-disable-next-line no-control-regex
+const ANSI_ESCAPE_PATTERN = new RegExp(`${ANSI_ESCAPE_CHAR}\\[[0-9;]*[a-zA-Z]`, "g");
+
 /** Append au fichier de log — appelée à chaque étape (git clone, docker build, docker run…). */
 export async function appendDeploymentLog(id: string, chunk: string): Promise<void> {
   try {
-    await fs.appendFile(logPath(id), chunk, "utf-8");
+    await fs.appendFile(logPath(id), chunk.replace(ANSI_ESCAPE_PATTERN, ""), "utf-8");
   } catch {
     // fichier de log illisible/supprimé entre-temps : ne fait pas échouer le déploiement pour autant
   }
