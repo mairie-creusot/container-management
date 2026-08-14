@@ -1673,6 +1673,163 @@ export function rewriteComposePortsForConflicts(doc: ComposeDoc, used: Set<numbe
   return remaps;
 }
 
+// --- Résolution du chemin RÉEL (hôte) du workspace de déploiement, pour les bind mounts d'un
+// docker-compose.yml déployé — bug racine, vérifié en conditions réelles le 14/08/2026 (déploiement
+// mairie-creusot/glpi_api, service prometheus avec bind mounts) : `docker compose`/`docker build`
+// tournent en sous-processus DANS ce conteneur, qui communiquent avec le VRAI démon Docker de
+// l'hôte via le socket monté (docker.sock passthrough, voir docker-compose.dev.yml) — un démon qui,
+// sur Docker Desktop, tourne dans une VM SÉPARÉE de ce conteneur. L'hypothèse initiale ("un dossier
+// bind-monté dans CE conteneur, référencé par son propre chemin, suffit") a été vérifiée FAUSSE en
+// conditions réelles : un chemin tel que vu par CE conteneur (ex: "/workspace/apps/api/data/...")
+// n'existe pour le vrai démon nulle part dans SON PROPRE espace de noms de fichiers, même si ce
+// même répertoire est RÉELLEMENT un dossier de l'hôte bind-monté dans ce conteneur — Docker crée
+// alors silencieusement un dossier VIDE à ce chemin côté démon (constaté : "cat: read error: Is a
+// directory" sur un fichier attendu). Le VRAI démon a besoin du chemin hôte NATIF (ex:
+// "C:\Users\...\apps\api\data\github-deploy-workspaces" avec ses backslashes sur Docker Desktop
+// Windows) — ET ce chemin doit être fourni SANS préfixage par `docker compose` (qui, tournant sur
+// Linux DANS ce conteneur, préfixe par son propre `cwd` tout chemin qu'il ne reconnaît pas comme
+// déjà absolu selon les règles POSIX) : seule la syntaxe courte non-quotée d'une entrée `volumes:`
+// ("C:\Users\...:/cible", testé et confirmé fonctionnel) traverse `docker compose` sans être
+// altérée. D'où rewriteComposeBindMountsToHostPath ci-dessous, appelée par deployViaDockerCompose.
+
+let cachedHostWorkspaceRoot: string | null | undefined; // undefined = pas encore résolu
+
+/** Identifiant court du conteneur DANS LEQUEL CE PROCESS TOURNE — lu depuis /proc/self/cgroup
+ * (fiable même si HOSTNAME a été explicitement surchargé, contrairement à `os.hostname()`), repli
+ * sur HOSTNAME (valeur par défaut posée par Docker = id du conteneur) si ce fichier est
+ * illisible/absent (cgroup v1 avec une hiérarchie différente selon le pilote). `null` si aucune des
+ * deux méthodes n'aboutit — cas légitime : ce process ne tourne PAS dans un conteneur (ex: API
+ * installée directement sur un hôte Linux nu en production, voir resolveHostWorkspaceRoot). */
+async function detectOwnContainerId(): Promise<string | null> {
+  try {
+    const cgroup = await fs.readFile("/proc/self/cgroup", "utf-8");
+    const match = /\/docker[/-]([0-9a-f]{12,64})(?:\.scope)?/i.exec(cgroup);
+    if (match?.[1]) return match[1];
+  } catch {
+    // /proc/self/cgroup illisible/absent (hors conteneur, ou hiérarchie cgroup inhabituelle) :
+    // repli sur HOSTNAME ci-dessous, jamais un échec net ici.
+  }
+  return process.env.HOSTNAME ?? null;
+}
+
+/**
+ * Chemin RÉEL du workspace de déploiement (`config.github.deployWorkspaceRoot`), tel que vu par le
+ * VRAI démon Docker — voir le commentaire de section ci-dessus et `config.github.
+ * deployWorkspaceHostPath`. Priorité : 1) config explicite (GITHUB_DEPLOY_WORKSPACE_HOST_PATH) ;
+ * 2) auto-détection en inspectant les MOUNTS de CE MÊME conteneur (déjà joignable via le socket
+ * Docker passthrough, comme le reste de ce fichier) — si `deployWorkspaceRoot` se trouve sous la
+ * DESTINATION d'un bind mount réel de ce conteneur, la VRAIE source hôte de ce mount + le suffixe
+ * restant donne le chemin réel, dans le format natif de cette source (détecté depuis sa FORME,
+ * jamais depuis l'OS de ce process — toujours Linux ici, même sur un hôte Docker Desktop Windows) ;
+ * 3) repli sur `deployWorkspaceRoot` tel quel — correct en production Linux sans VM intermédiaire
+ * (voir docstring de la config). Résolu une seule fois et mis en cache : les mounts de ce conteneur
+ * ne changent jamais après son démarrage.
+ */
+async function resolveHostWorkspaceRoot(): Promise<string> {
+  if (cachedHostWorkspaceRoot !== undefined) return cachedHostWorkspaceRoot ?? config.github.deployWorkspaceRoot;
+  if (config.github.deployWorkspaceHostPath) {
+    cachedHostWorkspaceRoot = config.github.deployWorkspaceHostPath;
+    return cachedHostWorkspaceRoot;
+  }
+  try {
+    const containerId = await detectOwnContainerId();
+    if (!containerId) throw new Error("ce process ne semble pas tourner dans un conteneur Docker");
+    const docker = await getClient(undefined);
+    const info = await docker.getContainer(containerId).inspect();
+    const target = path.resolve(config.github.deployWorkspaceRoot);
+    let best: { source: string; destination: string } | undefined;
+    for (const m of info.Mounts ?? []) {
+      const destination = path.resolve(m.Destination);
+      const covers = target === destination || target.startsWith(destination + path.sep);
+      if (covers && (!best || destination.length > best.destination.length)) {
+        best = { source: m.Source, destination };
+      }
+    }
+    if (!best) throw new Error(`aucun mount de ce conteneur ne couvre ${target}`);
+    const suffixSegments = path.relative(best.destination, target).split(path.sep).filter(Boolean);
+    const isWindowsHostPath = /^[A-Za-z]:[\\/]/.test(best.source);
+    const sep = isWindowsHostPath ? "\\" : "/";
+    const base = best.source.replace(/[\\/]+$/, "");
+    cachedHostWorkspaceRoot = suffixSegments.length > 0 ? `${base}${sep}${suffixSegments.join(sep)}` : base;
+  } catch {
+    cachedHostWorkspaceRoot = null; // repli honnête, voir docstring
+  }
+  return cachedHostWorkspaceRoot ?? config.github.deployWorkspaceRoot;
+}
+
+/** true si `source` d'une entrée `volumes:` désigne un BIND MOUNT (chemin réel) plutôt qu'un
+ * volume NOMMÉ géré par Docker — un nom de volume Docker ne peut de toute façon jamais contenir de
+ * séparateur de chemin, donc toute source qui EN contient un est nécessairement un chemin, jamais
+ * deviné autrement. Un volume nommé n'est jamais touché par rewriteComposeBindMountsToHostPath
+ * ci-dessous (aucun rapport avec le bug racine documenté ci-dessus). */
+export function isBindMountVolumeSource(source: string): boolean {
+  if (/^[A-Za-z]:[\\/]/.test(source)) return true; // chemin Windows à lettre de lecteur
+  return source.includes("/") || source.includes("\\");
+}
+
+/** true si `source` est déjà un chemin ABSOLU (POSIX, ou Windows à lettre de lecteur) — jamais
+ * réécrit par rewriteComposeBindMountsToHostPath (déjà résolu par le mainteneur du dépôt, pointant
+ * vers un fichier de l'HÔTE lui-même hors de tout contrôle de QUAI — cas rare mais jamais raccourci
+ * à l'aveugle). */
+function isAbsoluteVolumeSource(source: string): boolean {
+  return source.startsWith("/") || /^[A-Za-z]:[\\/]/.test(source);
+}
+
+/** Compose `hostDir` (chemin hôte natif) + un chemin relatif du dépôt (toujours en syntaxe POSIX,
+ * quel que soit l'OS du VRAI démon) — le séparateur utilisé est celui de `hostDir` lui-même (détecté
+ * depuis sa FORME, voir isWindowsHostPath ci-dessus), jamais celui de ce process. */
+function joinHostPath(hostDir: string, relativePosixPath: string): string {
+  const isWindowsHostPath = /^[A-Za-z]:[\\/]/.test(hostDir);
+  const sep = isWindowsHostPath ? "\\" : "/";
+  const segments = relativePosixPath.split(/[\\/]/).filter((seg) => seg && seg !== ".");
+  const base = hostDir.replace(/[\\/]+$/, "");
+  return segments.length > 0 ? `${base}${sep}${segments.join(sep)}` : base;
+}
+
+/** Réécrit UNE entrée `volumes:` d'un service compose — remplace une source de BIND MOUNT relative
+ * (le cas normal d'un dépôt cloné, ex: "./prometheus/prometheus.yml") par le chemin ABSOLU tel que
+ * vu par le vrai démon (`hostComposeDir`, voir resolveHostWorkspaceRoot) ; laisse TOUT le reste
+ * intact (volume nommé, source déjà absolue, entrée sans bind mount reconnu). */
+function rewriteVolumeEntry(entry: unknown, hostComposeDir: string): { entry: unknown; rewritten: boolean } {
+  if (typeof entry === "string") {
+    const parts = entry.split(":");
+    if (parts.length < 2) return { entry, rewritten: false }; // volume anonyme ("/data" seul dans le conteneur)
+    const source = parts[0]!;
+    if (!isBindMountVolumeSource(source) || isAbsoluteVolumeSource(source)) return { entry, rewritten: false };
+    const rest = parts.slice(1).join(":");
+    return { entry: `${joinHostPath(hostComposeDir, source)}:${rest}`, rewritten: true };
+  }
+  if (entry && typeof entry === "object") {
+    const v = entry as { type?: string; source?: string };
+    if ((v.type === "bind" || v.type === undefined) && typeof v.source === "string" && isBindMountVolumeSource(v.source) && !isAbsoluteVolumeSource(v.source)) {
+      return { entry: { ...(entry as object), source: joinHostPath(hostComposeDir, v.source) }, rewritten: true };
+    }
+  }
+  return { entry, rewritten: false };
+}
+
+/**
+ * Mute `doc` EN PLACE : réécrit toute source de bind mount RELATIVE (le cas normal d'un dépôt
+ * cloné référençant ses propres fichiers de config, ex: "./prometheus/prometheus.yml") en chemin
+ * ABSOLU tel que vu par le VRAI démon Docker — voir le commentaire de section ci-dessus. Retourne
+ * `true` si au moins une source a été réécrite : l'appelant doit alors écrire un fichier compose
+ * "effectif" plutôt que d'utiliser l'original tel quel (voir deployViaDockerCompose), le fichier
+ * d'origine du dépôt restant inchangé sur disque.
+ */
+export function rewriteComposeBindMountsToHostPath(doc: ComposeDoc, hostComposeDir: string): boolean {
+  if (!doc.services) return false;
+  let rewrittenAny = false;
+  for (const service of Object.values(doc.services)) {
+    if (!Array.isArray(service.volumes)) continue;
+    service.volumes = service.volumes.map((entry) => {
+      const { entry: next, rewritten } = rewriteVolumeEntry(entry, hostComposeDir);
+      if (rewritten) rewrittenAny = true;
+      return next;
+    });
+  }
+  return rewrittenAny;
+}
+
 /**
  * Environnement à passer au sous-processus `docker compose` pour qu'il cible EXACTEMENT le même
  * démon que celui résolu par services/docker.ts#getClient pour ce même `targetEnvironmentId` —
@@ -1704,7 +1861,12 @@ async function resolveComposeCliEnv(targetEnvironmentId: string | undefined): Pr
     return { env: { ...process.env, DOCKER_HOST: dockerHostUrl }, cleanup: async () => undefined };
   }
   // Certificats écrits dans un dossier temporaire dédié — noms imposés par la convention
-  // DOCKER_CERT_PATH de la CLI Docker (ca.pem/cert.pem/key.pem), supprimé après l'appel.
+  // DOCKER_CERT_PATH de la CLI Docker (ca.pem/cert.pem/key.pem), supprimé après l'appel. os.tmpdir()
+  // reste approprié ICI (contrairement au workspace de déploiement, voir bug racine documenté plus
+  // haut) : ces fichiers ne sont JAMAIS référencés comme bind mount d'un conteneur applicatif — la
+  // CLI `docker` (tournant DANS ce conteneur) les lit directement elle-même pour son propre
+  // handshake TLS vers un démon DISTANT (DOCKER_HOST=tcp://...), jamais transmis au démon comme un
+  // chemin à résoudre de son côté.
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "quai-compose-tls-"));
   await Promise.all([
     remote.tls?.ca ? fs.writeFile(path.join(dir, "ca.pem"), remote.tls.ca, { mode: 0o600 }) : undefined,
@@ -1791,7 +1953,13 @@ async function tearDownPreviousCompose(
   );
   const { env, cleanup } = await resolveComposeCliEnv(targetEnvironmentId);
   try {
-    await runComposeCommand(deploymentId, os.tmpdir(), ["compose", "-p", previous.composeProjectName, "down", "--remove-orphans"], env);
+    // `down --remove-orphans -p <projet>` cible par LABEL (nom de projet), pas par fichier compose
+    // — vérifié en conditions réelles le 14/08/2026 : fonctionne sans AUCUN fichier compose dans le
+    // `cwd` (aucun bind mount en jeu pour un arrêt). `config.github.deployWorkspaceRoot` plutôt que
+    // `os.tmpdir()` malgré tout, par cohérence avec le reste du pipeline (voir bug racine documenté
+    // plus haut dans ce fichier) — déjà garanti existant à ce stade (cloneDir du déploiement COURANT,
+    // sous ce même répertoire, vient d'être créé par runDeployment avant cet appel).
+    await runComposeCommand(deploymentId, path.resolve(config.github.deployWorkspaceRoot), ["compose", "-p", previous.composeProjectName, "down", "--remove-orphans"], env);
     await appendDeploymentLog(deploymentId, `Ancien projet compose "${previous.composeProjectName}" arrêté.\n`);
   } catch (err) {
     await appendDeploymentLog(
@@ -1849,6 +2017,26 @@ async function deployViaDockerCompose(
   const rawYaml = await fs.readFile(path.join(composeDir, composeFileName), "utf-8");
   const doc = (yaml.load(rawYaml) as ComposeDoc | undefined) ?? {};
 
+  // Bug racine (voir le commentaire de section au-dessus de resolveHostWorkspaceRoot) : toute
+  // source de bind mount RELATIVE du compose d'origine ("./prometheus/prometheus.yml", le cas
+  // normal d'un dépôt cloné) doit être réécrite en chemin ABSOLU tel que vu par le VRAI démon
+  // Docker AVANT le premier `docker compose up` — sinon un service qui en déclare un (configs
+  // nginx/prometheus, montage de code source...) échoue à démarrer ("not a directory: are you
+  // trying to mount a directory onto a file"), même si `composeDir` est RÉELLEMENT un dossier de
+  // l'hôte (voir config.github.deployWorkspaceRoot). `hostComposeDir` = équivalent hôte de
+  // `composeDir` lui-même (même suffixe relatif que composeDir depuis deployWorkspaceRoot,
+  // appliqué au chemin hôte réel plutôt qu'au chemin tel que vu par ce conteneur).
+  const hostWorkspaceRoot = await resolveHostWorkspaceRoot();
+  const workspaceRootSuffix = path.relative(path.resolve(config.github.deployWorkspaceRoot), path.resolve(composeDir));
+  const hostComposeDir = joinHostPath(hostWorkspaceRoot, workspaceRootSuffix.split(path.sep).join("/"));
+  let needsEffectiveFile = rewriteComposeBindMountsToHostPath(doc, hostComposeDir);
+  if (needsEffectiveFile) {
+    await appendDeploymentLog(
+      deploymentId,
+      `Bind mount(s) du docker-compose.yml réécrit(s) vers le chemin réel de l'hôte Docker (${hostComposeDir}) — nécessaire pour que le vrai démon (hors de ce conteneur) trouve les fichiers référencés.\n`,
+    );
+  }
+
   if (Object.keys(portOverrides).length > 0) {
     applyComposeHostPortOverrides(doc, portOverrides);
     await appendDeploymentLog(
@@ -1879,10 +2067,12 @@ async function deployViaDockerCompose(
   const MAX_UP_ATTEMPTS = 3;
   let lastError: Error | undefined;
   for (let attempt = 1; attempt <= MAX_UP_ATTEMPTS; attempt++) {
-    const effectiveFileName = remaps.length > 0 ? "docker-compose.quai-effective.yml" : composeFileName;
-    if (remaps.length > 0) {
+    if (remaps.length > 0) needsEffectiveFile = true;
+    const effectiveFileName = needsEffectiveFile ? "docker-compose.quai-effective.yml" : composeFileName;
+    if (needsEffectiveFile) {
       // Écrit DANS composeDir (jamais un autre dossier) : les chemins `build: .`/`build: ./sous-dossier`
-      // du fichier d'origine restent relatifs à ce même dossier, donc valides tels quels.
+      // du fichier d'origine restent relatifs à ce même dossier, donc valides tels quels — seules
+      // les sources de bind mount ont été réécrites en chemin hôte absolu ci-dessus, jamais `build:`.
       await fs.writeFile(path.join(composeDir, effectiveFileName), yaml.dump(doc), "utf-8");
     }
 
@@ -2014,6 +2204,10 @@ async function deployViaDockerCompose(
  * au-delà du clone (dossier temporaire supprimé dans le `finally` de l'appelant).
  */
 async function prepareGitAskPass(token: string): Promise<{ env: NodeJS.ProcessEnv; cleanup: () => Promise<void> }> {
+  // os.tmpdir() reste approprié ICI (contrairement au workspace de déploiement, voir bug racine
+  // documenté plus haut dans ce fichier) : ce script n'est JAMAIS un chemin transmis au démon Docker
+  // — `git` (tournant DANS ce conteneur, comme `docker`) l'exécute lui-même localement en
+  // sous-processus pour son propre protocole GIT_ASKPASS, aucun bind mount/démon distant en jeu.
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "quai-github-askpass-"));
   const scriptPath = path.join(dir, "askpass.sh");
   await fs.writeFile(scriptPath, `#!/bin/sh\nprintf '%s' "$GIT_QUAI_TOKEN"\n`, { encoding: "utf-8", mode: 0o700 });
@@ -2167,7 +2361,17 @@ async function runDeployment(
   serviceForSubdomain: string | undefined,
   composePortOverrides: Record<string, number> = {},
 ): Promise<void> {
-  const cloneDir = path.join(os.tmpdir(), `quai-github-deploy-${deploymentId}`);
+  // JAMAIS os.tmpdir() ici : `docker compose`/`docker build`, lancés plus bas en sous-processus
+  // (deployViaDockerCompose/deployViaDockerBuild), communiquent avec le VRAI démon Docker de
+  // l'hôte via le socket monté — un démon qui ne partage JAMAIS le `/tmp` de ce conteneur (bug
+  // racine documenté en tête de fichier, § "Résolution du chemin RÉEL (hôte) du workspace de
+  // déploiement"). `config.github.deployWorkspaceRoot` est un VRAI répertoire de l'hôte (voir sa
+  // docstring dans config.ts) — nécessaire même pour un déploiement Dockerfile-seul/IaC (qui n'a
+  // lui-même aucun bind mount à résoudre) : un seul workspace root pour tous les kinds, plus simple
+  // et cohérent à opérer/nettoyer qu'un mélange de deux racines différentes selon le moteur détecté.
+  const deployWorkspaceRoot = path.resolve(config.github.deployWorkspaceRoot);
+  await fs.mkdir(deployWorkspaceRoot, { recursive: true });
+  const cloneDir = path.join(deployWorkspaceRoot, `quai-github-deploy-${deploymentId}`);
   // Préparé AVANT le try (pour être nettoyé dans tous les cas via le `finally` ci-dessous) —
   // `null` si aucun jeton (repo public) : clone anonyme inchangé, sans GIT_ASKPASS.
   const askPass = token ? await prepareGitAskPass(token) : null;

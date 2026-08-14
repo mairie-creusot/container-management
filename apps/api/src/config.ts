@@ -184,6 +184,35 @@ export const config = {
     // décision documentée dans l'en-tête de ce module de stockage.
     fileOverridesPath: readString("GITHUB_FILE_OVERRIDES_PATH", "./data/github-file-overrides.json"),
     apiBaseUrl: readString("GITHUB_API_BASE_URL", "https://api.github.com"),
+    // Racine du clone/workspace de chaque déploiement GitHub (voir services/github.ts#runDeployment)
+    // — JAMAIS os.tmpdir() : ce process exécute `docker compose`/`docker build` en sous-processus,
+    // qui communiquent avec le VRAI démon Docker de l'hôte via le socket monté (docker.sock
+    // passthrough, voir docker-compose.dev.yml) — un démon qui tourne HORS de ce conteneur (dans la
+    // VM de Docker Desktop en dev, ou potentiellement un autre process en prod). Le build fonctionne
+    // avec n'importe quel chemin (le contexte est transféré en streaming, jamais par chemin
+    // partagé) — mais un docker-compose.yml déployé qui déclare un bind mount (`volumes: -
+    // ./fichier:/chemin`, très courant : configs nginx/prometheus...) échoue si ce chemin n'est pas
+    // RÉELLEMENT visible du vrai démon (`os.tmpdir()` du conteneur API n'est JAMAIS partagé avec
+    // lui — bug racine documenté en tête de services/github.ts). Défaut : sous-dossier de CONFIG_PATH
+    // (même répertoire `data/` que le reste de la persistance QUAI) — en dev, ce dossier est déjà
+    // couvert par le bind-mount `../../:/workspace` du repo entier (docker-compose.dev.yml), donc
+    // RÉELLEMENT visible sur le disque hôte sans mount supplémentaire à ajouter. En production, si
+    // cette API tourne elle-même en conteneur avec le même genre de socket passthrough, monter un
+    // VRAI répertoire hôte à ce chemin (ou pointer cette variable dessus) est OBLIGATOIRE pour que
+    // les déploiements avec bind mounts fonctionnent.
+    deployWorkspaceRoot: readString("GITHUB_DEPLOY_WORKSPACE_ROOT", "./data/github-deploy-workspaces"),
+    // Chemin RÉEL de ce même dossier tel que vu par le vrai démon Docker (PAS par ce conteneur) —
+    // nécessaire UNIQUEMENT quand le démon tourne dans un espace de noms de fichiers séparé de ce
+    // conteneur (ex: Docker Desktop, dont le démon vit dans une VM distincte — vérifié en conditions
+    // réelles : un chemin "tel que vu par CE conteneur" ne suffit PAS, le VRAI démon a besoin du
+    // chemin hôte natif, ex: "C:\Users\...\apps\api\data\github-deploy-workspaces" avec ses
+    // backslashes sur Docker Desktop Windows). Optionnel : si absent, services/github.ts tente de
+    // l'AUTO-DÉTECTER en inspectant les mounts de ce conteneur lui-même (voir
+    // resolveHostWorkspaceRoot) ; si cette auto-détection échoue aussi (pas dans un conteneur,
+    // aucun mount ne couvre ce chemin), retombe sur `deployWorkspaceRoot` tel quel — comportement
+    // correct en production Linux SANS VM intermédiaire (conteneur et démon partagent alors
+    // RÉELLEMENT le même chemin, si ce répertoire est monté au même endroit des deux côtés).
+    deployWorkspaceHostPath: readOptionalString("GITHUB_DEPLOY_WORKSPACE_HOST_PATH"),
     // Clone réel (git clone --depth 1) puis build/run réel — timeouts distincts : un clone est
     // rapide (shallow), un build d'image peut prendre plusieurs minutes selon le Dockerfile.
     cloneTimeoutMs: readNumber("GITHUB_CLONE_TIMEOUT_MS", 30_000),
