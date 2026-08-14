@@ -6,6 +6,14 @@ interface NewRegistryInput {
   kind: RegistryKind;
   name: string;
   url: string;
+  // Identifiants + org optionnels, saisissables dès la création (retour utilisateur du
+  // 14/08/2026 : "de plus a la creation ya pas pour mettre les identifiant ou un token") — même
+  // convention que UpdateRegistryInput ci-dessous (omis du corps de la requête tant qu'ils ne
+  // sont pas renseignés, voir handleCreate dans RegistriesPage.tsx).
+  username?: string;
+  password?: string;
+  token?: string;
+  org?: string;
 }
 
 export interface UpdateRegistryInput {
@@ -19,6 +27,10 @@ export interface UpdateRegistryInput {
   // (voir handleUpdate dans RegistriesPage.tsx).
   password?: string;
   token?: string;
+  // org : PAS la même convention que password/token — une chaîne vide efface explicitement
+  // l'org configurée (repli sur l'ancienne déduction), donc TOUJOURS envoyée, contrairement aux
+  // secrets (voir setupStore.ts#RegistryPatch et handleUpdate dans RegistriesPage.tsx).
+  org?: string;
 }
 
 interface RegistriesState {

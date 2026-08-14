@@ -68,6 +68,10 @@ interface Registry {
   status: "connected" | "unconfigured" | "error";
   trackedImages: number;
   lastSyncAt: string | null;  // ISO 8601
+  statusDetail?: string;      // raison concrète de "error" (ex: "GHCR : identifiants invalides ou expirés (401)")
+  org?: string;                // organisation GitHub (ghcr) / namespace-compte (dockerhub) EXPLICITE, indépendant
+                                // de `username` (identité de connexion) — pas un secret. Voir « Assistant de
+                                // configuration » ci-dessous, SetupRegistryConfig#org.
 }
 
 interface ContainerRef {
@@ -552,12 +556,19 @@ DELETE /api/images/:id?force=true           # équivalent `docker rmi`, image lo
 POST   /api/images/pull                     # { reference } — équivalent `docker pull`, retourne la liste rafraîchie
 
 GET   /api/registries
-POST  /api/registries
+POST  /api/registries                                   # { kind, name, url, username?, password?, token?, org? } —
+                                                         # identifiants + org saisissables dès la création (formulaire
+                                                         # "+ Ajouter un registry", modal — RegistriesPage.tsx), plus
+                                                         # besoin d'un détour par PATCH pour un dépôt privé.
 GET   /api/registries/:id
-PATCH /api/registries/:id                              # { name?, url?, username?, password?, token? } — password/token
+PATCH /api/registries/:id                              # { name?, url?, username?, password?, token?, org? } — password/token
                                                          # omis ou vides = identifiant déjà enregistré conservé (voir
-                                                         # setupStore.ts#updateRegistryAt). Icône engrenage sur chaque
-                                                         # carte de RegistriesPage.tsx (admin uniquement).
+                                                         # setupStore.ts#updateRegistryAt). `org` a une convention
+                                                         # DIFFÉRENTE (pas un secret) : absent = org déjà enregistrée
+                                                         # inchangée, mais une chaîne VIDE l'efface explicitement et fait
+                                                         # retomber la résolution sur l'ancienne déduction (voir
+                                                         # registriesStore.ts#resolveRegistryOrg). Icône engrenage sur
+                                                         # chaque carte de RegistriesPage.tsx (admin uniquement).
 GET   /api/registries/:id/repositories                 # { repositories, diagnostic? } — vrai catalogue distant (GHCR/
                                                          # Docker Hub). diagnostic = raison concrète d'un catalogue
                                                          # vide (401/403/404/429, org introuvable, aucune org déduite,

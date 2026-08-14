@@ -41,13 +41,31 @@ export default function RegistriesPage() {
   const searchQuery = useAppSelector((s) => s.ui.searchQuery);
   const session = useAppSelector((s) => s.auth.session);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ kind: "dockerhub" as RegistryKind, name: "", url: "" });
+  const [form, setForm] = useState({
+    kind: "dockerhub" as RegistryKind,
+    name: "",
+    url: "",
+    username: "",
+    password: "",
+    token: "",
+    org: "",
+  });
   const [editing, setEditing] = useState<Registry | null>(null);
-  const [editForm, setEditForm] = useState({ name: "", url: "", username: "", password: "", token: "" });
+  const [editForm, setEditForm] = useState({ name: "", url: "", username: "", password: "", token: "", org: "" });
   const [updating, setUpdating] = useState(false);
   const [updateError, setUpdateError] = useState<string | null>(null);
   const confirm = useConfirm();
-  const isDirty = showForm && (form.name.trim() !== "" || form.url.trim() !== "");
+  // Étendu à tous les champs (pas seulement nom/URL) : un identifiant saisi puis un abandon du
+  // formulaire doit lui aussi déclencher la confirmation "modifications non enregistrées",
+  // comme n'importe quel autre champ du formulaire de création.
+  const isDirty =
+    showForm &&
+    (form.name.trim() !== "" ||
+      form.url.trim() !== "" ||
+      form.username.trim() !== "" ||
+      form.password.trim() !== "" ||
+      form.token.trim() !== "" ||
+      form.org.trim() !== "");
 
   useEffect(() => {
     dispatch(fetchRegistries());
@@ -75,13 +93,32 @@ export default function RegistriesPage() {
 
   function resetForm() {
     setShowForm(false);
-    setForm({ kind: "dockerhub", name: "", url: "" });
+    setForm({ kind: "dockerhub", name: "", url: "", username: "", password: "", token: "", org: "" });
   }
 
   function handleCreate(event: FormEvent) {
     event.preventDefault();
     if (!form.name || !form.url) return;
-    dispatch(createRegistry(form)).then((action) => {
+    const name = form.name.trim();
+    const url = form.url.trim();
+    const username = form.username.trim();
+    const password = form.password.trim();
+    const token = form.token.trim();
+    const org = form.org.trim();
+    dispatch(
+      createRegistry({
+        kind: form.kind,
+        name,
+        url,
+        // Identifiants/org omis tant qu'ils sont vides — un registry créé sans reste
+        // "unconfigured" (comportement historique), toujours modifiable ensuite via l'icône
+        // engrenage (voir registriesStore.ts#createRegistry).
+        ...(username ? { username } : {}),
+        ...(password ? { password } : {}),
+        ...(token ? { token } : {}),
+        ...(org ? { org } : {}),
+      }),
+    ).then((action) => {
       if (createRegistry.fulfilled.match(action)) {
         resetForm();
       }
@@ -90,7 +127,10 @@ export default function RegistriesPage() {
 
   function openEdit(registry: Registry) {
     setEditing(registry);
-    setEditForm({ name: registry.name, url: registry.url, username: "", password: "", token: "" });
+    // `org` est prérempli (contrairement à username/password/token, jamais réaffichés) : ce
+    // n'est pas un secret — voir types.ts#Registry — et le montrer aide concrètement à corriger
+    // une déduction erronée (c'est précisément le champ qui résout le bug "connected/3 vs 401").
+    setEditForm({ name: registry.name, url: registry.url, username: "", password: "", token: "", org: registry.org ?? "" });
     setUpdateError(null);
   }
 
@@ -120,6 +160,10 @@ export default function RegistriesPage() {
         ...(username ? { username } : {}),
         ...(password ? { password } : {}),
         ...(token ? { token } : {}),
+        // org : TOUJOURS envoyé, contrairement aux identifiants ci-dessus — une valeur vide
+        // efface explicitement l'org configurée et fait retomber la résolution sur l'ancienne
+        // déduction (voir setupStore.ts#RegistryPatch).
+        org: editForm.org.trim(),
       }),
     );
     setUpdating(false);
@@ -179,53 +223,6 @@ export default function RegistriesPage() {
             </button>
           )}
         </div>
-
-        {showForm && (
-          <form className="card" style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 12 }} onSubmit={handleCreate}>
-            <div className="field">
-              <label htmlFor="registry-kind">Type</label>
-              <select
-                id="registry-kind"
-                className="topbar__env-select"
-                value={form.kind}
-                onChange={(event) => setForm((f) => ({ ...f, kind: event.target.value as RegistryKind }))}
-              >
-                {KINDS.map((k) => (
-                  <option key={k.id} value={k.id}>
-                    {k.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="field">
-              <label htmlFor="registry-name">Nom</label>
-              <input
-                id="registry-name"
-                value={form.name}
-                onChange={(event) => setForm((f) => ({ ...f, name: event.target.value }))}
-                required
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="registry-url">URL</label>
-              <input
-                id="registry-url"
-                value={form.url}
-                onChange={(event) => setForm((f) => ({ ...f, url: event.target.value }))}
-                placeholder="https://registry.example.org"
-                required
-              />
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button type="submit" className="btn btn-primary" disabled={creating}>
-                {creating ? "Ajout…" : "Ajouter"}
-              </button>
-              <button type="button" className="btn btn-ghost" onClick={handleCancelForm}>
-                Annuler
-              </button>
-            </div>
-          </form>
-        )}
 
         {error && <div className="error-banner">{error}</div>}
         {status === "loading" && items.length === 0 && (
@@ -295,6 +292,7 @@ export default function RegistriesPage() {
             <KeyValueList
               rows={[
                 { key: "Type", value: registryMeta(selectedDetail.kind).label },
+                ...(selectedDetail.org ? [{ key: "Organisation / Namespace", value: selectedDetail.org }] : []),
                 { key: "Images suivies", value: String(selectedDetail.trackedImages) },
                 { key: "Dernière synchro", value: formatSync(selectedDetail.lastSyncAt) },
               ]}
@@ -351,6 +349,21 @@ export default function RegistriesPage() {
               />
             </div>
             <div className="field">
+              <label htmlFor="registry-edit-org">Organisation / Namespace</label>
+              <input
+                id="registry-edit-org"
+                value={editForm.org}
+                onChange={(event) => setEditForm((f) => ({ ...f, org: event.target.value }))}
+                placeholder="ex : ville-lecreusot — vide = déduction automatique"
+                disabled={updating}
+              />
+              <p className="create-container-hint">
+                Organisation GitHub (GHCR) ou namespace/compte (Docker Hub) à parcourir — distinct du nom
+                d'utilisateur de connexion (souvent un e-mail pour GHCR, jamais un org/user GitHub valide).
+                Toujours prioritaire sur toute déduction automatique.
+              </p>
+            </div>
+            <div className="field">
               <label htmlFor="registry-edit-username">Nom d'utilisateur</label>
               <input
                 id="registry-edit-username"
@@ -395,6 +408,105 @@ export default function RegistriesPage() {
             </div>
           </form>
         )}
+      </Modal>
+
+      {/* Retour utilisateur du 14/08/2026 ("pas joli") : ce formulaire s'affichait auparavant
+          INLINE dans le flux de la page (poussant le contenu en dessous). Il utilise désormais la
+          même <Modal> partagée que le formulaire d'édition ci-dessus, par cohérence avec le reste
+          de l'app (Console/Logs, assistant GitHub deploy...). */}
+      <Modal open={showForm} onClose={handleCancelForm} labelledBy="registry-create-title">
+        <form className="confirm-dialog" onSubmit={handleCreate}>
+          <h2 id="registry-create-title" className="confirm-dialog__title">
+            Ajouter un registry
+          </h2>
+          <div className="field">
+            <label htmlFor="registry-kind">Type</label>
+            <select
+              id="registry-kind"
+              className="topbar__env-select"
+              value={form.kind}
+              onChange={(event) => setForm((f) => ({ ...f, kind: event.target.value as RegistryKind }))}
+            >
+              {KINDS.map((k) => (
+                <option key={k.id} value={k.id}>
+                  {k.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="field">
+            <label htmlFor="registry-name">Nom</label>
+            <input
+              id="registry-name"
+              value={form.name}
+              onChange={(event) => setForm((f) => ({ ...f, name: event.target.value }))}
+              autoFocus
+              required
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="registry-url">URL</label>
+            <input
+              id="registry-url"
+              value={form.url}
+              onChange={(event) => setForm((f) => ({ ...f, url: event.target.value }))}
+              placeholder="https://registry.example.org"
+              required
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="registry-org">Organisation / Namespace</label>
+            <input
+              id="registry-org"
+              value={form.org}
+              onChange={(event) => setForm((f) => ({ ...f, org: event.target.value }))}
+              placeholder="ex : ville-lecreusot — vide = déduction automatique"
+            />
+            <p className="create-container-hint">
+              Organisation GitHub (GHCR) ou namespace/compte (Docker Hub) à parcourir — distinct du nom
+              d'utilisateur de connexion (souvent un e-mail pour GHCR, jamais un org/user GitHub valide).
+            </p>
+          </div>
+          <div className="field">
+            <label htmlFor="registry-username">Nom d'utilisateur</label>
+            <input
+              id="registry-username"
+              value={form.username}
+              onChange={(event) => setForm((f) => ({ ...f, username: event.target.value }))}
+              placeholder="optionnel — requis pour un dépôt privé"
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="registry-password">Mot de passe</label>
+            <input
+              id="registry-password"
+              type="password"
+              value={form.password}
+              onChange={(event) => setForm((f) => ({ ...f, password: event.target.value }))}
+              placeholder="optionnel"
+              autoComplete="new-password"
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="registry-token">Jeton d'accès</label>
+            <input
+              id="registry-token"
+              type="password"
+              value={form.token}
+              onChange={(event) => setForm((f) => ({ ...f, token: event.target.value }))}
+              placeholder="optionnel — ex : PAT GitHub pour GHCR"
+              autoComplete="new-password"
+            />
+          </div>
+          <div className="confirm-dialog__actions">
+            <button type="button" className="btn btn-ghost" onClick={handleCancelForm}>
+              Annuler
+            </button>
+            <button type="submit" className="btn btn-primary" disabled={creating}>
+              {creating ? "Ajout…" : "Ajouter"}
+            </button>
+          </div>
+        </form>
       </Modal>
     </div>
   );

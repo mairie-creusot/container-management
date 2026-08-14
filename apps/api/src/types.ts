@@ -33,6 +33,13 @@ export interface Registry {
   // si status !== "error" ou si le test n'a produit qu'un échec réseau générique déjà couvert
   // par "error". Voir registries/index.ts#testRegistryConnection.
   statusDetail?: string;
+  // Organisation GitHub (ghcr) ou namespace/compte (dockerhub) EXPLICITEMENT configuré —
+  // indépendant de `username` (identité de connexion, souvent un e-mail pour GHCR, jamais un
+  // org/user GitHub valide). Absent = pas de valeur explicite, repli sur l'ancienne déduction
+  // (username non-email, puis image locale déjà tirée pour GHCR) — voir
+  // registriesStore.ts#resolveRegistryOrg. Pas un secret : exposé tel quel dans la vue publique,
+  // contrairement à username/password/token.
+  org?: string;
 }
 
 /** Résultat de l'exploration du catalogue distant d'un registry — voir GET /api/registries/:id/repositories. */

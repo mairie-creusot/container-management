@@ -34,8 +34,13 @@ export async function listTagsForImage(image: Pick<ImageRef, "name" | "registry"
  * ça, l'explorateur de registry ne peut afficher qu'un vague "aucun dépôt trouvé" quelle que
  * soit la vraie raison (mauvais jeton, org introuvable, panne réseau...), ce qui rend impossible
  * de savoir quoi corriger dans la config du registry.
+ *
+ * Exportée : réutilisée par registriesStore.ts#buildRegistryView (compteur "images suivies")
+ * pour produire EXACTEMENT le même message que l'explorateur de catalogue en cas d'échec —
+ * évite deux formulations différentes du même diagnostic pour le même registry (voir le bug
+ * "connected/3 vs 401" corrigé le 14/08/2026).
  */
-function diagnosticFromError(label: string, err: unknown): string {
+export function diagnosticFromError(label: string, err: unknown): string {
   if (err instanceof RegistryCredentialsMissingError) return `${label} : ${err.message}.`;
   if (err instanceof RegistryHttpError) {
     switch (err.status) {
@@ -60,16 +65,22 @@ function diagnosticFromError(label: string, err: unknown): string {
  * registry, apps/web/src/features/registries/RegistryExplorerPage.tsx). GitLab/Harbor : hors
  * périmètre pour l'instant (nécessiterait une recherche de projets par groupe, plus complexe
  * que le listing direct GHCR/Docker Hub) — diagnostic explicite plutôt qu'un [] muet.
+ *
+ * `org` doit déjà être la valeur RÉSOLUE (org GitHub pour GHCR, namespace pour Docker Hub) —
+ * voir registriesStore.ts#resolveRegistryOrg, SEUL endroit qui implémente la priorité
+ * (org explicite > username non-email > déduction locale). Cette fonction ne fait plus sa
+ * propre déduction (ancien `ghcr.resolveOrg` supprimé) : avant ce correctif, cette résolution
+ * était dupliquée ici ET dans registriesStore.ts, un risque de divergence future entre le
+ * compteur "images suivies" et l'explorateur de catalogue pour le même registry.
  */
-export async function listRegistryRepositories(kind: RegistryKind, username?: string): Promise<RegistryCatalogResult> {
+export async function listRegistryRepositories(kind: RegistryKind, org?: string): Promise<RegistryCatalogResult> {
   switch (kind) {
     case "ghcr": {
-      const org = await ghcr.resolveOrg(username);
       if (!org) {
         return {
           repositories: [],
           diagnostic:
-            "GHCR : aucune organisation/utilisateur déduit — renseignez-le via l'icône engrenage du registry (nom d'utilisateur), ou tirez au moins une image ghcr.io/<org>/... localement pour le déduire automatiquement.",
+            "GHCR : aucune organisation/utilisateur déduit — renseignez-le via l'icône engrenage du registry (champ « Organisation/Namespace »), ou tirez au moins une image ghcr.io/<org>/... localement pour le déduire automatiquement.",
         };
       }
       try {
@@ -83,7 +94,7 @@ export async function listRegistryRepositories(kind: RegistryKind, username?: st
     }
     case "dockerhub": {
       try {
-        return { repositories: await dockerhub.listNamespaceRepositories(username) };
+        return { repositories: await dockerhub.listNamespaceRepositories(org) };
       } catch (err) {
         return { repositories: [], diagnostic: diagnosticFromError("Docker Hub", err) };
       }

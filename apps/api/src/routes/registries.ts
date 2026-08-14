@@ -9,10 +9,14 @@
  *                                                    réécrire les identifiants via PATCH, ce que la
  *                                                    doc réservait déjà à `admin` — voir
  *                                                    docs/reports/security-audit-2026-08-12.md,
- *                                                    finding M4.
+ *                                                    finding M4. Accepte optionnellement
+ *                                                    username/password/token/org dès la création
+ *                                                    (retour utilisateur du 14/08/2026 : le
+ *                                                    formulaire de création n'avait aucun champ
+ *                                                    identifiant, forçant un détour par PATCH).
  * GET   /api/registries/:id                      — détail d'un registry.
- * PATCH /api/registries/:id                      — modifie nom/URL/identifiants — admin uniquement,
- *                                                    même raison que POST ci-dessus.
+ * PATCH /api/registries/:id                      — modifie nom/URL/identifiants/org — admin
+ *                                                    uniquement, même raison que POST ci-dessus.
  * DELETE /api/registries/:id                     — supprime un registry — admin uniquement, même
  *                                                    raison que POST/PATCH ci-dessus (manquait
  *                                                    jusqu'ici, retour utilisateur du 14/08/2026).
@@ -27,9 +31,11 @@ import {
   getPersistedRegistryConfig,
   getRegistry,
   listRegistries,
+  resolveRegistryOrg,
   updateRegistry,
 } from "../services/registriesStore.js";
 import { listRegistryRepositories, listTagsForImage } from "../services/registries/index.js";
+import { getLocalDockerImages } from "../services/docker.js";
 import type { RegistryKind } from "../types.js";
 
 const VALID_KINDS: readonly RegistryKind[] = ["dockerhub", "ghcr", "gitlab", "harbor"];
@@ -47,6 +53,14 @@ interface CreateRegistryBody {
   kind?: string;
   name?: string;
   url?: string;
+  // Identifiants + org optionnels dès la création — retour utilisateur du 14/08/2026 ("de plus a
+  // la creation ya pas pour mettre les identifiant ou un token") : avant ce correctif, seuls
+  // kind/name/url étaient acceptés ici, forçant un détour par PATCH (icône engrenage) pour tout
+  // registry privé. Mêmes champs que UpdateRegistryBody ci-dessous.
+  username?: string;
+  password?: string;
+  token?: string;
+  org?: string;
 }
 
 interface UpdateRegistryBody {
@@ -55,6 +69,9 @@ interface UpdateRegistryBody {
   username?: string;
   password?: string;
   token?: string;
+  // Organisation GitHub (ghcr) / namespace (dockerhub) explicite — voir setupStore.ts#RegistryPatch
+  // pour la convention "chaîne vide efface l'org, absence de la clé la laisse inchangée".
+  org?: string;
 }
 
 export default async function registriesRoutes(fastify: FastifyInstance): Promise<void> {
@@ -65,14 +82,22 @@ export default async function registriesRoutes(fastify: FastifyInstance): Promis
   fastify.post<{ Body: CreateRegistryBody }>("/api/registries", async (request, reply) => {
     if (rejectIfNotAdmin(request, reply)) return;
 
-    const { kind, name, url } = request.body ?? {};
+    const { kind, name, url, username, password, token, org } = request.body ?? {};
     if (!kind || !name || !url) {
       return reply.code(400).send({ error: "kind, name and url are required" });
     }
     if (!VALID_KINDS.includes(kind as RegistryKind)) {
       return reply.code(400).send({ error: `kind must be one of: ${VALID_KINDS.join(", ")}` });
     }
-    const registry = await createRegistry({ kind: kind as RegistryKind, name, url });
+    const registry = await createRegistry({
+      kind: kind as RegistryKind,
+      name,
+      url,
+      ...(username !== undefined ? { username } : {}),
+      ...(password !== undefined ? { password } : {}),
+      ...(token !== undefined ? { token } : {}),
+      ...(org !== undefined ? { org } : {}),
+    });
     return reply.code(201).send(registry);
   });
 
@@ -89,13 +114,14 @@ export default async function registriesRoutes(fastify: FastifyInstance): Promis
     async (request, reply) => {
       if (rejectIfNotAdmin(request, reply)) return;
 
-      const { name, url, username, password, token } = request.body ?? {};
+      const { name, url, username, password, token, org } = request.body ?? {};
       const updated = await updateRegistry(request.params.id, {
         ...(name !== undefined ? { name } : {}),
         ...(url !== undefined ? { url } : {}),
         ...(username !== undefined ? { username } : {}),
         ...(password !== undefined ? { password } : {}),
         ...(token !== undefined ? { token } : {}),
+        ...(org !== undefined ? { org } : {}),
       });
       if (!updated) {
         return reply.code(404).send({ error: `Registry "${request.params.id}" not found` });
@@ -119,19 +145,13 @@ export default async function registriesRoutes(fastify: FastifyInstance): Promis
     if (!persisted) {
       return reply.code(404).send({ error: `Registry "${request.params.id}" not found` });
     }
-    // Le "username" persisté est l'identité d'authentification, pas forcément l'org/namespace du
-    // catalogue à parcourir — pour Docker Hub il correspond toujours au namespace (compte
-    // perso/org). Pour GHCR, GitHub demande souvent un e-mail comme identifiant de connexion
-    // (docker login), qui n'est jamais un nom d'org/user GitHub valide : on ne le passe comme
-    // org explicite que s'il n'y ressemble pas, sinon on laisse resolveOrg() le déduire d'une
-    // image locale déjà tirée (voir ghcr.ts).
-    const namespace =
-      persisted.kind === "dockerhub"
-        ? persisted.username
-        : persisted.kind === "ghcr" && persisted.username && !persisted.username.includes("@")
-          ? persisted.username
-          : undefined;
-    const result = await listRegistryRepositories(persisted.kind, namespace);
+    // Résolution partagée avec registriesStore.ts#buildRegistryView (compteur "images suivies")
+    // — SEULE implémentation de cette logique (voir resolveRegistryOrg) : avant ce correctif,
+    // cette route recalculait sa propre variante (ternaire dupliqué ci-dessous, supprimé), un
+    // risque de divergence entre le compteur et l'explorateur de catalogue pour le même registry.
+    const localImages = await getLocalDockerImages();
+    const org = resolveRegistryOrg(persisted, localImages);
+    const result = await listRegistryRepositories(persisted.kind, org);
     return reply.send(result);
   });
 

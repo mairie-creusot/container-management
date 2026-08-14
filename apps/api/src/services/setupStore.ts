@@ -78,6 +78,14 @@ export interface SetupRegistryConfig {
   // password/token : chiffrés au repos (voir encryptSecrets/decryptRegistry ci-dessous).
   password?: string;
   token?: string;
+  // Organisation GitHub (ghcr) ou namespace/compte (dockerhub) EXPLICITEMENT configuré —
+  // INDÉPENDANT de `username` (identité de connexion : GHCR demande souvent un e-mail comme
+  // identifiant `docker login`, qui n'est jamais un org/user GitHub valide). Pas un secret,
+  // jamais chiffré. Toujours prioritaire sur toute déduction (username-sans-@, inférence depuis
+  // les images locales) — voir registriesStore.ts#resolveRegistryOrg, seule fonction qui
+  // implémente cette résolution (utilisée à la fois par le compteur "images suivies" et par
+  // l'explorateur de catalogue, pour qu'ils ne divergent jamais).
+  org?: string;
 }
 
 export interface SetupConfig {
@@ -267,6 +275,14 @@ export interface RegistryPatch {
   // ne changer que le nom effacerait silencieusement l'identifiant déjà enregistré.
   password?: string;
   token?: string;
+  // org : PAS un secret, donc PAS la même convention que password/token — même principe que
+  // name/url (« vides sont des choix valides de l'utilisateur »). Une chaîne vide EFFACE
+  // explicitement l'organisation configurée et fait retomber la résolution sur l'ancienne
+  // déduction (username-sans-@, puis image locale) — seule l'ABSENCE de la clé laisse l'org déjà
+  // enregistrée inchangée. Décision de conception assumée : contrairement à password/token, il
+  // n'existe aucun moyen de distinguer « l'utilisateur veut effacer l'org » de « l'utilisateur a
+  // laissé le champ vide sans y penser » autrement que par cette convention explicite du champ.
+  org?: string;
 }
 
 /**
@@ -309,6 +325,7 @@ export async function updateRegistryAt(index: number, patch: RegistryPatch): Pro
     ...(patch.name !== undefined ? { name: patch.name } : {}),
     ...(patch.url !== undefined ? { url: patch.url } : {}),
     ...(patch.username !== undefined ? { username: patch.username } : {}),
+    ...(patch.org !== undefined ? { org: patch.org } : {}),
     ...secretFields,
   };
   const next: SetupConfig = encryptSecrets({

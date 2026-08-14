@@ -1,13 +1,14 @@
 /**
  * Vue "Registry" (statut + compteur d'images suivies) construite à partir des registries
  * réellement persistés par l'assistant de configuration (setupStore.ts, config.json) — PAS
- * un CRUD en mémoire séparé. Repli sur le jeu de données de démonstration uniquement si
- * aucun registry n'est configuré du tout (même principe que docker.ts/images.ts).
+ * un CRUD en mémoire séparé. `[]` si aucun registry n'est configuré (plus de repli sur des
+ * données de démonstration — bug réel corrigé le 14/08/2026 : un repli qui se fait passer pour
+ * de vrais registries modifiables trompe plus qu'il n'aide, voir listRegistries ci-dessous).
  *
- * "status: connected" reflète l'accessibilité réseau du registry (testRegistryConnection),
- * pas une validation complète des identifiants pour chaque dépôt privé — voir la note dans
- * registries/index.ts#testRegistryConnection. C'est la même limitation que le test affiché
- * pendant l'assistant de configuration.
+ * "status: connected" reflète maintenant un jeu de tests plus complet que la simple
+ * joignabilité réseau — voir buildRegistryView ci-dessous (bug réel corrigé le 14/08/2026 :
+ * "connected" pouvait rester affiché alors que la vraie interrogation du catalogue échouait en
+ * 401, le compteur "images suivies" avalant silencieusement cet échec).
  */
 
 import {
@@ -20,12 +21,13 @@ import {
 import type { RegistryPatch, SetupRegistryConfig } from "./setupStore.js";
 import { getLocalDockerImages } from "./docker.js";
 import type { LocalDockerImage } from "./docker.js";
-import { registryKindFromImageName, testRegistryConnection } from "./registries/index.js";
+import { registryKindFromImageName, testRegistryConnection, diagnosticFromError } from "./registries/index.js";
 import { listOrgPackages } from "./registries/ghcr.js";
 import type { Registry, RegistryKind } from "../types.js";
 
-/** "ghcr.io/mairie-creusot/foo" -> "mairie-creusot" — pas d'org configurable dans l'assistant
- * aujourd'hui, donc déduite d'une image ghcr.io déjà tirée localement (best-effort). */
+/** "ghcr.io/mairie-creusot/foo" -> "mairie-creusot" — repli de dernier recours quand aucune org
+ * n'est explicitement configurée (champ `org`) ni déductible d'un `username` non-email : déduite
+ * d'une image ghcr.io déjà tirée localement (best-effort, fragile — voir resolveRegistryOrg). */
 export function inferGhcrOrg(localImages: LocalDockerImage[]): string | null {
   for (const img of localImages) {
     if (!img.name.startsWith("ghcr.io/")) continue;
@@ -35,10 +37,48 @@ export function inferGhcrOrg(localImages: LocalDockerImage[]): string | null {
   return null;
 }
 
+/**
+ * SOURCE UNIQUE de la résolution "quelle organisation/quel namespace interroger pour ce
+ * registry" — utilisée à la fois par buildRegistryView (compteur "images suivies" ci-dessous) et
+ * par routes/registries.ts (GET .../repositories, l'explorateur de catalogue). Avant ce
+ * correctif, ces deux appelants réimplémentaient chacun leur propre variante de cette logique
+ * (registriesStore.ts ET routes/registries.ts ET registries/ghcr.ts#resolveOrg avaient trois
+ * copies quasi identiques) — un pur risque de divergence future, même si en pratique elles
+ * calculaient déjà la même chose aujourd'hui (root-cause réelle du bug "3 vs 401" : voir
+ * buildRegistryView plus bas, pas une différence d'org entre les deux chemins).
+ *
+ * Priorité :
+ *  1. `persisted.org` explicite (nouveau champ, jamais un e-mail ni une déduction) — le seul
+ *     moyen fiable pour l'utilisateur de corriger une déduction erronée.
+ *  2. `persisted.username` s'il ne ressemble pas à un e-mail (repli historique : GitHub demande
+ *     souvent un e-mail comme identifiant `docker login`, jamais un org/user GitHub valide —
+ *     Docker Hub, en revanche, utilise bien le nom d'utilisateur comme namespace).
+ *  3. GHCR uniquement : déduit d'une image ghcr.io déjà tirée localement (inferGhcrOrg).
+ *  4. undefined si rien n'a pu être déterminé.
+ */
+export function resolveRegistryOrg(persisted: SetupRegistryConfig, localImages: LocalDockerImage[]): string | undefined {
+  const explicitOrg = persisted.org?.trim();
+  if (explicitOrg) return explicitOrg;
+  if (persisted.kind === "dockerhub") {
+    return persisted.username || undefined;
+  }
+  if (persisted.kind === "ghcr") {
+    if (persisted.username && !persisted.username.includes("@")) return persisted.username;
+    return inferGhcrOrg(localImages) ?? undefined;
+  }
+  return undefined;
+}
+
 async function buildRegistryView(persisted: SetupRegistryConfig, index: number): Promise<Registry> {
   const localImages = await getLocalDockerImages();
   const localCount = localImages.filter((img) => registryKindFromImageName(img.name) === persisted.kind).length;
-  const base = { id: `reg-${persisted.kind}-${index}`, kind: persisted.kind, name: persisted.name, url: persisted.url };
+  const base = {
+    id: `reg-${persisted.kind}-${index}`,
+    kind: persisted.kind,
+    name: persisted.name,
+    url: persisted.url,
+    ...(persisted.org ? { org: persisted.org } : {}),
+  };
 
   // Sans identifiants (ajouté via POST /api/registries sans passer par l'assistant) : pas de
   // test réseau, "unconfigured" — un registry public répondrait quand même 200, ce qui
@@ -61,18 +101,32 @@ async function buildRegistryView(persisted: SetupRegistryConfig, index: number):
   // trompeur pour un registry qu'on vient de configurer.
   let trackedImages = localCount;
   if (persisted.kind === "ghcr") {
-    // Priorité au nom d'utilisateur/organisation explicitement configuré (icône engrenage) —
-    // même règle que registries.ts#namespace pour GET .../repositories, voir ce fichier pour
-    // le pourquoi (un e-mail n'est pas un org/user GitHub valide).
-    const org = persisted.username && !persisted.username.includes("@") ? persisted.username : inferGhcrOrg(localImages);
+    const org = resolveRegistryOrg(persisted, localImages);
     if (org) {
       try {
         const packages = await listOrgPackages(org);
         if (packages.length > 0) trackedImages = packages.length;
-      } catch {
-        // Le compteur "images suivies" reste sur le total local en cas d'échec — le diagnostic
-        // précis (identifiants invalides, org introuvable...) est réservé à l'explorateur de
-        // registry (GET .../repositories, voir routes/registries.ts), pas à cette vue résumée.
+      } catch (err) {
+        // Bug réel corrigé le 14/08/2026 (retour utilisateur : GET /api/registries répondait
+        // "connected"/trackedImages=3 pour un registry dont GET .../repositories répondait
+        // "GHCR : identifiants invalides ou expirés (401)" pour le MÊME registry — CONTRADICTOIRE).
+        // Root-causé en lisant le code : ce `catch` avalait silencieusement l'échec et laissait
+        // `trackedImages` sur `localCount` (le nombre d'images ghcr.io déjà tirées EN LOCAL, sans
+        // rapport avec le vrai catalogue distant) tout en laissant `status` à "connected" (basé
+        // uniquement sur `testRegistryConnection`, qui ne fait que vérifier que ghcr.io répond à
+        // une requête HTTP, jamais que les identifiants sont valides — voir testRegistryConnection
+        // ci-dessus). Un registry dont les identifiants sont RÉELLEMENT rejetés par l'API GitHub
+        // Packages (401/403) ne peut plus se présenter comme "connected" ici : on bascule sur le
+        // même statut d'erreur ET le même message concret (diagnosticFromError, déjà utilisé par
+        // l'explorateur de catalogue) que ce que GET .../repositories affiche déjà pour ce même
+        // registry — les deux vues sont désormais TOUJOURS cohérentes entre elles.
+        return {
+          ...base,
+          status: "error",
+          trackedImages: localCount,
+          lastSyncAt: null,
+          statusDetail: diagnosticFromError("GHCR", err),
+        };
       }
     }
   }
@@ -129,11 +183,29 @@ export interface CreateRegistryInput {
   kind: RegistryKind;
   name: string;
   url: string;
+  // Identifiants + org optionnels, saisissables directement dans le formulaire de création —
+  // retour utilisateur du 14/08/2026 ("de plus a la creation ya pas pour mettre les identifiant
+  // ou un token") : avant ce correctif, seule une édition ultérieure via l'icône engrenage
+  // permettait de configurer des identifiants, ce qui laissait tout registry privé fraîchement
+  // créé "unconfigured" jusqu'à ce détour. Mêmes conventions que RegistryPatch (setupStore.ts).
+  username?: string;
+  password?: string;
+  token?: string;
+  org?: string;
 }
 
-/** Ajoute un registry (sans identifiants — utiliser l'assistant pour un dépôt privé). */
+/** Ajoute un registry — avec ou sans identifiants (sans, il reste "unconfigured" jusqu'à édition
+ * via l'icône engrenage — utile pour un premier repérage d'un dépôt public). */
 export async function createRegistry(input: CreateRegistryInput): Promise<Registry> {
-  await persistRegistry({ kind: input.kind, name: input.name, url: input.url });
+  await persistRegistry({
+    kind: input.kind,
+    name: input.name,
+    url: input.url,
+    ...(input.username !== undefined ? { username: input.username } : {}),
+    ...(input.password !== undefined ? { password: input.password } : {}),
+    ...(input.token !== undefined ? { token: input.token } : {}),
+    ...(input.org !== undefined ? { org: input.org } : {}),
+  });
   const all = await listRegistries();
   const created = [...all].reverse().find((r) => r.kind === input.kind && r.name === input.name);
   if (!created) throw new Error("Failed to create registry");

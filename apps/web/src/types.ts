@@ -26,6 +26,9 @@ export interface Registry {
   trackedImages: number;
   lastSyncAt: string | null; // ISO 8601
   statusDetail?: string;
+  // Organisation GitHub (ghcr) ou namespace/compte (dockerhub) explicitement configuré —
+  // indépendant de `username` (identité de connexion). Pas un secret. Voir ARCHITECTURE.md.
+  org?: string;
 }
 
 /** Résultat de l'exploration du catalogue distant d'un registry — voir GET /api/registries/:id/repositories. */

@@ -13,7 +13,6 @@
 import { config } from "../../config.js";
 import { demoStore } from "../demoData.js";
 import { getEffectiveRegistryCredentialsForImage } from "../setupStore.js";
-import { getLocalDockerImages } from "../docker.js";
 import { fetchJson, RegistryCredentialsMissingError, RegistryHttpError } from "./http.js";
 
 interface GhcrTokenResponse {
@@ -105,22 +104,6 @@ export async function listOrgPackages(owner: string): Promise<string[]> {
     }
     throw err;
   }
-}
-
-/**
- * Résout l'org/user GHCR à parcourir : celui passé explicitement (ex: le champ "utilisateur"
- * du registry configuré), sinon déduit d'une image ghcr.io déjà tirée localement (best-effort
- * — pas d'org configurable dans l'assistant aujourd'hui).
- */
-export async function resolveOrg(explicit?: string): Promise<string | null> {
-  if (explicit) return explicit;
-  const localImages = await getLocalDockerImages();
-  for (const img of localImages) {
-    if (!img.name.startsWith("ghcr.io/")) continue;
-    const org = img.name.slice("ghcr.io/".length).split("/")[0];
-    if (org) return org;
-  }
-  return null;
 }
 
 /** Liste les tags disponibles pour une image GHCR (ex: "ghcr.io/ville-lecreusot/portail-citoyen"). */
