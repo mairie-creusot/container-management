@@ -117,6 +117,26 @@ import type {
 } from "../types.js";
 
 /**
+ * Bug réel corrigé le 14/08/2026 (retour utilisateur : "Image introuvable parmi les images
+ * suivies" pour un conteneur pourtant bien tiré/suivi — vérifié en direct sur quai-dev-api-1 et
+ * ferrite-sup-test) : `ContainerInfo#Image` (Docker) préserve la référence TELLE QUE DONNÉE à la
+ * création du conteneur — un conteneur lancé sans tag explicite (`docker run quai-dev-api`, ou un
+ * docker-compose référençant juste `image: quai-dev-api`) garde `Config.Image = "quai-dev-api"`
+ * SANS ":latest", même si Docker résout bel et bien l'image "quai-dev-api:latest" en pratique
+ * (confirmé en direct : `docker inspect ... --format '{{.Config.Image}}'` -> "quai-dev-api", alors
+ * que `docker images` liste bien "quai-dev-api:latest"). Tout rapprochement par "name:tag" (badges
+ * vulnérabilités/MàJ dispo ci-dessous, ET `node.subtitle` lui-même consommé par le frontend pour
+ * retrouver l'ImageRef suivie — TopologyNodeDetailPanel.tsx/VulnerabilitiesPanel.tsx) échouait donc
+ * silencieusement pour ces conteneurs. Ajoute ":latest" UNIQUEMENT si la partie après le DERNIER
+ * "/" ne contient aucun ":" — un registry avec port ("host:5000/image") ne doit jamais être pris à
+ * tort pour un tag.
+ */
+export function ensureImageTag(image: string): string {
+  const afterLastSlash = image.slice(image.lastIndexOf("/") + 1);
+  return afterLastSlash.includes(":") ? image : `${image}:latest`;
+}
+
+/**
  * Résumé Critical/High pour l'image `image` ("name:tag", même format que ContainerInfo#Image) à
  * partir de l'historique de scans complet — ou `null` si aucun scan RÉUSSI n'a jamais tourné pour
  * cette image précise (aucun badge affiché dans ce cas, plutôt que 0 inventé).
@@ -699,17 +719,21 @@ export async function getTopology(): Promise<Topology> {
       const name = primaryContainerName(c.Names, c.Id);
       const usage = usages[index]!;
       const healthAndLimits = healthStatuses[index]!;
-      const vulnSummary = vulnSummaryByImage.get(c.Image) ?? null;
+      // Voir ensureImageTag ci-dessus (bug réel corrigé le 14/08/2026) — normalisé UNE FOIS ici,
+      // réutilisé pour les trois rapprochements par "name:tag" ci-dessous (badge vulnérabilités,
+      // subtitle exposé au frontend, badge MàJ dispo) plutôt que de répéter l'appel trois fois.
+      const image = ensureImageTag(c.Image);
+      const vulnSummary = vulnSummaryByImage.get(image) ?? null;
       const domains = domainsByContainerId.get(c.Id);
       nodes.push({
         id: containerNodeId,
         kind: "container",
         label: name,
-        subtitle: c.Image,
+        subtitle: image,
         status: mapState(c.State),
         cpuPercent: usage.cpuPercent,
         memBytes: usage.memBytes,
-        updateAvailable: updateAvailableImages.has(c.Image),
+        updateAvailable: updateAvailableImages.has(image),
         drift: driftFilePaths.some((path) => containerMatchesGitOpsFile(name, path)),
         ...(vulnSummary ? { vulnCritical: vulnSummary.vulnCritical, vulnHigh: vulnSummary.vulnHigh } : {}),
         healthStatus: healthAndLimits.healthStatus,

@@ -382,7 +382,16 @@ function parseProcessDetailsOutput(stdout: string): ContainerProcessDetail[] {
     });
   }
 
-  results.sort((a, b) => b.cpuTimeMs - a.cpuTimeMs);
+  // Bug réel corrigé le 14/08/2026 (retour utilisateur : "bug sur le css comportement a cause de
+  // actualisation") : trié par CPU cumulée décroissante à l'origine — deux process aux valeurs
+  // proches (ou qui grimpent/reculent l'un par rapport à l'autre d'un sondage au suivant, cpuTimeMs
+  // n'étant JAMAIS strictement figé pour un process actif) échangeaient alors de rang à CHAQUE
+  // rafraîchissement (toutes les 2,5s, voir TopologySubGraphPanel.tsx), faisant visuellement
+  // "sauter" les lignes du tableau en boucle — perçu comme un bug d'affichage, pas un tri utile.
+  // Le PID est un ordre STABLE (jamais réattribué à un autre process tant qu'il reste vivant) :
+  // CPU cumulée/âge restent visibles en colonnes pour repérer un process actif au premier coup
+  // d'œil, sans qu'une variation de quelques ms ne redistribue tout le tableau à chaque poll.
+  results.sort((a, b) => a.pid - b.pid);
   return results;
 }
 
