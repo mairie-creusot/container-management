@@ -15,7 +15,7 @@
 
 import { config } from "../../config.js";
 import { demoStore } from "../demoData.js";
-import { getEffectiveRegistryCredentials } from "../setupStore.js";
+import { getEffectiveRegistryCredentialsForImage } from "../setupStore.js";
 import { fetchJson, RegistryHttpError } from "./http.js";
 
 interface DockerHubLoginResponse {
@@ -47,9 +47,16 @@ function demoFallbackTags(image: string): string[] {
   return Array.from(new Set([demoImage.currentTag, demoImage.latestTag]));
 }
 
-/** Identifiants effectifs : ceux du registry Docker Hub configuré via l'assistant, sinon les variables d'environnement. */
-async function resolveCredentials(): Promise<{ username: string; password: string } | null> {
-  const persisted = await getEffectiveRegistryCredentials("dockerhub");
+/**
+ * Identifiants effectifs : ceux du registry Docker Hub configuré via l'assistant, sinon les
+ * variables d'environnement. `target` (nom d'image complet, ou namespace déjà isolé) désambiguïse
+ * entre PLUSIEURS comptes Docker Hub configurés (ex: compte pro + compte perso) — voir
+ * setupStore.ts#getEffectiveRegistryCredentialsForImage. Une image officielle sans namespace
+ * (ex: "nginx") ne peut être rapprochée d'aucun compte précis : repli sur le premier configuré,
+ * sans conséquence puisqu'aucune authentification n'est requise pour un dépôt public.
+ */
+async function resolveCredentials(target?: string): Promise<{ username: string; password: string } | null> {
+  const persisted = await getEffectiveRegistryCredentialsForImage("dockerhub", target ?? "");
   const persistedPassword = persisted?.password ?? persisted?.token;
   if (persisted?.username && persistedPassword) {
     return { username: persisted.username, password: persistedPassword };
@@ -61,8 +68,8 @@ async function resolveCredentials(): Promise<{ username: string; password: strin
 }
 
 /** En-tête Authorization Bearer via le flux de login JWT, ou {} pour un accès anonyme. */
-async function resolveAuthHeaders(): Promise<Record<string, string>> {
-  const credentials = await resolveCredentials();
+async function resolveAuthHeaders(target?: string): Promise<Record<string, string>> {
+  const credentials = await resolveCredentials(target);
   if (!credentials) return {};
 
   try {
@@ -87,9 +94,9 @@ async function resolveAuthHeaders(): Promise<Record<string, string>> {
  * (images officielles).
  */
 export async function listNamespaceRepositories(namespace?: string): Promise<string[]> {
-  const credentials = await resolveCredentials();
+  const credentials = await resolveCredentials(namespace);
   const ns = namespace ?? credentials?.username ?? "library";
-  const headers = await resolveAuthHeaders();
+  const headers = await resolveAuthHeaders(namespace);
   const repos: string[] = [];
   let url: string | null = `https://hub.docker.com/v2/repositories/${encodeURIComponent(ns)}/?page_size=100`;
 
@@ -122,7 +129,7 @@ export async function listTags(image: string): Promise<string[]> {
   const url = `https://hub.docker.com/v2/repositories/${encodeURIComponent(namespace)}/${encodeURIComponent(repository)}/tags?page_size=100&ordering=last_updated`;
 
   try {
-    const headers = await resolveAuthHeaders();
+    const headers = await resolveAuthHeaders(image);
     const data = await fetchJson<DockerHubTagsResponse>(url, { headers });
     return data.results.map((r) => r.name);
   } catch (err) {

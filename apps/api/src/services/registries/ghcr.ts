@@ -12,7 +12,7 @@
 
 import { config } from "../../config.js";
 import { demoStore } from "../demoData.js";
-import { getEffectiveRegistryCredentials } from "../setupStore.js";
+import { getEffectiveRegistryCredentialsForImage } from "../setupStore.js";
 import { getLocalDockerImages } from "../docker.js";
 import { fetchJson, RegistryCredentialsMissingError, RegistryHttpError } from "./http.js";
 
@@ -42,16 +42,21 @@ function demoFallbackTags(image: string): string[] {
  * passe pour `docker login ghcr.io`, c'est ce que l'assistant collecte pour ce type de
  * registry — ignorer `.password` aurait laissé tous les appels GHCR anonymes malgré des
  * identifiants réellement saisis.
+ *
+ * `target` (nom d'image complet "ghcr.io/org/pkg", ou org/user déjà isolé) désambiguïse entre
+ * PLUSIEURS registries GHCR configurés (ex: compte pro + compte perso) — voir
+ * setupStore.ts#getEffectiveRegistryCredentialsForImage. Omis (ex: repli générique de
+ * githubStore.ts) : retombe sur la première entrée GHCR configurée, comme avant.
  */
-async function resolveToken(): Promise<string | undefined> {
-  const persisted = await getEffectiveRegistryCredentials("ghcr");
+async function resolveToken(target?: string): Promise<string | undefined> {
+  const persisted = await getEffectiveRegistryCredentialsForImage("ghcr", target ?? "");
   return persisted?.token ?? persisted?.password ?? config.registries.ghcr.token;
 }
 
 async function getAnonymousToken(repository: string): Promise<string> {
   const url = `https://ghcr.io/token?service=ghcr.io&scope=repository:${encodeURIComponent(repository)}:pull`;
   const headers: Record<string, string> = {};
-  const token = await resolveToken();
+  const token = await resolveToken(repository);
   if (token) headers.Authorization = `Bearer ${token}`;
   const data = await fetchJson<GhcrTokenResponse>(url, { headers });
   return data.token;
@@ -82,7 +87,7 @@ async function fetchPackages(ownerKind: "orgs" | "users", owner: string, token: 
  * "aucun dépôt trouvé" sans dire pourquoi.
  */
 export async function listOrgPackages(owner: string): Promise<string[]> {
-  const token = await resolveToken();
+  const token = await resolveToken(owner);
   if (!token) {
     throw new RegistryCredentialsMissingError(
       "aucun identifiant GHCR configuré — ajoutez un jeton d'accès via l'icône engrenage du registry",

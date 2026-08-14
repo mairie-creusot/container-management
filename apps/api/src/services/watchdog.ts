@@ -32,7 +32,7 @@ import { getImages } from "./images.js";
 import { isKubernetesConfigured, isKubernetesReachable } from "./kubernetes.js";
 import { isNutanixConfigured, isNutanixReachable } from "./nutanix.js";
 import { recordNotificationEvent } from "./notificationsStore.js";
-import { getCurrent, getEffectiveRegistryCredentials } from "./setupStore.js";
+import { decryptRegistryCredentials, getCurrent } from "./setupStore.js";
 import { testRegistryConnection } from "./registries/index.js";
 import type { ImageRef } from "../types.js";
 
@@ -112,7 +112,11 @@ async function buildReachabilityChecks(): Promise<ReachabilityCheck[]> {
 
   const setup = await getCurrent();
   for (const [index, registry] of (setup.registries ?? []).entries()) {
-    const credentials = await getEffectiveRegistryCredentials(registry.kind);
+    // Déchiffrement DIRECT de `registry` (l'entrée précise de CE tour de boucle, pas une
+    // recherche par kind) : avec deux registries du même kind (ex: deux comptes GHCR), une
+    // résolution par kind aurait testé les DEUX entrées avec les identifiants de la première,
+    // ne surveillant jamais réellement la joignabilité propre de la seconde.
+    const credentials = decryptRegistryCredentials(registry);
     const hasCredentials = Boolean(credentials?.username || credentials?.password || credentials?.token);
     if (!hasCredentials) continue; // même garde que registriesStore.ts : jamais authentifié -> pas surveillé
     checks.push({

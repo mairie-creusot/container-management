@@ -12,8 +12,8 @@
 
 import {
   addRegistry as persistRegistry,
+  decryptRegistryCredentials,
   getCurrent,
-  getEffectiveRegistryCredentials,
   updateRegistryAt,
 } from "./setupStore.js";
 import type { RegistryPatch, SetupRegistryConfig } from "./setupStore.js";
@@ -43,7 +43,12 @@ async function buildRegistryView(persisted: SetupRegistryConfig, index: number):
   // Sans identifiants (ajouté via POST /api/registries sans passer par l'assistant) : pas de
   // test réseau, "unconfigured" — un registry public répondrait quand même 200, ce qui
   // donnerait un "connecté" trompeur pour un registry qu'on n'a en fait jamais authentifié.
-  const credentials = await getEffectiveRegistryCredentials(persisted.kind);
+  //
+  // Déchiffrement DIRECT de `persisted` (l'entrée précise, pas une recherche par kind) : avec
+  // plusieurs registries du même kind (ex: deux comptes GHCR), une résolution par kind seul
+  // aurait donné les identifiants de la PREMIÈRE entrée à toutes les vues, faisant apparaître
+  // le second registry comme "connecté"/"error" avec le statut du premier au lieu du sien.
+  const credentials = decryptRegistryCredentials(persisted);
   if (!credentials?.username && !credentials?.password && !credentials?.token) {
     return { ...base, status: "unconfigured", trackedImages: localCount, lastSyncAt: null };
   }

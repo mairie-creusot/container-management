@@ -413,27 +413,134 @@ export interface EffectiveRegistryCredentials {
   token?: string;
 }
 
+/** Déchiffre les identifiants d'UNE entrée de registry précise déjà en main (pas de recherche
+ * par kind) — pour un appelant qui possède déjà l'entrée exacte à utiliser (ex: watchdog.ts qui
+ * itère `setup.registries` par index, registriesStore.ts#buildRegistryView qui construit la vue
+ * d'une entrée précise) : aucune ambiguïté possible puisqu'il n'y a pas de sélection à faire. */
+export function decryptRegistryCredentials(entry: SetupRegistryConfig): EffectiveRegistryCredentials {
+  return {
+    ...(entry.username !== undefined ? { username: entry.username } : {}),
+    ...(entry.password !== undefined ? { password: decryptSecret(entry.password) } : {}),
+    ...(entry.token !== undefined ? { token: decryptSecret(entry.token) } : {}),
+  };
+}
+
 /**
  * Identifiants effectifs (déchiffrés) du premier registry persisté correspondant à `kind`,
  * ou `null` si aucun n'est configuré via l'assistant — dans ce cas les clients registries
  * (src/services/registries/*) retombent sur les variables d'environnement globales
  * (DOCKERHUB_TOKEN, GHCR_TOKEN, GITLAB_TOKEN).
  *
- * LIMITATION CONNUE : sélectionne par `kind` seul, pas par registry précis. Avec UN SEUL
- * registry par kind (cas actuel de tous les déploiements testés), aucun souci. Si un jour
- * DEUX registries GHCR (ou deux Docker Hub, etc.) sont configurés, les appels concernant le
- * second utiliseraient quand même les identifiants du premier — trouvé en vérifiant le système
- * de diagnostic d'exploration de catalogue (registries/index.ts#diagnosticFromError), pas
- * encore corrigé (nécessiterait de faire remonter l'id de registry, pas seulement le kind,
- * jusqu'à chaque client registries/*.ts).
+ * Réservée aux appelants qui n'ont réellement QUE le `kind`, sans image/organisation/hôte
+ * précis à désambiguïser (ex: githubStore.ts#ghcrFallbackToken, un simple jeton GitHub PAT en
+ * repli générique). Dès qu'un nom d'image (ou une organisation/un namespace) est disponible,
+ * utiliser getEffectiveRegistryCredentialsForImage ci-dessous à la place : avec DEUX registries
+ * du même kind (ex: un compte GHCR pro et un perso), cette fonction-ci retombe toujours sur le
+ * PREMIER des deux, quelle que soit l'image réellement concernée.
  */
 export async function getEffectiveRegistryCredentials(kind: RegistryKind): Promise<EffectiveRegistryCredentials | null> {
   const current = await getCurrent();
   const match = current.registries?.find((r) => r.kind === kind);
   if (!match) return null;
-  return {
-    ...(match.username !== undefined ? { username: match.username } : {}),
-    ...(match.password !== undefined ? { password: decryptSecret(match.password) } : {}),
-    ...(match.token !== undefined ? { token: decryptSecret(match.token) } : {}),
-  };
+  return decryptRegistryCredentials(match);
+}
+
+/** "ghcr.io/mairie/foo" ou "mairie/foo" ou "mairie" -> "mairie" (dépouille un préfixe d'hôte
+ * optionnel puis prend le premier segment de chemin). Sert à la fois pour GHCR (org GitHub) et
+ * Docker Hub (namespace), les deux formes d'entrée possibles (nom d'image complet ou simple
+ * org/namespace déjà isolé, ex: transmis par routes/registries.ts#GET .../repositories). */
+function firstPathSegment(value: string, hostPrefix?: string): string {
+  const stripped = hostPrefix && value.startsWith(hostPrefix) ? value.slice(hostPrefix.length) : value;
+  return stripped.split("/")[0] ?? "";
+}
+
+/** "https://gitlab.mairie.fr/" ou "gitlab.mairie.fr" -> "gitlab.mairie.fr" (hôte seul, en
+ * minuscules) — pour comparer l'hôte d'une image gitlab/harbor à l'URL d'un registry persisté. */
+function registryUrlHost(url: string): string {
+  try {
+    return new URL(url.includes("://") ? url : `https://${url}`).host.toLowerCase();
+  } catch {
+    return url.toLowerCase();
+  }
+}
+
+/**
+ * Choisit, parmi PLUSIEURS entrées du même `kind`, celle qui correspond le mieux à `target`
+ * (nom d'image complet, ou organisation/namespace déjà isolé) — `undefined` si aucune
+ * correspondance fiable n'est possible (l'appelant retombe alors sur la première entrée du
+ * kind, comportement historique, sans régression pour un déploiement à une seule entrée).
+ *
+ * - ghcr : rapproche par organisation/utilisateur GitHub (`username` persisté, jamais un
+ *   e-mail — voir registriesStore.ts#buildRegistryView pour la même convention) contre le
+ *   premier segment de `target` (après un éventuel préfixe "ghcr.io/").
+ * - dockerhub : rapproche par namespace contre le premier segment de `target`. Une image
+ *   OFFICIELLE (un seul segment, ex: "nginx") n'appartient à aucun compte précis — aucune
+ *   correspondance possible, ce qui est correct : n'importe quelle entrée dockerhub peut la
+ *   lire, aucune authentification n'étant de toute façon nécessaire pour un dépôt public.
+ * - gitlab/harbor : auto-hébergés, donc désambiguïsés par HÔTE (le nom de l'image commence
+ *   toujours par l'hôte du registry, ex: "gitlab.mairie.fr/groupe/projet") plutôt que par
+ *   namespace — aucune ambiguïté réelle entre deux entrées de ce type puisque chacune a
+ *   nécessairement un hôte distinct.
+ */
+function findBestRegistryMatch(
+  kind: RegistryKind,
+  target: string,
+  candidates: SetupRegistryConfig[],
+): SetupRegistryConfig | undefined {
+  if (!target) return undefined;
+  switch (kind) {
+    case "ghcr": {
+      const org = firstPathSegment(target, "ghcr.io/");
+      if (!org) return undefined;
+      return candidates.find(
+        (r) => r.username !== undefined && !r.username.includes("@") && r.username.toLowerCase() === org.toLowerCase(),
+      );
+    }
+    case "dockerhub": {
+      const withoutHost = target.startsWith("docker.io/") ? target.slice("docker.io/".length) : target;
+      const segments = withoutHost.split("/");
+      if (segments.length < 2) return undefined; // image officielle sans namespace : aucune entrée précise
+      const namespace = segments[0]!;
+      return candidates.find((r) => r.username !== undefined && r.username.toLowerCase() === namespace.toLowerCase());
+    }
+    case "gitlab":
+    case "harbor": {
+      const host = firstPathSegment(target);
+      if (!host) return undefined;
+      return candidates.find((r) => registryUrlHost(r.url) === host.toLowerCase());
+    }
+    default: {
+      const exhaustiveCheck: never = kind;
+      throw new Error(`Unsupported registry kind: ${String(exhaustiveCheck)}`);
+    }
+  }
+}
+
+/**
+ * Identifiants effectifs (déchiffrés) de la MEILLEURE entrée de registry pour `target` (nom
+ * d'image complet, ex: "ghcr.io/mairie-perso/site" — ou une organisation/un namespace déjà
+ * isolé, ex: transmis par routes/registries.ts). Remplace getEffectiveRegistryCredentials(kind)
+ * pour tout appelant qui connaît l'image (ou l'org/le namespace) concernée : c'est ce qui
+ * permet à PLUSIEURS registries du même kind de fonctionner chacun indépendamment (ex: un
+ * compte GHCR professionnel et un compte GHCR personnel) au lieu que le second retombe
+ * silencieusement sur les identifiants du premier.
+ *
+ * - Zéro entrée du kind : `null` (comportement identique à getEffectiveRegistryCredentials).
+ * - Une seule entrée du kind : celle-ci, sans même regarder `target` — comportement strictement
+ *   identique à getEffectiveRegistryCredentials(kind), aucune régression pour un déploiement à
+ *   une seule entrée par kind (cas de tous les déploiements existants).
+ * - Plusieurs entrées : la meilleure correspondance (voir findBestRegistryMatch), avec repli sur
+ *   la PREMIÈRE entrée du kind si `target` ne permet aucune désambiguïsation fiable.
+ */
+export async function getEffectiveRegistryCredentialsForImage(
+  kind: RegistryKind,
+  target: string,
+): Promise<EffectiveRegistryCredentials | null> {
+  const current = await getCurrent();
+  const candidates = (current.registries ?? []).filter((r) => r.kind === kind);
+  const first = candidates[0];
+  if (!first) return null;
+  if (candidates.length === 1) return decryptRegistryCredentials(first);
+  const match = findBestRegistryMatch(kind, target, candidates);
+  return decryptRegistryCredentials(match ?? first);
 }

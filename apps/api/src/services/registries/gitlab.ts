@@ -13,7 +13,7 @@
 
 import { config } from "../../config.js";
 import { demoStore } from "../demoData.js";
-import { getEffectiveRegistryCredentials } from "../setupStore.js";
+import { getEffectiveRegistryCredentialsForImage } from "../setupStore.js";
 import { fetchJson, RegistryHttpError } from "./http.js";
 
 interface GitlabRegistryRepository {
@@ -38,8 +38,12 @@ function demoFallbackTags(image: string): string[] {
   return Array.from(new Set([demoImage.currentTag, demoImage.latestTag]));
 }
 
-async function authHeaders(): Promise<Record<string, string>> {
-  const persisted = await getEffectiveRegistryCredentials("gitlab");
+/** `image` (nom d'image complet "host/groupe/projet") désambiguïse entre PLUSIEURS instances
+ * GitLab auto-hébergées configurées — rapprochement par HÔTE (voir
+ * setupStore.ts#findBestRegistryMatch), aucune ambiguïté réelle entre elles puisque chacune a
+ * nécessairement un hôte distinct. */
+async function authHeaders(image?: string): Promise<Record<string, string>> {
+  const persisted = await getEffectiveRegistryCredentialsForImage("gitlab", image ?? "");
   const token = persisted?.token ?? config.registries.gitlab.token;
   return token ? { "PRIVATE-TOKEN": token } : {};
 }
@@ -55,7 +59,7 @@ export async function listTags(image: string): Promise<string[]> {
   try {
     const repositories = await fetchJson<GitlabRegistryRepository[]>(
       `${apiBase}/projects/${encodedProject}/registry/repositories?tags_count=false`,
-      { headers: await authHeaders() },
+      { headers: await authHeaders(image) },
     );
 
     const repository = repositories.find((r) => r.location === image) ?? repositories[0];
@@ -65,7 +69,7 @@ export async function listTags(image: string): Promise<string[]> {
 
     const tags = await fetchJson<GitlabRegistryTag[]>(
       `${apiBase}/projects/${encodedProject}/registry/repositories/${repository.id}/tags`,
-      { headers: await authHeaders() },
+      { headers: await authHeaders(image) },
     );
     return tags.map((t) => t.name);
   } catch (err) {
