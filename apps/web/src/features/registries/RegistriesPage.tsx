@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import {
   createRegistry,
+  deleteRegistry,
   fetchRegistries,
   fetchRegistryDetail,
   selectRegistry,
@@ -126,6 +127,24 @@ export default function RegistriesPage() {
       closeEdit();
     } else {
       setUpdateError(result.payload ?? "Impossible de modifier ce registry.");
+    }
+  }
+
+  /** Retour utilisateur du 14/08/2026 : "manque option pour suprimer" — confirmation nommée
+   * (même pattern que le reste de l'app pour une action irréversible), puis refetch complet de la
+   * liste plutôt qu'un simple retrait local : les ids "reg-<kind>-<index>" des AUTRES entrées du
+   * même kind peuvent avoir changé côté serveur (voir registriesStore.ts#deleteRegistry). */
+  async function handleDelete(registry: { id: string; name: string }) {
+    const ok = await confirm({
+      title: "Supprimer le registry",
+      description: `Confirmer la suppression de « ${registry.name} » ? Les identifiants enregistrés seront définitivement perdus.`,
+      confirmLabel: "Supprimer",
+      variant: "danger",
+    });
+    if (!ok) return;
+    const result = await dispatch(deleteRegistry(registry.id));
+    if (deleteRegistry.fulfilled.match(result)) {
+      dispatch(fetchRegistries());
     }
   }
 
@@ -291,6 +310,15 @@ export default function RegistriesPage() {
             >
               Explorer le catalogue
             </button>
+            {canAdminister(session) && (
+              <button
+                type="button"
+                className="btn btn-danger btn-sm"
+                onClick={() => void handleDelete(selectedDetail)}
+              >
+                Supprimer
+              </button>
+            )}
           </>
         )}
       </Inspector>

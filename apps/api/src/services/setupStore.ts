@@ -274,6 +274,18 @@ export interface RegistryPatch {
  * vue "reg-<kind>-<index>" construit par registriesStore.ts). `password`/`token` ne sont
  * remplacés que si une valeur non vide est fournie ; le reste écrase toujours (name/url/username
  * vides sont des choix valides de l'utilisateur, contrairement aux secrets).
+ *
+ * Bug réel corrigé le 14/08/2026 (retour utilisateur : "sa doit utiliser les bon identifiant
+ * rentrer car sa utilise mon compt au lieux des info que jai mis") — root-causé en lisant le
+ * registry réellement configuré sur disque : `password` ET `token` étaient TOUS LES DEUX
+ * présents (saisis à des moments différents, probablement via une confusion entre les deux champs
+ * du formulaire d'édition — "Mot de passe"/"Jeton d'accès" pour ce qui n'est, pour GHCR comme pour
+ * la plupart des registries à un seul secret, qu'UN SEUL identifiant réel). resolveToken()
+ * (registries/ghcr.ts) préfère `.token` à `.password` : un jeton ANCIEN et non pertinent (ex :
+ * saisi par erreur une première fois) continuait donc silencieusement de primer sur le mot de
+ * passe fraîchement corrigé, qui ne remplaçait jamais rien tant que `.token` restait présent.
+ * Un registry n'a jamais qu'UN SEUL secret actif à la fois : fournir explicitement l'un des deux
+ * efface maintenant l'autre plutôt que de laisser une valeur périmée cohabiter et prendre le pas.
  */
 export async function updateRegistryAt(index: number, patch: RegistryPatch): Promise<SetupConfig> {
   const current = await getCurrent();
@@ -282,13 +294,22 @@ export async function updateRegistryAt(index: number, patch: RegistryPatch): Pro
   if (!existing) {
     throw new Error(`No registry at index ${index}`);
   }
+  // `exactOptionalPropertyTypes` interdit `{ token: undefined }` pour "effacer" la clé — on
+  // construit `secretFields` séparément puis on l'étale, en omettant explicitement l'autre champ
+  // via déstructuration plutôt que de lui assigner `undefined` (voir commentaire de tête ci-dessus
+  // pour le pourquoi de cet effacement croisé).
+  const { password: _droppedPassword, token: _droppedToken, ...existingWithoutSecrets } = existing;
+  const secretFields: Pick<SetupRegistryConfig, "password" | "token"> = patch.password
+    ? { password: patch.password }
+    : patch.token
+      ? { token: patch.token }
+      : { ...(existing.password !== undefined ? { password: existing.password } : {}), ...(existing.token !== undefined ? { token: existing.token } : {}) };
   const merged: SetupRegistryConfig = {
-    ...existing,
+    ...existingWithoutSecrets,
     ...(patch.name !== undefined ? { name: patch.name } : {}),
     ...(patch.url !== undefined ? { url: patch.url } : {}),
     ...(patch.username !== undefined ? { username: patch.username } : {}),
-    ...(patch.password ? { password: patch.password } : {}),
-    ...(patch.token ? { token: patch.token } : {}),
+    ...secretFields,
   };
   const next: SetupConfig = encryptSecrets({
     ...current,
@@ -297,6 +318,33 @@ export async function updateRegistryAt(index: number, patch: RegistryPatch): Pro
   await writeToDisk(next);
   cache = next;
   return next;
+}
+
+/**
+ * Supprime le registry à l'index `index` (retour utilisateur du 14/08/2026 : "manque option pour
+ * suprimer" — aucune route DELETE n'existait jusqu'ici). `false` si l'index n'existe pas/plus
+ * (jamais une exception pour un simple double-clic/une course avec une autre suppression).
+ *
+ * ATTENTION id INSTABLE après suppression : `reg-<kind>-<index>` (registriesStore.ts) est calculé
+ * depuis la position dans le tableau, pas un id stable propre à chaque entrée — supprimer une
+ * entrée DÉCALE les index (donc les ids) de toutes les entrées suivantes du même kind. Comportement
+ * déjà présent pour update/delete sur ce même schéma d'id (pas une régression introduite ici) ;
+ * le frontend doit toujours relire GET /api/registries après une suppression plutôt que de
+ * réutiliser un id mémorisé avant coup.
+ */
+export async function removeRegistryAt(index: number): Promise<boolean> {
+  const current = await getCurrent();
+  const registries = current.registries ?? [];
+  if (!registries[index]) return false;
+  // encryptSecrets() ci-dessus est idempotente (encryptSecretIfNeeded) — sans incidence sur les
+  // entrées restantes déjà chiffrées, juste une garde de cohérence avec addRegistry/updateRegistryAt.
+  const next: SetupConfig = encryptSecrets({
+    ...current,
+    registries: registries.filter((_, i) => i !== index),
+  });
+  await writeToDisk(next);
+  cache = next;
+  return true;
 }
 
 /** Config LDAP effective (secret déchiffré) : celle de l'assistant si persistée, sinon les valeurs d'environnement. */

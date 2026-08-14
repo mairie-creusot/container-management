@@ -13,6 +13,9 @@
  * GET   /api/registries/:id                      — détail d'un registry.
  * PATCH /api/registries/:id                      — modifie nom/URL/identifiants — admin uniquement,
  *                                                    même raison que POST ci-dessus.
+ * DELETE /api/registries/:id                     — supprime un registry — admin uniquement, même
+ *                                                    raison que POST/PATCH ci-dessus (manquait
+ *                                                    jusqu'ici, retour utilisateur du 14/08/2026).
  * GET   /api/registries/:id/repositories          — vrai catalogue distant (pas juste le local).
  * GET   /api/registries/:id/repositories/:repo/tags — tags d'un dépôt du catalogue (:repo encodé, cf. gitops.ts).
  */
@@ -20,6 +23,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   createRegistry,
+  deleteRegistry,
   getPersistedRegistryConfig,
   getRegistry,
   listRegistries,
@@ -99,6 +103,16 @@ export default async function registriesRoutes(fastify: FastifyInstance): Promis
       return reply.send(updated);
     },
   );
+
+  fastify.delete<{ Params: { id: string } }>("/api/registries/:id", async (request, reply) => {
+    if (rejectIfNotAdmin(request, reply)) return;
+
+    const ok = await deleteRegistry(request.params.id);
+    if (!ok) {
+      return reply.code(404).send({ error: `Registry "${request.params.id}" not found` });
+    }
+    return reply.send({ ok: true });
+  });
 
   fastify.get<{ Params: { id: string } }>("/api/registries/:id/repositories", async (request, reply) => {
     const persisted = await getPersistedRegistryConfig(request.params.id);

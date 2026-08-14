@@ -1,5 +1,5 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
-import { apiGet, apiPatch, apiPost, ApiError } from "@/api/client";
+import { apiDelete, apiGet, apiPatch, apiPost, ApiError } from "@/api/client";
 import type { Registry, RegistryCatalogResult, RegistryKind } from "@/types";
 
 interface NewRegistryInput {
@@ -98,6 +98,23 @@ export const updateRegistry = createAsyncThunk<
   }
 });
 
+/** DELETE /api/registries/:id — retour utilisateur du 14/08/2026 : "manque option pour suprimer",
+ * n'existait pas jusqu'ici. Après succès, l'appelant doit redéclencher fetchRegistries : les ids
+ * "reg-<kind>-<index>" des entrées restantes du même kind peuvent avoir changé (voir
+ * services/registriesStore.ts#deleteRegistry côté API), jamais réutiliser un id mémorisé avant. */
+export const deleteRegistry = createAsyncThunk<string, string, { rejectValue: string }>(
+  "registries/deleteRegistry",
+  async (id, { rejectWithValue }) => {
+    try {
+      await apiDelete<{ ok: boolean }>(`/registries/${id}`);
+      return id;
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : "Impossible de supprimer ce registry.";
+      return rejectWithValue(message);
+    }
+  },
+);
+
 /** Vrai catalogue distant d'un registry — voir GET /api/registries/:id/repositories. */
 export const fetchRepositories = createAsyncThunk<RegistryCatalogResult, string, { rejectValue: string }>(
   "registries/fetchRepositories",
@@ -190,6 +207,23 @@ const registriesSlice = createSlice({
       .addCase(updateRegistry.rejected, (state, action) => {
         state.creating = false;
         state.error = action.payload ?? "Impossible de modifier ce registry.";
+      })
+      .addCase(deleteRegistry.pending, (state) => {
+        state.creating = true;
+      })
+      .addCase(deleteRegistry.fulfilled, (state, action) => {
+        state.creating = false;
+        // Retrait immédiat de CETTE entrée pour un retour visuel sans latence — les ids "reg-
+        // <kind>-<index>" des AUTRES entrées du même kind peuvent avoir changé côté serveur (voir
+        // services/registriesStore.ts#deleteRegistry), donc l'appelant (RegistriesPage.tsx)
+        // redéclenche quand même fetchRegistries() juste après pour rester la source de vérité.
+        state.items = state.items.filter((r) => r.id !== action.payload);
+        if (state.selectedId === action.payload) state.selectedId = null;
+        if (state.selectedDetail?.id === action.payload) state.selectedDetail = null;
+      })
+      .addCase(deleteRegistry.rejected, (state, action) => {
+        state.creating = false;
+        state.error = action.payload ?? "Impossible de supprimer ce registry.";
       })
       .addCase(fetchRepositories.pending, (state) => {
         state.reposStatus = "loading";

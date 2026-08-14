@@ -14,6 +14,7 @@ import {
   addRegistry as persistRegistry,
   decryptRegistryCredentials,
   getCurrent,
+  removeRegistryAt,
   updateRegistryAt,
 } from "./setupStore.js";
 import type { RegistryPatch, SetupRegistryConfig } from "./setupStore.js";
@@ -137,4 +138,19 @@ export async function updateRegistry(id: string, patch: RegistryPatch): Promise<
   if (index === -1) return undefined;
   await updateRegistryAt(index, patch);
   return getRegistry(id);
+}
+
+/**
+ * Supprime un registry — retour utilisateur du 14/08/2026 : "manque option pour suprimer", aucune
+ * route DELETE n'existait jusqu'ici (limite honnête déjà notée lors du chantier multi-comptes).
+ * `false` si l'id n'existe pas/plus. Voir removeRegistryAt (setupStore.ts) pour la mise en garde
+ * sur l'instabilité des ids "reg-<kind>-<index>" après une suppression — le frontend doit relire
+ * GET /api/registries après coup plutôt que réutiliser un id mémorisé avant la suppression.
+ */
+export async function deleteRegistry(id: string): Promise<boolean> {
+  const current = await getCurrent();
+  const persisted = current.registries ?? [];
+  const index = persisted.findIndex((r, i) => `reg-${r.kind}-${i}` === id);
+  if (index === -1) return false;
+  return removeRegistryAt(index);
 }
