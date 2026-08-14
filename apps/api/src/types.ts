@@ -336,6 +336,59 @@ export interface LxcContainer {
   type: string; // "container" | "virtual-machine" (LXD gère les deux avec la même API)
 }
 
+/**
+ * Hôte physique AHV réel (Prism Central API v3, `/hosts/list`) — voir
+ * src/services/nutanix.ts#getNutanixHosts. Vérifié en conditions réelles le 14/08/2026 sur
+ * l'instance 172.20.0.10:9440 (3 hôtes physiques réels pour CLUSTER_AHV_HDV) : `status.resources`
+ * ne porte QUE de la capacité statique (cpu_model/num_cpu_cores/num_cpu_sockets/
+ * memory_capacity_mib/hypervisor.num_vms), AUCUNE stat d'utilisation courante (%CPU/mem) — même
+ * limite déjà documentée pour ClusterNode#cpuPercent/memPercent (nécessiterait l'API de métriques
+ * Prism dédiée, hors scope). Champs de capacité tous optionnels et jamais fabriqués si absents.
+ */
+export interface NutanixHost {
+  id: string;
+  name: string;
+  /** uuid réel du cluster physique qui héberge ce nœud AHV (status.cluster_reference.uuid) — le
+   * NOM du cluster n'est PAS renvoyé par `/hosts/list` (contrairement à `/vms/list`, vérifié en
+   * conditions réelles) : résolu séparément par l'appelant via getNutanixClusters() si besoin,
+   * jamais deviné ici. Absent seulement si Prism Central ne l'a pas renvoyé (rare). */
+  clusterUuid?: string;
+  cpuModel?: string;
+  numCpuCores?: number;
+  numCpuSockets?: number;
+  memoryCapacityMib?: number;
+  /** Nombre de VMs rapporté DIRECTEMENT par l'hyperviseur pour cet hôte
+   * (status.resources.hypervisor.num_vms) — pas recalculé depuis /vms/list, source Prism Central
+   * directe (peut différer transitoirement de vmCountByHostUuid si une migration est en cours). */
+  hypervisorNumVms?: number;
+  hypervisorFullName?: string;
+}
+
+/** Un disque réel d'une VM Nutanix (status.resources.disk_list[], Prism Central API v3) — voir
+ * src/services/nutanix.ts#mapVmEntity. Vérifié en conditions réelles : `device_properties.
+ * device_type` vaut "DISK" ou "CDROM" (jamais traduit/deviné, reflète la valeur brute de Prism
+ * Central) ; `disk_size_bytes` absent pour un CDROM sans média monté (jamais 0 fabriqué). */
+export interface NutanixVmDisk {
+  uuid?: string;
+  deviceType: string;
+  sizeBytes?: number;
+}
+
+/** Une interface réseau réelle d'une VM Nutanix (status.resources.nic_list[], Prism Central API
+ * v3) — voir src/services/nutanix.ts#mapVmEntity. `subnetName`/`vlanId` résolus via une liste de
+ * subnets récupérée UNE SEULE FOIS par poll (`/api/nutanix/v3/subnets/list`, jamais un appel par
+ * VM) ; repli sur le nom brut porté par `nic.subnet_reference.name` si ce subnet précis n'a pas pu
+ * être retrouvé dans la liste résolue au moment de l'appel (course entre deux requêtes, subnet
+ * supprimé entre-temps) — jamais un VLAN inventé. */
+export interface NutanixVmNetwork {
+  subnetUuid?: string;
+  subnetName?: string;
+  vlanId?: number;
+  /** IP(s) RÉELLEMENT assignées à cette VM sur ce NIC (ip_endpoint_list[].ip) — [] si aucune (VM
+   * éteinte, DHCP pas encore attribué), jamais inventée. */
+  ips: string[];
+}
+
 /** VM Nutanix (Prism Central API v3) — voir src/services/nutanix.ts. */
 export interface NutanixVm {
   id: string;
@@ -349,6 +402,26 @@ export interface NutanixVm {
    * pas renvoyé (rare). Sert à relier une VM à son VRAI nœud "host" de cluster par identité stable
    * dans le graphe de topologie (services/topology.ts), jamais par rapprochement de nom. */
   clusterUuid?: string;
+  /** uuid réel de l'hôte physique AHV qui exécute ACTUELLEMENT cette VM
+   * (status.resources.host_reference.uuid, jamais spec — un placement est un état CONSTATÉ, pas
+   * une intention de config) — recalculé à CHAQUE appel de getNutanixVms()/getNutanixEnvironment
+   * (aucun cache figé) : une VM AHV peut migrer d'un hôte à l'autre en live migration, voir
+   * services/topology.ts#getNutanixTopologyParts. Absent si la VM est éteinte ou si Prism Central
+   * n'a pas renvoyé ce champ. */
+  hostUuid?: string;
+  /** Nom réel de l'hôte, résolu via getNutanixHosts() (status.name, ex: "HDVNUTA3") — PAS
+   * `host_reference.name` brut : vérifié en conditions réelles, ce champ porte en fait l'IP de
+   * l'hyperviseur ("172.20.0.5"), pas un nom lisible. Repli sur cette IP UNIQUEMENT si l'hôte n'a
+   * pas pu être retrouvé dans la liste résolue au moment de l'appel (course entre deux requêtes),
+   * jamais un nom inventé. */
+  hostName?: string;
+  /** Disques réels de la VM (status.resources.disk_list, repli spec.resources.disk_list) — absent
+   * si Prism Central n'a renvoyé aucun disque (jamais un tableau vide fabriqué en cas d'échec de
+   * lecture du champ lui-même, distinct d'une VM réellement sans disque). */
+  disks?: NutanixVmDisk[];
+  /** Interfaces réseau réelles de la VM avec VLAN/subnet résolu et IP(s) — mêmes conditions
+   * d'absence que `disks` ci-dessus. */
+  networks?: NutanixVmNetwork[];
 }
 
 export interface GitOpsFile {
@@ -677,7 +750,15 @@ export type TopologyNodeKind =
  * frontend choisit l'icône/couleur/contenu du panneau de détail sur CE champ, jamais en parsant du
  * texte libre.
  */
-export type TopologyHostKind = "nutanix-cluster" | "remote-docker" | "lxc";
+/**
+ * "nutanix-host" (14/08/2026) : hôte physique AHV réel — niveau intermédiaire entre "nutanix-
+ * cluster" (le cluster physique tout entier) et les VMs qu'il héberge (voir
+ * services/topology.ts#getNutanixTopologyParts, retour utilisateur : "je devrais voir ce node plus
+ * 3 autre vue que jai 3 nutanix et ensuite tout les node vm" — 3 confirmé en conditions réelles
+ * sur l'instance 172.20.0.10:9440). Distinct de "nutanix-cluster" : un cluster peut avoir plusieurs
+ * hôtes physiques, chacun devient son propre nœud "host" ici.
+ */
+export type TopologyHostKind = "nutanix-cluster" | "nutanix-host" | "remote-docker" | "lxc";
 
 export interface TopologyNode {
   // ex: "container:<id>", "volume:<name>", "network:<id>", "nutanix-vm:<uuid>",
@@ -718,6 +799,34 @@ export interface TopologyNode {
   /** VMs Nutanix uniquement (voir services/nutanix.ts#NutanixVm) : nombre de vCPUs et mémoire allouée. */
   numVcpus?: number;
   memoryMib?: number;
+  /**
+   * VM Nutanix uniquement : nom réel de l'hôte physique AHV qui l'exécute ACTUELLEMENT (voir
+   * services/nutanix.ts#NutanixVm#hostName) — recalculé à CHAQUE rafraîchissement du graphe
+   * (jamais figé entre deux polls, une VM peut migrer d'un hôte à l'autre en live migration).
+   * Absent si la VM est éteinte ou si Prism Central n'a pas renvoyé host_reference. Le rattachement
+   * VISUEL réel (nœud "host" nutanix-host -> nœud "nutanix-vm") est porté par une arête `kind:
+   * "hosts"` (voir services/topology.ts#getNutanixTopologyParts), ce champ sert uniquement
+   * d'affichage direct dans le panneau de détail sans recalcul côté frontend.
+   */
+  nutanixHostName?: string;
+  /** VM Nutanix uniquement : disques réels (voir services/nutanix.ts#NutanixVmDisk) — absent si
+   * Prism Central n'a renvoyé aucun disque, jamais un tableau vide fabriqué en cas d'échec. */
+  nutanixDisks?: NutanixVmDisk[];
+  /** VM Nutanix uniquement : interfaces réseau réelles avec VLAN/subnet résolu et IP(s) (voir
+   * services/nutanix.ts#NutanixVmNetwork). */
+  nutanixNetworks?: NutanixVmNetwork[];
+  /**
+   * Nœuds "host" de sous-type "nutanix-host" UNIQUEMENT (hôte physique AHV réel, voir
+   * services/nutanix.ts#NutanixHost) — capacité RÉELLE rapportée par Prism Central au moment du
+   * poll. PAS d'utilisation courante (%CPU/mem) : cet endpoint ne l'expose pas, volontairement
+   * absent plutôt qu'une valeur à 0 qui laisserait croire à une vraie mesure (même limite que
+   * ClusterNode#cpuPercent/memPercent).
+   */
+  nutanixHostCpuModel?: string;
+  nutanixHostNumCpuCores?: number;
+  nutanixHostNumCpuSockets?: number;
+  nutanixHostMemoryCapacityMib?: number;
+  nutanixHostHypervisorFullName?: string;
   /**
    * Volumes/networks uniquement : horodatage de création RÉEL rapporté par Docker (`CreatedAt`/
    * `Created`). Absent pour les conteneurs/VMs Nutanix (pas nécessaire : leur id EST déjà un

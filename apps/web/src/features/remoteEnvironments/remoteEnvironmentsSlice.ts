@@ -1,12 +1,20 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import { apiDelete, apiGet, apiPatch, apiPost, ApiError } from "@/api/client";
-import type { RemoteDockerEnvironmentRef, RemoteDockerTestResult } from "@/types";
+import type { RemoteDockerEnvironmentRef, RemoteDockerTestResult, RemoteDockerTransport } from "@/types";
 
 export interface NewRemoteEnvironmentInput {
   name: string;
   host: string;
+  // Requis pour transport "tcp-tls" (pas de port Docker par défaut sensé) ; optionnel pour "ssh"
+  // (défaut 22 résolu côté store) — le formulaire fournit toujours une valeur explicite dans les
+  // deux cas (voir EnvironmentsPage.tsx), donc `number` reste le type ici.
   port: number;
+  // Défaut "tcp-tls" côté store si omis. "ssh" : QUAI se connecte au port SSH déjà ouvert pour
+  // l'administration de la machine puis tunnelise Docker au travers (aucun port Docker exposé sur
+  // le réseau) — voir remoteDockerStore.ts en-tête pour le détail complet des deux transports.
+  transport?: RemoteDockerTransport;
   tls?: { ca?: string; cert?: string; key?: string };
+  ssh?: { username: string; password?: string; privateKey?: string };
 }
 
 interface RemoteEnvironmentsState {
@@ -52,6 +60,19 @@ export interface UpdateRemoteEnvironmentInput {
   name?: string;
   host?: string;
   port?: number;
+  // transport omis = transport conservé tel quel. Changer de transport DROPPE toujours les
+  // identifiants de l'ancien transport côté store — un nouveau tls/ssh adapté au nouveau
+  // transport est alors requis dans le même patch (voir remoteDockerStore.ts#updateRemoteDockerEnvironment).
+  transport?: RemoteDockerTransport;
+  // tls fourni = remplace ca/cert/key fournis (les autres champs TLS déjà persistés sont
+  // conservés) ; clearTls = repasse en TCP non chiffré (voir remoteDockerStore.ts#PATCH pour la
+  // sémantique exacte côté store) — jamais les deux à la fois côté formulaire (UpdateRemoteModal).
+  tls?: { ca?: string; cert?: string; key?: string };
+  clearTls?: boolean;
+  // ssh fourni = remplace username/password/privateKey ; clearSsh = supprime les identifiants SSH
+  // persistés — mêmes conventions que tls/clearTls ci-dessus, côté transport "ssh".
+  ssh?: { username: string; password?: string; privateKey?: string };
+  clearSsh?: boolean;
 }
 
 export const updateRemoteEnvironment = createAsyncThunk<

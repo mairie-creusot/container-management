@@ -44,7 +44,15 @@
  *  - "nutanix-cluster" : un nœud par cluster physique réellement listé par Prism Central
  *    (nutanix.ts#getNutanixClusters), status toujours "running" (un cluster qu'on a pu lister est
  *    par définition joignable) — [] si Nutanix n'a jamais été configuré ou si injoignable, comme
- *    les VMs. Relié à ses VMs par une arête "hosts" (voir ci-dessus).
+ *    les VMs. Relié à ses hôtes physiques (voir ci-dessous) par une arête "hosts".
+ *  - "nutanix-host" (14/08/2026) : niveau intermédiaire NOUVEAU, un nœud par hôte AHV physique
+ *    réellement listé (nutanix.ts#getNutanixHosts, endpoint /hosts/list) — 3 hôtes physiques
+ *    confirmés en conditions réelles pour CLUSTER_AHV_HDV (172.20.0.10:9440). Relié à son cluster
+ *    parent par une arête "hosts", et à chaque VM qu'il exécute ACTUELLEMENT par une autre arête
+ *    "hosts" (`vm.hostUuid`, recalculé à CHAQUE poll depuis status.resources.host_reference — une
+ *    VM qui migre en live migration change donc de rattachement dès le prochain rafraîchissement).
+ *    Une VM sans hôte déterminable (éteinte, champ absent) reste rattachée directement au nœud
+ *    cluster, comme avant l'introduction de ce niveau intermédiaire.
  *  - "remote-docker" : un nœud par environnement Docker distant PERSISTÉ (remoteDockerStore.ts,
  *    SSH ou TCP+TLS) — TOUJOURS présent dès qu'il est configuré (l'utilisateur l'a créé, il
  *    existe), `status` reflète honnêtement la joignabilité RÉELLE au moment de la construction du
@@ -90,7 +98,7 @@ import { getClient, getDockerHostInfo, isDockerReachable, readContainerHealth, r
 import { getImages } from "./images.js";
 import { listGitOpsFiles } from "./gitops.js";
 import { listAllScans } from "./scan.js";
-import { getNutanixClusters, getNutanixVms, isNutanixConfigured } from "./nutanix.js";
+import { getNutanixClusters, getNutanixHosts, getNutanixVms, isNutanixConfigured } from "./nutanix.js";
 import { getEffectiveAdDnsConfig } from "./setupStore.js";
 import { lastKnownDnsSync, listRoutes } from "./reverseProxy.js";
 import { listGroups } from "./topologyGroupsStore.js";
@@ -108,6 +116,7 @@ import type {
   AutomationActionConfig,
   AutomationTriggerSource,
   IacEngine,
+  NutanixHost,
   NutanixVm,
   ScanResult,
   Topology,
@@ -226,6 +235,12 @@ function nutanixVmToNode(vm: NutanixVm): TopologyNode {
     status: mapNutanixPowerState(vm.powerState),
     numVcpus: vm.numVcpus,
     memoryMib: vm.memoryMib,
+    // Placement réel + disques/réseau (voir nutanix.ts#NutanixVm, mission "corrige le j'ai rien" —
+    // retour utilisateur du 14/08/2026) : simple report des champs déjà résolus par nutanix.ts,
+    // aucun recalcul ici — TopologyNodeDetailPanel.tsx les affiche tels quels.
+    ...(vm.hostName ? { nutanixHostName: vm.hostName } : {}),
+    ...(vm.disks && vm.disks.length > 0 ? { nutanixDisks: vm.disks } : {}),
+    ...(vm.networks && vm.networks.length > 0 ? { nutanixNetworks: vm.networks } : {}),
   };
 }
 
@@ -233,37 +248,61 @@ function nutanixClusterHostNodeId(clusterUuid: string): string {
   return `host:nutanix-cluster:${clusterUuid}`;
 }
 
+/** "host:nutanix-host:<uuid>" — voir nutanixClusterHostNodeId ci-dessus pour le même principe au
+ * niveau cluster (préfixe distinct : un cluster ET un hôte physique ne partagent jamais le même
+ * uuid côté Prism Central, mais le préfixe garde les deux espaces d'id lisiblement séparés). */
+function nutanixHostNodeId(hostUuid: string): string {
+  return `host:nutanix-host:${hostUuid}`;
+}
+
+/** "256881 Mio" -> "251 Go RAM" (arrondi à l'entier, cohérent avec l'affichage frontend
+ * formatMem/topologyGraphShared.tsx) — formaté ici côté backend car ce n'est qu'un sous-titre
+ * informatif de nœud, pas une donnée structurée à retraiter côté client (comme pour les autres
+ * subtitles de ce fichier, ex: "Cluster Nutanix · N VMs"). */
+function formatHostMemorySubtitle(memoryCapacityMib: number): string {
+  return `${(memoryCapacityMib / 1024).toFixed(0)} Go RAM`;
+}
+
 /**
- * Nœuds VM Nutanix + nœuds "host" de cluster physique + arêtes réelles qui les relient — une seule
- * fonction pour les trois (plutôt que trois appels séparés) : les arêtes VM->cluster ont besoin des
- * VMs ET des clusters en même temps, autant récupérer les deux d'un coup et les combiner ici.
+ * Nœuds VM Nutanix + nœuds "host" (cluster physique ET, niveau intermédiaire, hôte physique AHV) +
+ * arêtes réelles qui les relient — une seule fonction pour l'ensemble (plutôt que des appels
+ * séparés) : les arêtes ont besoin des VMs, des clusters ET des hôtes physiques en même temps,
+ * autant récupérer les trois d'un coup et les combiner ici.
+ *
+ * Hiérarchie (retour utilisateur du 14/08/2026 : "je devrais voir ce node plus 3 autre vue que jai
+ * 3 nutanix et ensuite tout les node vm" / "je doit pouvoir voir sur quelle cluster et sur quelle
+ * node chaque vm tourne car defois elle se deplace" — 3 hôtes physiques confirmés en conditions
+ * réelles sur l'instance 172.20.0.10:9440) : cluster (nœud "host"/hostKind "nutanix-cluster", déjà
+ * existant) -> hôte physique AHV (nœud "host"/hostKind "nutanix-host", NOUVEAU) -> VM. Le
+ * rattachement VM -> hôte est réévalué à CHAQUE appel (jamais figé) : `vm.hostUuid` vient de
+ * nutanix.ts#getNutanixVms, recalculé à chaque poll depuis `status.resources.host_reference` —
+ * une VM qui a migré en live migration change donc d'arête dès le prochain rafraîchissement du
+ * graphe. Si `vm.hostUuid` est absent (VM éteinte, champ non renvoyé) OU que l'hôte visé n'est
+ * plus dans la liste réellement retournée par getNutanixHosts() à cet instant (course entre deux
+ * requêtes), repli sur l'ancien comportement : rattachement direct au nœud cluster.
  *
  * [] partout si Nutanix n'a jamais été configuré via l'assistant (isNutanixConfigured, même garde
- * que nutanix.ts#getNutanixEnvironment) — ni VM, ni cluster, ni arête inventée. Si configuré mais
- * injoignable, getNutanixVms()/getNutanixClusters() retombent chacun sur [] indépendamment (même
- * garde intrinsèque à chacun) : le graphe reste honnêtement vide plutôt que partiellement peuplé
- * avec des données obsolètes.
- *
- * Une arête `kind: "hosts"` (nœud host cluster -> nœud nutanix-vm) n'est créée QUE si le
- * `clusterUuid` de la VM (voir nutanix.ts#NutanixVm) correspond à un cluster RÉELLEMENT présent
- * dans la réponse de getNutanixClusters() à cet instant — jamais d'arête vers un cluster qu'on n'a
- * pas pu lister soi-même (course entre les deux appels, cluster supprimé entre-temps...).
+ * que nutanix.ts#getNutanixEnvironment) — ni VM, ni cluster, ni hôte, ni arête inventée. Si
+ * configuré mais injoignable, getNutanixVms()/getNutanixClusters()/getNutanixHosts() retombent
+ * chacun sur [] indépendamment (même garde intrinsèque à chacun) : le graphe reste honnêtement
+ * vide plutôt que partiellement peuplé avec des données obsolètes.
  */
 async function getNutanixTopologyParts(): Promise<{ vmNodes: TopologyNode[]; hostNodes: TopologyNode[]; hostEdges: TopologyEdge[] }> {
   if (!(await isNutanixConfigured())) return { vmNodes: [], hostNodes: [], hostEdges: [] };
 
-  const [vms, clusters] = await Promise.all([getNutanixVms(), getNutanixClusters()]);
+  const [vms, clusters, hosts] = await Promise.all([getNutanixVms(), getNutanixClusters(), getNutanixHosts()]);
   const vmNodes = vms.map(nutanixVmToNode);
 
   // Nombre RÉEL de VMs par cluster, déduit des VMs déjà récupérées ci-dessus (pas un second appel
   // réseau) — utilisé uniquement pour un sous-titre informatif sur le nœud "host".
   const vmCountByClusterUuid = new Map<string, number>();
+  const vmCountByHostUuid = new Map<string, number>();
   for (const vm of vms) {
-    if (!vm.clusterUuid) continue;
-    vmCountByClusterUuid.set(vm.clusterUuid, (vmCountByClusterUuid.get(vm.clusterUuid) ?? 0) + 1);
+    if (vm.clusterUuid) vmCountByClusterUuid.set(vm.clusterUuid, (vmCountByClusterUuid.get(vm.clusterUuid) ?? 0) + 1);
+    if (vm.hostUuid) vmCountByHostUuid.set(vm.hostUuid, (vmCountByHostUuid.get(vm.hostUuid) ?? 0) + 1);
   }
 
-  const hostNodes: TopologyNode[] = clusters.map((c) => {
+  const clusterNodes: TopologyNode[] = clusters.map((c) => {
     const vmCount = vmCountByClusterUuid.get(c.uuid) ?? 0;
     return {
       id: nutanixClusterHostNodeId(c.uuid),
@@ -279,19 +318,51 @@ async function getNutanixTopologyParts(): Promise<{ vmNodes: TopologyNode[]; hos
     };
   });
 
+  const hostPhysicalNodes: TopologyNode[] = hosts.map((h) => {
+    const vmCount = vmCountByHostUuid.get(h.id) ?? 0;
+    const specParts = [
+      typeof h.numCpuCores === "number" ? `${h.numCpuCores} cœurs` : null,
+      typeof h.memoryCapacityMib === "number" ? formatHostMemorySubtitle(h.memoryCapacityMib) : null,
+    ].filter((p): p is string => p !== null);
+    return {
+      id: nutanixHostNodeId(h.id),
+      kind: "host",
+      hostKind: "nutanix-host",
+      label: h.name,
+      subtitle: [`${vmCount} VM${vmCount > 1 ? "s" : ""}`, ...specParts].join(" · "),
+      // Un hôte qu'on vient de lister via l'API v3 est par définition joignable à cet instant —
+      // même principe que les nœuds cluster ci-dessus.
+      status: "running",
+      ...(h.cpuModel ? { nutanixHostCpuModel: h.cpuModel } : {}),
+      ...(typeof h.numCpuCores === "number" ? { nutanixHostNumCpuCores: h.numCpuCores } : {}),
+      ...(typeof h.numCpuSockets === "number" ? { nutanixHostNumCpuSockets: h.numCpuSockets } : {}),
+      ...(typeof h.memoryCapacityMib === "number" ? { nutanixHostMemoryCapacityMib: h.memoryCapacityMib } : {}),
+      ...(h.hypervisorFullName ? { nutanixHostHypervisorFullName: h.hypervisorFullName } : {}),
+    };
+  });
+
   const knownClusterUuids = new Set(clusters.map((c) => c.uuid));
+  const knownHostUuids = new Set(hosts.map((h) => h.id));
   const hostEdges: TopologyEdge[] = [];
-  for (const vm of vms) {
-    if (!vm.clusterUuid || !knownClusterUuids.has(vm.clusterUuid)) continue; // cluster non déterminable : jamais d'arête inventée
-    hostEdges.push({
-      id: `hosts:${vm.clusterUuid}:${vm.id}`,
-      source: nutanixClusterHostNodeId(vm.clusterUuid),
-      target: `nutanix-vm:${vm.id}`,
-      kind: "hosts",
-    });
+
+  // Cluster -> hôte physique (niveau intermédiaire NOUVEAU) — jamais d'arête vers un cluster qu'on
+  // n'a pas pu lister soi-même (course entre les deux appels, cluster supprimé entre-temps...).
+  for (const h of hosts) {
+    if (!h.clusterUuid || !knownClusterUuids.has(h.clusterUuid)) continue;
+    hostEdges.push({ id: `hosts:${h.clusterUuid}:${h.id}`, source: nutanixClusterHostNodeId(h.clusterUuid), target: nutanixHostNodeId(h.id), kind: "hosts" });
   }
 
-  return { vmNodes, hostNodes, hostEdges };
+  // Hôte physique -> VM (placement réel et vivant, voir JSDoc ci-dessus) ; repli sur cluster -> VM
+  // (comportement historique) si l'hôte de la VM n'est pas déterminable à cet instant.
+  for (const vm of vms) {
+    if (vm.hostUuid && knownHostUuids.has(vm.hostUuid)) {
+      hostEdges.push({ id: `hosts:${vm.hostUuid}:${vm.id}`, source: nutanixHostNodeId(vm.hostUuid), target: `nutanix-vm:${vm.id}`, kind: "hosts" });
+    } else if (vm.clusterUuid && knownClusterUuids.has(vm.clusterUuid)) {
+      hostEdges.push({ id: `hosts:${vm.clusterUuid}:${vm.id}`, source: nutanixClusterHostNodeId(vm.clusterUuid), target: `nutanix-vm:${vm.id}`, kind: "hosts" });
+    }
+  }
+
+  return { vmNodes, hostNodes: [...clusterNodes, ...hostPhysicalNodes], hostEdges };
 }
 
 /**

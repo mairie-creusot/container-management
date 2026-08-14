@@ -135,9 +135,15 @@ const HEALTH_SEMANTIC: Record<string, "success" | "critical" | "warning" | "neut
  * statut, pour distinguer les trois sources possibles sans dépendre du libellé/sous-titre libre. */
 const HOST_KIND_LABEL: Record<TopologyHostKind, string> = {
   "nutanix-cluster": "Cluster Nutanix",
+  "nutanix-host": "Hôte physique Nutanix",
   "remote-docker": "Docker distant",
   lxc: "Hôte LXD",
 };
+
+/** Repli honnête pour une donnée que Prism Central n'a pas communiquée (mission "corrige le j'ai
+ * rien" du 14/08/2026) — jamais caché silencieusement : l'utilisateur doit comprendre que c'est
+ * une limite de l'API, pas un bug d'affichage (voir mission point 5). */
+const NOT_REPORTED_BY_API = "non communiqué par l'API";
 
 /** Libellé humain d'un moteur IaC — même table que services/topology.ts#IAC_ENGINE_LABEL et
  * l'ancienne IacPage.tsx (retirée). */
@@ -1798,7 +1804,13 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
           </>
         )}
 
-        {/* --- VM Nutanix -------------------------------------------------------------------- */}
+        {/* --- VM Nutanix -------------------------------------------------------------------- *
+            Hôte physique/disques/réseau (mission 14/08/2026, retour utilisateur : "la jai rien je
+            c'est pas le volume ni le network ni le vlan il manque tout les info des vm hote etc")
+            — toutes ces données viennent RÉELLEMENT de Prism Central (voir services/nutanix.ts,
+            TopologyNode#nutanixHostName/nutanixDisks/nutanixNetworks) : une info précise manquante
+            (ex: taille d'un CDROM sans média, IP pas encore attribuée) s'affiche explicitement
+            "non communiqué par l'API" plutôt que d'être cachée silencieusement. */}
         {node.kind === "nutanix-vm" && (
           <>
             <div className="chip-row topology-detail-panel__chips">
@@ -1807,11 +1819,48 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
             <KeyValueList
               rows={[
                 { key: "Cluster", value: node.subtitle },
+                {
+                  key: "Hôte physique actuel",
+                  value: node.nutanixHostName ?? (node.status === "stopped" ? "VM éteinte — aucun hôte" : NOT_REPORTED_BY_API),
+                },
                 { key: "vCPUs", value: String(node.numVcpus ?? "—") },
                 { key: "Mémoire", value: node.memoryMib ? formatMem(node.memoryMib * 1024 * 1024) : "—" },
                 { key: "État d'alimentation", value: node.status === "running" ? "Allumée" : node.status === "stopped" ? "Éteinte" : "Indéterminé" },
               ]}
             />
+
+            <div className="inspector-section-title">Disques</div>
+            {(!node.nutanixDisks || node.nutanixDisks.length === 0) && (
+              <div className="empty-state">Aucun disque {NOT_REPORTED_BY_API}.</div>
+            )}
+            {node.nutanixDisks && node.nutanixDisks.length > 0 && (
+              <div className="iac-run-list">
+                {node.nutanixDisks.map((d, index) => (
+                  <div key={d.uuid ?? index} className="iac-run-item" style={{ cursor: "default" }}>
+                    <span>{d.deviceType === "DISK" ? "Disque" : d.deviceType === "CDROM" ? "CD-ROM" : d.deviceType}</span>
+                    <span className="iac-run-item__meta">{d.sizeBytes ? formatMem(d.sizeBytes) : `Taille ${NOT_REPORTED_BY_API}`}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="inspector-section-title">Réseau / VLAN</div>
+            {(!node.nutanixNetworks || node.nutanixNetworks.length === 0) && (
+              <div className="empty-state">Aucune interface réseau {NOT_REPORTED_BY_API}.</div>
+            )}
+            {node.nutanixNetworks && node.nutanixNetworks.length > 0 && (
+              <div className="iac-run-list">
+                {node.nutanixNetworks.map((n, index) => (
+                  <div key={n.subnetUuid ?? index} className="iac-run-item" style={{ cursor: "default" }}>
+                    <span>
+                      {n.subnetName ?? `Subnet ${NOT_REPORTED_BY_API}`}
+                      {n.vlanId !== undefined ? ` · VLAN ${n.vlanId}` : ` · VLAN ${NOT_REPORTED_BY_API}`}
+                    </span>
+                    <span className="iac-run-item__meta">{n.ips.length > 0 ? n.ips.join(", ") : `IP ${NOT_REPORTED_BY_API}`}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </>
         )}
 
@@ -1880,6 +1929,32 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
                 Cet hôte Docker distant est configuré mais actuellement injoignable — aucune information en direct
                 disponible (voir Paramètres › Environnements Docker distants).
               </div>
+            )}
+            {node.hostKind === "nutanix-host" && (
+              <>
+                <div className="inspector-section-title">Capacité (Prism Central)</div>
+                <KeyValueList
+                  rows={[
+                    { key: "Modèle CPU", value: node.nutanixHostCpuModel ?? NOT_REPORTED_BY_API },
+                    {
+                      key: "Cœurs / sockets",
+                      value:
+                        node.nutanixHostNumCpuCores !== undefined
+                          ? `${node.nutanixHostNumCpuCores} cœurs${node.nutanixHostNumCpuSockets !== undefined ? ` · ${node.nutanixHostNumCpuSockets} socket(s)` : ""}`
+                          : NOT_REPORTED_BY_API,
+                    },
+                    {
+                      key: "Mémoire",
+                      value: node.nutanixHostMemoryCapacityMib ? formatMem(node.nutanixHostMemoryCapacityMib * 1024 * 1024) : NOT_REPORTED_BY_API,
+                    },
+                    { key: "Hyperviseur", value: node.nutanixHostHypervisorFullName ?? NOT_REPORTED_BY_API },
+                    {
+                      key: "Utilisation CPU/mémoire",
+                      value: "Non disponible — nécessiterait l'API de métriques Prism Central dédiée (hors scope)",
+                    },
+                  ]}
+                />
+              </>
             )}
           </>
         )}

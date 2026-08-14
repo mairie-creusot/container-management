@@ -86,14 +86,29 @@ export interface Environment {
 }
 
 // --- Environnements Docker distants — voir apps/api/src/services/remoteDockerStore.ts.
-// ca/cert/key ne transitent jamais par ce contrat (write-only), seul `hasTls` indique leur présence.
+// ca/cert/key/password/privateKey ne transitent jamais par ce contrat (write-only), seuls
+// `hasTls`/`hasSshCredentials` indiquent leur présence.
+
+/** Deux transports vers le démon Docker distant — voir remoteDockerStore.ts en-tête pour le
+ * détail complet. "tcp-tls" : host/port du démon exposé directement (TCP+TLS classique).
+ * "ssh" : host/port SSH déjà ouvert pour l'admin de la machine, Docker tunnelisé au travers —
+ * aucun port Docker exposé sur le réseau (cas typique : VPS joignable uniquement en SSH). */
+export type RemoteDockerTransport = "tcp-tls" | "ssh";
 
 export interface RemoteDockerEnvironmentRef {
   id: string;
   name: string;
   host: string;
   port: number;
+  // Absent sur les environnements créés avant l'introduction du transport SSH : traiter comme
+  // "tcp-tls" (comportement historique, voir remoteDockerStore.ts#toRef) — optionnel ici pour
+  // ne pas casser un composant qui ne connaîtrait pas encore ce champ, mais toujours présent en
+  // pratique depuis la réponse actuelle de l'API.
+  transport: RemoteDockerTransport;
   hasTls: boolean;
+  /** transport "ssh" uniquement — le login n'est pas un secret. */
+  sshUsername?: string;
+  hasSshCredentials: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -101,6 +116,23 @@ export interface RemoteDockerEnvironmentRef {
 export interface RemoteDockerTestResult {
   ok: boolean;
   message: string;
+}
+
+/** Un disque réel d'une VM Nutanix — voir apps/api/src/types.ts#NutanixVmDisk. `deviceType` vaut
+ * "DISK"/"CDROM" en pratique (valeur brute Prism Central, jamais traduite). */
+export interface NutanixVmDisk {
+  uuid?: string;
+  deviceType: string;
+  sizeBytes?: number;
+}
+
+/** Une interface réseau réelle d'une VM Nutanix, VLAN/subnet déjà résolus côté API — voir
+ * apps/api/src/types.ts#NutanixVmNetwork. */
+export interface NutanixVmNetwork {
+  subnetUuid?: string;
+  subnetName?: string;
+  vlanId?: number;
+  ips: string[];
 }
 
 /** VM Nutanix (Prism Central API v3) — voir apps/api/src/services/nutanix.ts. */
@@ -114,6 +146,13 @@ export interface NutanixVm {
   /** uuid réel du cluster physique (cluster_reference) — absent seulement si Prism Central ne l'a
    * pas renvoyé. Sert à relier une VM à son nœud "host" de cluster dans le graphe de topologie. */
   clusterUuid?: string;
+  /** uuid réel de l'hôte physique AHV qui exécute ACTUELLEMENT cette VM — recalculé à chaque poll
+   * (jamais figé, une VM peut migrer d'un hôte à l'autre en live migration). */
+  hostUuid?: string;
+  /** Nom réel de l'hôte (résolu côté API, PAS l'IP brute de host_reference.name). */
+  hostName?: string;
+  disks?: NutanixVmDisk[];
+  networks?: NutanixVmNetwork[];
 }
 
 export interface ContainerPortMapping {
@@ -273,7 +312,10 @@ export type TopologyNodeKind =
 
 /** Sous-type d'un nœud "host" — voir TopologyNode#hostKind ci-dessous et
  * apps/api/src/services/topology.ts. Champ explicite plutôt qu'une convention dans `subtitle`. */
-export type TopologyHostKind = "nutanix-cluster" | "remote-docker" | "lxc";
+/** "nutanix-host" (14/08/2026) : hôte physique AHV réel — niveau intermédiaire entre "nutanix-
+ * cluster" (le cluster tout entier) et les VMs qu'il héberge, voir apps/api/src/services/
+ * topology.ts#getNutanixTopologyParts. */
+export type TopologyHostKind = "nutanix-cluster" | "nutanix-host" | "remote-docker" | "lxc";
 
 export interface TopologyNode {
   id: string;
@@ -306,6 +348,23 @@ export interface TopologyNode {
   /** VMs Nutanix uniquement (voir apps/api/src/services/nutanix.ts#NutanixVm). */
   numVcpus?: number;
   memoryMib?: number;
+  /** VM Nutanix uniquement : nom réel de l'hôte physique AHV qui l'exécute ACTUELLEMENT — recalculé
+   * à chaque rafraîchissement du graphe, absent si la VM est éteinte ou si Prism Central n'a pas
+   * renvoyé host_reference. Voir apps/api/src/types.ts#TopologyNode#nutanixHostName. */
+  nutanixHostName?: string;
+  /** VM Nutanix uniquement : disques réels — voir apps/api/src/types.ts#NutanixVmDisk. */
+  nutanixDisks?: NutanixVmDisk[];
+  /** VM Nutanix uniquement : interfaces réseau réelles (VLAN/subnet/IP résolus) — voir
+   * apps/api/src/types.ts#NutanixVmNetwork. */
+  nutanixNetworks?: NutanixVmNetwork[];
+  /** Nœuds "host" de sous-type "nutanix-host" uniquement : capacité RÉELLE rapportée par Prism
+   * Central — PAS d'utilisation courante (%CPU/mem, non exposée par cet endpoint), absente plutôt
+   * qu'une valeur à 0 qui laisserait croire à une vraie mesure. */
+  nutanixHostCpuModel?: string;
+  nutanixHostNumCpuCores?: number;
+  nutanixHostNumCpuSockets?: number;
+  nutanixHostMemoryCapacityMib?: number;
+  nutanixHostHypervisorFullName?: string;
   /**
    * Volumes/networks uniquement : horodatage de création réel Docker — absent pour les
    * conteneurs/VMs Nutanix (leur id est déjà un identifiant immuable). Utilisé par

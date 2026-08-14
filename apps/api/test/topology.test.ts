@@ -22,11 +22,13 @@ vi.mock("../src/services/docker.js", () => ({
 const isNutanixConfiguredMock = vi.fn<[], Promise<boolean>>();
 const getNutanixVmsMock = vi.fn<[], Promise<NutanixVm[]>>();
 const getNutanixClustersMock = vi.fn<[], Promise<{ uuid: string; name: string }[]>>();
+const getNutanixHostsMock = vi.fn<[], Promise<import("../src/types.js").NutanixHost[]>>();
 
 vi.mock("../src/services/nutanix.js", () => ({
   isNutanixConfigured: () => isNutanixConfiguredMock(),
   getNutanixVms: () => getNutanixVmsMock(),
   getNutanixClusters: () => getNutanixClustersMock(),
+  getNutanixHosts: () => getNutanixHostsMock(),
 }));
 
 // Isolation des nœuds "host" Docker distant/LXD (voir services/topology.ts) : sans ce mock,
@@ -55,6 +57,7 @@ const { getTopology } = await import("../src/services/topology.js");
 // changer (voir leur intention originale, inchangée).
 beforeEach(() => {
   getNutanixClustersMock.mockResolvedValue([]);
+  getNutanixHostsMock.mockResolvedValue([]);
   listRemoteDockerEnvironmentsMock.mockResolvedValue([]);
   getLxcEnvironmentMock.mockResolvedValue(null);
   getEffectiveLxcConfigMock.mockResolvedValue(null);
@@ -183,6 +186,118 @@ describe("getTopology — nœuds host cluster Nutanix (kind \"host\", hostKind \
     );
     // vm-c (clusterUuid absent) n'a produit aucune arête.
     expect(topology.edges.some((e) => e.target === "nutanix-vm:vm-uuid-3")).toBe(false);
+  });
+});
+
+describe("getTopology — nœuds host physique Nutanix (kind \"host\", hostKind \"nutanix-host\")", () => {
+  it("n'ajoute aucun nœud hôte physique si Nutanix n'a jamais été configuré", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(false);
+    getNutanixVmsMock.mockResolvedValue([]);
+    getNutanixHostsMock.mockResolvedValue([{ id: "host-uuid-1", name: "HDVNUTA3", clusterUuid: "cluster-uuid-1" }]);
+
+    const topology = await getTopology();
+
+    expect(topology.nodes.some((n) => n.kind === "host" && n.hostKind === "nutanix-host")).toBe(false);
+    expect(getNutanixHostsMock).not.toHaveBeenCalled();
+  });
+
+  it("un nœud par hôte physique réel, relié à son cluster et à chaque VM qu'il exécute ACTUELLEMENT (hostUuid)", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(true);
+    getNutanixClustersMock.mockResolvedValue([{ uuid: "cluster-uuid-1", name: "CLUSTER_AHV_HDV" }]);
+    getNutanixHostsMock.mockResolvedValue([
+      {
+        id: "host-uuid-1",
+        name: "HDVNUTA3",
+        clusterUuid: "cluster-uuid-1",
+        cpuModel: "Intel(R) Xeon(R) Gold 6210U CPU @ 2.50GHz",
+        numCpuCores: 20,
+        numCpuSockets: 1,
+        memoryCapacityMib: 256881,
+        hypervisorFullName: "AHV 11.0.0.2",
+      },
+      { id: "host-uuid-2", name: "HDVNUTA4", clusterUuid: "cluster-uuid-1" },
+    ]);
+    getNutanixVmsMock.mockResolvedValue([
+      {
+        id: "vm-uuid-1",
+        name: "vm-a",
+        powerState: "on",
+        numVcpus: 2,
+        memoryMib: 2048,
+        cluster: "CLUSTER_AHV_HDV",
+        clusterUuid: "cluster-uuid-1",
+        hostUuid: "host-uuid-1",
+        hostName: "HDVNUTA3",
+        disks: [{ uuid: "disk-1", deviceType: "DISK", sizeBytes: 805306368000 }],
+        networks: [{ subnetUuid: "subnet-1", subnetName: "VLAN 1", vlanId: 1, ips: ["172.16.8.48"] }],
+      },
+      // VM éteinte, hostUuid absent : doit retomber sur un rattachement direct au cluster.
+      { id: "vm-uuid-2", name: "vm-b", powerState: "off", numVcpus: 1, memoryMib: 1024, cluster: "CLUSTER_AHV_HDV", clusterUuid: "cluster-uuid-1" },
+    ]);
+
+    const topology = await getTopology();
+    const physicalHostNodes = topology.nodes.filter((n) => n.kind === "host" && n.hostKind === "nutanix-host");
+
+    expect(physicalHostNodes).toHaveLength(2);
+    const host1 = physicalHostNodes.find((n) => n.id === "host:nutanix-host:host-uuid-1");
+    expect(host1).toMatchObject({
+      label: "HDVNUTA3",
+      status: "running",
+      nutanixHostCpuModel: "Intel(R) Xeon(R) Gold 6210U CPU @ 2.50GHz",
+      nutanixHostNumCpuCores: 20,
+      nutanixHostNumCpuSockets: 1,
+      nutanixHostMemoryCapacityMib: 256881,
+      nutanixHostHypervisorFullName: "AHV 11.0.0.2",
+    });
+    expect(host1?.subtitle).toContain("1 VM");
+
+    const hostEdges = topology.edges.filter((e) => e.kind === "hosts");
+    // cluster -> host-uuid-1, cluster -> host-uuid-2, host-uuid-1 -> vm-uuid-1 (placement réel),
+    // cluster -> vm-uuid-2 (repli : pas de hostUuid pour cette VM éteinte).
+    expect(hostEdges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "host:nutanix-host:host-uuid-1" }),
+        expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "host:nutanix-host:host-uuid-2" }),
+        expect.objectContaining({ source: "host:nutanix-host:host-uuid-1", target: "nutanix-vm:vm-uuid-1" }),
+        expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "nutanix-vm:vm-uuid-2" }),
+      ]),
+    );
+    // Jamais un rattachement DOUBLE (host ET cluster en même temps) pour la même VM placée.
+    expect(topology.edges.filter((e) => e.target === "nutanix-vm:vm-uuid-1")).toHaveLength(1);
+
+    // Le placement/disques/réseau réels sont bien reportés tels quels sur le nœud VM lui-même
+    // (voir services/topology.ts#nutanixVmToNode) — mission "corrige le j'ai rien".
+    const vmNode = topology.nodes.find((n) => n.id === "nutanix-vm:vm-uuid-1");
+    expect(vmNode).toMatchObject({
+      nutanixHostName: "HDVNUTA3",
+      nutanixDisks: [{ uuid: "disk-1", deviceType: "DISK", sizeBytes: 805306368000 }],
+      nutanixNetworks: [{ subnetUuid: "subnet-1", subnetName: "VLAN 1", vlanId: 1, ips: ["172.16.8.48"] }],
+    });
+  });
+
+  it("si l'hôte visé par une VM n'est plus dans la liste réellement retournée (course), repli sur le rattachement direct au cluster", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(true);
+    getNutanixClustersMock.mockResolvedValue([{ uuid: "cluster-uuid-1", name: "CLUSTER_AHV_HDV" }]);
+    getNutanixHostsMock.mockResolvedValue([]); // hôte supprimé/injoignable entre les deux appels
+    getNutanixVmsMock.mockResolvedValue([
+      {
+        id: "vm-uuid-1",
+        name: "vm-a",
+        powerState: "on",
+        numVcpus: 2,
+        memoryMib: 2048,
+        cluster: "CLUSTER_AHV_HDV",
+        clusterUuid: "cluster-uuid-1",
+        hostUuid: "host-uuid-inconnu",
+      },
+    ]);
+
+    const topology = await getTopology();
+
+    expect(topology.nodes.some((n) => n.kind === "host" && n.hostKind === "nutanix-host")).toBe(false);
+    expect(topology.edges).toEqual(
+      expect.arrayContaining([expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "nutanix-vm:vm-uuid-1" })]),
+    );
   });
 });
 
