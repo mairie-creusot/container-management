@@ -31,7 +31,8 @@
     "pino": "^9.3.2",
     "pino-pretty": "^11.2.2",
     "simple-git": "^3.25.0",
-    "ssh2": "^1.17.0"
+    "ssh2": "^1.17.0",
+    "ws": "^8.21.3"
   },
   "devDependencies": {
     "@types/dockerode": "^3.3.31",

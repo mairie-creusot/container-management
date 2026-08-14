@@ -661,7 +661,7 @@ interface NutanixVmFullEntity {
  * introuvable, (400) si Nutanix n'a jamais été configuré, (502) si Prism Central répond une autre
  * erreur. Utilisée par TOUTES les actions ci-dessous juste avant leur PUT/DELETE (voir JSDoc de
  * section ci-dessus : jamais une supposition sur l'état courant de la VM). */
-async function loadNutanixVmFullEntity(uuid: string): Promise<{ effective: SetupNutanixConfig; entity: NutanixVmFullEntity }> {
+export async function loadNutanixVmFullEntity(uuid: string): Promise<{ effective: SetupNutanixConfig; entity: NutanixVmFullEntity }> {
   const effective = await loadNutanixConfig();
   if (!effective) {
     throw new NutanixActionError("Nutanix is not configured — configure Prism Central before running any VM action", 400);
@@ -908,4 +908,48 @@ export async function migrateNutanixVm(uuid: string, targetHostUuid: string): Pr
   };
   await putNutanixVmEntity(effective, uuid, entity, newSpec, "live migration");
   return { ok: true, vmName, targetHostName: targetHost.name };
+}
+
+// ============================================================================================
+// Console VNC réelle d'une VM — mission "je pousse voir interieur des vm comme en bureaux
+// distance aussi" : accès clavier/souris RÉEL à l'intérieur d'une VM AHV, PAS un RDP authentifié
+// séparé — l'utilisateur tape ses identifiants directement dans l'écran affiché, exactement comme
+// s'il était physiquement devant la VM (console matérielle virtuelle).
+//
+// Mécanisme RÉEL vérifié EN CONDITIONS RÉELLES le 14/08/2026 sur l'instance 172.20.0.10:9440 (VM
+// réelle "HDVAPPLI", LECTURE SEULE — poignée de main WebSocket confirmée par un 101 Switching
+// Protocols reçu, AUCUNE trame envoyée après connexion, socket fermé immédiatement, voir garde-fou
+// de prudence absolue de cette mission) — NE JAMAIS SUPPOSER, inspecté empiriquement :
+//  - Prism Central v3 n'expose AUCUNE ressource de console dans son API REST documentée : ni
+//    `POST/GET /api/nutanix/v3/vms/{uuid}/console` (404), ni les variantes legacy Prism Element
+//    v1/v2 (`/PrismGateway/services/rest/v1|v2.0/vms/{uuid}/console`, 404 également) — cette
+//    instance n'a PAS le mécanisme "action dédiée" qu'on pourrait attendre par analogie avec
+//    d'autres API Nutanix plus anciennes.
+//  - Le SEUL mécanisme réel disponible est `/vnc/vm/{uuid}/proxy` — un endpoint WebSocket qui
+//    répond 400 (Bad Request, PAS 404) à un GET simple sans en-têtes d'upgrade (confirmant que la
+//    route existe et attend spécifiquement une poignée de main WebSocket), et accepte réellement
+//    l'upgrade (101 Switching Protocols) avec authentification Basic (mêmes identifiants Prism
+//    Central que le reste de ce fichier). L'en-tête de réponse `x-ntnx-env: pe` prouve que Prism
+//    Central PROXIFIE cette requête de façon transparente vers le Prism Element du cluster
+//    physique propriétaire de la VM — PC lui-même n'héberge pas le VNC, il relaie vers PE, qui
+//    est bien l'ancienne interface "cluster physique" distincte mentionnée dans la mission. C'est
+//    exactement le mécanisme qu'utilise l'onglet "Launch Console" de l'UI web Prism elle-même
+//    (confirmé par les en-têtes `content-security-policy`/`x-frame-options` orientés navigateur
+//    reçus dans la même réponse). Jamais exposé tel quel au frontend QUAI : voir routes/nutanix.ts,
+//    qui proxifie lui-même ce WebSocket pour que le navigateur ne parle JAMAIS directement à Prism
+//    Central/l'hyperviseur, cohérent avec le reste de cette intégration (mêmes identifiants que
+//    /api/nutanix/vms/list etc., jamais transmis au client).
+//
+// Garde-fou métier délibéré (pas une limite Prism Central documentée, choix QUAI comme pour
+// deleteNutanixVm ci-dessus) : refuse une VM éteinte AVANT même de tenter la connexion amont — une
+// VM AHV éteinte n'a aucune sortie vidéo à proxifier (le proxy VNC de Prism Element se contente
+// sinon d'ouvrir une connexion qui ne montre jamais rien, un état confus pour l'opérateur).
+export async function getNutanixVmConsoleTarget(uuid: string): Promise<{ effective: SetupNutanixConfig; wsPath: string; vmName: string }> {
+  const { effective, entity } = await loadNutanixVmFullEntity(uuid);
+  const vmName = entity.status?.name ?? entity.spec.name ?? uuid;
+  const powerState = entity.status?.resources?.power_state;
+  if (powerState !== "ON") {
+    throw new NutanixActionError(`VM "${vmName}" is powered off — no console video output is available (start the VM first)`, 409);
+  }
+  return { effective, wsPath: `/vnc/vm/${uuid}/proxy`, vmName };
 }

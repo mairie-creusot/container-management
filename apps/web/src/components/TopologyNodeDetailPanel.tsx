@@ -14,6 +14,7 @@ import KeyValueList from "@/components/KeyValueList";
 import MetricsChart from "@/components/MetricsChart";
 import VolumeFilesModal from "@/components/VolumeFilesModal";
 import ContainerConsole from "@/components/ContainerConsole";
+import VmConsole from "@/components/VmConsole";
 import ContainerLogs from "@/features/containers/ContainerLogs";
 import VulnerabilitiesPanel from "@/components/VulnerabilitiesPanel";
 import { IconHistory, IconTerminal } from "@/components/icons";
@@ -1121,6 +1122,11 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
   // lourde "taper le nom de la VM" pour Supprimer, jamais ouverte directement par le bouton lui-même.
   const nutanixActionPendingUuid = useAppSelector((s) => s.nutanix.actionPendingUuid);
   const [nutanixDeleteDialogOpen, setNutanixDeleteDialogOpen] = useState(false);
+  // Console VNC réelle (VmConsole.tsx) — voir la section "VM Nutanix" plus bas. Même pattern EXACT
+  // que consoleTarget ci-dessus (console conteneur) : null = fermée, sinon { uuid, name } de la VM
+  // ciblée. Distinct de consoleTarget (conteneurs) : un id de conteneur Docker et un uuid Nutanix
+  // ne partagent aucun espace de nommage, jamais réutiliser le même state pour les deux.
+  const [nutanixConsoleTarget, setNutanixConsoleTarget] = useState<{ uuid: string; name: string } | null>(null);
 
   /**
    * Démarrer/Arrêter/Redémarrer une VM Nutanix — confirmation `useConfirm`/variant danger AVANT
@@ -1908,6 +1914,21 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
                     >
                       {nutanixActionPendingUuid === rawId ? "…" : "Redémarrer"}
                     </button>
+                    {/* Console VNC réelle (VmConsole.tsx) — clavier/souris réels, mission "je pousse
+                        voir interieur des vm comme en bureaux distance aussi". UNIQUEMENT si la VM
+                        est ALLUMÉE (même choix "masqué plutôt que désactivé" que Démarrer/Arrêter/
+                        Redémarrer ci-dessus, mission : "une VM éteinte ne devrait pas proposer
+                        Console activement" — voir le message ci-dessous pour le cas éteint) : le
+                        backend refuserait de toute façon (409, voir services/nutanix.ts#
+                        getNutanixVmConsoleTarget), une VM AHV éteinte n'a aucune sortie vidéo. */}
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      disabled={nutanixActionPendingUuid === rawId}
+                      onClick={() => setNutanixConsoleTarget({ uuid: rawId, name: node.label })}
+                    >
+                      <IconTerminal /> Console
+                    </button>
                   </>
                 )}
                 <button
@@ -1920,6 +1941,11 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
                   Supprimer
                 </button>
               </div>
+            )}
+            {operate && node.status === "stopped" && (
+              <p className="topology-detail-panel__hint">
+                Console indisponible — la VM est éteinte, aucun flux vidéo à afficher. Démarrez-la d'abord.
+              </p>
             )}
             <TypeToConfirmDialog
               open={nutanixDeleteDialogOpen}
@@ -2228,6 +2254,14 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
         containerId={logsTarget?.id ?? null}
         containerName={logsTarget?.name ?? ""}
         onClose={() => setLogsTarget(null)}
+      />
+      {/* Console VNC réelle d'une VM Nutanix (VmConsole.tsx) — même principe de montage que
+          ContainerConsole/ContainerLogs ci-dessus, piloté par nutanixConsoleTarget (voir bouton
+          "Console" de la section "VM Nutanix" ci-dessus). */}
+      <VmConsole
+        vmUuid={nutanixConsoleTarget?.uuid ?? null}
+        vmName={nutanixConsoleTarget?.name ?? ""}
+        onClose={() => setNutanixConsoleTarget(null)}
       />
     </div>
   );

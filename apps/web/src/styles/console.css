@@ -171,3 +171,86 @@
 .container-console-modal__error {
   margin-top: 10px;
 }
+
+/* Console VNC réelle d'une VM Nutanix — VmConsole.tsx (noVNC/RFB). Mission : fenêtre "plein écran"
+   (contrairement à la console conteneur ci-dessus, un vrai bureau distant a besoin de bien plus
+   que 860px pour rester utilisable) — même truc `:has()` que ci-dessus pour élargir SEULEMENT
+   `.modal-card` quand elle contient CETTE modale précise. */
+.modal-card:has(.vm-console-modal) {
+  width: 100%;
+  max-width: calc(100vw - 32px);
+}
+
+.vm-console-modal {
+  width: calc(100vw - 32px);
+  height: calc(100vh - 32px);
+  padding: 14px 16px 16px;
+  display: flex;
+  flex-direction: column;
+  background: #0a0e14;
+}
+
+.vm-console-modal__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.vm-console-modal__title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.vm-console-modal__subtitle {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.vm-console-modal__status {
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.vm-console-modal__status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-faint);
+}
+
+.vm-console-modal__status--connected .vm-console-modal__status-dot {
+  background: var(--color-success);
+}
+
+.vm-console-modal__status--error .vm-console-modal__status-dot {
+  background: var(--color-critical);
+}
+
+/* Habille le canevas noVNC (fond blanc brut par défaut) — un cadre sombre cohérent avec le reste
+   de QUAI plutôt que le style noVNC par défaut, mission : "pas un cadre blanc brut de noVNC par
+   défaut". `overflow: hidden` + le conteneur centré : `scaleViewport` (VmConsole.tsx) redimensionne
+   déjà le canevas noVNC à la taille de CE conteneur, jamais l'inverse. */
+.vm-console-modal__screen {
+  flex: 1;
+  min-height: 0;
+  background: #0a0e14;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.vm-console-modal__screen canvas {
+  outline: none;
+}
+
+.vm-console-modal__error {
+  margin-top: 10px;
+}

@@ -10,6 +10,18 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src"),
     },
   },
+  optimizeDeps: {
+    // @novnc/novnc (console VNC des VMs Nutanix, voir VmConsole.tsx) utilise un `await` de haut
+    // niveau dans un de ses fichiers internes (core/util/browser.js, détection de support
+    // WebCodecs) — la cible esbuild PAR DÉFAUT du pré-bundling de dépendances de Vite (baseline
+    // ancienne : chrome87/es2020/safari14...) ne le supporte pas et fait planter le serveur de
+    // dev entier au démarrage ("Top-level await is not available...", bug réel constaté le
+    // 14/08/2026). Les navigateurs réels ciblés par cette app supportent nativement le top-level
+    // await depuis longtemps — on exclut simplement ce paquet du PRÉ-bundling esbuild (il reste
+    // servi tel quel, en ESM natif, ce que le navigateur exécute très bien) plutôt que de relever
+    // la cible globale de tout le pré-bundling pour un seul paquet.
+    exclude: ["@novnc/novnc"],
+  },
   server: {
     port: 5173,
     // Bind mount Windows -> conteneur Docker (docker-compose.dev.yml) : les événements fs
