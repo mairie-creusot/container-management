@@ -737,6 +737,18 @@ export async function getContainerLogs(id: string, tail = DEFAULT_LOG_TAIL): Pro
     output.on("error", reject);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (docker.modem as any).demuxStream(input, output, output);
+    // Bug réel corrigé le 14/08/2026 (retour utilisateur : logs vides malgré "En direct" — le
+    // snapshot ne remontait jamais) : `demuxStream` (docker-modem) écoute uniquement l'évènement
+    // "data" de `input`, JAMAIS son "end" — il ne ferme donc jamais lui-même `output`, quoi qu'il
+    // arrive (vérifié en lisant son code source : `streama.on('data', processData)` est le SEUL
+    // listener posé, aucun `.on('end', ...)`). Sans ce relais explicite, la Promise ci-dessus
+    // restait bloquée INDÉFINIMENT (reproduit en direct : >120s sans réponse, confirmé résolu en
+    // quelques ms une fois ce relais ajouté) — même correctif déjà appliqué juste au-dessus dans ce
+    // fichier pour le flux temps réel (`rawStream.on("end", () => output.end())`), simplement
+    // oublié ici pour le snapshot. `input.end(buffer)` déclenche "data" (traité par
+    // `processData`) AVANT "end" (comportement standard des flux Node) : tout le contenu est donc
+    // déjà écrit dans `output` au moment où ce relais s'exécute.
+    input.on("end", () => output.end());
     input.end(buffer);
   });
 }

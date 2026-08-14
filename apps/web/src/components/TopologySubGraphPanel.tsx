@@ -871,7 +871,16 @@ export default function TopologySubGraphPanel({
    * seconde implémentation qui pourrait diverger (même principe que VulnerabilitiesPanel.tsx).
    * Les deux appelants ne sont jamais montés simultanément (un seul `viewMode` actif à la fois).
    */
-  function renderExternalDependenciesGraph() {
+  /**
+   * `compact` (ajouté le 14/08/2026, retour utilisateur : "bug de resize" — la MiniMap, pensée
+   * pour la vue plein écran d'origine, se réaffichait telle quelle dans le petit panneau repliable
+   * "Réseau externe" de Composition interne, ~280px de haut : une carte miniature DANS une carte
+   * déjà miniature, illisible et visuellement cassée) : `true` pour l'usage EMBARQUÉ dans un
+   * panneau réduit (masque la MiniMap, inutile à cette échelle), `false` pour l'ancien usage plein
+   * écran (root non-conteneur, seul contexte qui garde "Dépendances" en contenu principal) — même
+   * calcul de nœuds/arêtes dans les deux cas, aucune deuxième implémentation.
+   */
+  function renderExternalDependenciesGraph(compact: boolean) {
     return (
       <ReactFlow
         key={currentRootId ?? "none"}
@@ -890,17 +899,19 @@ export default function TopologySubGraphPanel({
         minZoom={0.3}
       >
         <Background gap={20} size={1.6} color="var(--color-text-faint)" />
-        <MiniMap
-          position="top-left"
-          nodeColor={(n) =>
-            n.type === "topologyGroupNode" ? "#e879f9" : MINIMAP_NODE_COLOR[(n.data as unknown as TopologyNode).kind]
-          }
-          nodeStrokeWidth={0}
-          nodeBorderRadius={4}
-          maskColor="rgba(11, 12, 16, 0.75)"
-          pannable
-          zoomable
-        />
+        {!compact && (
+          <MiniMap
+            position="top-left"
+            nodeColor={(n) =>
+              n.type === "topologyGroupNode" ? "#e879f9" : MINIMAP_NODE_COLOR[(n.data as unknown as TopologyNode).kind]
+            }
+            nodeStrokeWidth={0}
+            nodeBorderRadius={4}
+            maskColor="rgba(11, 12, 16, 0.75)"
+            pannable
+            zoomable
+          />
+        )}
       </ReactFlow>
     );
   }
@@ -1003,7 +1014,7 @@ export default function TopologySubGraphPanel({
             </div>
           )}
 
-          <div className="topology-subgraph-panel__graph">{renderExternalDependenciesGraph()}</div>
+          <div className="topology-subgraph-panel__graph">{renderExternalDependenciesGraph(false)}</div>
         </>
       )}
 
@@ -1092,20 +1103,27 @@ export default function TopologySubGraphPanel({
                               // directement vers l'action de cycle de vie du conteneur existante. Le serveur
                               // refuserait de toute façon en 409 (défense en profondeur dans handleKillProcess/
                               // handleRestartProcess), mais cette garde évite l'aller-retour raté.
+                              // Libellés courts + `title` pour le détail complet (retour utilisateur du
+                              // 14/08/2026 : "bug de resize" — "Redémarrer le conteneur"/"Arrêter le
+                              // conteneur" en entier forçaient cette ligne, et donc toute la grille, plus
+                              // large que le panneau ; le contexte de la ligne PID 1 rend déjà clair de
+                              // quel conteneur il s'agit, la répétition n'apportait rien).
                               <>
                                 <button
                                   type="button"
                                   className="topology-interior__link-btn"
+                                  title="Redémarrer le conteneur (PID 1 = tout le conteneur)"
                                   onClick={() => void handleContainerAction(rawRootId, rootNode.label, "restart")}
                                 >
-                                  Redémarrer le conteneur
+                                  Redémarrer
                                 </button>
                                 <button
                                   type="button"
                                   className="topology-interior__link-btn topology-interior__link-btn--danger"
+                                  title="Arrêter le conteneur (PID 1 = tout le conteneur)"
                                   onClick={() => void handleContainerAction(rawRootId, rootNode.label, "stop")}
                                 >
-                                  Arrêter le conteneur
+                                  Arrêter
                                 </button>
                               </>
                             )}
@@ -1227,7 +1245,7 @@ export default function TopologySubGraphPanel({
                     Aucune dépendance directe pour « {rootNode.label} » — ce nœud n'a aucune arête dans le graphe.
                   </div>
                 ) : (
-                  <div className="topology-interior__depgraph">{renderExternalDependenciesGraph()}</div>
+                  <div className="topology-interior__depgraph">{renderExternalDependenciesGraph(true)}</div>
                 )}
               </CollapsibleSection>
             </div>

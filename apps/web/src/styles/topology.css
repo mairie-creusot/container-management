@@ -1363,16 +1363,28 @@
 .topology-interior__unified-grid {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   display: grid;
-  grid-template-columns: 1.4fr 1fr;
+  /* Bug réel corrigé le 14/08/2026 (retour utilisateur : "bug de resize", barre de défilement
+     horizontale sur TOUTE LA PAGE) : `1.4fr 1fr` seul ne borne pas la largeur MINIMALE d'une
+     colonne — une piste `fr` reste au moins aussi large que le plus gros contenu intrinsèque de
+     ses enfants (ex : une ligne de processus avec "Redémarrer le conteneur"/"Arrêter le conteneur"
+     en `white-space: nowrap`, voir .topology-interior__proc-actions), ce qui pouvait pousser toute
+     la grille — et donc la page entière — plus large que le canevas. `minmax(0, …)` autorise
+     chaque colonne à rétrécir sous la taille de son contenu ; le débordement réel se retrouve alors
+     CONTENU dans le panneau concerné via son propre `overflow-x` (voir .topology-interior__panel-body
+     ci-dessous), jamais sur la page entière. */
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
   gap: 14px;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .topology-interior__unified-col {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  min-width: 0;
   min-height: 0;
 }
 
@@ -1445,6 +1457,10 @@
   padding: 0 12px 12px;
   max-height: 340px;
   overflow-y: auto;
+  /* Voir .topology-interior__unified-grid ci-dessus : une ligne trop large (ex : les libellés
+     longs des actions de secours sur le PID 1) défile maintenant DANS ce panneau plutôt que de
+     pousser toute la page. */
+  overflow-x: auto;
 }
 
 /* --- Liste des processus réels (GET .../processes/detailed) ------------------------------------ */
@@ -1901,7 +1917,22 @@
   }
 }
 
-/* --- Bouton flottant "Nettoyer les orphelins" (coin bas-droit, glassmorphisme) ------------------ */
+/* --- Bouton flottant "Nettoyer les orphelins" (coin bas-gauche, glassmorphisme) ----------------- */
+
+/* Bug réel corrigé le 14/08/2026 (retour utilisateur : "il manque le button clean orphan") : le
+   bouton a été déplacé du coin bas-droit au bas-gauche (13/08/2026, TopologyGraph.tsx) et rendu
+   permanent, mais SEULE la classe JSX avait changé — cette règle CSS pour la nouvelle classe
+   `.topology-toolbar-bottom-left` n'avait jamais été écrite. Le bouton existait bien dans le DOM
+   mais sans `position: absolute`, donc sans coordonnées : poussé dans le flux normal du document,
+   invisible dans la zone du canevas. `.topology-toolbar-bottom-right` n'a plus aucun appelant
+   (voir TopologyGraph.tsx) mais reste ici, inoffensive, au cas où un futur bouton réutilise le
+   même coin. */
+.topology-toolbar-bottom-left {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  z-index: 20;
+}
 
 .topology-toolbar-bottom-right {
   position: absolute;
