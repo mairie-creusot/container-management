@@ -38,6 +38,29 @@ function matchesFilter(channel: EffectiveNotificationChannel, event: Omit<System
   return true;
 }
 
+/**
+ * Résumé sûr d'une URL de webhook pour un message d'erreur (jamais loggé/persisté tel quel) — ne
+ * renvoie JAMAIS le chemin ni la query string, qui embarquent le secret d'authentification du
+ * canal pour Slack/Discord/un webhook générique (ex: https://hooks.slack.com/services/T000/B000/
+ * XXXXXXXX, le TOKEN est le chemin lui-même ; un webhook générique peut porter un jeton en query
+ * string) : seule l'origine (protocole + hôte + port) est utile pour diagnostiquer un canal
+ * injoignable, et elle n'est jamais sensible. Le message produit par postJson() remonte tel quel
+ * jusqu'à trois endroits qui ne doivent jamais voir le secret en clair : le log serveur
+ * (dispatchNotificationEvent -> console.warn), l'historique PERSISTANT d'automatisation
+ * (automationRunLog via automationEngine.ts) et la réponse HTTP de POST
+ * /api/notification-channels/:id/test (sendTestNotification, exposée à un admin via l'API) —
+ * corrige la fuite trouvée lors de l'analyse d'écart Vault (jamais un secret en clair dans un log,
+ * cf. docs/reports/security-audit-2026-08-12.md pour le même principe appliqué ailleurs dans QUAI).
+ */
+function redactWebhookUrlForLogging(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}/••• (chemin masqué : peut contenir le jeton du canal)`;
+  } catch {
+    return "URL de webhook invalide";
+  }
+}
+
 async function postJson(url: string, body: unknown): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.notificationChannels.requestTimeoutMs);
@@ -59,7 +82,7 @@ async function postJson(url: string, body: unknown): Promise<void> {
         : err instanceof Error
           ? err.message
           : String(err);
-    throw new Error(`${url}: ${reason}`);
+    throw new Error(`${redactWebhookUrlForLogging(url)}: ${reason}`);
   } finally {
     clearTimeout(timeout);
   }
