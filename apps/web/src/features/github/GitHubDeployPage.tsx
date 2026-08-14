@@ -388,12 +388,19 @@ export default function GitHubDeployPage() {
    * pour être appliqués au déploiement suivant (voir composePortOverrides ci-dessus). */
   function handleSubmitConfig(input: DeployConfigFormSubmitInput) {
     if (!configModalTarget) return;
-    dispatch(saveGithubConfigValues({ owner: configModalTarget.owner, repo: configModalTarget.repo, values: input.values })).then((result) => {
+    dispatch(
+      saveGithubConfigValues({
+        owner: configModalTarget.owner,
+        repo: configModalTarget.repo,
+        values: input.values,
+        ...(input.secretRefs ? { secretRefs: input.secretRefs } : {}),
+      }),
+    ).then((result) => {
       if (saveGithubConfigValues.fulfilled.match(result)) {
         if (input.composePortOverrides) setComposePortOverrides((prev) => ({ ...prev, ...input.composePortOverrides }));
-        setConfigModalOpen(false);
-        // Le schéma vient de changer (clés désormais résolues) — reflète-le immédiatement dans le
-        // bandeau "Configuration requise" ci-dessous sans attendre un futur changement de détection.
+        // La fermeture de la modale (immédiate, ou après le panneau de révélation d'un compte
+        // admin généré) est gérée PAR DeployConfigForm lui-même (voir son effet sur `saving`) —
+        // jamais fermée ici, sinon le panneau de révélation n'aurait jamais le temps de s'afficher.
         dispatch(fetchGithubConfigSchema({ owner: configModalTarget.owner, repo: configModalTarget.repo }));
       }
     });

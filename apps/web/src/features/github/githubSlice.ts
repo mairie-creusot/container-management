@@ -181,11 +181,14 @@ export const fetchGithubConfigSchema = createAsyncThunk<
  * réutilisé automatiquement au redéploiement suivant. */
 export const saveGithubConfigValues = createAsyncThunk<
   void,
-  { owner: string; repo: string; values: Record<string, string> },
+  { owner: string; repo: string; values: Record<string, string>; secretRefs?: Record<string, string> },
   { rejectValue: string }
->("github/saveConfigValues", async ({ owner, repo, values }, { rejectWithValue, dispatch }) => {
+>("github/saveConfigValues", async ({ owner, repo, values, secretRefs }, { rejectWithValue, dispatch }) => {
   try {
-    await apiPut(`/github/repos/${owner}/${repo}/config-values`, { values });
+    await apiPut(`/github/repos/${owner}/${repo}/config-values`, {
+      values,
+      ...(secretRefs && Object.keys(secretRefs).length > 0 ? { secretRefs } : {}),
+    });
     dispatch(pushNotification({ level: "success", message: "Configuration enregistrée." }));
   } catch (error) {
     const message = error instanceof ApiError ? error.message : "Échec de l'enregistrement de la configuration.";

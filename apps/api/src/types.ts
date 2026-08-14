@@ -1401,6 +1401,22 @@ export interface EnvVarRequirement {
    * un champ masqué pour ces clés, jamais un texte en clair une fois saisi (même pattern que les
    * champs token/password des registres). */
   looksSensitive: boolean;
+  /**
+   * Résolution AUTOMATIQUE générique appliquée par services/github.ts (voir applyAutoResolutions)
+   * — jamais un cas spécifique à un dépôt précis :
+   * "db-provisioned" : QUAI a prouvé (référence `${clé}` littérale dans le MÊME compose) que cette
+   * clé alimente le mot de passe d'un service base de données reconnu qu'il crée lui-même dans ce
+   * déploiement — un mot de passe fort est généré et appliqué aux deux côtés via l'interpolation
+   * compose native ; `hasValue` vaut alors true, rien à saisir, la valeur n'est jamais montrée.
+   * "admin-seed" : clé qui ressemble à un compte admin par défaut d'une application déployée par
+   * QUAI lui-même (ADMIN_DEFAULT_EMAIL/PASS...) — `hasValue` reste false (champ toujours visible/
+   * éditable), voir `suggestedValue` ci-dessous.
+   */
+  autoResolution?: "db-provisioned" | "admin-seed";
+  /** "admin-seed" uniquement : valeur PROPOSÉE à pré-remplir dans le formulaire (jamais une valeur
+   * de secret préexistante — un email/mot de passe fraîchement suggéré pour un compte que QUAI
+   * crée) — l'utilisateur peut la remplacer avant de valider, jamais appliquée sans qu'il la voie. */
+  suggestedValue?: string;
 }
 
 export interface DeployPortRequirement {

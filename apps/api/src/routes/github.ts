@@ -16,8 +16,10 @@
  * GET  /api/github/repos/:owner/:repo/config-schema  — ?ref=&path= optionnels ; ce qui peut/doit être configuré avant déploiement
  *                                                       (variables d'environnement manquantes, ports, volumes, ARG Dockerfile) —
  *                                                       jamais une vraie valeur de secret, voir DeployConfigSchema (types.ts).
- * PUT  /api/github/repos/:owner/:repo/config-values  — { values: Record<string,string> } — operator/admin (hook global) ; stocke
- *                                                       les valeurs comme secret nommé "github-env:<owner>/<repo>" (secretsStore.ts),
+ * PUT  /api/github/repos/:owner/:repo/config-values  — { values?: Record<string,string>, secretRefs?: Record<string,string> } —
+ *                                                       operator/admin (hook global) ; stocke les valeurs (littérales et/ou
+ *                                                       références vers un secret DÉJÀ existant, vérifié avant enregistrement)
+ *                                                       comme secret nommé "github-env:<owner>/<repo>" (secretsStore.ts),
  *                                                       réutilisé automatiquement à chaque redéploiement suivant.
  *
  * Le webhook entrant lui-même (POST /api/github/webhook, appelé par GitHub — pas de session) vit
@@ -51,6 +53,7 @@ import {
   startDeployment,
 } from "../services/github.js";
 import { isValidSubdomain } from "../services/reverseProxy.js";
+import { getSecretRef } from "../services/secretsStore.js";
 import { RegistryCredentialsMissingError, RegistryHttpError } from "../services/registries/http.js";
 import { remoteDockerIdFromEnvironmentId } from "../utils/environmentId.js";
 import type { GithubAutoDeployStatus } from "../types.js";
@@ -211,19 +214,39 @@ export default async function githubRoutes(fastify: FastifyInstance): Promise<vo
 
   // Enregistre les valeurs de configuration (variables d'environnement) fournies par
   // l'utilisateur — voir services/github.ts#saveGithubEnvValues. Une valeur vide n'écrase jamais
-  // une valeur déjà stockée (formulaire partiel). Le hook global (plugins/auth.ts) exige déjà
-  // operator/admin pour toute méthode mutante, cohérent avec POST .../deploy ci-dessus.
-  fastify.put<{ Params: { owner: string; repo: string }; Body: { values?: Record<string, string> } }>(
-    "/api/github/repos/:owner/:repo/config-values",
-    async (request, reply) => {
-      const values = request.body?.values;
-      if (!values || typeof values !== "object" || Array.isArray(values)) {
-        return reply.code(400).send({ error: "values (object) is required" });
+  // une valeur déjà stockée (formulaire partiel). `secretRefs` (mécanisme générique, ex: SMTP
+  // partagé entre plusieurs dépôts) référence un secret DÉJÀ existant par id au lieu de retaper
+  // une valeur — vérifié ICI, avant tout enregistrement : un id qui ne correspond à AUCUN secret
+  // réel est refusé explicitement (400), jamais une référence fantôme silencieuse. Le hook global
+  // (plugins/auth.ts) exige déjà operator/admin pour toute méthode mutante, cohérent avec POST
+  // .../deploy ci-dessus.
+  fastify.put<{
+    Params: { owner: string; repo: string };
+    Body: { values?: Record<string, string>; secretRefs?: Record<string, string> };
+  }>("/api/github/repos/:owner/:repo/config-values", async (request, reply) => {
+    const values = request.body?.values;
+    const secretRefs = request.body?.secretRefs;
+    if (values !== undefined && (typeof values !== "object" || Array.isArray(values))) {
+      return reply.code(400).send({ error: "values must be an object" });
+    }
+    if (secretRefs !== undefined && (typeof secretRefs !== "object" || Array.isArray(secretRefs))) {
+      return reply.code(400).send({ error: "secretRefs must be an object" });
+    }
+    if (!values && !secretRefs) {
+      return reply.code(400).send({ error: "values or secretRefs is required" });
+    }
+    if (secretRefs) {
+      for (const [key, secretId] of Object.entries(secretRefs)) {
+        if (!secretId) continue;
+        const found = await getSecretRef(secretId);
+        if (!found) {
+          return reply.code(400).send({ error: `secretRefs.${key} : aucun secret "${secretId}" trouvé — vérifiez son id.` });
+        }
       }
-      await saveGithubEnvValues(request.params.owner, request.params.repo, values);
-      return reply.send({ ok: true });
-    },
-  );
+    }
+    await saveGithubEnvValues(request.params.owner, request.params.repo, values ?? {}, secretRefs);
+    return reply.send({ ok: true });
+  });
 
   // --- Déploiement automatique sur push (webhook GitHub réel — cf. routes/githubWebhook.ts) ----
 

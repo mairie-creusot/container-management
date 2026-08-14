@@ -17,7 +17,7 @@
  * explicite à POST /api/github/repos/:owner/:repo/deploy (action utilisateur, voir routes/github.ts).
  */
 
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { spawn } from "node:child_process";
 import os from "node:os";
@@ -41,7 +41,14 @@ import {
 } from "./githubDeployments.js";
 import { CaddyPushFailedError, createRoute, deleteRoute, listRoutes, SubdomainConflictError } from "./reverseProxy.js";
 import { RegistryCredentialsMissingError, RegistryHttpError } from "./registries/http.js";
-import { createSecret, getDecryptedSecretValue, listSecrets, updateSecret } from "./secretsStore.js";
+import {
+  createSecret,
+  getDecryptedSecretValue,
+  getDecryptedSecretValueById,
+  getSecretRef,
+  listSecrets,
+  updateSecret,
+} from "./secretsStore.js";
 import { withTimeout } from "../utils/async.js";
 import type {
   DeployConfigSchema,
@@ -741,6 +748,148 @@ export async function buildEnvRequirements(input: BuildEnvRequirementsInput): Pr
   return { envVars, missingRequiredKeys, ...(unresolvableEnvFile ? { unresolvableEnvFile } : {}) };
 }
 
+// --- Auto-provisioning générique de mot de passe base de données (retour utilisateur réel,
+// 14/08/2026, DB_PASS sur mairie-creusot/formulaire_hotline : "bah normalement c'est toi qui la
+// creer donc tu peut creer un compt admin ou check dans le code de repos si ya info il faut un
+// systeme qui check sa autonome") ------------------------------------------------------------
+//
+// Quand le MÊME docker-compose.yml définit à la fois un service CONSOMMATEUR (qui attend une clé
+// requise, ex: "app" avec `DB_PASS` non résolu) ET un service PRODUCTEUR reconnu (image/nom de
+// moteur de base de données bien connu) dont l'un des mots de passe standard référence CETTE MÊME
+// clé via l'interpolation compose native (`${DB_PASS}`, `${DB_PASS:-defaut}`...), QUAI contrôle
+// RÉELLEMENT les deux côtés dans CE déploiement précis (le service producteur est créé PAR ce
+// même `docker compose up`, jamais un service externe deviné) : un mot de passe fort est alors
+// généré UNE fois (crypto.randomBytes, jamais un mot de passe faible/prévisible), stocké comme
+// secret scopé à ce dépôt (voir githubEnvSecretName) et appliqué de façon cohérente aux deux
+// variables PAR LE MÉCANISME D'INTERPOLATION COMPOSE LUI-MÊME (même fichier .env, voir
+// resolveAndWriteEnvConfig) — jamais une valeur écrite séparément à deux endroits qui pourrait
+// diverger. Preuve exigée AVANT tout provisionnement automatique : la référence `${clé}` doit
+// apparaître LITTÉRALEMENT dans le compose de CE dépôt, jamais une supposition sur un service
+// externe/déjà existant.
+
+/** Services reconnus comme "producteurs" d'une base de données — nom de service standard OU image
+ * d'un moteur connu (mysql/mariadb/postgres/mongo). Heuristique volontairement conservatrice :
+ * un service qui ne matche NI l'un NI l'autre n'est jamais considéré comme un producteur, même si
+ * son nom contient "db" en partie (ex: "pgdb-migrate" ne matche pas le nom exact attendu). */
+const DB_PRODUCER_SERVICE_NAME_PATTERN = /^(db|database|mysql|mariadb|postgres|postgresql|mongo|mongodb)$/i;
+const DB_PRODUCER_IMAGE_PATTERN = /^(mysql|mariadb|postgres|postgresql|mongo|mongodb)(:|@|$)/i;
+
+/** Variables d'environnement standard portant le mot de passe d'accès pour chaque moteur reconnu —
+ * conventions officielles des images Docker Hub respectives, jamais une supposition. */
+const DB_PRODUCER_PASSWORD_VAR_NAMES = new Set([
+  "MYSQL_ROOT_PASSWORD",
+  "MYSQL_PASSWORD",
+  "MARIADB_ROOT_PASSWORD",
+  "MARIADB_PASSWORD",
+  "POSTGRES_PASSWORD",
+  "MONGO_INITDB_ROOT_PASSWORD",
+]);
+
+function looksLikeDbProducerService(serviceName: string, service: ComposeServiceDoc): boolean {
+  const image = typeof service.image === "string" ? service.image : "";
+  return DB_PRODUCER_SERVICE_NAME_PATTERN.test(serviceName) || DB_PRODUCER_IMAGE_PATTERN.test(image);
+}
+
+/** Extrait la clé référencée par une interpolation compose SIMPLE `${KEY}` / `${KEY:-defaut}` /
+ * `${KEY-defaut}` — `undefined` pour toute autre forme (valeur littérale, expression imbriquée...),
+ * jamais interprétée à l'aveugle. Même famille de syntaxe que Docker Compose lui-même. */
+export function composeInterpolatedVarName(rawValue: unknown): string | undefined {
+  if (typeof rawValue !== "string") return undefined;
+  const match = /^\$\{([A-Za-z_][A-Za-z0-9_]*)(:?-.*)?\}$/.exec(rawValue.trim());
+  return match?.[1];
+}
+
+/** true si `key` est PROUVÉE, dans CE MÊME compose, alimenter le mot de passe d'un service base de
+ * données reconnu — voir le commentaire de section ci-dessus. Fonction pure, testée indépendamment. */
+export function isDbCredentialProvisionable(composeDoc: ComposeDoc | undefined, key: string): boolean {
+  if (!composeDoc?.services) return false;
+  for (const [serviceName, service] of Object.entries(composeDoc.services)) {
+    if (!looksLikeDbProducerService(serviceName, service)) continue;
+    const raw = service.environment;
+    const entries: Array<[string, unknown]> = Array.isArray(raw)
+      ? raw
+          .filter((e): e is string => typeof e === "string" && e.includes("="))
+          .map((e) => {
+            const eq = e.indexOf("=");
+            return [e.slice(0, eq), e.slice(eq + 1)] as [string, unknown];
+          })
+      : raw && typeof raw === "object"
+        ? Object.entries(raw as Record<string, unknown>)
+        : [];
+    for (const [envKey, envValue] of entries) {
+      if (!DB_PRODUCER_PASSWORD_VAR_NAMES.has(envKey.toUpperCase())) continue;
+      if (composeInterpolatedVarName(envValue) === key) return true;
+    }
+  }
+  return false;
+}
+
+/** Mot de passe fort généré côté serveur (192 bits d'entropie, alphabet URL-safe — jamais un mot
+ * de passe faible/prévisible, voir mission) — utilisé pour l'auto-provisioning DB ET le seeder de
+ * compte admin ci-dessous. */
+export function generateStrongSecret(): string {
+  return randomBytes(24).toString("base64url");
+}
+
+// --- Seeder générique de compte admin par défaut (retour utilisateur réel, 14/08/2026 : "genre
+// admin@localhost.fr mdp simple bref quand ya des truc dans ce genre ou ont a le controle
+// utiliser un systeme de seeder ou utilisateur peut toujour overide si il le shouaite") --------
+//
+// Une clé qui ressemble à un compte admin PAR DÉFAUT d'une application que QUAI déploie
+// lui-même (jamais un compte d'un système EXTERNE) reçoit une valeur SUGGÉRÉE — jamais appliquée
+// en silence : le champ reste visible/éditable dans le formulaire (DeployConfigForm.tsx),
+// pré-rempli avec cette suggestion que l'utilisateur peut remplacer avant de valider. Le mot de
+// passe suggéré est généré fort (generateStrongSecret), jamais "simple" malgré le mot de
+// l'utilisateur — c'est un vrai compte admin d'une vraie application.
+
+const ADMIN_SEED_EMAIL_KEY_PATTERN = /^(ADMIN_DEFAULT_EMAIL|ADMIN_EMAIL|DEFAULT_ADMIN_EMAIL|SEED_ADMIN_EMAIL)$/i;
+const ADMIN_SEED_PASSWORD_KEY_PATTERN = /^(ADMIN_DEFAULT_PASS(WORD)?|ADMIN_PASSWORD|DEFAULT_ADMIN_PASS(WORD)?|SEED_ADMIN_PASS(WORD)?)$/i;
+
+/** Segment DNS-safe dérivé du nom du dépôt — même esprit que defaultSubdomainFor côté frontend
+ * (GitHubDeployPage.tsx), réutilisé ici pour un email de démonstration plausible et unique par dépôt. */
+function repoSlug(repo: string): string {
+  return (
+    repo
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 63) || "app"
+  );
+}
+
+/** Suggestion pour une clé "seed admin" reconnue — `undefined` si `key` ne matche aucun des deux
+ * motifs (email/mot de passe), jamais un provisionnement pour une clé qui n'y ressemble pas. */
+export function adminSeedSuggestion(key: string, repo: string): string | undefined {
+  if (ADMIN_SEED_EMAIL_KEY_PATTERN.test(key)) return `admin@${repoSlug(repo)}.local`;
+  if (ADMIN_SEED_PASSWORD_KEY_PATTERN.test(key)) return generateStrongSecret();
+  return undefined;
+}
+
+/**
+ * Applique les deux mécanismes génériques ci-dessus sur une liste d'EnvVarRequirement déjà
+ * calculée par buildEnvRequirements — factorisé entre buildDeployConfigSchema (aperçu, ne
+ * persiste rien) et resolveAndWriteEnvConfig (déploiement réel, persiste la valeur DB générée).
+ * Mute `envVars` EN PLACE (tableau déjà possédé par l'appelant, jamais partagé ailleurs) et
+ * retourne la liste de clés encore réellement bloquantes après application.
+ */
+function applyAutoResolutions(envVars: EnvVarRequirement[], composeDoc: ComposeDoc | undefined, repo: string): string[] {
+  for (const v of envVars) {
+    if (v.hasValue) continue;
+    if (isDbCredentialProvisionable(composeDoc, v.key)) {
+      v.hasValue = true;
+      v.autoResolution = "db-provisioned";
+      continue;
+    }
+    const suggestion = adminSeedSuggestion(v.key, repo);
+    if (suggestion !== undefined) {
+      v.autoResolution = "admin-seed";
+      v.suggestedValue = suggestion;
+      // hasValue reste false : le champ DOIT rester visible/éditable, jamais appliqué en silence.
+    }
+  }
+  return envVars.filter((v) => v.required && !v.hasValue).map((v) => v.key);
+}
+
 /** Nom du secret multi-clé (JSON) portant les variables d'environnement résolues pour CE dépôt —
  * scope au dépôt entier (pas par sous-dossier : un dépôt a en pratique une configuration
  * d'environnement cohérente d'un seul tenant, simplification assumée et documentée). Convention
@@ -749,19 +898,51 @@ export function githubEnvSecretName(owner: string, repo: string): string {
   return `github-env:${owner.toLowerCase()}/${repo.toLowerCase()}`;
 }
 
-/** Valeurs déjà résolues pour ce dépôt (déchiffrées) — jamais exposées telles quelles par une
- * route, voir buildDeployConfigSchema/resolveAndWriteEnvConfig qui n'en dérivent qu'un booléen
- * `hasValue` ou les consomment pour écrire un VRAI fichier .env local, jamais pour les renvoyer
- * au client. */
-async function getStoredEnvValues(owner: string, repo: string): Promise<Record<string, string>> {
+/**
+ * Entrée stockée pour une clé donnée dans le secret multi-clé d'un dépôt — soit une valeur
+ * littérale (chiffrée avec le reste du blob JSON, comme avant), soit une RÉFÉRENCE vers un secret
+ * DÉJÀ existant ailleurs dans secretsStore.ts (`{ secretRef: <id> }`) : la copie n'est jamais
+ * dupliquée, résolue à la demande (getStoredEnvValues) — si le secret référencé est renommé/tourné
+ * plus tard, ce dépôt récupère automatiquement la nouvelle valeur au prochain déploiement, jamais
+ * une copie figée au moment de la référence. Mécanisme générique demandé par la mission "SMTP
+ * partagé entre plusieurs dépôts" — voir routes/github.ts#PUT .../config-values.
+ */
+type StoredEnvEntry = string | { secretRef: string };
+
+/** Forme BRUTE (non résolue) du secret multi-clé de ce dépôt — utilisée uniquement par
+ * saveGithubEnvValues pour fusionner sans jamais devoir déchiffrer/reformer les entrées déjà
+ * présentes. Jamais exposée par une route. */
+async function getStoredEnvEntriesRaw(owner: string, repo: string): Promise<Record<string, StoredEnvEntry>> {
   const raw = await getDecryptedSecretValue(githubEnvSecretName(owner, repo));
   if (!raw) return {};
   try {
     const parsed: unknown = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, StoredEnvEntry>) : {};
   } catch {
     return {};
   }
+}
+
+/** Valeurs RÉSOLUES (déchiffrées) pour ce dépôt — une entrée `{secretRef}` est déréférencée vers
+ * la valeur COURANTE du secret ciblé (jamais une copie figée) ; si ce secret référencé a disparu
+ * depuis (supprimé), la clé est simplement absente du résultat, jamais une exception qui ferait
+ * échouer toute la résolution. Jamais exposée telle quelle par une route — voir
+ * buildDeployConfigSchema/resolveAndWriteEnvConfig qui n'en dérivent qu'un booléen `hasValue` ou
+ * les consomment pour écrire un VRAI fichier .env local, jamais pour les renvoyer au client. */
+async function getStoredEnvValues(owner: string, repo: string): Promise<Record<string, string>> {
+  const rawEntries = await getStoredEnvEntriesRaw(owner, repo);
+  const out: Record<string, string> = {};
+  for (const [key, entry] of Object.entries(rawEntries)) {
+    if (typeof entry === "string") {
+      out[key] = entry;
+      continue;
+    }
+    if (entry && typeof entry === "object" && typeof entry.secretRef === "string") {
+      const value = await getDecryptedSecretValueById(entry.secretRef).catch(() => null);
+      if (value !== null) out[key] = value;
+    }
+  }
+  return out;
 }
 
 /**
@@ -769,12 +950,23 @@ async function getStoredEnvValues(owner: string, repo: string): Promise<Record<s
  * fournies dans le secret JSON multi-clé de ce dépôt (créé au premier appel, mis à jour ensuite).
  * Une valeur vide/absente n'écrase JAMAIS une valeur déjà stockée : un formulaire qui ne modifie
  * que certains champs (les autres restant masqués "déjà configuré") ne doit jamais effacer le reste.
+ * `secretRefs` (optionnel) : référence un secret DÉJÀ existant par id au lieu de retaper une
+ * valeur — voir StoredEnvEntry ; l'appelant (routes/github.ts) DOIT avoir vérifié que chaque id
+ * existe réellement avant d'appeler cette fonction (jamais une référence fantôme silencieuse).
  */
-export async function saveGithubEnvValues(owner: string, repo: string, values: Record<string, string>): Promise<void> {
-  const existing = await getStoredEnvValues(owner, repo);
-  const merged = { ...existing };
+export async function saveGithubEnvValues(
+  owner: string,
+  repo: string,
+  values: Record<string, string>,
+  secretRefs?: Record<string, string>,
+): Promise<void> {
+  const existing = await getStoredEnvEntriesRaw(owner, repo);
+  const merged: Record<string, StoredEnvEntry> = { ...existing };
   for (const [key, value] of Object.entries(values)) {
     if (value !== undefined && value !== "") merged[key] = value;
+  }
+  for (const [key, secretId] of Object.entries(secretRefs ?? {})) {
+    if (secretId) merged[key] = { secretRef: secretId };
   }
   const name = githubEnvSecretName(owner, repo);
   const all = await listSecrets();
@@ -786,7 +978,7 @@ export async function saveGithubEnvValues(owner: string, repo: string, values: R
     await createSecret({
       name,
       value: payload,
-      description: `Variables d'environnement résolues pour le déploiement GitHub ${owner}/${repo} (secret multi-clé, JSON) — réutilisées automatiquement à chaque redéploiement suivant.`,
+      description: `Variables d'environnement résolues pour le déploiement GitHub ${owner}/${repo} (secret multi-clé, JSON — valeurs littérales et/ou références vers d'autres secrets) — réutilisées automatiquement à chaque redéploiement suivant.`,
     });
   }
 }
@@ -833,13 +1025,18 @@ export async function buildDeployConfigSchema(
   const envFileExists = async (relativePath: string): Promise<boolean> =>
     (await fetchFileContent(owner, repo, filePath(relativePath), resolvedRef, token)) !== undefined;
 
-  const { envVars, missingRequiredKeys, unresolvableEnvFile } = await buildEnvRequirements({
+  const { envVars, unresolvableEnvFile } = await buildEnvRequirements({
     ...(composeDoc ? { composeDoc } : {}),
     ...(dockerfileContent ? { dockerfileContent } : {}),
     envExampleDefaults,
     resolvedValues: storedValues,
     envFileExists,
   });
+  // Auto-provisioning DB (preuve dans CE compose) + seeder de compte admin par défaut — voir
+  // applyAutoResolutions. Aperçu SEULEMENT ici (aucune écriture/génération persistée) : la
+  // génération réelle du mot de passe DB n'a lieu qu'au moment du déploiement effectif, voir
+  // resolveAndWriteEnvConfig — GET ne doit jamais avoir d'effet de bord.
+  const missingRequiredKeys = applyAutoResolutions(envVars, composeDoc, repo);
 
   const ports: DeployPortRequirement[] = [];
   if (composeDoc?.services) {
@@ -1754,13 +1951,37 @@ async function resolveAndWriteEnvConfig(
       .then(() => true)
       .catch(() => false);
 
-  const { envVars, missingRequiredKeys } = await buildEnvRequirements({
+  const { envVars } = await buildEnvRequirements({
     ...(composeDoc ? { composeDoc } : {}),
     ...(dockerfileContent ? { dockerfileContent } : {}),
     envExampleDefaults,
     resolvedValues: storedValues,
     envFileExists,
   });
+
+  // Auto-provisioning DB (preuve dans CE MÊME compose, voir isDbCredentialProvisionable) + seeder
+  // de compte admin par défaut (voir adminSeedSuggestion) — réduisent RÉELLEMENT ce qui bloque le
+  // déploiement, jamais un cas spécifique à un dépôt précis (voir applyAutoResolutions).
+  const missingRequiredKeys = applyAutoResolutions(envVars, composeDoc, repo);
+
+  // Génère RÉELLEMENT, une seule fois, le mot de passe des clés auto-provisionnées encore sans
+  // valeur stockée — un redéploiement ultérieur retrouve `storedValues[key]` déjà rempli et ne
+  // régénère JAMAIS (le service base de données déjà créé, dont le volume persiste les données,
+  // refuserait un nouveau mot de passe à chaque redéploiement). Persisté immédiatement (secret
+  // scopé à ce dépôt) pour que le prochain déploiement retrouve la MÊME valeur.
+  const newlyProvisioned: Record<string, string> = {};
+  for (const v of envVars) {
+    if (v.autoResolution !== "db-provisioned" || storedValues[v.key] !== undefined) continue;
+    newlyProvisioned[v.key] = generateStrongSecret();
+  }
+  if (Object.keys(newlyProvisioned).length > 0) {
+    await saveGithubEnvValues(owner, repo, newlyProvisioned);
+    Object.assign(storedValues, newlyProvisioned);
+    await appendDeploymentLog(
+      deploymentId,
+      `${Object.keys(newlyProvisioned).length} mot(s) de passe de base de données généré(s) automatiquement (référence directe prouvée dans ce même docker-compose.yml : ${Object.keys(newlyProvisioned).join(", ")}) — stocké(s) de manière chiffrée, jamais journalisé(s) en clair, réutilisé(s) automatiquement à chaque redéploiement suivant.\n`,
+    );
+  }
 
   if (missingRequiredKeys.length > 0) {
     await appendDeploymentLog(

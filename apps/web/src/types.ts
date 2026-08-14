@@ -1073,6 +1073,13 @@ export interface EnvVarRequirement {
   envFilePath?: string; // "env_file" uniquement
   /** Heuristique sur le NOM de la clé — champ masqué côté formulaire pour ces clés. */
   looksSensitive: boolean;
+  /** "db-provisioned" : mot de passe généré et appliqué automatiquement (preuve dans le même
+   * compose) — hasValue true, rien à saisir, jamais montré. "admin-seed" : compte admin par
+   * défaut d'une app déployée par QUAI — hasValue reste false, voir suggestedValue. */
+  autoResolution?: "db-provisioned" | "admin-seed";
+  /** "admin-seed" uniquement : valeur proposée à pré-remplir (jamais un secret préexistant),
+   * toujours modifiable avant validation. */
+  suggestedValue?: string;
 }
 
 export interface DeployPortRequirement {
