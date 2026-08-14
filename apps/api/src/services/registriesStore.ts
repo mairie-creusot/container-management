@@ -22,7 +22,6 @@ import { getLocalDockerImages } from "./docker.js";
 import type { LocalDockerImage } from "./docker.js";
 import { registryKindFromImageName, testRegistryConnection } from "./registries/index.js";
 import { listOrgPackages } from "./registries/ghcr.js";
-import { demoStore } from "./demoData.js";
 import type { Registry, RegistryKind } from "../types.js";
 
 /** "ghcr.io/mairie-creusot/foo" -> "mairie-creusot" — pas d'org configurable dans l'assistant
@@ -87,10 +86,25 @@ async function buildRegistryView(persisted: SetupRegistryConfig, index: number):
   };
 }
 
+/**
+ * Bug réel corrigé le 14/08/2026 (retour utilisateur : "tu a mis des placehold que je ne peut pas
+ * enlever") — root-causé via le journal d'audit : l'utilisateur a réellement supprimé son seul
+ * registry configuré (DELETE /api/registries/reg-ghcr-0, 200, confirmé) ; `persisted.length === 0`
+ * déclenchait alors un repli sur `demoStore.registries` — 4 cartes ("Docker Hub"/"GitHub Container
+ * Registry"/"GitLab Registry — Mairie"/"Harbor interne") renvoyées avec EXACTEMENT la même forme
+ * qu'un vrai `Registry`, donc rendues par le frontend avec les mêmes boutons "Explorer le
+ * catalogue"/"Supprimer" pleinement cliquables — qui échouaient en 404 dès qu'on cliquait dessus
+ * (aucune entrée réelle correspondante dans le tableau persisté). Un repli de démonstration n'a de
+ * sens QU'AVANT tout usage réel (aperçu de fonctionnalité pendant l'assistant de configuration) —
+ * une fois `completed: true` (l'assistant a déjà tourné), un tableau vide signifie RÉELLEMENT "plus
+ * aucun registry", jamais une invitation à afficher des cartes qui se comportent comme des vraies
+ * sans en être. RegistriesPage.tsx a déjà un état vide honnête ("Aucun registry configuré.",
+ * jamais atteint tant que ce repli renvoyait 4 entrées) : on le laisse enfin s'afficher.
+ */
 export async function listRegistries(): Promise<Registry[]> {
   const current = await getCurrent();
   const persisted = current.registries ?? [];
-  if (persisted.length === 0) return demoStore.registries; // rien configuré : repli démo
+  if (persisted.length === 0) return [];
   return Promise.all(persisted.map((r, index) => buildRegistryView(r, index)));
 }
 
