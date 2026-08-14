@@ -564,7 +564,17 @@ export default function TopologySubGraphPanel({
   }, [dispatch, viewMode, imageRef?.id]);
 
   const historyLayers = imageRef ? historyByImageId[imageRef.id] ?? null : null;
-  const processesDetailedReady = processesDetailedStatus === "ready" && processesDetailedContainerId === rawRootId;
+  // Bug réel corrigé le 14/08/2026 (retour utilisateur : le panneau "Processus réels" se vide/
+  // rétrécit puis se repeuple/regrandit en boucle, "effet bizarre buggé") — root-causé : cette
+  // condition exigeait `status === "ready"`, mais le sondage périodique (PROCESS_POLL_INTERVAL_MS,
+  // ~2,5s) repasse par `"loading"` À CHAQUE cycle AVANT que la nouvelle réponse arrive, alors même
+  // que `processesDetailed` contient encore la DERNIÈRE liste valide, inchangée. La liste entière
+  // disparaissait donc brièvement à chaque sondage puis réapparaissait dès la résolution — jamais
+  // un vrai premier chargement, juste un rafraîchissement en arrière-plan qui n'a aucune raison de
+  // cacher des données déjà correctes. On garde maintenant la DERNIÈRE liste connue affichée tant
+  // qu'elle correspond au bon conteneur, quel que soit le statut du sondage EN COURS — seul un
+  // changement de conteneur (id différent) ou l'absence de toute donnée doit la vider.
+  const processesDetailedReady = processesDetailedContainerId === rawRootId && processesDetailed !== null;
   const effectiveProcessesDetailed = processesDetailedReady ? processesDetailed : null;
 
   /** "Carte réseau interne" — dérivée des `listenPorts` réels de chaque process, aucune route
