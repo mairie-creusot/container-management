@@ -49,6 +49,13 @@ import {
   listSecrets,
   updateSecret,
 } from "./secretsStore.js";
+import {
+  deleteFileOverride,
+  getFileOverride,
+  listFileOverrides,
+  saveFileOverride,
+} from "./githubFileOverridesStore.js";
+import { diagnoseDeploymentFailure } from "./deploymentDiagnostics.js";
 import { withTimeout } from "../utils/async.js";
 import type {
   DeployConfigSchema,
@@ -62,8 +69,11 @@ import type {
   GithubDeploymentDetail,
   GithubDeploymentTrigger,
   GithubDetectionCandidate,
+  GithubFileOverride,
   GithubRepoDetection,
   GithubRepoRef,
+  OverridableFileKind,
+  OverridableFileRef,
 } from "../types.js";
 
 // --- Client HTTP GitHub (garde le style diagnostic de registries/http.ts — RegistryHttpError/
@@ -1004,13 +1014,19 @@ export async function buildDeployConfigSchema(
   const entries = Array.isArray(data) ? (data as GithubApiContentItem[]) : [];
   const summary = summarizeEntries(entries);
 
-  const composeRaw = summary.hasCompose
-    ? await fetchFileContent(owner, repo, filePath(summary.composeFileName!), resolvedRef, token)
-    : undefined;
+  // Le fichier réellement utilisé pour build/déployer est TOUJOURS l'original du dépôt SAUF si
+  // une surcharge existe pour ce chemin exact (voir githubFileOverridesStore.ts) — l'aperçu de
+  // schéma doit refléter le contenu EFFECTIF (celui qui sera réellement utilisé), jamais l'original
+  // si une surcharge est active pour ce chemin.
+  const effectiveFileContent = async (relPath: string): Promise<string | undefined> => {
+    const override = await getFileOverride(owner, repo, relPath);
+    if (override) return override.content;
+    return fetchFileContent(owner, repo, relPath, resolvedRef, token);
+  };
+
+  const composeRaw = summary.hasCompose ? await effectiveFileContent(filePath(summary.composeFileName!)) : undefined;
   const composeDoc = composeRaw ? ((yaml.load(composeRaw) as ComposeDoc | undefined) ?? undefined) : undefined;
-  const dockerfileContent = summary.hasDockerfile
-    ? await fetchFileContent(owner, repo, filePath("Dockerfile"), resolvedRef, token)
-    : undefined;
+  const dockerfileContent = summary.hasDockerfile ? await effectiveFileContent(filePath("Dockerfile")) : undefined;
 
   let envExampleDefaults = new Map<string, string | undefined>();
   for (const name of ENV_EXAMPLE_FILE_NAMES) {
@@ -1083,6 +1099,108 @@ export async function buildDeployConfigSchema(
     volumes,
     ...(unresolvableEnvFile ? { unresolvableEnvFile } : {}),
   };
+}
+
+// --- Surcharge du CONTENU de fichiers détectés au moment du build/déploiement (retour
+// utilisateur réel, 14/08/2026 : "fait en sorte qu'ont puisse overide le dockerfile et les autre
+// fichier de conf au moment du build") — voir services/githubFileOverridesStore.ts pour le
+// stockage (EN CLAIR, décision documentée dans ce module) et le commentaire d'en-tête de
+// types.ts § "Surcharge du CONTENU de fichiers".
+
+/**
+ * GET /api/github/repos/:owner/:repo/overridable-files (voir routes/github.ts) — énumère les
+ * fichiers RÉELLEMENT détectés à cet emplacement (même détection que detectRepo), croisés avec les
+ * surcharges actives pour ce dépôt — jamais un fichier inventé, uniquement ceux que la détection a
+ * réellement trouvés dans le VRAI dépôt.
+ */
+export async function listOverridableFiles(owner: string, repo: string, ref?: string, explicitPath?: string): Promise<OverridableFileRef[]> {
+  const effective = await getEffectiveToken();
+  const token = effective?.token;
+  const resolvedRef = ref ?? (await fetchDefaultBranch(owner, repo, token));
+  const dirPath = explicitPath ?? "";
+  const filePath = (name: string) => (dirPath ? `${dirPath}/${name}` : name);
+
+  const { data } = await githubFetch(`${contentsApiPath(owner, repo, dirPath)}?ref=${encodeURIComponent(resolvedRef)}`, token);
+  const entries = Array.isArray(data) ? (data as GithubApiContentItem[]) : [];
+  const summary = summarizeEntries(entries);
+
+  const candidates: Array<{ path: string; kind: OverridableFileKind }> = [];
+  if (summary.hasDockerfile) candidates.push({ path: filePath("Dockerfile"), kind: "dockerfile" });
+  if (summary.hasCompose) candidates.push({ path: filePath(summary.composeFileName!), kind: "compose" });
+  for (const tf of summary.terraformFiles) candidates.push({ path: filePath(tf), kind: "terraform" });
+  if (summary.ansiblePlaybook) candidates.push({ path: filePath(summary.ansiblePlaybook), kind: "ansible-playbook" });
+  if (summary.hasAnsible) {
+    const fileNames = new Set(entries.filter((e) => e.type === "file").map((e) => e.name.toLowerCase()));
+    const inventoryName = ANSIBLE_INVENTORY_NAMES.find((name) => fileNames.has(name));
+    if (inventoryName) candidates.push({ path: filePath(inventoryName), kind: "ansible-inventory" });
+  }
+
+  const overrides = await listFileOverrides(owner, repo);
+  const overriddenPaths = new Set(overrides.map((o) => o.path));
+  return candidates.map((c) => ({ ...c, hasOverride: overriddenPaths.has(c.path) }));
+}
+
+/**
+ * GET /api/github/repos/:owner/:repo/file-content (voir routes/github.ts) — contenu d'UN fichier,
+ * soit l'ORIGINAL du dépôt (API Contents GitHub, `source=original`), soit la SURCHARGE active
+ * (`source=override`) — jamais les deux mélangés. `null` si introuvable dans la source demandée
+ * (fichier absent du dépôt, ou aucune surcharge active pour ce chemin).
+ */
+export async function getGithubFileContent(
+  owner: string,
+  repo: string,
+  filePathValue: string,
+  ref: string | undefined,
+  source: "original" | "override",
+): Promise<{ content: string; source: "original" | "override" } | null> {
+  if (source === "override") {
+    const override = await getFileOverride(owner, repo, filePathValue);
+    return override ? { content: override.content, source: "override" } : null;
+  }
+  const effective = await getEffectiveToken();
+  const token = effective?.token;
+  const resolvedRef = ref ?? (await fetchDefaultBranch(owner, repo, token));
+  const content = await fetchFileContent(owner, repo, filePathValue, resolvedRef, token);
+  return content !== undefined ? { content, source: "original" } : null;
+}
+
+// Re-exportés tels quels (pas de logique supplémentaire nécessaire) — routes/github.ts n'importe
+// qu'un seul module de service, jamais directement githubFileOverridesStore.ts, même convention
+// que githubDeployments.ts ci-dessus (voir `export { listDeployments }` plus bas dans ce fichier).
+export { listFileOverrides, saveFileOverride, deleteFileOverride };
+
+/**
+ * Applique EN PLACE, sur le VRAI clone local, toute surcharge active pour CE dépôt dont le chemin
+ * correspond à un fichier RÉELLEMENT présent dans ce clone (voir mission "jamais un patch/diff
+ * partiel" : remplace le fichier ENTIÈREMENT). Appelée par runDeployment juste après le clone,
+ * AVANT toute détection/lecture locale — ainsi resolveAndWriteEnvConfig/deployViaDockerBuild/
+ * deployViaDockerCompose lisent tous naturellement le contenu EFFECTIF sans code spécifique
+ * ailleurs. `cloneDir` = racine du clone (les chemins de surcharge sont relatifs à la racine du
+ * dépôt, jamais au sous-dossier configPath — voir OverridableFileRef#path).
+ */
+async function applyStoredFileOverrides(deploymentId: string, cloneDir: string, owner: string, repo: string): Promise<void> {
+  const overrides = await listFileOverrides(owner, repo);
+  if (overrides.length === 0) return;
+  const resolvedCloneDir = path.resolve(cloneDir);
+  for (const override of overrides) {
+    // Défense en profondeur : le chemin a déjà été validé (isSafeRelativeConfigPath) à
+    // l'enregistrement (routes/github.ts) — un garde-fou supplémentaire ici ne coûte rien et
+    // protège aussi contre un store modifié hors de QUAI (fichier JSON édité à la main sur disque).
+    if (!isSafeRelativeConfigPath(override.path)) continue;
+    const target = path.resolve(path.join(cloneDir, override.path));
+    if (!target.startsWith(resolvedCloneDir + path.sep) && target !== resolvedCloneDir) continue;
+    const existedBefore = await fs
+      .access(target)
+      .then(() => true)
+      .catch(() => false);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, override.content, "utf-8");
+    await appendDeploymentLog(
+      deploymentId,
+      `Fichier "${override.path}" ${existedBefore ? "remplacé" : "créé"} par la surcharge enregistrée pour ce dépôt ` +
+        `(voir Configuration -> Fichiers, modifiée le ${new Date(override.updatedAt).toLocaleString("fr-FR")} par ${override.updatedBy}).\n`,
+    );
+  }
 }
 
 interface GithubApiCommit {
@@ -2075,6 +2193,12 @@ async function runDeployment(
     );
     await appendDeploymentLog(deploymentId, "Clone terminé.\n");
 
+    // Surcharges de fichiers actives pour ce dépôt (Dockerfile/compose/*.tf/playbook Ansible, voir
+    // githubFileOverridesStore.ts) — appliquées AVANT toute détection/lecture locale, pour que
+    // TOUT le reste du pipeline (détection, résolution des variables d'environnement, build) opère
+    // naturellement sur le contenu EFFECTIF, sans code spécifique ailleurs.
+    await applyStoredFileOverrides(deploymentId, cloneDir, owner, repo);
+
     // "Vérité terrain" : détection sur le VRAI clone (jamais réutilisé la détection GitHub API,
     // qui n'est qu'un aperçu — voir en-tête de fichier), à l'emplacement choisi par l'utilisateur
     // (configPath = GithubRepoDetection#detectedPath, "" pour la racine).
@@ -2236,5 +2360,8 @@ export async function getDeploymentDetail(id: string): Promise<GithubDeploymentD
   const deployment = await getDeployment(id);
   if (!deployment) return null;
   const log = await readDeploymentLog(id);
-  return { ...deployment, log };
+  // Diagnostic générique — calculé À LA DEMANDE (jamais persisté), status "failed" uniquement (voir
+  // services/deploymentDiagnostics.ts). Toujours au moins un élément si calculé (jamais [] muet).
+  const diagnostics = deployment.status === "failed" ? diagnoseDeploymentFailure(log) : undefined;
+  return { ...deployment, log, ...(diagnostics ? { diagnostics } : {}) };
 }

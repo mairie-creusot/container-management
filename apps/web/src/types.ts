@@ -1050,6 +1050,29 @@ export interface GithubDeployment {
 
 export interface GithubDeploymentDetail extends GithubDeployment {
   log: string;
+  /** status "failed" uniquement : diagnostic(s) structuré(s) extraits du log par le moteur
+   * générique de reconnaissance de motifs — calculé à la demande, jamais persisté. */
+  diagnostics?: DeploymentDiagnostic[];
+}
+
+// --- Diagnostic générique des échecs de déploiement — voir apps/api/src/services/deploymentDiagnostics.ts.
+
+export type DeploymentDiagnosticCategory =
+  | "missing-header"
+  | "missing-dependency"
+  | "image-not-found"
+  | "syntax-error"
+  | "dependency-failed"
+  | "port-conflict"
+  | "missing-config"
+  | "unknown";
+
+export interface DeploymentDiagnostic {
+  category: DeploymentDiagnosticCategory;
+  title: string;
+  explanation: string;
+  suggestedAction: string;
+  evidence?: string;
 }
 
 // --- Configuration dynamique de déploiement (variables d'environnement manquantes, ports,
@@ -1110,6 +1133,32 @@ export interface DeployConfigSchema {
   /** Présent seulement si un `env_file:` référence un fichier introuvable ET qu'aucun
    * .env.example/.env.sample n'a été trouvé pour en déduire les clés attendues. */
   unresolvableEnvFile?: string;
+}
+
+// --- Surcharge du CONTENU de fichiers détectés au moment du build/déploiement — voir
+// apps/api/src/services/githubFileOverridesStore.ts. Le fichier réellement utilisé pour build/
+// déployer est TOUJOURS l'original du clone SAUF si une surcharge existe pour ce chemin exact,
+// auquel cas elle le remplace ENTIÈREMENT (jamais un patch/diff partiel).
+
+export type OverridableFileKind = "dockerfile" | "compose" | "terraform" | "ansible-playbook" | "ansible-inventory";
+
+export interface OverridableFileRef {
+  path: string;
+  kind: OverridableFileKind;
+  hasOverride: boolean;
+}
+
+export interface GithubFileOverride {
+  path: string;
+  content: string;
+  updatedAt: string;
+  updatedBy: string;
+}
+
+export interface GithubFileContent {
+  path: string;
+  content: string;
+  source: "original" | "override";
 }
 
 /** GET/PUT /api/github/repos/:owner/:repo/auto-deploy — déploiement automatique sur push. */

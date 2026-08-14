@@ -176,6 +176,13 @@ export const config = {
     // Intégration GitOps GitHub (cf. ARCHITECTURE.md, chapitre "Intégration GitHub") : jeton
     // (PAT) persisté chiffré au repos, même pattern/répertoire que secrets.json.
     storePath: readString("GITHUB_STORE_PATH", "./data/github.json"),
+    // Surcharges de fichiers (Dockerfile/docker-compose.yml/*.tf/playbook Ansible) appliquées au
+    // clone juste avant build/déploiement (voir services/githubFileOverridesStore.ts) — NON
+    // chiffré (contrairement au jeton ci-dessus) : le contenu d'un Dockerfile/compose n'a pas
+    // vocation à être un secret (il est normalement committé en clair dans le dépôt d'origine),
+    // simple JSON en clair sur disque avec permissions restrictives (0600, comme le reste),
+    // décision documentée dans l'en-tête de ce module de stockage.
+    fileOverridesPath: readString("GITHUB_FILE_OVERRIDES_PATH", "./data/github-file-overrides.json"),
     apiBaseUrl: readString("GITHUB_API_BASE_URL", "https://api.github.com"),
     // Clone réel (git clone --depth 1) puis build/run réel — timeouts distincts : un clone est
     // rapide (shallow), un build d'image peut prendre plusieurs minutes selon le Dockerfile.

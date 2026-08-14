@@ -1354,6 +1354,47 @@ export interface GithubDeployment {
 /** GithubDeployment + le log complet (clone + build + run entrelacés) — chargé à la demande, même principe que IacRunDetail. */
 export interface GithubDeploymentDetail extends GithubDeployment {
   log: string;
+  /** status "failed" UNIQUEMENT : diagnostic(s) structuré(s) extraits du log complet par le moteur
+   * générique de reconnaissance de motifs d'erreurs (voir services/deploymentDiagnostics.ts) —
+   * calculé À LA DEMANDE à chaque lecture (jamais persisté), donc toujours cohérent avec le log
+   * actuel. Absent pour tout autre statut. [] n'arrive jamais : au moins un diagnostic "unknown"
+   * honnête est toujours renvoyé si aucun motif connu n'a matché — jamais un tableau vide qui
+   * laisserait croire à une absence d'analyse. */
+  diagnostics?: DeploymentDiagnostic[];
+}
+
+// --- Diagnostic générique des échecs de déploiement (retour utilisateur réel, 14/08/2026 : "un
+// systeme si le build echoue... generer un rapport visible et claire detecte tout ce qui ne vas
+// pas... puissant systeme generique") — voir apps/api/src/services/deploymentDiagnostics.ts.
+// Moteur de RECONNAISSANCE DE MOTIFS sur le log brut existant (jamais une réimplémentation d'un
+// vrai linter/compilateur) : chaque motif reconnu produit un diagnostic humain actionnable ; aucun
+// motif reconnu -> un diagnostic honnête "cause non reconnue automatiquement", jamais une
+// supposition plausible mais fausse.
+
+export type DeploymentDiagnosticCategory =
+  | "missing-header" // ex: "fatal error: ldap.h: No such file or directory" — paquet -dev manquant
+  | "missing-dependency" // composer/npm/pip : paquet introuvable/non résolu
+  | "image-not-found" // docker pull 401/404/"manifest unknown"
+  | "syntax-error" // YAML compose / HCL Terraform invalide
+  | "dependency-failed" // un service compose démarre mais un AUTRE dont il dépend (depends_on
+  // condition: service_healthy) échoue/ne devient jamais sain — cas réel rencontré le 14/08/2026
+  // (mairie-creusot/formulaire_hotline : service "db" MySQL sorti en erreur juste après démarrage)
+  | "port-conflict" // ne devrait normalement plus jamais atteindre ce diagnostic (géré en amont),
+  // reconnu quand même par cohérence si un cas limite l'a laissé passer jusqu'ici
+  | "missing-config" // idem : géré en amont (status "needs-config"), reconnu par cohérence
+  | "unknown"; // repli honnête : aucun motif connu n'a matché, jamais un diagnostic inventé
+
+export interface DeploymentDiagnostic {
+  category: DeploymentDiagnosticCategory;
+  /** Titre court et humain, ex: "En-tête manquant pour compiler une extension PHP". */
+  title: string;
+  /** Explication de ce qui cloche probablement, en français clair. */
+  explanation: string;
+  /** Action concrète suggérée à l'utilisateur pour corriger le problème. */
+  suggestedAction: string;
+  /** Extrait du log (quelques lignes) ayant déclenché ce diagnostic — pour retrouver le contexte
+   * exact dans le log complet, jamais une citation tronquée trompeuse. Absent pour "unknown". */
+  evidence?: string;
 }
 
 /**
@@ -1461,6 +1502,46 @@ export interface DeployConfigSchema {
    * qu'aucun .env.example/.env.sample n'a été trouvé pour en déduire les clés attendues — limite
    * honnête où QUAI ne peut proposer aucun champ pour ce fichier précis (voir services/github.ts). */
   unresolvableEnvFile?: string;
+}
+
+// --- Surcharge du CONTENU de fichiers détectés au moment du build/déploiement (retour
+// utilisateur réel, 14/08/2026 : "fait en sorte qu'ont puisse overide le dockerfile et les autre
+// fichier de conf au moment du build") — voir apps/api/src/services/githubFileOverridesStore.ts.
+// Corrige un problème ponctuel (ex: Dockerfile réellement buggé) SANS forker/committer sur le vrai
+// dépôt : le fichier réellement utilisé pour build/déployer est TOUJOURS l'original du clone SAUF
+// si une surcharge existe pour ce chemin exact, auquel cas elle le remplace ENTIÈREMENT (jamais un
+// patch/diff partiel). Stocké EN CLAIR (non chiffré, contrairement aux secrets) — ces fichiers
+// n'ont pas vocation à être des secrets et doivent rester consultables, voir le store pour la
+// décision documentée.
+
+export type OverridableFileKind = "dockerfile" | "compose" | "terraform" | "ansible-playbook" | "ansible-inventory";
+
+/** Un fichier réellement détecté (voir GithubRepoDetection) et potentiellement surchargeable —
+ * alimente le sélecteur "Fichiers" du formulaire de configuration. */
+export interface OverridableFileRef {
+  /** Chemin relatif au dépôt (incluant le sous-dossier détecté éventuel), ex: "Dockerfile",
+   * "docker/docker-compose.yml", "main.tf". */
+  path: string;
+  kind: OverridableFileKind;
+  /** true si une surcharge est ACTUELLEMENT active pour ce chemin exact sur ce dépôt. */
+  hasOverride: boolean;
+}
+
+/** GET .../file-overrides — surcharge active pour un chemin donné, contenu INCLUS (ce contrat
+ * n'est jamais write-only, contrairement aux secrets : voir githubFileOverridesStore.ts). */
+export interface GithubFileOverride {
+  path: string;
+  content: string;
+  updatedAt: string; // ISO 8601
+  updatedBy: string; // username
+}
+
+/** GET .../file-content — contenu d'UN fichier, soit l'original du dépôt (API Contents GitHub),
+ * soit la surcharge active — jamais les deux mélangés (voir `source` demandé par le client). */
+export interface GithubFileContent {
+  path: string;
+  content: string;
+  source: "original" | "override";
 }
 
 // --- Sauvegardes automatiques (volumes Docker + bases de données) vers un stockage

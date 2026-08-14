@@ -16,6 +16,7 @@ import {
   selectRepo,
 } from "@/features/github/githubSlice";
 import DeployConfigForm, { type DeployConfigFormSubmitInput } from "@/features/github/DeployConfigForm";
+import FileOverrideModal from "@/features/github/FileOverrideModal";
 import { fetchEnvironments } from "@/features/clusters/clustersSlice";
 import { canAdminister, canOperate } from "@/features/auth/authSlice";
 import { setUnsavedFormActive } from "@/features/ui/uiSlice";
@@ -147,6 +148,9 @@ export default function GitHubDeployPage() {
   const [configModalOpen, setConfigModalOpen] = useState(false);
   const [configModalTarget, setConfigModalTarget] = useState<{ owner: string; repo: string } | null>(null);
   const [composePortOverrides, setComposePortOverrides] = useState<Record<string, number>>({});
+  // Surcharge du contenu d'un fichier détecté (Dockerfile/compose/*.tf/playbook Ansible) au moment
+  // du build — voir FileOverrideModal.tsx.
+  const [fileOverrideModalOpen, setFileOverrideModalOpen] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
 
   // État initial de l'assistant calculé UNE SEULE FOIS au montage à partir du state déjà en
@@ -865,6 +869,20 @@ export default function GitHubDeployPage() {
                               </button>
                             )}
 
+                          {/* Surcharge du contenu d'un fichier détecté (Dockerfile/compose/*.tf/
+                              playbook Ansible) au moment du build — voir FileOverrideModal.tsx.
+                              Toujours disponible dès qu'un fichier a été réellement détecté. */}
+                          {canDeployAny && (
+                            <button
+                              type="button"
+                              className="btn btn-ghost btn-sm"
+                              style={{ alignSelf: "flex-start" }}
+                              onClick={() => setFileOverrideModalOpen(true)}
+                            >
+                              Fichiers (Dockerfile, compose…)
+                            </button>
+                          )}
+
                           {deployError && <div className="error-banner">{deployError}</div>}
 
                           <button
@@ -1043,6 +1061,33 @@ export default function GitHubDeployPage() {
                     <div className="error-banner">Le déploiement a échoué — voir le journal ci-dessous pour le détail.</div>
                   )}
 
+                  {/* Diagnostic générique (retour utilisateur réel, 14/08/2026 : "un systeme si le
+                      build echoue... generer un rapport visible et claire") — panneau distinct du
+                      log brut (jamais supprimé, toujours consultable en dessous), voir
+                      services/deploymentDiagnostics.ts. Toujours au moins un élément si présent
+                      (jamais un tableau vide silencieux). */}
+                  {selectedDeployment.status === "failed" && selectedDeployment.diagnostics && selectedDeployment.diagnostics.length > 0 && (
+                    <div className="card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      <strong style={{ fontSize: 13 }}>Diagnostic</strong>
+                      {selectedDeployment.diagnostics.map((d, i) => (
+                        <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <div style={{ fontWeight: 600, fontSize: 13 }}>{d.title}</div>
+                          <p className="muted" style={{ fontSize: 12.5, margin: 0 }}>{d.explanation}</p>
+                          {d.category !== "unknown" && (
+                            <p style={{ fontSize: 12.5, margin: 0 }}>
+                              <strong>Action suggérée :</strong> {d.suggestedAction}
+                            </p>
+                          )}
+                          {d.evidence && (
+                            <pre className="iac-log" style={{ maxHeight: 120, fontSize: 11 }}>
+                              {d.evidence}
+                            </pre>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
                   {/* "needs-config" (14/08/2026) : le clone a détecté des variables d'environnement
                       requises sans valeur connue — arrêté PROPREMENT avant tout `docker build`/
                       `docker compose up`, jamais l'échec docker brut d'origine ("env file ... not
@@ -1111,6 +1156,17 @@ export default function GitHubDeployPage() {
         submitLabel={configSchema && configSchema.missingRequiredKeys.length > 0 ? "Enregistrer et déployer" : "Enregistrer"}
         onSubmit={handleSubmitConfig}
       />
+
+      {selectedRepo && detection && !detection.candidates && (
+        <FileOverrideModal
+          open={fileOverrideModalOpen}
+          onClose={() => setFileOverrideModalOpen(false)}
+          owner={selectedRepo.owner}
+          repo={selectedRepo.repo}
+          ref={detection.ref}
+          {...(detection.detectedPath ? { configPath: detection.detectedPath } : {})}
+        />
+      )}
     </div>
   );
 }

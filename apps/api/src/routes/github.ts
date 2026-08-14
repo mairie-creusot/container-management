@@ -22,6 +22,13 @@
  *                                                       comme secret nommé "github-env:<owner>/<repo>" (secretsStore.ts),
  *                                                       réutilisé automatiquement à chaque redéploiement suivant.
  *
+ * GET    /api/github/repos/:owner/:repo/overridable-files — ?ref=&path= optionnels ; fichiers détectés potentiellement
+ *                                                             surchargeables (Dockerfile/compose/*.tf/playbook Ansible).
+ * GET    /api/github/repos/:owner/:repo/file-content        — ?path=&ref=&source=original|override ; contenu d'UN fichier.
+ * PUT    /api/github/repos/:owner/:repo/file-overrides       — { path, content } — operator/admin (hook global) ; remplace
+ *                                                               ENTIÈREMENT ce fichier au prochain déploiement de ce dépôt.
+ * DELETE /api/github/repos/:owner/:repo/file-overrides       — ?path= — retour au fichier original du dépôt.
+ *
  * Le webhook entrant lui-même (POST /api/github/webhook, appelé par GitHub — pas de session) vit
  * dans routes/githubWebhook.ts, volontairement séparé (authentification différente : signature
  * HMAC plutôt que cookie de session, voir plugins/auth.ts).
@@ -42,13 +49,17 @@ import {
 import {
   buildDeployConfigSchema,
   createRepoWebhook,
+  deleteFileOverride,
   deleteRepoWebhook,
   detectRepo,
   diagnosticFromGithubError,
   getDeploymentDetail,
+  getGithubFileContent,
   isSafeRelativeConfigPath,
   listDeployments,
+  listOverridableFiles,
   listRepos,
+  saveFileOverride,
   saveGithubEnvValues,
   startDeployment,
 } from "../services/github.js";
@@ -247,6 +258,89 @@ export default async function githubRoutes(fastify: FastifyInstance): Promise<vo
     await saveGithubEnvValues(request.params.owner, request.params.repo, values ?? {}, secretRefs);
     return reply.send({ ok: true });
   });
+
+  // --- Surcharge du CONTENU de fichiers détectés (Dockerfile/compose/*.tf/playbook Ansible) au
+  // moment du build/déploiement — voir services/githubFileOverridesStore.ts. Corrige un problème
+  // ponctuel SANS forker/committer sur le vrai dépôt.
+
+  fastify.get<{ Params: { owner: string; repo: string }; Querystring: { ref?: string; path?: string } }>(
+    "/api/github/repos/:owner/:repo/overridable-files",
+    async (request, reply) => {
+      const explicitPath = request.query.path?.trim();
+      if (explicitPath && !isSafeRelativeConfigPath(explicitPath)) {
+        return reply.code(400).send({ error: `"${explicitPath}" is not a valid repository-relative path` });
+      }
+      try {
+        const files = await listOverridableFiles(request.params.owner, request.params.repo, request.query.ref, explicitPath);
+        return reply.send(files);
+      } catch (err) {
+        return reply.code(statusFromGithubError(err)).send({ error: diagnosticFromGithubError(err) });
+      }
+    },
+  );
+
+  // Contenu d'UN fichier — soit l'original du dépôt (source=original, API Contents GitHub), soit
+  // la surcharge active (source=override) — jamais les deux mélangés. `path` valide obligatoirement
+  // via isSafeRelativeConfigPath (même garde anti-traversée que le reste, voir mission).
+  fastify.get<{
+    Params: { owner: string; repo: string };
+    Querystring: { path?: string; ref?: string; source?: string };
+  }>("/api/github/repos/:owner/:repo/file-content", async (request, reply) => {
+    const filePath = request.query.path?.trim();
+    if (!filePath || !isSafeRelativeConfigPath(filePath)) {
+      return reply.code(400).send({ error: `"${filePath ?? ""}" is not a valid repository-relative file path` });
+    }
+    const source = request.query.source === "override" ? "override" : "original";
+    try {
+      const result = await getGithubFileContent(request.params.owner, request.params.repo, filePath, request.query.ref, source);
+      if (!result) {
+        return reply.code(404).send({
+          error:
+            source === "override"
+              ? `Aucune surcharge active pour "${filePath}" sur ce dépôt.`
+              : `Fichier "${filePath}" introuvable dans le dépôt à cette référence.`,
+        });
+      }
+      return reply.send({ path: filePath, ...result });
+    } catch (err) {
+      return reply.code(statusFromGithubError(err)).send({ error: diagnosticFromGithubError(err) });
+    }
+  });
+
+  // Enregistre une surcharge — remplace ENTIÈREMENT le fichier à ce chemin exact au prochain
+  // déploiement de ce dépôt (jamais un patch/diff partiel, voir mission). Le hook global
+  // (plugins/auth.ts) exige déjà operator/admin pour toute méthode mutante.
+  fastify.put<{ Params: { owner: string; repo: string }; Body: { path?: string; content?: string } }>(
+    "/api/github/repos/:owner/:repo/file-overrides",
+    async (request, reply) => {
+      const filePath = request.body?.path?.trim();
+      const content = request.body?.content;
+      if (!filePath || !isSafeRelativeConfigPath(filePath)) {
+        return reply.code(400).send({ error: `"${filePath ?? ""}" is not a valid repository-relative file path` });
+      }
+      if (typeof content !== "string" || content.length === 0) {
+        return reply.code(400).send({ error: "content is required" });
+      }
+      const saved = await saveFileOverride(request.params.owner, request.params.repo, filePath, content, request.authSession!.username);
+      return reply.send(saved);
+    },
+  );
+
+  // Supprime la surcharge — retour au fichier ORIGINAL du dépôt au prochain déploiement.
+  fastify.delete<{ Params: { owner: string; repo: string }; Querystring: { path?: string } }>(
+    "/api/github/repos/:owner/:repo/file-overrides",
+    async (request, reply) => {
+      const filePath = request.query.path?.trim();
+      if (!filePath || !isSafeRelativeConfigPath(filePath)) {
+        return reply.code(400).send({ error: `"${filePath ?? ""}" is not a valid repository-relative file path` });
+      }
+      const deleted = await deleteFileOverride(request.params.owner, request.params.repo, filePath);
+      if (!deleted) {
+        return reply.code(404).send({ error: `Aucune surcharge active pour "${filePath}" sur ce dépôt.` });
+      }
+      return reply.send({ ok: true });
+    },
+  );
 
   // --- Déploiement automatique sur push (webhook GitHub réel — cf. routes/githubWebhook.ts) ----
 
