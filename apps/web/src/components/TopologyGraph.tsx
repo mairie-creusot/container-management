@@ -72,6 +72,7 @@ import { createBackupDefinition } from "@/features/backups/backupsSlice";
 import { createAutomationEdge, createAutomationNode, deleteAutomationEdge, deleteAutomationNode } from "@/features/automation/automationSlice";
 import { fetchRoutes } from "@/features/reverseProxy/reverseProxySlice";
 import { fetchNotificationChannels } from "@/features/notificationChannels/notificationChannelsSlice";
+import { migrateNutanixVm, runNutanixVmAction, type NutanixVmLifecycleAction } from "@/features/nutanix/nutanixSlice";
 import type { IacEngine } from "@/types";
 import {
   ACTION_LABEL,
@@ -1664,6 +1665,54 @@ interface TopologyGraphProps {
   refreshIntervalMs?: number;
 }
 
+// --- Migration d'une VM Nutanix par glisser-déposer (voir handleNodeDragStop plus bas) ----------
+// Réutilise le drag de POSITION déjà en place pour TOUT nœud du graphe (nodesDraggable={operate},
+// handleNodeDragStop persiste déjà la position finale via PUT /api/topology/positions) — PAS le
+// mécanisme de connexion par Handle/port (handleConnect/classifyConnection) : la relation "hosts"/
+// "hosted-by" y est délibérément non-interactive (voir NODE_CAPABILITIES, topologyGraphShared.tsx)
+// car c'est une vérité SERVEUR, jamais une intention à glisser à la main comme un network. Détecter
+// une "dépose sur un hôte" est donc un test géométrique simple sur les positions déjà connues du
+// canevas, pas un nouveau type de Handle.
+
+/** Nœud "hôte physique Nutanix" (kind "host", hostKind "nutanix-host") UNIQUEMENT — une VM ne migre
+ * jamais vers le nœud "cluster" (niveau agrégé, aucune notion de placement à ce niveau) ni vers un
+ * hôte Docker distant/LXD (aucune API de migration de VM Nutanix ne s'applique à eux). */
+function isMigratableNutanixHostNode(n: Node): boolean {
+  const topoNode = n.data as unknown as TopologyNode;
+  return topoNode.kind === "host" && topoNode.hostKind === "nutanix-host";
+}
+
+/** Hôte physique dont la carte (position + taille APPROXIMATIVE, voir GROUP_NODE_APPROX_WIDTH/
+ * HEIGHT ci-dessus — même compromis assumé que pour le cadre de groupe : pas de layout DOM réel
+ * nécessaire pour ce simple test de dépose) contient le CENTRE du nœud VM déposé — `undefined` si
+ * la VM a été lâchée dans le vide ou sur un nœud d'un autre type. */
+function findNutanixHostNodeUnderDrop(vmNode: Node, allNodes: Node[]): Node | undefined {
+  const cx = vmNode.position.x + GROUP_NODE_APPROX_WIDTH / 2;
+  const cy = vmNode.position.y + GROUP_NODE_APPROX_HEIGHT / 2;
+  return allNodes.find((n) => {
+    if (n.id === vmNode.id || !isMigratableNutanixHostNode(n)) return false;
+    return (
+      cx >= n.position.x && cx <= n.position.x + GROUP_NODE_APPROX_WIDTH && cy >= n.position.y && cy <= n.position.y + GROUP_NODE_APPROX_HEIGHT
+    );
+  });
+}
+
+/** "host:nutanix-host:<uuid>" -> "<uuid>" — l'id d'un nœud "host" physique Nutanix a DEUX préfixes
+ * côté serveur (services/topology.ts#nutanixHostNodeId), contrairement à "container:<id>"/
+ * "nutanix-vm:<uuid>" qui n'en ont qu'un seul : `idWithoutPrefix` (topologyGraphShared.tsx) ne
+ * retire que le premier segment, insuffisant ici. Les uuids Nutanix ne contiennent jamais ":",
+ * prendre tout ce qui suit le DERNIER ":" est donc fiable quel que soit le nombre de préfixes. */
+function rawNutanixHostUuid(hostNodeId: string): string {
+  return hostNodeId.slice(hostNodeId.lastIndexOf(":") + 1);
+}
+
+/** id du nœud "host" hébergeant ACTUELLEMENT cette VM — dérivé de la VRAIE arête `kind: "hosts"`
+ * du graphe (jamais recalculé/deviné), voir services/topology.ts#getNutanixTopologyParts.
+ * `undefined` si la VM n'a pas d'hôte déterminable (éteinte, ou juste rattachée au nœud cluster). */
+function currentNutanixHostNodeId(vmNodeId: string, edges: TopologyEdge[]): string | undefined {
+  return edges.find((e) => e.kind === "hosts" && e.target === vmNodeId)?.source;
+}
+
 export default function TopologyGraph({ height = 460, onSelectNode, refreshIntervalMs = REFRESH_INTERVAL_MS }: TopologyGraphProps) {
   const dispatch = useAppDispatch();
   const { data, status, error, positions } = useAppSelector((s) => s.topology);
@@ -2095,9 +2144,49 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
 
   /** Fin de glissé d'un nœud : persiste sa position finale par id, sur le compte de l'utilisateur
    * connecté (PUT /api/topology/positions) — elle survivra au prochain fetch (15s), à un
-   * rechargement de page, et suit désormais l'utilisateur d'un poste à l'autre. */
+   * rechargement de page, et suit désormais l'utilisateur d'un poste à l'autre. Comportement
+   * INCHANGÉ pour tout nœud/toute dépose (voir mission : "ne régresse pas") — la migration
+   * ci-dessous est un effet ADDITIONNEL déclenché en plus, jamais à la place de la sauvegarde de
+   * position (annulée par l'utilisateur = simple repositionnement manuel, comme avant). */
   function handleNodeDragStop(_event: unknown, node: Node) {
     dispatch(saveTopologyPositions({ ...positions, [node.id]: { x: node.position.x, y: node.position.y } }));
+    void maybeHandleNutanixVmDrop(node);
+  }
+
+  /**
+   * Glisser-déposer une VM Nutanix sur un nœud "hôte physique" -> migration live RÉELLE (mission :
+   * "si jai node A B C je doit pouvoir deplace de a a b ou b a c... et cela deplace la vm il faut
+   * un controle totale via le graphe"). Ne fait RIEN (silencieux) si : ce n'est pas une VM Nutanix,
+   * la dépose n'atterrit sur AUCUN hôte physique valide, ou l'hôte visé est déjà l'hôte actuel
+   * (retour utilisateur du geste, pas une erreur — l'utilisateur a juste repositionné la carte dans
+   * la même zone). Confirmation explicite AVANT tout appel réel (variant danger — jamais un simple
+   * drag qui migrerait une VRAIE VM de production sans confirmation) ; le serveur revalide de toute
+   * façon les mêmes gardes (même hôte, hôte d'un autre cluster, VM éteinte — services/nutanix.ts#
+   * migrateNutanixVm), ce contrôle client n'est qu'un confort, jamais la seule barrière.
+   */
+  async function maybeHandleNutanixVmDrop(vmNode: Node) {
+    const topoNode = vmNode.data as unknown as TopologyNode;
+    if (!operate || topoNode.kind !== "nutanix-vm" || !data) return;
+
+    const targetHostFlowNode = findNutanixHostNodeUnderDrop(vmNode, flowNodes);
+    if (!targetHostFlowNode) return;
+
+    const targetHostUuid = rawNutanixHostUuid(targetHostFlowNode.id);
+    const currentHostNodeId = currentNutanixHostNodeId(vmNode.id, data.edges);
+    if (currentHostNodeId === targetHostFlowNode.id) return; // reposée sur son hôte actuel : rien à faire, pas une erreur
+
+    const targetHostTopoNode = targetHostFlowNode.data as unknown as TopologyNode;
+    const currentHostLabel = topoNode.nutanixHostName ?? "un hôte indéterminé";
+    const ok = await confirm({
+      title: "Migrer cette VM vers un autre hôte",
+      description: `Migrer "${topoNode.label}" de ${currentHostLabel} vers ${targetHostTopoNode.label} ? Cette action déclenche une VRAIE migration live sur Prism Central.`,
+      confirmLabel: "Migrer",
+      variant: "danger",
+    });
+    if (!ok) return;
+
+    const result = await dispatch(migrateNutanixVm({ uuid: idWithoutPrefix(vmNode.id), targetHostUuid }));
+    if (migrateNutanixVm.fulfilled.match(result)) dispatch(fetchTopology());
   }
 
   function findPort(nodeId: string | null | undefined, handleId: string | null | undefined): PortSpec | null {
@@ -2265,6 +2354,31 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     }
     const result = await dispatch(runContainerAction({ id, action }));
     if (runContainerAction.fulfilled.match(result)) dispatch(fetchTopology());
+  }
+
+  /** Démarrer/Arrêter/Redémarrer une VM Nutanix depuis le menu contextuel du graphe — même
+   * confirmation que TopologyNodeDetailPanel.tsx#handleNutanixVmAction (dupliquée volontairement :
+   * ce composant a son propre `confirm`/`dispatch`, pas de state partagé pratique entre les deux
+   * sans complexifier les deux pour un accès rapide). "Supprimer" reste volontairement ABSENT de ce
+   * menu rapide — la confirmation lourde "taper le nom de la VM" (mission) vit UNIQUEMENT dans
+   * TopologyNodeDetailPanel.tsx, ouvert via "Voir le détail" (premier item de ce même menu) : une
+   * seule source de vérité pour l'action la plus destructrice plutôt que deux dialogues à maintenir
+   * en parallèle. */
+  async function handleNutanixVmAction(uuid: string, vmName: string, action: NutanixVmLifecycleAction) {
+    if (action === "stop" || action === "restart") {
+      const ok = await confirm({
+        title: action === "stop" ? "Arrêter la VM" : "Redémarrer la VM",
+        description:
+          action === "stop"
+            ? `Confirmer l'arrêt GRACIEUX (ACPI) de "${vmName}" ? Les services qu'elle héberge seront interrompus.`
+            : `Confirmer le redémarrage GRACIEUX de "${vmName}" ? Les services qu'elle héberge seront brièvement interrompus.`,
+        confirmLabel: action === "stop" ? "Arrêter" : "Redémarrer",
+        variant: "danger",
+      });
+      if (!ok) return;
+    }
+    const result = await dispatch(runNutanixVmAction({ uuid, action }));
+    if (runNutanixVmAction.fulfilled.match(result)) dispatch(fetchTopology());
   }
 
   async function handleRemoveVolume(name: string) {
@@ -2615,6 +2729,18 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         onClick: () => setNetworkConnectPopover({ containerId: id, x, y }),
       });
       items.push({ label: "Supprimer", danger: true, onClick: () => handleContainerAction(id, node.label, "remove") });
+    } else if (node.kind === "nutanix-vm") {
+      // Voir handleNutanixVmAction ci-dessus pour le pourquoi de l'absence volontaire de
+      // "Supprimer" ici (confirmation lourde réservée à TopologyNodeDetailPanel.tsx). Démarrer/
+      // Arrêter/Redémarrer mutuellement exclusifs selon l'état RÉEL (node.status), même principe
+      // que "container" ci-dessus.
+      const uuid = idWithoutPrefix(node.id);
+      if (node.status === "running") {
+        items.push({ label: "Arrêter", onClick: () => void handleNutanixVmAction(uuid, node.label, "stop") });
+        items.push({ label: "Redémarrer", onClick: () => void handleNutanixVmAction(uuid, node.label, "restart") });
+      } else if (node.status === "stopped") {
+        items.push({ label: "Démarrer", onClick: () => void handleNutanixVmAction(uuid, node.label, "start") });
+      }
     } else if (node.kind === "volume") {
       const name = idWithoutPrefix(node.id);
       items.push({ label: "Supprimer", danger: true, onClick: () => handleRemoveVolume(name) });

@@ -86,6 +86,65 @@ async function nutanixPost<T>(prismCentralUrl: string, path: string, username: s
   });
 }
 
+/**
+ * GET/PUT/DELETE générique vers l'API v3 de Prism Central — pendant de nutanixPost ci-dessus, mais
+ * pour les actions de cycle de vie/migration/suppression d'UNE ressource individuelle (mission
+ * "démarrer/arrêter/redémarrer/supprimer/migrer une VM", voir plus bas). Vérifié EN CONDITIONS
+ * RÉELLES le 14/08/2026 sur l'instance 172.20.0.10:9440 (VM réelle "HDVAPPLI", GET UNIQUEMENT —
+ * voir garde-fou de prudence en tête de ce fichier de mission) : contrairement aux endpoints
+ * `/list` (toujours POST, voir nutanixPost), une ressource individuelle suit le modèle REST v3
+ * classique sur `/vms/{uuid}` : GET renvoie l'entité complète (api_version + metadata + spec +
+ * status), PUT la met à jour en renvoyant la MÊME forme, DELETE la supprime. Prism Central v3 n'a
+ * PAS de sous-ressource d'action dédiée façon v1/v2 (`/vms/{uuid}/set_power_state`,
+ * `/vms/{uuid}/migrate`) — confirmé par la forme réelle observée, jamais supposé depuis la seule
+ * documentation : toute mutation passe par un PUT déclaratif de l'entité entière.
+ */
+async function nutanixRequest<T>(
+  prismCentralUrl: string,
+  method: "GET" | "PUT" | "DELETE",
+  path: string,
+  username: string,
+  password: string,
+  body?: unknown,
+): Promise<{ status: number; data: T | null; raw: string }> {
+  const target = new URL(path, normalizedBaseUrl(prismCentralUrl));
+  const auth = Buffer.from(`${username}:${password}`).toString("base64");
+  const payload = body !== undefined ? JSON.stringify(body) : undefined;
+
+  return await new Promise((resolve, reject) => {
+    const req = httpsRequest(
+      target,
+      {
+        method,
+        headers: {
+          Accept: "application/json",
+          Authorization: `Basic ${auth}`,
+          ...(payload !== undefined ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } : {}),
+        },
+        rejectUnauthorized: config.nutanix.tlsRejectUnauthorized,
+        timeout: config.nutanix.requestTimeoutMs,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const raw = Buffer.concat(chunks).toString("utf-8");
+          const status = res.statusCode ?? 0;
+          try {
+            resolve({ status, data: raw ? (JSON.parse(raw) as T) : null, raw });
+          } catch (err) {
+            reject(new Error(`Nutanix API returned invalid JSON for ${method} ${path}: ${err instanceof Error ? err.message : String(err)}`));
+          }
+        });
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error(`Nutanix API request ${method} ${path} timed out after ${config.nutanix.requestTimeoutMs}ms`)));
+    req.on("error", (err) => reject(err));
+    if (payload !== undefined) req.write(payload);
+    req.end();
+  });
+}
+
 // --- Formes (partielles) des réponses Prism Central v3 — seuls les champs utilisés ici. Vérifiées
 // EN CONDITIONS RÉELLES le 14/08/2026 sur l'instance 172.20.0.10:9440 (CLUSTER_AHV_HDV, 29 VMs, 3
 // hôtes physiques, 6 subnets) plutôt que supposées depuis la seule documentation Nutanix. ---
@@ -520,4 +579,333 @@ export async function getNutanixEnvironment(): Promise<Environment | null> {
       nodes: [],
     };
   }
+}
+
+// ============================================================================================
+// Actions de cycle de vie (démarrer/arrêter/redémarrer/supprimer) + migration hôte-à-hôte d'une
+// VM Nutanix — mission demandée par retour utilisateur : "il manque suprimer redemarer creer
+// toute interface et la logique" (cycle de vie) + "si jai node A B C je doit pouvoire deplace de
+// a a b" (migration, restreinte au SEUL cluster existant chez cet utilisateur : migration
+// hôte-à-hôte DANS un même cluster physique, jamais inter-cluster tant qu'un second cluster
+// n'existe pas réellement — voir migrateNutanixVm ci-dessous).
+//
+// TOUTES ces fonctions MUTENT une VRAIE VM de production (voir en-tête de fichier : aucun jeu de
+// données de démonstration Nutanix). Chacune :
+//  - lève une erreur explicite si Nutanix n'a jamais été configuré (même garde que getNutanixVms
+//    ci-dessus) — jamais un no-op silencieux sur une action destructive/mutante.
+//  - relit l'entité RÉELLE et COMPLÈTE de la VM (GET /vms/{uuid}) juste avant toute mutation —
+//    jamais une supposition sur son état courant : le placement/l'alimentation exposés par
+//    getNutanixVms() (liste, potentiellement pollée plusieurs secondes plus tôt côté frontend)
+//    pourraient avoir changé entre-temps (autre opérateur, tâche déjà en cours...).
+//  - PUT l'entité REÇUE, modifiée UNIQUEMENT sur les champs concernés — jamais reconstruite à la
+//    main champ par champ : Prism Central v3 attend l'objet complet en retour (voir nutanixRequest
+//    ci-dessus), un champ oublié par une reconstruction manuelle pourrait corrompre silencieusement
+//    la config réelle de la VM (ex: perdre un disque/NIC en repartant d'un objet vide).
+//
+// Vérifié EN CONDITIONS RÉELLES le 14/08/2026 sur l'instance 172.20.0.10:9440 (VM réelle
+// "HDVAPPLI") : UNIQUEMENT via des appels GET en lecture seule (`GET /api/nutanix/v3/vms/{uuid}`),
+// jamais de mutation testée (interdiction absolue de cette mission — voir CLAUDE.md du dépôt).
+// Cette vérification confirme la FORME exacte de l'entité (api_version "3.1", metadata.uuid/
+// spec_version, spec.resources.power_state/power_state_mechanism.mechanism/host_reference absent
+// par défaut, status.resources.power_state/host_reference réels) mais PAS le comportement d'un
+// PUT en pratique (accepté/refusé, task créée...) : documenté honnêtement, jamais supposé.
+// ============================================================================================
+
+/** Erreur explicite dédiée aux actions de cycle de vie/migration — porte un `httpStatus` suggéré
+ * pour que routes/nutanix.ts traduise honnêtement chaque cas (VM introuvable, garde-fou métier
+ * violé, Prism Central injoignable/en erreur...) plutôt qu'un 502 générique fourre-tout comme
+ * pour les listings en lecture seule ci-dessus (où un échec retombe simplement sur [] silencieux,
+ * un choix qui n'a plus de sens pour une action qui doit soit réussir soit échouer clairement). */
+export class NutanixActionError extends Error {
+  httpStatus: number;
+  constructor(message: string, httpStatus: number) {
+    super(message);
+    this.name = "NutanixActionError";
+    this.httpStatus = httpStatus;
+  }
+}
+
+/**
+ * Entité VM complète (spec+status+metadata), vue individuelle via GET /vms/{uuid} — PAS le même
+ * niveau de détail typé que NutanixVmEntity (list, en tête de fichier) qui n'expose qu'un
+ * SOUS-ENSEMBLE des champs utilisés par mapVmEntity pour l'AFFICHAGE. Ici, `resources` reste
+ * VOLONTAIREMENT un objet libre (jamais retapé champ par champ) : un PUT v3 doit renvoyer l'objet
+ * COMPLET reçu au GET précédent (voir JSDoc de section ci-dessus) — le typer exhaustivement
+ * risquerait de perdre silencieusement un champ que TypeScript laisserait de côté lors d'une
+ * recopie partielle, corrompant potentiellement la config d'une VRAIE VM de production.
+ */
+interface NutanixVmFullEntity {
+  api_version?: string;
+  metadata: { uuid: string; [key: string]: unknown };
+  spec: {
+    name?: string;
+    resources: {
+      power_state?: string;
+      power_state_mechanism?: { mechanism?: string; [key: string]: unknown };
+      host_reference?: NutanixReference;
+      [key: string]: unknown;
+    };
+    cluster_reference?: NutanixReference;
+    [key: string]: unknown;
+  };
+  status?: {
+    name?: string;
+    resources?: { power_state?: string; host_reference?: NutanixReference; [key: string]: unknown };
+    cluster_reference?: NutanixReference;
+    execution_context?: { task_uuid?: string; [key: string]: unknown };
+    [key: string]: unknown;
+  };
+}
+
+/** Relit l'entité RÉELLE et COMPLÈTE d'une VM (GET /vms/{uuid}) — lève NutanixActionError(404) si
+ * introuvable, (400) si Nutanix n'a jamais été configuré, (502) si Prism Central répond une autre
+ * erreur. Utilisée par TOUTES les actions ci-dessous juste avant leur PUT/DELETE (voir JSDoc de
+ * section ci-dessus : jamais une supposition sur l'état courant de la VM). */
+async function loadNutanixVmFullEntity(uuid: string): Promise<{ effective: SetupNutanixConfig; entity: NutanixVmFullEntity }> {
+  const effective = await loadNutanixConfig();
+  if (!effective) {
+    throw new NutanixActionError("Nutanix is not configured — configure Prism Central before running any VM action", 400);
+  }
+  const result = await nutanixRequest<NutanixVmFullEntity>(
+    effective.prismCentralUrl,
+    "GET",
+    `/api/nutanix/v3/vms/${uuid}`,
+    effective.username,
+    effective.password,
+  );
+  if (result.status === 404) {
+    throw new NutanixActionError(`VM "${uuid}" not found on Prism Central`, 404);
+  }
+  if (result.status < 200 || result.status >= 300 || !result.data) {
+    throw new NutanixActionError(`Prism Central returned an error reading VM "${uuid}" (status ${result.status}): ${result.raw.slice(0, 300)}`, 502);
+  }
+  return { effective, entity: result.data };
+}
+
+/** PUT l'entité COMPLÈTE (metadata inchangée — nécessaire pour la concurrence optimiste v3 côté
+ * Prism Central — et `newSpec`, une COPIE de `entity.spec` modifiée UNIQUEMENT sur les champs
+ * voulus par l'appelant, jamais reconstruite à la main, voir JSDoc de section). `raison` sert
+ * uniquement au message d'erreur en cas d'échec, pour un diagnostic clair sans avoir à deviner
+ * quelle action a échoué depuis une pile d'appels génériques. */
+async function putNutanixVmEntity(
+  effective: SetupNutanixConfig,
+  uuid: string,
+  entity: NutanixVmFullEntity,
+  newSpec: NutanixVmFullEntity["spec"],
+  raison: string,
+): Promise<NutanixVmFullEntity> {
+  const body = { api_version: entity.api_version ?? "3.1", metadata: entity.metadata, spec: newSpec };
+  const result = await nutanixRequest<NutanixVmFullEntity>(
+    effective.prismCentralUrl,
+    "PUT",
+    `/api/nutanix/v3/vms/${uuid}`,
+    effective.username,
+    effective.password,
+    body,
+  );
+  if (result.status < 200 || result.status >= 300 || !result.data) {
+    throw new NutanixActionError(`Prism Central refused ${raison} for VM "${uuid}" (status ${result.status}): ${result.raw.slice(0, 300)}`, 502);
+  }
+  return result.data;
+}
+
+/** Interroge à intervalles réguliers l'état d'alimentation RÉEL (status.resources.power_state,
+ * jamais spec — un placement/état est un fait constaté, voir en-tête de fichier) jusqu'à ce qu'il
+ * corresponde à `want`, ou lève une erreur explicite au bout de `timeoutMs` — utilisée UNIQUEMENT
+ * par restartNutanixVm ci-dessous entre l'extinction et le rallumage (voir JSDoc), jamais pour
+ * démarrer/arrêter seuls (fire-and-forget, cohérent avec docker.ts#startContainer/stopContainer :
+ * le graphe reflète l'état réel au prochain poll, pas besoin d'attendre la convergence ici). */
+async function waitForNutanixVmPowerState(
+  effective: SetupNutanixConfig,
+  uuid: string,
+  want: "ON" | "OFF",
+  timeoutMs: number,
+  intervalMs: number,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const result = await nutanixRequest<NutanixVmFullEntity>(
+      effective.prismCentralUrl,
+      "GET",
+      `/api/nutanix/v3/vms/${uuid}`,
+      effective.username,
+      effective.password,
+    );
+    if (result.status >= 200 && result.status < 300 && result.data?.status?.resources?.power_state === want) return;
+    if (Date.now() >= deadline) {
+      throw new NutanixActionError(
+        `VM "${uuid}" did not reach power state ${want} within ${Math.round(timeoutMs / 1000)}s — refusing to proceed`,
+        504,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
+const RESTART_POWEROFF_TIMEOUT_MS = 60_000;
+const RESTART_POWEROFF_POLL_INTERVAL_MS = 2_000;
+
+/**
+ * Démarre une VM éteinte — PUT spec.resources.power_state="ON". Refuse (409) si la VM est déjà
+ * allumée (état RÉEL, status.resources.power_state — jamais l'intention spec) : un no-op explicite
+ * plutôt qu'un succès trompeur qui laisserait croire qu'une action a eu lieu.
+ */
+export async function startNutanixVm(uuid: string): Promise<{ ok: true; vmName: string }> {
+  const { effective, entity } = await loadNutanixVmFullEntity(uuid);
+  const current = entity.status?.resources?.power_state;
+  const vmName = entity.status?.name ?? entity.spec.name ?? uuid;
+  if (current === "ON") {
+    throw new NutanixActionError(`VM "${vmName}" is already powered on`, 409);
+  }
+  const newSpec = { ...entity.spec, resources: { ...entity.spec.resources, power_state: "ON" } };
+  await putNutanixVmEntity(effective, uuid, entity, newSpec, "power on");
+  return { ok: true, vmName };
+}
+
+/**
+ * Arrête une VM allumée — GRACIEUSEMENT par défaut (mission : "pas un power-off brutal par
+ * défaut") via `power_state_mechanism.mechanism = "ACPI"` (signal d'extinction envoyé à l'OS
+ * invité, qui gère lui-même son arrêt propre — champ réel confirmé présent sur cette instance,
+ * voir en-tête de section) plutôt que "HARD" (coupure immédiate, jamais utilisée ici). Refuse
+ * (409) si la VM est déjà éteinte.
+ */
+export async function stopNutanixVm(uuid: string): Promise<{ ok: true; vmName: string }> {
+  const { effective, entity } = await loadNutanixVmFullEntity(uuid);
+  const current = entity.status?.resources?.power_state;
+  const vmName = entity.status?.name ?? entity.spec.name ?? uuid;
+  if (current === "OFF") {
+    throw new NutanixActionError(`VM "${vmName}" is already powered off`, 409);
+  }
+  const newSpec = {
+    ...entity.spec,
+    resources: {
+      ...entity.spec.resources,
+      power_state: "OFF",
+      power_state_mechanism: { ...(entity.spec.resources.power_state_mechanism ?? {}), mechanism: "ACPI" },
+    },
+  };
+  await putNutanixVmEntity(effective, uuid, entity, newSpec, "graceful power off");
+  return { ok: true, vmName };
+}
+
+/**
+ * Redémarre une VM allumée — GRACIEUSEMENT (extinction ACPI, attente de convergence RÉELLE, puis
+ * rallumage). Documentation honnête (voir mission, point (a) "vérifie le format exact... documente
+ * ce que tu trouves réellement plutôt que de supposer") : l'API Prism Central v3 n'expose AUCUNE
+ * valeur `power_state` de type "REBOOT"/"RESETTING" observée ou documentée de façon fiable pour un
+ * PUT côté client (contrairement à v1/v2 qui avait une action dédiée) — le mécanisme réel utilisé
+ * par les outils tiers connus (ex: provider Terraform Nutanix) est PRÉCISÉMENT cette séquence
+ * "éteindre proprement, ATTENDRE l'état OFF réel, rallumer", jamais un flip direct spéculatif d'un
+ * champ non vérifié sur cette instance. Refuse (409) si la VM n'est pas actuellement allumée (on
+ * ne "redémarre" pas une VM déjà éteinte — utiliser Démarrer).
+ */
+export async function restartNutanixVm(uuid: string): Promise<{ ok: true; vmName: string }> {
+  const { effective, entity } = await loadNutanixVmFullEntity(uuid);
+  const current = entity.status?.resources?.power_state;
+  const vmName = entity.status?.name ?? entity.spec.name ?? uuid;
+  if (current !== "ON") {
+    throw new NutanixActionError(`VM "${vmName}" is not currently powered on — cannot restart, use Start instead`, 409);
+  }
+
+  const offSpec = {
+    ...entity.spec,
+    resources: {
+      ...entity.spec.resources,
+      power_state: "OFF",
+      power_state_mechanism: { ...(entity.spec.resources.power_state_mechanism ?? {}), mechanism: "ACPI" },
+    },
+  };
+  await putNutanixVmEntity(effective, uuid, entity, offSpec, "graceful power off (restart step 1/2)");
+
+  // Attend la CONVERGENCE réelle (status.resources.power_state === "OFF") avant de rallumer —
+  // jamais un second PUT immédiat qui pourrait arriver avant que Prism Central n'ait fini de
+  // traiter le premier (spec_version potentiellement pas encore avancé), voir JSDoc ci-dessus.
+  await waitForNutanixVmPowerState(effective, uuid, "OFF", RESTART_POWEROFF_TIMEOUT_MS, RESTART_POWEROFF_POLL_INTERVAL_MS);
+
+  // Relit l'entité (spec_version a changé après le premier PUT) avant le second PUT — jamais
+  // réutiliser `entity`/`offSpec` d'avant la première mutation pour la concurrence optimiste v3.
+  const { entity: entityAfterOff } = await loadNutanixVmFullEntity(uuid);
+  const onSpec = { ...entityAfterOff.spec, resources: { ...entityAfterOff.spec.resources, power_state: "ON" } };
+  await putNutanixVmEntity(effective, uuid, entityAfterOff, onSpec, "power on (restart step 2/2)");
+
+  return { ok: true, vmName };
+}
+
+/**
+ * Supprime définitivement une VM — garde-fou QUAI (pas une limite Prism Central documentée avec
+ * certitude ; choix délibéré et prudent de ce projet vu la sensibilité de l'action, voir mission
+ * "PRUDENCE ABSOLUE") : refuse (409) si la VM est actuellement ALLUMÉE, pour ne jamais permettre
+ * la suppression en un seul clic d'une VM de production en cours d'exécution — l'opérateur doit
+ * l'arrêter explicitement d'abord (action distincte, elle-même confirmée séparément côté
+ * frontend). La confirmation "taper le nom de la VM" est portée par le FRONTEND (voir
+ * TopologyNodeDetailPanel.tsx) — cette fonction reste l'action réelle, appelée seulement après
+ * cette confirmation lourde.
+ */
+export async function deleteNutanixVm(uuid: string): Promise<{ ok: true; vmName: string }> {
+  const { effective, entity } = await loadNutanixVmFullEntity(uuid);
+  const current = entity.status?.resources?.power_state;
+  const vmName = entity.status?.name ?? entity.spec.name ?? uuid;
+  if (current === "ON") {
+    throw new NutanixActionError(
+      `VM "${vmName}" is currently powered on — stop it before deleting (QUAI safety guard, avoids removing a running VM in one click)`,
+      409,
+    );
+  }
+  const result = await nutanixRequest<unknown>(effective.prismCentralUrl, "DELETE", `/api/nutanix/v3/vms/${uuid}`, effective.username, effective.password);
+  if (result.status < 200 || result.status >= 300) {
+    throw new NutanixActionError(`Prism Central refused deletion of VM "${vmName}" (status ${result.status}): ${result.raw.slice(0, 300)}`, 502);
+  }
+  return { ok: true, vmName };
+}
+
+/**
+ * Migre une VM d'un hôte physique à un autre, DANS LE MÊME CLUSTER — mécanisme RÉEL vérifié le
+ * 14/08/2026 (voir en-tête de section) : Prism Central v3 n'a pas d'action dédiée
+ * `/vms/{uuid}/migrate` (contrairement à v1/v2) — la migration live AHV est déclenchée en PUTtant
+ * `spec.resources.host_reference` vers l'hôte ciblé sur une VM ACTUELLEMENT ALLUMÉE (le scheduler
+ * AHV effectue alors une live migration ; sur une VM éteinte, ce même champ ne fait que fixer son
+ * prochain hôte de démarrage, pas une VRAIE migration — ce cas est refusé explicitement ci-dessous
+ * plutôt que de laisser croire qu'une migration live a eu lieu).
+ *
+ * Périmètre RÉEL actuel de cet utilisateur (voir mission) : un SEUL cluster existe
+ * (CLUSTER_AHV_HDV, 3 hôtes HDVNUTA1/2/3) — deux garde-fous stricts, jamais de tentative
+ * silencieuse hors de ce périmètre :
+ *  - hôte cible === hôte actuel : refuse (409), rien à faire.
+ *  - hôte cible n'appartenant pas au MÊME cluster que la VM : refuse (409) avec un message clair —
+ *    prépare honnêtement le terrain pour un jour où plusieurs clusters existeraient réellement,
+ *    sans jamais migrer silencieusement entre deux clusters aujourd'hui (n'existe pas encore chez
+ *    cet utilisateur, donc jamais exercé en pratique, mais le code ne doit jamais SUPPOSER qu'un
+ *    seul cluster existera pour toujours).
+ */
+export async function migrateNutanixVm(uuid: string, targetHostUuid: string): Promise<{ ok: true; vmName: string; targetHostName: string }> {
+  const { effective, entity } = await loadNutanixVmFullEntity(uuid);
+  const vmName = entity.status?.name ?? entity.spec.name ?? uuid;
+  const currentHostUuid = entity.status?.resources?.host_reference?.uuid;
+  const vmClusterUuid = entity.status?.cluster_reference?.uuid ?? entity.spec.cluster_reference?.uuid;
+
+  if (entity.status?.resources?.power_state !== "ON") {
+    throw new NutanixActionError(`VM "${vmName}" is not currently powered on — live migration requires a running VM`, 409);
+  }
+  if (currentHostUuid && currentHostUuid === targetHostUuid) {
+    throw new NutanixActionError(`VM "${vmName}" is already running on this host — nothing to do`, 409);
+  }
+
+  const hosts = await getNutanixHosts();
+  const targetHost = hosts.find((h) => h.id === targetHostUuid);
+  if (!targetHost) {
+    throw new NutanixActionError(`Target host "${targetHostUuid}" not found on Prism Central`, 404);
+  }
+  if (vmClusterUuid && targetHost.clusterUuid && targetHost.clusterUuid !== vmClusterUuid) {
+    throw new NutanixActionError(
+      `Refusing to migrate VM "${vmName}" to host "${targetHost.name}": it belongs to a different cluster (cross-cluster migration is not supported)`,
+      409,
+    );
+  }
+
+  const newSpec = {
+    ...entity.spec,
+    resources: { ...entity.spec.resources, host_reference: { kind: "host", uuid: targetHostUuid } },
+  };
+  await putNutanixVmEntity(effective, uuid, entity, newSpec, "live migration");
+  return { ok: true, vmName, targetHostName: targetHost.name };
 }

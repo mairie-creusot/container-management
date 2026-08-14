@@ -72,6 +72,11 @@ import { deleteAutomationNode, fetchAutomationRuns } from "@/features/automation
 // GitHubDeployPage.tsx (étape "Déploiement") — le réutiliser ici écraserait silencieusement son
 // état si la modal GitHub est rouverte ensuite.
 import { deployGithubRepo, fetchGithubDeployments } from "@/features/github/githubSlice";
+// Actions de cycle de vie + suppression d'une VM Nutanix (mission "il manque suprimer redemarer
+// creer toute interface et la logique") — voir la section "VM Nutanix" plus bas dans ce fichier
+// pour le câblage complet (boutons + confirmation lourde "taper le nom de la VM" pour Supprimer).
+import { deleteNutanixVm, runNutanixVmAction, type NutanixVmLifecycleAction } from "@/features/nutanix/nutanixSlice";
+import TypeToConfirmDialog from "@/components/TypeToConfirmDialog";
 import type { ContainerMetricPoint, Topology, TopologyHostKind, TopologyNode, TopologyNodeKind } from "@/types";
 import type { AutomationRunLogEntry, BackupRun, CronJobRun } from "@/types";
 import type { GithubDeployment, GithubDeploymentDetail } from "@/types";
@@ -1111,6 +1116,53 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
   const [githubLogsStatus, setGithubLogsStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [githubLog, setGithubLog] = useState("");
   const [githubRedeploying, setGithubRedeploying] = useState(false);
+  // VM Nutanix (voir section "VM Nutanix" plus bas) — uuid ayant une action de cycle de vie en
+  // cours (désactive les boutons, state.nutanix.actionPendingUuid) + visibilité de la confirmation
+  // lourde "taper le nom de la VM" pour Supprimer, jamais ouverte directement par le bouton lui-même.
+  const nutanixActionPendingUuid = useAppSelector((s) => s.nutanix.actionPendingUuid);
+  const [nutanixDeleteDialogOpen, setNutanixDeleteDialogOpen] = useState(false);
+
+  /**
+   * Démarrer/Arrêter/Redémarrer une VM Nutanix — confirmation `useConfirm`/variant danger AVANT
+   * tout appel réel pour "Arrêter"/"Redémarrer" (interrompt des services en cours, même esprit que
+   * l'arrêt d'un conteneur, voir TopologyGraph.tsx#handleContainerAction) ; "Démarrer" n'a besoin
+   * d'aucune confirmation (action non destructive, même convention que le conteneur). Rafraîchit
+   * le graphe après succès pour refléter le nouvel état réel au prochain rendu (placement/
+   * alimentation recalculés côté serveur, voir services/topology.ts).
+   */
+  async function handleNutanixVmAction(uuid: string, vmName: string, action: NutanixVmLifecycleAction) {
+    if (action === "stop" || action === "restart") {
+      const ok = await confirm({
+        title: action === "stop" ? "Arrêter la VM" : "Redémarrer la VM",
+        description:
+          action === "stop"
+            ? `Confirmer l'arrêt GRACIEUX (ACPI) de "${vmName}" ? Les services qu'elle héberge seront interrompus.`
+            : `Confirmer le redémarrage GRACIEUX de "${vmName}" ? Les services qu'elle héberge seront brièvement interrompus.`,
+        confirmLabel: action === "stop" ? "Arrêter" : "Redémarrer",
+        variant: "danger",
+      });
+      if (!ok) return;
+    }
+    const result = await dispatch(runNutanixVmAction({ uuid, action }));
+    if (runNutanixVmAction.fulfilled.match(result)) dispatch(fetchTopology());
+  }
+
+  /**
+   * Suppression définitive d'une VM Nutanix — confirmation LOURDE (mission : "ex: taper le nom de
+   * la VM pour confirmer") : le bouton "Supprimer" n'ouvre QUE la boîte de dialogue
+   * TypeToConfirmDialog (voir la section "VM Nutanix" plus bas), jamais l'action elle-même —
+   * celle-ci n'est déclenchée qu'ici, depuis son `onConfirm`, une fois le nom exact retapé. Le
+   * serveur refuse de toute façon (409) si la VM est encore allumée (services/nutanix.ts#
+   * deleteNutanixVm) : message d'erreur affiché via errorNotificationMiddleware, pas géré ici.
+   */
+  async function handleNutanixVmDeleteConfirmed(uuid: string) {
+    setNutanixDeleteDialogOpen(false);
+    const result = await dispatch(deleteNutanixVm({ uuid }));
+    if (deleteNutanixVm.fulfilled.match(result)) {
+      dispatch(fetchTopology());
+      onClose();
+    }
+  }
 
   const kind = node?.kind;
   const rawId = node ? idWithoutPrefix(node.id) : "";
@@ -1816,6 +1868,73 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
             <div className="chip-row topology-detail-panel__chips">
               <StatusPill status={node.status} />
             </div>
+
+            {/* Actions de cycle de vie réelles (Prism Central v3, services/nutanix.ts) — mission
+                "il manque suprimer redemarer creer toute interface et la logique". Démarrer/
+                Redémarrer masqués selon l'état RÉEL (node.status, jamais une intention) plutôt que
+                désactivés : un bouton visible mais grisé laisserait croire qu'une action pourrait
+                un jour s'appliquer dans cet état, alors que le serveur la refuse catégoriquement
+                (409, voir services/nutanix.ts#startNutanixVm/stopNutanixVm/restartNutanixVm) —
+                même choix que TopologyGraph.tsx#nodeMenuItems pour un conteneur (Arrêter/Démarrer
+                mutuellement exclusifs selon `node.status`). "Supprimer" n'ouvre QUE la confirmation
+                lourde ci-dessous (jamais l'action elle-même) — voir handleNutanixVmDeleteConfirmed. */}
+            {operate && (
+              <div className="inspector-actions">
+                {node.status === "stopped" && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary btn-sm"
+                    disabled={nutanixActionPendingUuid === rawId}
+                    onClick={() => void handleNutanixVmAction(rawId, node.label, "start")}
+                  >
+                    {nutanixActionPendingUuid === rawId ? "…" : "Démarrer"}
+                  </button>
+                )}
+                {node.status === "running" && (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      disabled={nutanixActionPendingUuid === rawId}
+                      onClick={() => void handleNutanixVmAction(rawId, node.label, "stop")}
+                    >
+                      {nutanixActionPendingUuid === rawId ? "…" : "Arrêter"}
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      disabled={nutanixActionPendingUuid === rawId}
+                      onClick={() => void handleNutanixVmAction(rawId, node.label, "restart")}
+                    >
+                      {nutanixActionPendingUuid === rawId ? "…" : "Redémarrer"}
+                    </button>
+                  </>
+                )}
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  style={{ color: "var(--color-critical)" }}
+                  disabled={nutanixActionPendingUuid === rawId}
+                  onClick={() => setNutanixDeleteDialogOpen(true)}
+                >
+                  Supprimer
+                </button>
+              </div>
+            )}
+            <TypeToConfirmDialog
+              open={nutanixDeleteDialogOpen}
+              title="Supprimer cette VM"
+              description={
+                node.status === "running"
+                  ? `"${node.label}" est actuellement ALLUMÉE — le serveur refusera la suppression tant qu'elle n'est pas arrêtée. Cette action est irréversible et détruit réellement la VM sur Prism Central.`
+                  : `Confirmer la suppression définitive de "${node.label}" ? Cette action est irréversible et détruit réellement la VM sur Prism Central.`
+              }
+              expectedValue={node.label}
+              confirmLabel="Supprimer définitivement"
+              onConfirm={() => void handleNutanixVmDeleteConfirmed(rawId)}
+              onCancel={() => setNutanixDeleteDialogOpen(false)}
+            />
+
             <KeyValueList
               rows={[
                 { key: "Cluster", value: node.subtitle },

@@ -147,7 +147,7 @@ export const MINIMAP_NODE_COLOR: Record<TopologyNode["kind"], string> = {
  * isValidConnection/handleConnect (TopologyGraph.tsx) restent inchangés, ils ne lisent que ces
  * deux tables.
  */
-export type CapabilityId = "network" | "attach" | "volume-mount" | "provide" | "hosted-by";
+export type CapabilityId = "network" | "attach" | "volume-mount" | "provide" | "hosted-by" | "hosts";
 
 export interface PortSpec {
   /** Id du Handle React Flow — unique au sein d'un même type de nœud. */
@@ -180,18 +180,40 @@ export const NODE_CAPABILITIES: Record<TopologyNode["kind"], PortSpec[]> = {
   network: [
     { id: "attach", capability: "attach", handleType: "target", position: Position.Left, label: "Attache un conteneur", colorToken: "network" },
   ],
-  // Aucun port pour ce premier lot : les VMs Nutanix sont indépendantes de l'infra Docker locale
-  // (voir services/topology.ts), pas de capacité de connexion à déclarer. GraphNode ci-dessous
-  // gère déjà un tableau de ports vide sans erreur (ports.map sur []).
-  "nutanix-vm": [],
+  // Bug réel corrigé le 14/08/2026 (retour utilisateur sur capture d'écran : "c'est pas relier
+  // corectement cluster au hote 1 2 3 eu vm cncerner") : `ports: []` ici faisait que GraphNode
+  // (voir plus bas, `ports.map(...)`) ne posait AUCUN <Handle> React Flow sur ce nœud — sans
+  // ancrage DOM des deux côtés, React Flow ne peut simplement PAS dessiner une arête, même quand
+  // elle existe bel et bien dans les données (services/topology.ts#getNutanixTopologyParts
+  // produisait déjà la bonne arête `kind: "hosts"` host->VM, invisible côté rendu uniquement). Un
+  // seul port TARGET ("hosted-by", même capacité/position/couleur que le port synthétique déjà
+  // posé sur un groupe hébergé, voir CAPABILITY_PORT_META ci-dessous) suffit : une VM Nutanix n'est
+  // jamais elle-même la SOURCE d'une arête "hosts" (jamais l'hôte de quoi que ce soit d'autre).
+  // Reste non-interactif au clic-glissé (voir CAPABILITY_DEFS["hosted-by"] ci-dessous) : ce
+  // placement est une vérité serveur recalculée à chaque poll, pas une intention à modifier à la
+  // main depuis ce port.
+  "nutanix-vm": [
+    { id: "hosted-by", capability: "hosted-by", handleType: "target", position: Position.Top, label: "Hébergé par", colorToken: "host" },
+  ],
   // Même principe pour le contrôleur de domaine/DNS AD (services/adDns.ts) : jamais relié par une
   // arête (aucune donnée ne prouve un lien réel avec un nœud Docker/Nutanix précis).
   "ad-server": [],
-  // Nœuds "host" (cluster Nutanix / environnement Docker distant / hôte LXD, voir
-  // services/topology.ts) : pas connectables comme un conteneur/volume/network — la seule arête
-  // qui les touche ("hosts", cluster Nutanix -> VM) est posée par le serveur, jamais glissée à la
-  // main par l'utilisateur.
-  host: [],
+  // Nœuds "host" (cluster Nutanix physique / hôte AHV physique / environnement Docker distant /
+  // hôte LXD, voir services/topology.ts) — même correctif que "nutanix-vm" ci-dessus, mais ce kind
+  // peut être BOTH bout d'une arête "hosts" selon le hostKind réel (un cluster Nutanix est
+  // toujours SOURCE vers ses hôtes physiques ; un hôte physique AHV est TARGET depuis son cluster
+  // ET SOURCE vers les VMs qu'il héberge, voir getNutanixTopologyParts) : les deux Handles sont
+  // posés INCONDITIONNELLEMENT sur tout nœud "host" (même table statique par `kind`, pas par
+  // `hostKind` — NODE_CAPABILITIES est indexée uniquement par `kind`), exactement comme un
+  // conteneur affiche toujours ses deux ports network/volume-mount même s'il n'utilise que l'un
+  // des deux. Un hôte Docker distant/LXD qui ne participe à aucune arête "hosts" affiche donc ces
+  // deux points de connexion sans jamais s'en servir — cosmétique, pas un bug (même compromis
+  // assumé que pour tout autre kind du graphe). `hosts` reste non-interactif au clic-glissé (voir
+  // CAPABILITY_DEFS ci-dessous) — jamais de fausse relation d'hébergement crée à la main.
+  host: [
+    { id: "hosted-by", capability: "hosted-by", handleType: "target", position: Position.Top, label: "Hébergé par", colorToken: "host" },
+    { id: "hosts", capability: "hosts", handleType: "source", position: Position.Bottom, label: "Héberge", colorToken: "host" },
+  ],
   // Workspaces IaC (voir services/topology.ts#getIacWorkspaceNodes) : indépendants de l'infra Docker
   // locale comme les VMs Nutanix/le contrôleur AD ci-dessus — un `tofu apply`/`ansible-playbook`/
   // `packer build` peut provisionner une ressource Docker, mais QUAI n'a aucune donnée reliant
@@ -239,12 +261,21 @@ export const CAPABILITY_DEFS: Record<CapabilityId, CapabilityDef> = {
   attach: { linksTo: "network", interactive: true },
   "volume-mount": { linksTo: "provide", interactive: false, infoMessage: VOLUME_MOUNT_INFO },
   provide: { linksTo: "volume-mount", interactive: false, infoMessage: VOLUME_MOUNT_INFO },
-  // N'existe QUE sur les ports synthétiques d'un groupe replié (voir deriveGroupPorts ci-dessous,
-  // arête "hosts" — ex: docker-local -> conteneur) : jamais posé sur un vrai NODE_CAPABILITIES
-  // (les nœuds "host" n'ont eux-mêmes aucun port, cette relation n'est jamais glissée à la main).
-  // `linksTo` auto-référent car sans utilité réelle ici — juste pour satisfaire le type, ce
-  // capability n'est jamais l'origine d'une connexion initiée par l'utilisateur.
-  "hosted-by": { linksTo: "hosted-by", interactive: false, infoMessage: "Relation d'hébergement posée par le serveur, non modifiable ici." },
+  // Posé À LA FOIS sur les ports synthétiques d'un groupe replié (deriveGroupPorts ci-dessous, ex:
+  // docker-local -> conteneur membre) ET, depuis le correctif du 14/08/2026 (voir NODE_CAPABILITIES
+  // ci-dessus), sur tout vrai nœud "nutanix-vm"/"host" — toujours le bout TARGET d'une arête
+  // "hosts" (jamais l'origine d'une connexion glissée par l'utilisateur, React Flow ne démarre un
+  // geste de connexion que depuis un Handle `type="source"`). `linksTo: "hosts"` (le pendant SOURCE,
+  // voir juste en dessous) : jamais interactif, ce placement est une vérité serveur recalculée à
+  // chaque poll, pas une intention à modifier à la main depuis ce port.
+  "hosted-by": { linksTo: "hosts", interactive: false, infoMessage: "Relation d'hébergement posée par le serveur, non modifiable ici." },
+  // Pendant SOURCE de "hosted-by" ci-dessus — posé UNIQUEMENT sur un vrai nœud "host" (voir
+  // NODE_CAPABILITIES), jamais sur un port synthétique de groupe (un groupe n'est jamais lui-même
+  // la source d'une arête "hosts" dans ce premier lot, voir deriveGroupPorts). Même garde non-
+  // interactive que "hosted-by" : un clic-glissé depuis ce port affiche le même message plutôt que
+  // de ne rien faire silencieusement (avant ce correctif, le nœud "host" n'avait tout simplement
+  // aucun port, glisser depuis lui n'était même pas possible).
+  hosts: { linksTo: "hosted-by", interactive: false, infoMessage: "Relation d'hébergement posée par le serveur, non modifiable ici." },
 };
 
 /**
@@ -265,6 +296,13 @@ const CAPABILITY_PORT_META: Record<CapabilityId, Pick<PortSpec, "handleType" | "
   // "hosts", voir services/topology.ts) reste visuellement distinct de ses connexions
   // réseau/volume habituelles — voir deriveGroupPorts ci-dessous.
   "hosted-by": { handleType: "target", position: Position.Top, colorToken: "host", label: "Hébergé par" },
+  // Jamais réellement lue par deriveGroupPorts (un groupe n'est jamais SOURCE d'une arête "hosts",
+  // voir CAPABILITY_DEFS["hosts"] ci-dessus) — entrée requise uniquement pour que ce
+  // `Record<CapabilityId, ...>` reste total après l'ajout de "hosts" à CapabilityId (NODE_CAPABILITIES
+  // pose ce port directement avec ses propres métadonnées pour un vrai nœud "host", sans passer par
+  // cette table synthétique). Valeurs alignées sur NODE_CAPABILITIES["host"] pour rester cohérentes
+  // si jamais réutilisées un jour.
+  hosts: { handleType: "source", position: Position.Bottom, colorToken: "host", label: "Héberge" },
 };
 
 /**
