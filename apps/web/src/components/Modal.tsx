@@ -25,6 +25,24 @@ export default function Modal({
   const dialogRef = useRef<HTMLDivElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
 
+  // Bug réel corrigé le 14/08/2026 (retour utilisateur : "ya un probleme des que ecrit une lettre
+  // sa se remet sur type" — le focus revenait au premier champ du formulaire à CHAQUE frappe).
+  // Root-causé : l'effet de gestion du focus ci-dessous avait `onClose`/`dismissible` en
+  // dépendances — `onClose` est presque toujours une fonction déclarée directement dans le corps
+  // du composant appelant (ex: `onClose={handleCancelForm}`, jamais enveloppée dans `useCallback`),
+  // donc une IDENTITÉ NOUVELLE à CHAQUE rendu du parent. Taper un caractère dans un champ contrôlé
+  // déclenche un `setState` → un rendu du parent → un nouvel `onClose` → cet effet se redéclenchait
+  // en entier, y compris `(first ?? dialog)?.focus()` qui vole le focus vers le PREMIER champ
+  // focusable de la modale. Un ref garde `onClose`/`dismissible` toujours à jour SANS faire partie
+  // des dépendances de l'effet de focus : celui-ci ne se redéclenche donc plus que sur une VRAIE
+  // ouverture/fermeture (`open`), jamais sur un simple changement de référence de fonction.
+  const onCloseRef = useRef(onClose);
+  const dismissibleRef = useRef(dismissible);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+    dismissibleRef.current = dismissible;
+  });
+
   // Ouverture : mémorise le focus courant, déplace le focus dans la modale,
   // pose le piège de focus (Tab/Shift+Tab) et l'écoute d'Échap.
   useEffect(() => {
@@ -38,9 +56,9 @@ export default function Modal({
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        if (dismissible) {
+        if (dismissibleRef.current) {
           event.preventDefault();
-          onClose();
+          onCloseRef.current();
         }
         return;
       }
@@ -66,7 +84,7 @@ export default function Modal({
       document.removeEventListener("keydown", handleKeyDown);
       previouslyFocused.current?.focus();
     };
-  }, [open, dismissible, onClose]);
+  }, [open]);
 
   if (!open) return null;
 
