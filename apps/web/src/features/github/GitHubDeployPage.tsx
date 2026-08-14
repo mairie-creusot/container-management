@@ -122,6 +122,10 @@ export default function GitHubDeployPage() {
   const [targetEnvironmentId, setTargetEnvironmentId] = useState("");
   const [subdomainInput, setSubdomainInput] = useState("");
   const [portInput, setPortInput] = useState("");
+  // Service docker-compose choisi pour recevoir la route de sous-domaine — pertinent uniquement
+  // quand detection.composeServices compte PLUSIEURS candidats (aucun choix silencieux possible
+  // dans ce cas, voir services/github.ts#deployViaDockerCompose) ; auto-rempli quand un seul.
+  const [serviceForSubdomainInput, setServiceForSubdomainInput] = useState("");
   const [autoDeployBranchInput, setAutoDeployBranchInput] = useState("");
   const [autoDeployOpen, setAutoDeployOpen] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
@@ -170,6 +174,7 @@ export default function GitHubDeployPage() {
     setRefInput("");
     setPortInput("");
     setSubdomainInput(defaultSubdomainFor(selectedRepo.repo));
+    setServiceForSubdomainInput("");
     setAutoDeployOpen(false);
     setDeployError(null);
     // Cible par défaut = l'environnement actuellement sélectionné dans le Topbar, s'il est
@@ -199,6 +204,16 @@ export default function GitHubDeployPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detection?.exposedPort]);
+
+  // Service compose pré-rempli quand il n'y a qu'UN SEUL candidat (aucune saisie requise) — quand
+  // il y en a plusieurs, laissé vide : l'utilisateur DOIT choisir explicitement (voir le sélecteur
+  // "Service à exposer" plus bas), jamais un choix silencieux d'un des deux.
+  useEffect(() => {
+    if (detection?.composeServices?.length === 1) {
+      setServiceForSubdomainInput(detection.composeServices[0]!.name);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detection?.composeServices]);
 
   useEffect(() => {
     if (autoDeploy) setAutoDeployBranchInput(autoDeploy.branch);
@@ -243,6 +258,10 @@ export default function GitHubDeployPage() {
         ...(targetEnvironmentId ? { targetEnvironmentId } : {}),
         ...(subdomainInput.trim() ? { subdomain: subdomainInput.trim() } : {}),
         ...(port ? { port } : {}),
+        // Même emplacement que celui inspecté à l'étape "Configuration" (racine si absent) — voir
+        // GithubRepoDetection#detectedPath.
+        ...(detection?.detectedPath ? { configPath: detection.detectedPath } : {}),
+        ...(serviceForSubdomainInput.trim() ? { serviceForSubdomain: serviceForSubdomainInput.trim() } : {}),
       }),
     ).then((result) => {
       if (deployGithubRepo.fulfilled.match(result)) {
@@ -296,6 +315,7 @@ export default function GitHubDeployPage() {
     setRefInput("");
     setPortInput("");
     setSubdomainInput("");
+    setServiceForSubdomainInput("");
     setTargetEnvironmentId("");
     setAutoDeployBranchInput("");
     setAutoDeployOpen(false);
@@ -305,8 +325,34 @@ export default function GitHubDeployPage() {
     setMaxStepReached(1);
   }
 
+  /** Choix explicite d'un emplacement candidat (voir GithubRepoDetection#candidates, racine vide +
+   * plusieurs sous-dossiers trouvés) — relance la détection SUR ce chemin précis, jamais un choix
+   * deviné à l'aveugle. Un seul clic (liste cliquable), conforme à la règle "≤3 clics". */
+  function handleSelectCandidate(candidatePath: string) {
+    if (!selectedRepo) return;
+    dispatch(fetchGithubDetection({ owner: selectedRepo.owner, repo: selectedRepo.repo, path: candidatePath }));
+  }
+
   const canBrowseRepos = Boolean(status?.configured || status?.usingGhcrFallback);
   const canDeployDockerfile = Boolean(detection?.hasDockerfile);
+  const canDeployCompose = Boolean(detection?.hasCompose);
+  // Sous-domaine + cible de déploiement sont pertinents pour les DEUX (Dockerfile seul ET compose,
+  // tous deux pilotés via services/docker.ts#getClient) — le port manuel, lui, reste spécifique au
+  // flux Dockerfile seul (compose résout ses ports depuis le YAML + le sélecteur de service).
+  const canDeployToDocker = canDeployDockerfile || canDeployCompose;
+  const canDeployAny = canDeployToDocker || Boolean(detection?.hasTerraform) || Boolean(detection?.hasAnsible);
+  const composeServiceCandidates = detection?.composeServices ?? [];
+  // Un sous-domaine ne peut être routé qu'après un choix explicite du service quand il y en a
+  // plusieurs (voir le useEffect d'auto-remplissage ci-dessus) — bloque le déploiement plutôt que
+  // de laisser le backend deviner silencieusement (il ne devine jamais non plus, mais autant le
+  // signaler ici, avant même de lancer le déploiement).
+  const composeServiceChoicePending =
+    canDeployCompose && composeServiceCandidates.length > 1 && Boolean(subdomainInput.trim()) && !serviceForSubdomainInput;
+  // Déploiement automatique sur push : la config actuelle (routes/githubWebhook.ts) ne connaît ni
+  // sous-dossier ni choix de service compose — n'exposer le bouton "Configurer" que dans le cas
+  // NON ambigu (racine, ou un seul service compose) pour ne jamais activer un déploiement
+  // automatique qui se tromperait d'emplacement/service silencieusement à chaque push.
+  const canConfigureAutoDeploy = canDeployToDocker && !detection?.detectedPath && composeServiceCandidates.length <= 1;
 
   const filteredRepos = useMemo(() => {
     const q = repoSearch.trim().toLowerCase();
@@ -322,10 +368,10 @@ export default function GitHubDeployPage() {
             <IconGithub className="inline-icon" /> GitHub
           </h2>
           <p>
-            Parcourez vos vrais dépôts GitHub, détectez Dockerfile/docker-compose/Terraform, puis buildez et
-            déployez réellement (Docker local ou distant) en 2 clics — sous-domaine, environnement et port sont
-            pré-remplis automatiquement. Terraform seul : un workspace Infra-as-code est créé, sans "apply"
-            automatique.
+            Parcourez vos vrais dépôts GitHub, détectez Dockerfile/docker-compose/Terraform/Ansible (racine ou
+            sous-dossier), puis buildez et déployez réellement (Docker local ou distant) en 2 clics — sous-domaine,
+            environnement et port sont pré-remplis automatiquement. Terraform/Ansible seuls : un workspace
+            Infra-as-code est créé, sans "apply"/"ansible-playbook" automatique.
           </p>
         </div>
       </div>
@@ -514,39 +560,78 @@ export default function GitHubDeployPage() {
                   {detectionStatus === "loading" && <div className="empty-state">Détection en cours…</div>}
                   {detectionError && <div className="error-banner">{detectionError}</div>}
 
-                  {detection && (
+                  {/* Racine vide + plusieurs emplacements candidats trouvés en sous-dossier (voir
+                      GithubRepoDetection#candidates) — jamais deviné à l'aveugle : un simple choix
+                      dans une liste, ≤3 clics au total pour arriver au déploiement. */}
+                  {detection?.candidates && detection.candidates.length > 0 && (
+                    <>
+                      <p className="muted" style={{ fontSize: 12.5 }}>
+                        Rien à la racine, mais {detection.candidates.length} emplacements possibles trouvés dans des
+                        sous-dossiers — choisissez lequel déployer :
+                      </p>
+                      <div className="iac-workspace-list">
+                        {detection.candidates.map((c) => (
+                          <button key={c.path} type="button" className="iac-workspace-item" onClick={() => handleSelectCandidate(c.path)}>
+                            <span className="iac-workspace-item__name">{c.path}/</span>
+                            <span className="iac-workspace-item__engine">
+                              {[
+                                c.hasCompose && "docker-compose",
+                                c.hasDockerfile && "Dockerfile",
+                                c.hasTerraform && "Terraform",
+                                c.hasAnsible && "Ansible",
+                              ]
+                                .filter(Boolean)
+                                .join(", ")}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+
+                  {detection && !detection.candidates && (
                     <>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <span className={`chip ${detection.hasCompose ? "chip--accent" : ""}`}>
+                          {detection.hasCompose ? "●" : "✗"} docker-compose
+                        </span>
                         <span className={`chip ${detection.hasDockerfile ? "chip--accent" : ""}`}>
                           {detection.hasDockerfile ? "●" : "✗"} Dockerfile
                           {detection.exposedPort ? ` (port ${detection.exposedPort})` : ""}
-                        </span>
-                        <span className={`chip ${detection.hasCompose ? "chip--accent" : ""}`}>
-                          {detection.hasCompose ? "●" : "✗"} docker-compose
                         </span>
                         <span className={`chip ${detection.hasTerraform ? "chip--accent" : ""}`}>
                           {detection.hasTerraform ? "●" : "✗"} Terraform
                           {detection.hasTerraform ? ` (${detection.terraformFiles.join(", ")})` : ""}
                         </span>
+                        <span className={`chip ${detection.hasAnsible ? "chip--accent" : ""}`}>
+                          {detection.hasAnsible ? "●" : "✗"} Ansible
+                          {detection.ansiblePlaybook ? ` (${detection.ansiblePlaybook})` : ""}
+                        </span>
                       </div>
                       <p className="muted" style={{ fontSize: 12 }}>
-                        Détection limitée à la racine du dépôt (pas de parcours récursif dans ce premier lot), branche{" "}
-                        <code>{detection.ref}</code>.
+                        {detection.detectedPath ? (
+                          <>
+                            Détecté dans le sous-dossier <code>{detection.detectedPath}/</code>
+                          </>
+                        ) : (
+                          "Détecté à la racine du dépôt"
+                        )}
+                        , branche <code>{detection.ref}</code>.
                       </p>
 
-                      {!detection.hasDockerfile && !detection.hasTerraform && (
+                      {!canDeployAny && (
                         <p className="graph-popover__error">
-                          Aucun Dockerfile ni fichier Terraform à la racine — rien à déployer automatiquement (compose
-                          seul non géré dans ce premier lot).
+                          Aucun Dockerfile, docker-compose, fichier Terraform ni playbook Ansible détecté — rien à
+                          déployer automatiquement.
                         </p>
                       )}
 
-                      {operator && (detection.hasDockerfile || detection.hasTerraform) && (
+                      {operator && canDeployAny && (
                         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                           {/* Chemin principal : SEUL champ visible par défaut est le sous-domaine
                               (pré-rempli, jamais obligatoire à modifier) — 0 saisie requise pour
                               déployer, tout le reste est replié derrière "Options avancées". */}
-                          {canDeployDockerfile && (
+                          {canDeployToDocker && (
                             <div className="field">
                               <label htmlFor="gh-subdomain">Sous-domaine (reverse proxy interne)</label>
                               <input
@@ -562,9 +647,33 @@ export default function GitHubDeployPage() {
                             </div>
                           )}
 
+                          {/* Ambiguïté RÉELLE (plusieurs services compose exposent un port) : jamais
+                              devinée côté serveur non plus (voir deployViaDockerCompose) — un choix
+                              explicite ici évite l'aller-retour d'un déploiement dont la route
+                              n'aurait finalement pas été créée. */}
+                          {canDeployCompose && composeServiceCandidates.length > 1 && (
+                            <div className="field">
+                              <label htmlFor="gh-compose-service">Service à exposer (plusieurs services déclarent un port)</label>
+                              <select
+                                id="gh-compose-service"
+                                value={serviceForSubdomainInput}
+                                onChange={(e) => setServiceForSubdomainInput(e.target.value)}
+                              >
+                                <option value="">— choisir —</option>
+                                {composeServiceCandidates.map((s) => (
+                                  <option key={s.name} value={s.name}>
+                                    {s.name}
+                                    {s.port ? ` (port ${s.port})` : ""}
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+
                           <details>
                             <summary style={{ cursor: "pointer", fontSize: 12.5, color: "var(--color-text-muted)" }}>
-                              Options avancées (branche, environnement cible, port)
+                              Options avancées (branche{canDeployToDocker ? ", environnement cible" : ""}
+                              {canDeployDockerfile && !canDeployCompose ? ", port" : ""})
                             </summary>
                             <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
                               <div className="field">
@@ -576,53 +685,62 @@ export default function GitHubDeployPage() {
                                   placeholder={detection.ref}
                                 />
                               </div>
-                              {detection.hasDockerfile && (
-                                <>
-                                  <div className="field">
-                                    <label htmlFor="gh-target">Cible de déploiement</label>
-                                    <select
-                                      id="gh-target"
-                                      value={targetEnvironmentId}
-                                      onChange={(e) => setTargetEnvironmentId(e.target.value)}
-                                    >
-                                      <option value="">🖥️ Docker local</option>
-                                      {environments
-                                        .filter((e) => DEPLOY_TARGET_ORCHESTRATORS.has(e.orchestrator))
-                                        .map((e) => (
-                                          <option key={e.id} value={e.id}>
-                                            🌐 {e.name} (hôte Docker distant)
-                                          </option>
-                                        ))}
-                                    </select>
-                                    <p className="create-container-hint">
-                                      Seuls les hôtes Docker réellement pilotables par ce flux sont proposés (Docker
-                                      local, ou un hôte Docker distant configuré dans Environnements). Kubernetes/
-                                      Nutanix/LXC ne sont pas des cibles Docker et n'apparaissent jamais ici.
-                                    </p>
-                                  </div>
-                                  <div className="field">
-                                    <label htmlFor="gh-port">Port du conteneur (pour le sous-domaine)</label>
-                                    <input
-                                      id="gh-port"
-                                      type="number"
-                                      min={1}
-                                      max={65535}
-                                      value={portInput}
-                                      onChange={(e) => setPortInput(e.target.value)}
-                                      placeholder={
-                                        detection.exposedPort ? String(detection.exposedPort) : "détecté automatiquement (EXPOSE)"
-                                      }
-                                    />
-                                  </div>
-                                </>
+                              {canDeployToDocker && (
+                                <div className="field">
+                                  <label htmlFor="gh-target">Cible de déploiement</label>
+                                  <select
+                                    id="gh-target"
+                                    value={targetEnvironmentId}
+                                    onChange={(e) => setTargetEnvironmentId(e.target.value)}
+                                  >
+                                    <option value="">🖥️ Docker local</option>
+                                    {environments
+                                      .filter((e) => DEPLOY_TARGET_ORCHESTRATORS.has(e.orchestrator))
+                                      .map((e) => (
+                                        <option key={e.id} value={e.id}>
+                                          🌐 {e.name} (hôte Docker distant)
+                                        </option>
+                                      ))}
+                                  </select>
+                                  <p className="create-container-hint">
+                                    Seuls les hôtes Docker réellement pilotables par ce flux sont proposés (Docker
+                                    local, ou un hôte Docker distant configuré dans Environnements). Kubernetes/
+                                    Nutanix/LXC ne sont pas des cibles Docker et n'apparaissent jamais ici.
+                                  </p>
+                                </div>
+                              )}
+                              {canDeployDockerfile && !canDeployCompose && (
+                                <div className="field">
+                                  <label htmlFor="gh-port">Port du conteneur (pour le sous-domaine)</label>
+                                  <input
+                                    id="gh-port"
+                                    type="number"
+                                    min={1}
+                                    max={65535}
+                                    value={portInput}
+                                    onChange={(e) => setPortInput(e.target.value)}
+                                    placeholder={
+                                      detection.exposedPort ? String(detection.exposedPort) : "détecté automatiquement (EXPOSE)"
+                                    }
+                                  />
+                                </div>
                               )}
                             </div>
                           </details>
 
-                          {detection.hasTerraform && !detection.hasDockerfile && (
+                          {canDeployCompose && (
                             <p className="muted" style={{ fontSize: 12 }}>
-                              Un workspace Infra-as-code sera créé à partir des fichiers Terraform de la racine —
-                              aucun "apply" automatique, à lancer ensuite depuis le nœud du workspace dans le graphe.
+                              Déploiement via <code>docker compose</code> dans un projet isolé (build + up des services
+                              définis dans le fichier compose) — port hôte déjà utilisé par un autre conteneur :
+                              remplacé automatiquement par un port libre, journalisé dans le déploiement.
+                            </p>
+                          )}
+
+                          {!canDeployCompose && !canDeployDockerfile && (detection.hasTerraform || detection.hasAnsible) && (
+                            <p className="muted" style={{ fontSize: 12 }}>
+                              Un workspace Infra-as-code sera créé à partir des fichiers{" "}
+                              {detection.hasTerraform ? "Terraform" : "Ansible"} détectés — aucun "apply"/"ansible-playbook"
+                              automatique, à lancer ensuite depuis le nœud du workspace dans le graphe.
                             </p>
                           )}
 
@@ -632,7 +750,8 @@ export default function GitHubDeployPage() {
                             type="button"
                             className="btn btn-primary"
                             onClick={handleDeploy}
-                            disabled={deploying}
+                            disabled={deploying || composeServiceChoicePending}
+                            title={composeServiceChoicePending ? "Choisissez le service à exposer avant de déployer" : undefined}
                             style={{ padding: "12px 16px", fontSize: 14, fontWeight: 600 }}
                           >
                             {deploying ? "Démarrage…" : "Déployer"}
@@ -640,8 +759,11 @@ export default function GitHubDeployPage() {
 
                           {/* Déploiement automatique sur push — option annexe de CETTE étape (pas une
                               4e étape), repliée par défaut pour garder le focus sur le déploiement
-                              manuel ci-dessus. */}
-                          {canDeployDockerfile && (
+                              manuel ci-dessus. Non proposé pour un emplacement/service ambigu (voir
+                              canConfigureAutoDeploy) : le webhook (routes/githubWebhook.ts) ne connaît
+                              ni sous-dossier ni choix de service, jamais un déploiement automatique
+                              qui se tromperait d'emplacement silencieusement à chaque push. */}
+                          {canConfigureAutoDeploy && (
                             <button
                               type="button"
                               className="btn btn-ghost btn-sm"
@@ -659,7 +781,7 @@ export default function GitHubDeployPage() {
                         </div>
                       )}
 
-                      {operator && canDeployDockerfile && autoDeployOpen && (
+                      {operator && canConfigureAutoDeploy && autoDeployOpen && (
                         <div className="card" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                             <strong style={{ fontSize: 13 }}>Déploiement automatique sur push</strong>

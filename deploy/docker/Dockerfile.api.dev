@@ -85,6 +85,20 @@ RUN DOCKER_CLI_VERSION=29.7.2 \
     && chmod +x /usr/local/bin/docker \
     && rm -rf /tmp/docker-cli.tgz /tmp/docker
 
+# Docker Compose (plugin CLI officiel, https://github.com/docker/compose, Apache-2.0) : nécessaire
+# pour piloter `docker compose` en sous-processus (déploiement automatique GitHub d'un dépôt dont
+# le seul artefact est un docker-compose.yml — voir apps/api/src/services/github.ts#
+# deployViaDockerCompose, spawn("docker", ["compose", ...])). Le client `docker` ci-dessus ne sait
+# PAS lui-même parler "compose" (`docker compose` répond "unknown command" sans ce plugin,
+# constaté en testant le binaire ci-dessus) : binaire statique officiel installé dans le
+# répertoire standard des plugins CLI Docker, comme le préconise sa documentation d'installation
+# manuelle — aucune réimplémentation de docker-compose.
+RUN DOCKER_COMPOSE_VERSION=v2.29.7 \
+    && ARCH=$(if [ "$TARGETARCH" = "arm64" ]; then echo "aarch64"; else echo "x86_64"; fi) \
+    && mkdir -p /usr/local/lib/docker/cli-plugins \
+    && curl -fsSL "https://github.com/docker/compose/releases/download/${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${ARCH}" -o /usr/local/lib/docker/cli-plugins/docker-compose \
+    && chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+
 RUN corepack enable && corepack prepare pnpm@9.1.0 --activate
 
 WORKDIR /workspace

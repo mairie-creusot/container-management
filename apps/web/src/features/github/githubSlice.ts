@@ -88,12 +88,15 @@ export const fetchGithubRepos = createAsyncThunk<GithubRepoRef[], void, { reject
 
 export const fetchGithubDetection = createAsyncThunk<
   GithubRepoDetection,
-  { owner: string; repo: string; ref?: string },
+  { owner: string; repo: string; ref?: string; path?: string },
   { rejectValue: string }
->("github/fetchDetection", async ({ owner, repo, ref }, { rejectWithValue }) => {
+>("github/fetchDetection", async ({ owner, repo, ref, path }, { rejectWithValue }) => {
   try {
-    const query = ref ? `?ref=${encodeURIComponent(ref)}` : "";
-    return await apiGet<GithubRepoDetection>(`/github/repos/${owner}/${repo}/detect${query}`);
+    const params = new URLSearchParams();
+    if (ref) params.set("ref", ref);
+    if (path) params.set("path", path);
+    const query = params.toString();
+    return await apiGet<GithubRepoDetection>(`/github/repos/${owner}/${repo}/detect${query ? `?${query}` : ""}`);
   } catch (error) {
     const message = error instanceof ApiError ? error.message : "Échec de la détection.";
     return rejectWithValue(message);
@@ -102,15 +105,26 @@ export const fetchGithubDetection = createAsyncThunk<
 
 export const deployGithubRepo = createAsyncThunk<
   GithubDeployment,
-  { owner: string; repo: string; ref?: string; targetEnvironmentId?: string; subdomain?: string; port?: number },
+  {
+    owner: string;
+    repo: string;
+    ref?: string;
+    targetEnvironmentId?: string;
+    subdomain?: string;
+    port?: number;
+    configPath?: string;
+    serviceForSubdomain?: string;
+  },
   { rejectValue: string }
->("github/deploy", async ({ owner, repo, ref, targetEnvironmentId, subdomain, port }, { rejectWithValue, dispatch }) => {
+>("github/deploy", async ({ owner, repo, ref, targetEnvironmentId, subdomain, port, configPath, serviceForSubdomain }, { rejectWithValue, dispatch }) => {
   try {
     const deployment = await apiPost<GithubDeployment>(`/github/repos/${owner}/${repo}/deploy`, {
       ...(ref ? { ref } : {}),
       ...(targetEnvironmentId ? { targetEnvironmentId } : {}),
       ...(subdomain ? { subdomain } : {}),
       ...(port !== undefined ? { port } : {}),
+      ...(configPath ? { configPath } : {}),
+      ...(serviceForSubdomain ? { serviceForSubdomain } : {}),
     });
     dispatch(pushNotification({ level: "info", message: `Déploiement de ${owner}/${repo} démarré.` }));
     return deployment;

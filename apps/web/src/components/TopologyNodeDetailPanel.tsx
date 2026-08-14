@@ -1321,6 +1321,15 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
         ref: d.ref,
         ...(d.targetEnvironmentId ? { targetEnvironmentId: d.targetEnvironmentId } : {}),
         ...(d.subdomain ? { subdomain: d.subdomain } : {}),
+        // Rejoue le MÊME sous-dossier que le déploiement d'origine (voir GithubDeployment#configPath)
+        // — sans ça, un dépôt dont le docker-compose/Dockerfile est dans un sous-dossier serait
+        // redéployé à tort depuis la racine (probablement rien à y déployer).
+        ...(d.configPath ? { configPath: d.configPath } : {}),
+        // kind "docker-compose" : le service ayant reçu la route est déjà connu (d.containerName
+        // porte le nom du SERVICE compose, pas juste le nom du conteneur — voir
+        // services/github.ts#deployViaDockerCompose) ; le repasser évite de retomber sur
+        // l'ambiguïté "plusieurs services exposent un port" à chaque redéploiement.
+        ...(d.kind === "docker-compose" && d.containerName ? { serviceForSubdomain: d.containerName } : {}),
       }),
     );
     setGithubRedeploying(false);
@@ -1423,8 +1432,17 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
               <>
                 <div className="inspector-section-title">Déployé depuis GitHub</div>
                 <div className="card" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ fontWeight: 600, fontSize: 13 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13, display: "flex", alignItems: "center", gap: 8 }}>
                     {githubDeployment.owner}/{githubDeployment.repo}@{githubDeployment.ref}
+                    {/* kind "docker-compose" : ce conteneur n'est que le SERVICE ayant reçu la route
+                        de sous-domaine, pas l'unique conteneur produit par ce déploiement (voir
+                        services/github.ts#deployViaDockerCompose) — l'indiquer évite de laisser
+                        croire à un déploiement Dockerfile-seul classique. */}
+                    {githubDeployment.kind === "docker-compose" && (
+                      <span className="chip" style={{ fontWeight: 400, fontSize: 11 }}>
+                        docker-compose{githubDeployment.containerName ? ` · ${githubDeployment.containerName}` : ""}
+                      </span>
+                    )}
                   </div>
                   {githubDeployment.commit ? (
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>

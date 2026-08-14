@@ -1188,33 +1188,93 @@ export interface GithubRepoRef {
 }
 
 /**
+ * Un emplacement (racine ou sous-dossier) où quelque chose de déployable a été trouvé lors du
+ * parcours borné de sous-dossiers (voir services/github.ts#scanSubfoldersForCandidates) —
+ * uniquement peuplé quand la racine elle-même n'a RIEN (voir GithubRepoDetection#candidates
+ * ci-dessous). Résumé volontairement superficiel (pas de exposedPort/composeServices ici) : le
+ * détail complet n'est calculé qu'une fois un candidat précis choisi explicitement par
+ * l'utilisateur (nouvel appel à GET .../detect?path=..., voir GitHubDeployPage.tsx).
+ */
+export interface GithubDetectionCandidate {
+  /** Chemin relatif depuis la racine du dépôt, SANS "/" final (ex: "docker", "apps/api"). */
+  path: string;
+  hasDockerfile: boolean;
+  hasCompose: boolean;
+  hasTerraform: boolean;
+  terraformFiles: string[];
+  hasAnsible: boolean;
+}
+
+/** Un service docker-compose candidat pour recevoir la route de sous-domaine — services qui ne
+ * déclarent AUCUN port (`ports:`/`expose:`) ne sont jamais candidats (base de données interne
+ * typique, jamais routable en HTTP). Voir services/github.ts#parseComposeServiceCandidates. */
+export interface GithubComposeServiceCandidate {
+  name: string;
+  /** Port CONTENEUR (jamais le port hôte — Caddy connecte directement le conteneur sur le réseau
+   * docker, voir services/reverseProxy.ts) du premier port déclaré pour ce service — absent si
+   * indéterminable depuis le YAML (ex: variable d'environnement non résolue dans le mapping). */
+  port?: number;
+}
+
+/**
  * GET /api/github/repos/:owner/:repo/detect — résumé honnête de ce qui est réellement présent à
- * la RACINE du repo (pas de parcours récursif dans ce premier lot, voir ARCHITECTURE.md) : un
- * repo sans Dockerfile ne doit jamais faire remonter hasDockerfile: true.
+ * la racine du repo, ou dans le sous-dossier explicitement demandé (`?path=`), ou (racine vide
+ * uniquement) dans l'unique sous-dossier candidat trouvé par un parcours BORNÉ (2-3 niveaux, voir
+ * services/github.ts#scanSubfoldersForCandidates) — un repo sans aucun de ces fichiers ne doit
+ * jamais faire remonter un booléen à `true`.
  */
 export interface GithubRepoDetection {
   ref: string; // branche/commit effectivement inspecté (résolu à la branche par défaut si omis)
   hasDockerfile: boolean;
   hasCompose: boolean;
   hasTerraform: boolean;
-  terraformFiles: string[]; // noms de fichiers *.tf trouvés à la racine
-  /** Dernière instruction EXPOSE trouvée dans le Dockerfile de la racine (lecture réelle du
+  terraformFiles: string[]; // noms de fichiers *.tf trouvés à l'emplacement retenu
+  hasAnsible: boolean;
+  /** Nom du fichier playbook trouvé ("playbook.yml"/"site.yml"/variantes .yaml) — absent si hasAnsible est false. */
+  ansiblePlaybook?: string;
+  /** Dernière instruction EXPOSE trouvée dans le Dockerfile de l'emplacement retenu (lecture réelle du
    * contenu du fichier via l'API Contents GitHub) — absent si aucun Dockerfile ou aucune
    * instruction EXPOSE, jamais une valeur devinée par convention. Pré-remplit le champ "port"
    * du formulaire de déploiement (voir GitHubDeployPage.tsx), toujours éditable. */
   exposedPort?: number;
+  /** Services docker-compose candidats pour le sous-domaine (voir GithubComposeServiceCandidate)
+   * — absent/vide si hasCompose est false ou si aucun service ne déclare de port. Un seul élément
+   * -> sélection automatique côté déploiement ; plusieurs -> l'utilisateur doit choisir
+   * explicitement (`serviceForSubdomain`, voir POST .../deploy), jamais deviné silencieusement. */
+  composeServices?: GithubComposeServiceCandidate[];
+  /** Sous-dossier effectivement inspecté pour produire CE résumé (ex: "docker") — absent quand
+   * c'est la racine (comportement historique inchangé). À repasser tel quel comme `configPath`
+   * à POST .../deploy pour que le déploiement réel utilise le MÊME emplacement que celui inspecté ici. */
+  detectedPath?: string;
+  /** Plusieurs emplacements candidats trouvés à des endroits DIFFÉRENTS (racine vide, parcours de
+   * sous-dossiers) — aucun n'a été choisi automatiquement, l'utilisateur doit trancher
+   * explicitement (voir GitHubDeployPage.tsx, un simple choix dans une liste). Quand ce champ est
+   * présent, tous les booléens ci-dessus valent `false`/vide : rien n'est encore résolu. Absent
+   * si un seul emplacement a été retenu (racine, ou unique candidat de sous-dossier).
+   */
+  candidates?: GithubDetectionCandidate[];
 }
 
 export type GithubDeploymentStatus = "running" | "success" | "failed";
 
 /**
- * "docker-build-run" : Dockerfile détecté -> vrai `docker build` + `docker run` sur la cible.
- * "iac-workspace" : *.tf détecté sans Dockerfile -> workspace IaC créé (voir services/iac/),
- * aucun `tofu apply` automatique — reporté à une action explicite ultérieure de l'utilisateur.
+ * "docker-build-run" : Dockerfile détecté (seul, ou prioritaire) -> vrai `docker build` + `docker
+ * run` sur la cible.
+ * "docker-compose" : docker-compose.yml/compose.yml détecté -> vrai `docker compose -p <projet
+ * isolé> up -d --build` sur la cible (voir services/github.ts#deployViaDockerCompose). PRIORITAIRE
+ * sur un Dockerfile isolé quand les deux sont présents au même emplacement : un docker-compose.yml
+ * référence le plus souvent ce même Dockerfile (`build: .`) tout en décrivant en plus la topologie
+ * complète voulue par le mainteneur (services dépendants, volumes, réseau, variables d'env) —
+ * c'est un sur-ensemble strict d'un déploiement Dockerfile seul, jamais l'inverse (même logique que
+ * Railway/Render : la présence d'un compose signale une intention multi-service explicite).
+ * "iac-workspace" : *.tf (Terraform/OpenTofu) OU un playbook Ansible détecté, sans Dockerfile ni
+ * compose -> workspace IaC créé (voir services/iac/), aucun "apply"/"ansible-playbook" automatique
+ * — reporté à une action explicite ultérieure de l'utilisateur. Terraform et Ansible partagent ce
+ * même kind (même mécanisme de suivi, moteur distingué par IacWorkspace#engine).
  * null tant que le clone/la détection n'a pas encore déterminé la voie suivie (déploiement
  * encore "running").
  */
-export type GithubDeploymentKind = "docker-build-run" | "iac-workspace";
+export type GithubDeploymentKind = "docker-build-run" | "docker-compose" | "iac-workspace";
 
 /** "manual" : clic operator/admin sur GitHubDeployPage.tsx. "webhook" : push GitHub reçu par
  * POST /api/github/webhook avec le déploiement automatique activé pour ce dépôt (voir
@@ -1247,9 +1307,27 @@ export interface GithubDeployment {
   triggeredBy: GithubDeploymentTrigger;
   commit?: GithubDeploymentCommit;
   imageTag?: string; // kind "docker-build-run"
-  containerId?: string; // kind "docker-build-run"
-  containerName?: string; // kind "docker-build-run"
-  iacWorkspaceId?: string; // kind "iac-workspace"
+  /** Conteneur ayant reçu la route reverse-proxy de sous-domaine : LE conteneur unique pour un
+   * déploiement "docker-build-run", ou le conteneur du service choisi/déduit pour un déploiement
+   * "docker-compose" (voir serviceForSubdomain) — absent si aucun sous-domaine demandé/réussi, ou
+   * kind "iac-workspace" (pas de conteneur applicable). */
+  containerId?: string;
+  containerName?: string;
+  iacWorkspaceId?: string; // kind "iac-workspace" (Terraform ou Ansible, voir GithubDeploymentKind)
+  /** kind "docker-compose" uniquement : nom du projet compose isolé (`docker compose -p`)
+   * effectivement utilisé — dérivé de l'id de ce déploiement (voir sanitizeDockerName), jamais en
+   * collision avec un autre déploiement compose sur ce même hôte Docker. Sert aussi à retrouver ce
+   * déploiement pour l'arrêter proprement (`down`) avant un redéploiement du même dépôt. */
+  composeProjectName?: string;
+  /** kind "docker-compose" uniquement : noms des conteneurs RÉELLEMENT créés par `docker compose up`
+   * (un par service défini dans le docker-compose.yml) — pour affichage, jamais une liste déduite du
+   * seul contenu YAML (qui peut différer du résultat réel en cas d'échec partiel). */
+  composeServices?: string[];
+  /** Sous-dossier du dépôt utilisé pour la détection ET le déploiement réel (voir
+   * GithubRepoDetection#detectedPath) — absent si racine (comportement historique inchangé). Rejoué
+   * tel quel par un redéploiement (voir TopologyNodeDetailPanel.tsx#handleRedeployFromGithub) pour
+   * cibler le même emplacement, jamais une racine par défaut qui serait fausse pour ce dépôt. */
+  configPath?: string;
   /** Sous-domaine demandé pour ce déploiement (reverse proxy interne), s'il y en a un — voir
    * GitHubDeployPage.tsx. Présent même si la route n'a en fin de compte pas pu être créée
    * (ex: aucun port EXPOSE détecté ni fourni) : reverseProxyRouteId distingue les deux cas. */

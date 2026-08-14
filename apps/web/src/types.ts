@@ -964,19 +964,46 @@ export interface GithubRepoRef {
   updatedAt: string;
 }
 
+/** Voir apps/api/src/types.ts#GithubDetectionCandidate (contrat en miroir). */
+export interface GithubDetectionCandidate {
+  path: string; // relatif depuis la racine, sans "/" final (ex: "docker", "apps/api")
+  hasDockerfile: boolean;
+  hasCompose: boolean;
+  hasTerraform: boolean;
+  terraformFiles: string[];
+  hasAnsible: boolean;
+}
+
+/** Voir apps/api/src/types.ts#GithubComposeServiceCandidate (contrat en miroir). */
+export interface GithubComposeServiceCandidate {
+  name: string;
+  port?: number; // port CONTENEUR (jamais le port hôte)
+}
+
 export interface GithubRepoDetection {
   ref: string;
   hasDockerfile: boolean;
   hasCompose: boolean;
   hasTerraform: boolean;
   terraformFiles: string[];
-  /** Dernière instruction EXPOSE trouvée dans le Dockerfile de la racine — absent si aucun
+  hasAnsible: boolean;
+  ansiblePlaybook?: string;
+  /** Dernière instruction EXPOSE trouvée dans le Dockerfile de l'emplacement retenu — absent si aucun
    * Dockerfile ou aucun EXPOSE, jamais deviné. Pré-remplit le champ "port" (toujours éditable). */
   exposedPort?: number;
+  /** Services compose candidats pour le sous-domaine — un seul -> sélection automatique côté
+   * déploiement ; plusieurs -> l'utilisateur doit choisir explicitement (voir GitHubDeployPage.tsx). */
+  composeServices?: GithubComposeServiceCandidate[];
+  /** Sous-dossier effectivement inspecté (absent = racine) — à repasser tel quel comme `configPath`
+   * à POST .../deploy. */
+  detectedPath?: string;
+  /** Plusieurs emplacements candidats trouvés (racine vide, parcours de sous-dossiers) — aucun
+   * choisi automatiquement, l'utilisateur doit trancher explicitement dans une liste. */
+  candidates?: GithubDetectionCandidate[];
 }
 
 export type GithubDeploymentStatus = "running" | "success" | "failed";
-export type GithubDeploymentKind = "docker-build-run" | "iac-workspace";
+export type GithubDeploymentKind = "docker-build-run" | "docker-compose" | "iac-workspace";
 export type GithubDeploymentTrigger = "manual" | "webhook";
 
 export interface GithubDeploymentCommit {
@@ -1000,9 +1027,17 @@ export interface GithubDeployment {
   triggeredBy: GithubDeploymentTrigger;
   commit?: GithubDeploymentCommit;
   imageTag?: string;
+  /** Conteneur ayant reçu la route reverse-proxy de sous-domaine (unique conteneur pour
+   * "docker-build-run", service choisi/déduit pour "docker-compose") — absent si aucun sous-domaine
+   * demandé/réussi, ou kind "iac-workspace". */
   containerId?: string;
   containerName?: string;
-  iacWorkspaceId?: string;
+  iacWorkspaceId?: string; // kind "iac-workspace" (Terraform ou Ansible)
+  composeProjectName?: string; // kind "docker-compose" : nom du projet compose isolé (docker compose -p)
+  composeServices?: string[]; // kind "docker-compose" : conteneurs réellement créés
+  /** Sous-dossier du dépôt utilisé pour la détection ET le déploiement (voir
+   * GithubRepoDetection#detectedPath) — absent si racine. Rejoué tel quel par "Redéployer". */
+  configPath?: string;
   subdomain?: string;
   reverseProxyRouteId?: string;
 }

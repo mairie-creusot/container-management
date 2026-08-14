@@ -37,6 +37,7 @@ import {
   detectRepo,
   diagnosticFromGithubError,
   getDeploymentDetail,
+  isSafeRelativeConfigPath,
   listDeployments,
   listRepos,
   startDeployment,
@@ -91,11 +92,15 @@ export default async function githubRoutes(fastify: FastifyInstance): Promise<vo
     }
   });
 
-  fastify.get<{ Params: { owner: string; repo: string }; Querystring: { ref?: string } }>(
+  fastify.get<{ Params: { owner: string; repo: string }; Querystring: { ref?: string; path?: string } }>(
     "/api/github/repos/:owner/:repo/detect",
     async (request, reply) => {
+      const explicitPath = request.query.path?.trim();
+      if (explicitPath && !isSafeRelativeConfigPath(explicitPath)) {
+        return reply.code(400).send({ error: `"${explicitPath}" is not a valid repository-relative path` });
+      }
       try {
-        const detection = await detectRepo(request.params.owner, request.params.repo, request.query.ref);
+        const detection = await detectRepo(request.params.owner, request.params.repo, request.query.ref, explicitPath);
         return reply.send(detection);
       } catch (err) {
         return reply.code(statusFromGithubError(err)).send({ error: diagnosticFromGithubError(err) });
@@ -105,7 +110,7 @@ export default async function githubRoutes(fastify: FastifyInstance): Promise<vo
 
   fastify.post<{
     Params: { owner: string; repo: string };
-    Body: { ref?: string; targetEnvironmentId?: string; subdomain?: string; port?: number };
+    Body: { ref?: string; targetEnvironmentId?: string; subdomain?: string; port?: number; configPath?: string; serviceForSubdomain?: string };
   }>("/api/github/repos/:owner/:repo/deploy", async (request, reply) => {
     const subdomain = request.body?.subdomain?.trim().toLowerCase();
     if (subdomain && !isValidSubdomain(subdomain)) {
@@ -116,6 +121,14 @@ export default async function githubRoutes(fastify: FastifyInstance): Promise<vo
     const port = request.body?.port;
     if (port !== undefined && !isValidPort(port)) {
       return reply.code(400).send({ error: "port must be a valid port number (1-65535)" });
+    }
+    // configPath = emplacement (racine si absent) choisi par l'utilisateur parmi
+    // GithubRepoDetection#candidates (voir GitHubDeployPage.tsx) — jamais fait confiance sans
+    // validation avant d'atteindre services/github.ts#runDeployment, qui le combine à un chemin de
+    // fichier local (path.join(cloneDir, configPath)) : voir isSafeRelativeConfigPath.
+    const configPath = request.body?.configPath?.trim();
+    if (configPath && !isSafeRelativeConfigPath(configPath)) {
+      return reply.code(400).send({ error: `"${configPath}" is not a valid repository-relative path` });
     }
     // services/github.ts#deployViaDockerBuild passe targetEnvironmentId TEL QUEL à
     // services/docker.ts#getClient(remoteEnvironmentId), qui attend l'id BRUT d'un environnement
@@ -135,6 +148,8 @@ export default async function githubRoutes(fastify: FastifyInstance): Promise<vo
         ...(resolvedTargetEnvironmentId ? { targetEnvironmentId: resolvedTargetEnvironmentId } : {}),
         ...(subdomain ? { subdomain } : {}),
         ...(port !== undefined ? { port } : {}),
+        ...(configPath ? { configPath } : {}),
+        ...(request.body?.serviceForSubdomain?.trim() ? { serviceForSubdomain: request.body.serviceForSubdomain.trim() } : {}),
         startedBy: request.authSession!.username,
       });
       return reply.code(201).send(deployment);

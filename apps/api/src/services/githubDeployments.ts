@@ -73,6 +73,10 @@ export interface CreateDeploymentInput {
   triggeredBy: GithubDeploymentTrigger;
   commit?: GithubDeploymentCommit;
   subdomain?: string;
+  /** Sous-dossier du dépôt utilisé pour la détection/le déploiement — absent = racine (voir
+   * types.ts#GithubDeployment#configPath). Persisté dès la création pour qu'un redéploiement
+   * ultérieur (voir TopologyNodeDetailPanel.tsx) puisse le rejouer tel quel. */
+  configPath?: string;
 }
 
 /** Crée l'entrée d'historique à l'état "running" et initialise son fichier de log. */
@@ -91,6 +95,7 @@ export async function createDeploymentRecord(input: CreateDeploymentInput): Prom
     triggeredBy: input.triggeredBy,
     ...(input.commit ? { commit: input.commit } : {}),
     ...(input.subdomain ? { subdomain: input.subdomain } : {}),
+    ...(input.configPath ? { configPath: input.configPath } : {}),
   };
   await fs.mkdir(rootPath(), { recursive: true });
   const trigger = input.triggeredBy === "webhook" ? "automatiquement (push GitHub)" : `par ${input.startedBy}`;
