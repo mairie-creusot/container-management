@@ -13,6 +13,12 @@
  * GET  /api/github/repos/:owner/:repo/auto-deploy    — statut du déploiement automatique sur push (jamais le secret webhook).
  * PUT  /api/github/repos/:owner/:repo/auto-deploy    — { enabled, branch?, targetEnvironmentId?, subdomain?, port? } — operator/admin
  *                                                       (hook global) ; enregistre/supprime réellement le webhook GitHub.
+ * GET  /api/github/repos/:owner/:repo/config-schema  — ?ref=&path= optionnels ; ce qui peut/doit être configuré avant déploiement
+ *                                                       (variables d'environnement manquantes, ports, volumes, ARG Dockerfile) —
+ *                                                       jamais une vraie valeur de secret, voir DeployConfigSchema (types.ts).
+ * PUT  /api/github/repos/:owner/:repo/config-values  — { values: Record<string,string> } — operator/admin (hook global) ; stocke
+ *                                                       les valeurs comme secret nommé "github-env:<owner>/<repo>" (secretsStore.ts),
+ *                                                       réutilisé automatiquement à chaque redéploiement suivant.
  *
  * Le webhook entrant lui-même (POST /api/github/webhook, appelé par GitHub — pas de session) vit
  * dans routes/githubWebhook.ts, volontairement séparé (authentification différente : signature
@@ -32,6 +38,7 @@ import {
   setToken,
 } from "../services/githubStore.js";
 import {
+  buildDeployConfigSchema,
   createRepoWebhook,
   deleteRepoWebhook,
   detectRepo,
@@ -40,6 +47,7 @@ import {
   isSafeRelativeConfigPath,
   listDeployments,
   listRepos,
+  saveGithubEnvValues,
   startDeployment,
 } from "../services/github.js";
 import { isValidSubdomain } from "../services/reverseProxy.js";
@@ -110,7 +118,15 @@ export default async function githubRoutes(fastify: FastifyInstance): Promise<vo
 
   fastify.post<{
     Params: { owner: string; repo: string };
-    Body: { ref?: string; targetEnvironmentId?: string; subdomain?: string; port?: number; configPath?: string; serviceForSubdomain?: string };
+    Body: {
+      ref?: string;
+      targetEnvironmentId?: string;
+      subdomain?: string;
+      port?: number;
+      configPath?: string;
+      serviceForSubdomain?: string;
+      composePortOverrides?: Record<string, number>;
+    };
   }>("/api/github/repos/:owner/:repo/deploy", async (request, reply) => {
     const subdomain = request.body?.subdomain?.trim().toLowerCase();
     if (subdomain && !isValidSubdomain(subdomain)) {
@@ -121,6 +137,12 @@ export default async function githubRoutes(fastify: FastifyInstance): Promise<vo
     const port = request.body?.port;
     if (port !== undefined && !isValidPort(port)) {
       return reply.code(400).send({ error: "port must be a valid port number (1-65535)" });
+    }
+    // Port hôte précis demandé par service compose (voir DeployPortRequirement#overridable) —
+    // chaque valeur validée individuellement, même règle que `port` ci-dessus (1-65535).
+    const composePortOverrides = request.body?.composePortOverrides;
+    if (composePortOverrides && Object.values(composePortOverrides).some((p) => !isValidPort(p))) {
+      return reply.code(400).send({ error: "composePortOverrides values must be valid port numbers (1-65535)" });
     }
     // configPath = emplacement (racine si absent) choisi par l'utilisateur parmi
     // GithubRepoDetection#candidates (voir GitHubDeployPage.tsx) — jamais fait confiance sans
@@ -150,6 +172,7 @@ export default async function githubRoutes(fastify: FastifyInstance): Promise<vo
         ...(port !== undefined ? { port } : {}),
         ...(configPath ? { configPath } : {}),
         ...(request.body?.serviceForSubdomain?.trim() ? { serviceForSubdomain: request.body.serviceForSubdomain.trim() } : {}),
+        ...(composePortOverrides ? { composePortOverrides } : {}),
         startedBy: request.authSession!.username,
       });
       return reply.code(201).send(deployment);
@@ -167,6 +190,40 @@ export default async function githubRoutes(fastify: FastifyInstance): Promise<vo
     if (!detail) return reply.code(404).send({ error: `Deployment "${request.params.id}" not found` });
     return reply.send(detail);
   });
+
+  // --- Configuration dynamique de déploiement (voir DeployConfigSchema, types.ts) ---------------
+
+  fastify.get<{ Params: { owner: string; repo: string }; Querystring: { ref?: string; path?: string } }>(
+    "/api/github/repos/:owner/:repo/config-schema",
+    async (request, reply) => {
+      const explicitPath = request.query.path?.trim();
+      if (explicitPath && !isSafeRelativeConfigPath(explicitPath)) {
+        return reply.code(400).send({ error: `"${explicitPath}" is not a valid repository-relative path` });
+      }
+      try {
+        const schema = await buildDeployConfigSchema(request.params.owner, request.params.repo, request.query.ref, explicitPath);
+        return reply.send(schema);
+      } catch (err) {
+        return reply.code(statusFromGithubError(err)).send({ error: diagnosticFromGithubError(err) });
+      }
+    },
+  );
+
+  // Enregistre les valeurs de configuration (variables d'environnement) fournies par
+  // l'utilisateur — voir services/github.ts#saveGithubEnvValues. Une valeur vide n'écrase jamais
+  // une valeur déjà stockée (formulaire partiel). Le hook global (plugins/auth.ts) exige déjà
+  // operator/admin pour toute méthode mutante, cohérent avec POST .../deploy ci-dessus.
+  fastify.put<{ Params: { owner: string; repo: string }; Body: { values?: Record<string, string> } }>(
+    "/api/github/repos/:owner/:repo/config-values",
+    async (request, reply) => {
+      const values = request.body?.values;
+      if (!values || typeof values !== "object" || Array.isArray(values)) {
+        return reply.code(400).send({ error: "values (object) is required" });
+      }
+      await saveGithubEnvValues(request.params.owner, request.params.repo, values);
+      return reply.send({ ok: true });
+    },
+  );
 
   // --- Déploiement automatique sur push (webhook GitHub réel — cf. routes/githubWebhook.ts) ----
 

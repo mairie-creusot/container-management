@@ -3,16 +3,19 @@ import { useAppDispatch, useAppSelector } from "@/hooks";
 import {
   deployGithubRepo,
   fetchGithubAutoDeploy,
+  fetchGithubConfigSchema,
   fetchGithubDeploymentDetail,
   fetchGithubDeployments,
   fetchGithubDetection,
   fetchGithubRepos,
   fetchGithubStatus,
   saveGithubAutoDeploy,
+  saveGithubConfigValues,
   saveGithubToken,
   selectDeployment,
   selectRepo,
 } from "@/features/github/githubSlice";
+import DeployConfigForm, { type DeployConfigFormSubmitInput } from "@/features/github/DeployConfigForm";
 import { fetchEnvironments } from "@/features/clusters/clustersSlice";
 import { canAdminister, canOperate } from "@/features/auth/authSlice";
 import { setUnsavedFormActive } from "@/features/ui/uiSlice";
@@ -73,6 +76,7 @@ function formatAbsolute(iso: string): string {
 function statusLabel(status: GithubDeploymentStatus): string {
   if (status === "running") return "en cours…";
   if (status === "success") return "succès";
+  if (status === "needs-config") return "configuration requise";
   return "échec";
 }
 
@@ -106,6 +110,10 @@ export default function GitHubDeployPage() {
     autoDeploy,
     autoDeploySaving,
     autoDeployError,
+    configSchema,
+    configSchemaStatus,
+    savingConfigValues,
+    saveConfigValuesError,
     deployments,
     selectedDeployment,
     deploying,
@@ -131,13 +139,21 @@ export default function GitHubDeployPage() {
   const [deployError, setDeployError] = useState<string | null>(null);
   const [repoSearch, setRepoSearch] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
+  // Formulaire dynamique de configuration (variables d'environnement manquantes, ports, volumes —
+  // voir DeployConfigForm.tsx) : `configModalTarget` porte le dépôt/emplacement ciblé par la
+  // modale ouverte, indépendamment de `selectedRepo` (peut différer en consultant l'historique
+  // d'un AUTRE dépôt à l'étape 3, voir handleOpenConfigModal). `composePortOverrides` mémorise les
+  // ports hôte choisis explicitement dans la modale, appliqués au PROCHAIN clic "Déployer".
+  const [configModalOpen, setConfigModalOpen] = useState(false);
+  const [configModalTarget, setConfigModalTarget] = useState<{ owner: string; repo: string } | null>(null);
+  const [composePortOverrides, setComposePortOverrides] = useState<Record<string, number>>({});
   const logRef = useRef<HTMLPreElement>(null);
 
   // État initial de l'assistant calculé UNE SEULE FOIS au montage à partir du state déjà en
   // mémoire (ex: modal refermée puis rouverte pendant qu'un déploiement tournait encore) — ne
   // force jamais l'utilisateur à repartir de l'étape 1 s'il y a déjà quelque chose à montrer.
   const [step, setStep] = useState<WizardStep>(() => {
-    if (selectedDeployment && selectedDeployment.status === "running") return 3;
+    if (selectedDeployment && (selectedDeployment.status === "running" || selectedDeployment.status === "needs-config")) return 3;
     if (selectedRepo && detection) return 2;
     return 1;
   });
@@ -177,6 +193,7 @@ export default function GitHubDeployPage() {
     setServiceForSubdomainInput("");
     setAutoDeployOpen(false);
     setDeployError(null);
+    setComposePortOverrides({});
     // Cible par défaut = l'environnement actuellement sélectionné dans le Topbar, s'il est
     // pertinent pour un déploiement Docker ; repli sur "Docker local" sinon.
     const topbarTarget = topbarEnvironmentId
@@ -204,6 +221,25 @@ export default function GitHubDeployPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detection?.exposedPort]);
+
+  // Schéma de configuration dynamique (variables d'environnement manquantes, ports, volumes) —
+  // récupéré dès que la détection arrive pour un dépôt réellement déployable via Docker (compose ou
+  // Dockerfile isolé ; Terraform/Ansible seuls n'ont rien à configurer ici, voir buildDeployConfigSchema
+  // côté API). Alimente le bandeau "Configuration requise" ci-dessous AVANT même de cliquer
+  // "Déployer" — évite un aller-retour inutile sur le bug réel du 14/08/2026 (.env manquant).
+  useEffect(() => {
+    if (!selectedRepo || !detection || detection.candidates) return;
+    if (!detection.hasCompose && !detection.hasDockerfile) return;
+    dispatch(
+      fetchGithubConfigSchema({
+        owner: selectedRepo.owner,
+        repo: selectedRepo.repo,
+        ref: detection.ref,
+        ...(detection.detectedPath ? { path: detection.detectedPath } : {}),
+      }),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dispatch, selectedRepo, detection]);
 
   // Service compose pré-rempli quand il n'y a qu'UN SEUL candidat (aucune saisie requise) — quand
   // il y en a plusieurs, laissé vide : l'utilisateur DOIT choisir explicitement (voir le sélecteur
@@ -262,6 +298,9 @@ export default function GitHubDeployPage() {
         // GithubRepoDetection#detectedPath.
         ...(detection?.detectedPath ? { configPath: detection.detectedPath } : {}),
         ...(serviceForSubdomainInput.trim() ? { serviceForSubdomain: serviceForSubdomainInput.trim() } : {}),
+        // Port(s) hôte choisis explicitement dans le formulaire de configuration dynamique (voir
+        // DeployConfigForm.tsx) — {} par défaut, comportement historique inchangé.
+        ...(Object.keys(composePortOverrides).length > 0 ? { composePortOverrides } : {}),
       }),
     ).then((result) => {
       if (deployGithubRepo.fulfilled.match(result)) {
@@ -333,6 +372,33 @@ export default function GitHubDeployPage() {
     dispatch(fetchGithubDetection({ owner: selectedRepo.owner, repo: selectedRepo.repo, path: candidatePath }));
   }
 
+  /** Ouvre le formulaire dynamique de configuration (voir DeployConfigForm.tsx) pour `owner/repo` —
+   * indépendant de `selectedRepo` : peut cibler un AUTRE dépôt que celui actuellement sélectionné
+   * en consultant l'historique à l'étape 3 (voir le bandeau "needs-config" plus bas). Un seul clic
+   * (bouton "Configurer"), cohérent avec la règle "≤3 clics". */
+  function handleOpenConfigModal(owner: string, repo: string, ref?: string, path?: string) {
+    setConfigModalTarget({ owner, repo });
+    dispatch(fetchGithubConfigSchema({ owner, repo, ...(ref ? { ref } : {}), ...(path ? { path } : {}) }));
+    setConfigModalOpen(true);
+  }
+
+  /** Enregistre les valeurs saisies (secret nommé "github-env:<owner>/<repo>", voir
+   * services/github.ts#saveGithubEnvValues côté API) — réutilisées automatiquement au prochain
+   * "Déployer"/"Redéployer", sans re-demander. Les ports hôte éventuellement choisis sont mémorisés
+   * pour être appliqués au déploiement suivant (voir composePortOverrides ci-dessus). */
+  function handleSubmitConfig(input: DeployConfigFormSubmitInput) {
+    if (!configModalTarget) return;
+    dispatch(saveGithubConfigValues({ owner: configModalTarget.owner, repo: configModalTarget.repo, values: input.values })).then((result) => {
+      if (saveGithubConfigValues.fulfilled.match(result)) {
+        if (input.composePortOverrides) setComposePortOverrides((prev) => ({ ...prev, ...input.composePortOverrides }));
+        setConfigModalOpen(false);
+        // Le schéma vient de changer (clés désormais résolues) — reflète-le immédiatement dans le
+        // bandeau "Configuration requise" ci-dessous sans attendre un futur changement de détection.
+        dispatch(fetchGithubConfigSchema({ owner: configModalTarget.owner, repo: configModalTarget.repo }));
+      }
+    });
+  }
+
   const canBrowseRepos = Boolean(status?.configured || status?.usingGhcrFallback);
   const canDeployDockerfile = Boolean(detection?.hasDockerfile);
   const canDeployCompose = Boolean(detection?.hasCompose);
@@ -348,6 +414,14 @@ export default function GitHubDeployPage() {
   // signaler ici, avant même de lancer le déploiement).
   const composeServiceChoicePending =
     canDeployCompose && composeServiceCandidates.length > 1 && Boolean(subdomainInput.trim()) && !serviceForSubdomainInput;
+  // Configuration dynamique (variables d'environnement manquantes, voir DeployConfigForm.tsx) :
+  // bloque le déploiement tant que des clés REQUISES restent sans valeur connue — jamais un
+  // `docker compose up`/`docker build` lancé à l'aveugle sur le bug réel du 14/08/2026 (.env
+  // manquant). `configSchema` peut porter le schéma d'un AUTRE dépôt en transition (fetch encore en
+  // vol après un changement de sélection) : ne bloque que quand il correspond au dépôt courant.
+  const configSchemaMatchesSelectedRepo =
+    Boolean(configSchema) && configSchema!.owner === selectedRepo?.owner && configSchema!.repo === selectedRepo?.repo;
+  const configBlocksDeploy = configSchemaMatchesSelectedRepo && configSchema!.missingRequiredKeys.length > 0;
   // Déploiement automatique sur push : la config actuelle (routes/githubWebhook.ts) ne connaît ni
   // sous-dossier ni choix de service compose — n'exposer le bouton "Configurer" que dans le cas
   // NON ambigu (racine, ou un seul service compose) pour ne jamais activer un déploiement
@@ -407,6 +481,11 @@ export default function GitHubDeployPage() {
             <p className="muted">Seul un administrateur peut configurer le jeton GitHub.</p>
           )}
           {tokenError && <p className="graph-popover__error">{tokenError}</p>}
+          <p className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+            Enregistré UNE SEULE FOIS comme secret réutilisable ("github-token", Gestionnaire de secrets) — plus jamais
+            redemandé ensuite, réutilisé automatiquement partout où QUAI a besoin d'un jeton GitHub (cette page,
+            détection de dépôts, déploiement automatique sur push).
+          </p>
         </div>
       )}
 
@@ -744,14 +823,55 @@ export default function GitHubDeployPage() {
                             </p>
                           )}
 
+                          {/* Configuration requise (variables d'environnement manquantes, voir
+                              DeployConfigForm.tsx) — corrige le bug réel du 14/08/2026 (.env
+                              manquant) : jamais un `docker compose up` lancé à l'aveugle, l'utilisateur
+                              renseigne les clés manquantes AVANT de cliquer "Déployer". */}
+                          {configBlocksDeploy && (
+                            <div className="error-banner" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                              <span>
+                                Configuration requise avant de pouvoir déployer : {configSchema!.missingRequiredKeys.join(", ")}.
+                              </span>
+                              <button
+                                type="button"
+                                className="btn btn-primary btn-sm"
+                                style={{ alignSelf: "flex-start" }}
+                                onClick={() => handleOpenConfigModal(selectedRepo.owner, selectedRepo.repo, detection.ref, detection.detectedPath)}
+                              >
+                                Configurer
+                              </button>
+                            </div>
+                          )}
+                          {/* Action explicite pour modifier des valeurs déjà configurées PLUS TARD
+                              (jamais figées à vie, voir mission) — discrète, toujours disponible dès
+                              qu'il y a quelque chose à configurer/consulter (variables, ports, volumes). */}
+                          {!configBlocksDeploy &&
+                            configSchemaMatchesSelectedRepo &&
+                            (configSchema!.envVars.length > 0 || configSchema!.ports.some((p) => p.overridable) || configSchema!.volumes.length > 0) && (
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-sm"
+                                style={{ alignSelf: "flex-start" }}
+                                onClick={() => handleOpenConfigModal(selectedRepo.owner, selectedRepo.repo, detection.ref, detection.detectedPath)}
+                              >
+                                Configuration ({configSchema!.envVars.length} variable{configSchema!.envVars.length > 1 ? "s" : ""})
+                              </button>
+                            )}
+
                           {deployError && <div className="error-banner">{deployError}</div>}
 
                           <button
                             type="button"
                             className="btn btn-primary"
                             onClick={handleDeploy}
-                            disabled={deploying || composeServiceChoicePending}
-                            title={composeServiceChoicePending ? "Choisissez le service à exposer avant de déployer" : undefined}
+                            disabled={deploying || composeServiceChoicePending || configBlocksDeploy}
+                            title={
+                              composeServiceChoicePending
+                                ? "Choisissez le service à exposer avant de déployer"
+                                : configBlocksDeploy
+                                  ? "Renseignez la configuration requise avant de déployer"
+                                  : undefined
+                            }
                             style={{ padding: "12px 16px", fontSize: 14, fontWeight: 600 }}
                           >
                             {deploying ? "Démarrage…" : "Déployer"}
@@ -879,7 +999,9 @@ export default function GitHubDeployPage() {
                           ? "chip--accent"
                           : selectedDeployment.status === "failed"
                             ? "chip--danger"
-                            : ""
+                            : selectedDeployment.status === "needs-config"
+                              ? "chip--muted"
+                              : ""
                       }`}
                     >
                       {statusLabel(selectedDeployment.status).toUpperCase()}
@@ -914,6 +1036,39 @@ export default function GitHubDeployPage() {
                     <div className="error-banner">Le déploiement a échoué — voir le journal ci-dessous pour le détail.</div>
                   )}
 
+                  {/* "needs-config" (14/08/2026) : le clone a détecté des variables d'environnement
+                      requises sans valeur connue — arrêté PROPREMENT avant tout `docker build`/
+                      `docker compose up`, jamais l'échec docker brut d'origine ("env file ... not
+                      found"). Le bouton ouvre le MÊME formulaire dynamique qu'à l'étape 2. */}
+                  {selectedDeployment.status === "needs-config" && (
+                    <div className="error-banner" style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      <span>
+                        Configuration requise — variable{(selectedDeployment.missingConfigKeys ?? []).length > 1 ? "s" : ""}{" "}
+                        manquante{(selectedDeployment.missingConfigKeys ?? []).length > 1 ? "s" : ""} :{" "}
+                        {(selectedDeployment.missingConfigKeys ?? []).join(", ") || "voir le journal ci-dessous"}.
+                      </span>
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        style={{ alignSelf: "flex-start" }}
+                        onClick={() =>
+                          handleOpenConfigModal(
+                            selectedDeployment.owner,
+                            selectedDeployment.repo,
+                            selectedDeployment.ref,
+                            selectedDeployment.configPath,
+                          )
+                        }
+                      >
+                        Configurer
+                      </button>
+                      <p className="muted" style={{ fontSize: 11 }}>
+                        Une fois enregistrées, revenez à "Revoir la configuration" puis "Déployer" pour relancer — les
+                        valeurs saisies sont réutilisées automatiquement, sans re-demander.
+                      </p>
+                    </div>
+                  )}
+
                   {selectedDeployment.status === "running" && (
                     <div className="empty-state" style={{ textAlign: "left" }}>
                       Déploiement en cours…
@@ -938,6 +1093,17 @@ export default function GitHubDeployPage() {
           )}
         </div>
       )}
+
+      <DeployConfigForm
+        open={configModalOpen}
+        onClose={() => setConfigModalOpen(false)}
+        schema={configSchema}
+        loading={configSchemaStatus === "loading"}
+        saving={savingConfigValues}
+        error={saveConfigValuesError}
+        submitLabel={configSchema && configSchema.missingRequiredKeys.length > 0 ? "Enregistrer et déployer" : "Enregistrer"}
+        onSubmit={handleSubmitConfig}
+      />
     </div>
   );
 }

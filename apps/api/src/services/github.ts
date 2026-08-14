@@ -41,8 +41,14 @@ import {
 } from "./githubDeployments.js";
 import { CaddyPushFailedError, createRoute, deleteRoute, listRoutes, SubdomainConflictError } from "./reverseProxy.js";
 import { RegistryCredentialsMissingError, RegistryHttpError } from "./registries/http.js";
+import { createSecret, getDecryptedSecretValue, listSecrets, updateSecret } from "./secretsStore.js";
 import { withTimeout } from "../utils/async.js";
 import type {
+  DeployConfigSchema,
+  DeployPortRequirement,
+  DeployVolumeInfo,
+  EnvVarRequirement,
+  EnvVarSource,
   GithubComposeServiceCandidate,
   GithubDeployment,
   GithubDeploymentCommit,
@@ -523,6 +529,365 @@ export async function detectRepo(owner: string, repo: string, ref?: string, expl
   }
 }
 
+// --- Détection et résolution des variables d'environnement manquantes (bug réel corrigé le
+// 14/08/2026, retour utilisateur : "oui jai cette erreur ce qu'il faut faire c'est detecter si ya
+// un .env ou .env.local ou autre les ajouter au secret et utiliser ces secret pour le deploiement
+// automatique") ------------------------------------------------------------------------------
+//
+// Un docker-compose.yml référençant `env_file: .env` (ou une clé `environment: KEY:` sans valeur,
+// ou un `ARG` de Dockerfile sans défaut) échouait platement à `docker compose up`/`docker build`
+// ("env file ... not found", code 14) sur un clone frais — `.env` est presque toujours gitignored
+// (pratique standard, un fichier de secrets n'est jamais commité). Au lieu de laisser Docker
+// échouer bruyamment, la détection ci-dessous recense CE dont un déploiement a réellement besoin
+// AVANT d'invoquer quoi que ce soit, résout ce qui peut l'être depuis :
+//  1. un secret déjà stocké pour ce dépôt (voir githubEnvSecretName, secretsStore.ts) — un
+//     redéploiement ultérieur ne redemande donc plus jamais les mêmes clés ;
+//  2. une valeur par défaut LÉGITIME et NON SENSIBLE trouvée dans un .env.example/.env.sample du
+//     dépôt (ex: "PORT=3000") — jamais une valeur qui ressemblerait à un vrai secret (voir
+//     looksLikePlaceholderEnvValue/looksSensitiveEnvKey) ;
+// et, si des clés REQUISES restent sans valeur après ça, arrête le déploiement à une étape claire
+// "configuration requise" (status "needs-config", voir runDeployment) plutôt qu'un échec brut.
+//
+// Deux consommateurs de cette même logique pure (buildEnvRequirements) : buildDeployConfigSchema
+// (aperçu via l'API Contents GitHub, avant clone — alimente GET .../config-schema) et
+// resolveAndWriteEnvConfig (vérité terrain sur le VRAI clone local — invoqué par runDeployment
+// juste avant deployViaDockerCompose/deployViaDockerBuild), chacun ne fournissant qu'un
+// `envFileExists` différent (API GitHub vs `fs.access` local).
+
+// Variantes usuelles d'un gabarit d'environnement (voir mission) — la première trouvée à
+// l'emplacement inspecté est utilisée comme liste de référence des clés attendues.
+const ENV_EXAMPLE_FILE_NAMES = [".env.example", ".env.sample", ".env.local.example", ".env.dist", ".env.template", "env.example"];
+
+// Heuristique sur le NOM de la clé (jamais sur sa valeur, qu'on ne connaît pas forcément) —
+// détermine si le frontend doit afficher un champ masqué (voir EnvVarRequirement#looksSensitive,
+// même esprit que les champs token/password des registres déjà gérés dans le frontend). "PASS"
+// seul (pas seulement "PASSWORD"/"PASSWD") — couvre les abréviations très courantes en pratique
+// ("DB_PASS", "ADMIN_DEFAULT_PASS"...), constaté en conditions réelles le 14/08/2026 lors de la
+// vérification de cette mission sur mairie-creusot/formulaire_hotline : DB_PASS/ADMIN_DEFAULT_PASS
+// n'étaient PAS détectées comme sensibles avec le seul motif "PASSWORD|PASSWD", affichant un champ
+// en clair pour un vrai mot de passe.
+const SENSITIVE_ENV_KEY_PATTERN =
+  /PASS|PWD|SECRET|TOKEN|API[_-]?KEY|PRIVATE[_-]?KEY|CREDENTIAL|DSN|CONNECTION.?STRING|DATABASE_URL|CERT|CLIENT_SECRET|ACCESS_KEY/i;
+
+export function looksSensitiveEnvKey(key: string): boolean {
+  return SENSITIVE_ENV_KEY_PATTERN.test(key);
+}
+
+// Valeurs "placeholder" courantes d'un .env.example — jamais utilisées comme défaut légitime (voir
+// looksLikePlaceholderEnvValue) : un .env.example contient normalement des valeurs vides/factices,
+// mais on vérifie explicitement plutôt que de faire confiance à la convention.
+const PLACEHOLDER_ENV_VALUE_PATTERN = /^(changeme|change_me|change-me|xxx+|todo|example|replace(_?me)?|secret|password|placeholder)$/i;
+
+/** true si `value` ressemble à une valeur factice/placeholder plutôt qu'à une VRAIE valeur par
+ * défaut utilisable telle quelle (ex: "changeme", "<votre-clé>", chaîne vide) — voir
+ * parseEnvExampleDefaults. Jamais un faux-négatif qui laisserait passer un secret déjà rempli par
+ * erreur dans un .env.example : en cas de doute (clé au nom sensible), looksSensitiveEnvKey tranche
+ * de toute façon en amont. */
+export function looksLikePlaceholderEnvValue(value: string): boolean {
+  const v = value.trim();
+  if (!v) return true;
+  if (v.startsWith("<") || v.endsWith(">")) return true;
+  if (/your[-_].*here/i.test(v)) return true;
+  return PLACEHOLDER_ENV_VALUE_PATTERN.test(v);
+}
+
+/**
+ * Parse un .env.example/.env.sample (une entrée `KEY=value` par ligne, `#` = commentaire) —
+ * retourne, pour chaque clé trouvée, une valeur par défaut UNIQUEMENT si elle est à la fois
+ * non-sensible (looksSensitiveEnvKey) ET ne ressemble pas à un placeholder
+ * (looksLikePlaceholderEnvValue) : `undefined` sinon (clé connue, mais aucune valeur utilisable
+ * sans deviner). Jamais une exception si le fichier est mal formé — lignes illisibles simplement
+ * ignorées (best-effort, même esprit que parseComposeServiceCandidates).
+ */
+export function parseEnvExampleDefaults(raw: string): Map<string, string | undefined> {
+  const out = new Map<string, string | undefined>();
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim().replace(/^export\s+/, "");
+    if (!key || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    let value = trimmed.slice(eq + 1).trim();
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    }
+    const usable = !looksSensitiveEnvKey(key) && !looksLikePlaceholderEnvValue(value);
+    out.set(key, usable ? value : undefined);
+  }
+  return out;
+}
+
+/** Chemins `env_file:` référencés par un service compose — accepte la forme courte (chaîne
+ * unique ou liste de chaînes) et la forme longue Compose Spec (`{ path, required }`). */
+export function composeEnvFilePaths(service: ComposeServiceDoc): string[] {
+  const raw = service.env_file;
+  if (!raw) return [];
+  const arr = Array.isArray(raw) ? raw : [raw];
+  return arr
+    .map((entry) => (typeof entry === "string" ? entry : (entry as { path?: unknown } | undefined)?.path))
+    .filter((p): p is string => typeof p === "string" && p.length > 0);
+}
+
+/** Clés `environment:` déclarées SANS valeur ("KEY:" nul en YAML forme map, ou "KEY" seul en forme
+ * liste) — convention docker-compose signifiant "vient du shell/.env hôte", jamais une valeur à
+ * deviner. Une entrée "KEY=valeur" (liste) ou "KEY: valeur" (map) a déjà sa valeur, jamais
+ * remontée ici. */
+export function composeEnvironmentMissingKeys(service: ComposeServiceDoc): string[] {
+  const raw = service.environment;
+  if (!raw) return [];
+  const missing: string[] = [];
+  if (Array.isArray(raw)) {
+    for (const entry of raw) {
+      if (typeof entry !== "string") continue;
+      if (!entry.includes("=")) missing.push(entry.trim());
+    }
+  } else if (typeof raw === "object") {
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (value === null || value === undefined) missing.push(key);
+    }
+  }
+  return missing;
+}
+
+/** ARG Dockerfile SANS valeur par défaut ("ARG FOO", jamais "ARG FOO=valeur") — jamais deviné,
+ * même convention que parseExposedPort ci-dessus (dernière-instruction-gagne non pertinent ici :
+ * chaque ARG est indépendant). */
+export function parseDockerfileArgsWithoutDefault(content: string): string[] {
+  const out: string[] = [];
+  for (const match of content.matchAll(/^\s*ARG\s+([A-Za-z_][A-Za-z0-9_]*)\s*(=.*)?$/gim)) {
+    if (!match[2]) out.push(match[1]!);
+  }
+  return out;
+}
+
+export interface BuildEnvRequirementsInput {
+  composeDoc?: ComposeDoc;
+  dockerfileContent?: string;
+  /** Vide si aucun .env.example/variante n'a été trouvé à l'emplacement inspecté. */
+  envExampleDefaults: Map<string, string | undefined>;
+  /** Valeurs déjà résolues (secret stocké déchiffré) — jamais journalisées, jamais renvoyées telles
+   * quelles par un GET (voir DeployConfigSchema#EnvVarRequirement, qui ne porte qu'un booléen). */
+  resolvedValues: Record<string, string>;
+  /** Existence RÉELLE d'un fichier `env_file:` référencé — API Contents GitHub (aperçu) ou
+   * `fs.access` sur le clone local (vérité terrain) selon l'appelant. */
+  envFileExists: (relativePath: string) => Promise<boolean>;
+}
+
+export interface BuildEnvRequirementsResult {
+  envVars: EnvVarRequirement[];
+  missingRequiredKeys: string[];
+  unresolvableEnvFile?: string;
+}
+
+/**
+ * Fonction pure (modulo `envFileExists`, injecté) au cœur de la détection — voir le commentaire
+ * d'en-tête de section. Ne remonte QUE les clés qui ont réellement besoin d'une valeur externe :
+ * une clé `environment:`/compose déjà littérale n'est jamais remontée (rien à demander).
+ */
+export async function buildEnvRequirements(input: BuildEnvRequirementsInput): Promise<BuildEnvRequirementsResult> {
+  const envVars: EnvVarRequirement[] = [];
+  const seen = new Set<string>();
+  let unresolvableEnvFile: string | undefined;
+
+  const pushKey = (key: string, source: EnvVarSource, service: string | undefined, envFilePath: string | undefined) => {
+    const dedupeKey = `${source}:${service ?? ""}:${envFilePath ?? ""}:${key}`;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    const hasStoredValue = Object.prototype.hasOwnProperty.call(input.resolvedValues, key);
+    const exampleDefault = input.envExampleDefaults.get(key);
+    envVars.push({
+      key,
+      required: true,
+      hasValue: hasStoredValue || exampleDefault !== undefined,
+      source,
+      ...(service ? { service } : {}),
+      ...(envFilePath ? { envFilePath } : {}),
+      looksSensitive: looksSensitiveEnvKey(key),
+    });
+  };
+
+  if (input.composeDoc?.services) {
+    for (const [serviceName, service] of Object.entries(input.composeDoc.services)) {
+      for (const key of composeEnvironmentMissingKeys(service)) {
+        pushKey(key, "environment", serviceName, undefined);
+      }
+      for (const envFilePath of composeEnvFilePaths(service)) {
+        const exists = await input.envFileExists(envFilePath);
+        // Fichier déjà présent dans le dépôt (rare mais possible — valeurs non sensibles commitées
+        // volontairement) : rien à demander, docker compose le lira tel quel depuis le clone.
+        if (exists) continue;
+        if (input.envExampleDefaults.size > 0) {
+          for (const key of input.envExampleDefaults.keys()) {
+            pushKey(key, "env_file", serviceName, envFilePath);
+          }
+        } else {
+          // Fichier référencé absent ET aucun .env.example pour en déduire les clés attendues :
+          // limite honnête, voir DeployConfigSchema#unresolvableEnvFile — jamais un formulaire
+          // vide qui laisserait croire à tort qu'il n'y a rien à configurer.
+          unresolvableEnvFile = envFilePath;
+        }
+      }
+    }
+  }
+
+  if (input.dockerfileContent) {
+    for (const key of parseDockerfileArgsWithoutDefault(input.dockerfileContent)) {
+      pushKey(key, "dockerfile_arg", undefined, undefined);
+    }
+  }
+
+  const missingRequiredKeys = envVars.filter((v) => v.required && !v.hasValue).map((v) => v.key);
+  return { envVars, missingRequiredKeys, ...(unresolvableEnvFile ? { unresolvableEnvFile } : {}) };
+}
+
+/** Nom du secret multi-clé (JSON) portant les variables d'environnement résolues pour CE dépôt —
+ * scope au dépôt entier (pas par sous-dossier : un dépôt a en pratique une configuration
+ * d'environnement cohérente d'un seul tenant, simplification assumée et documentée). Convention
+ * cohérente avec le modèle de données existant (secretsStore.ts, secrets nommés). */
+export function githubEnvSecretName(owner: string, repo: string): string {
+  return `github-env:${owner.toLowerCase()}/${repo.toLowerCase()}`;
+}
+
+/** Valeurs déjà résolues pour ce dépôt (déchiffrées) — jamais exposées telles quelles par une
+ * route, voir buildDeployConfigSchema/resolveAndWriteEnvConfig qui n'en dérivent qu'un booléen
+ * `hasValue` ou les consomment pour écrire un VRAI fichier .env local, jamais pour les renvoyer
+ * au client. */
+async function getStoredEnvValues(owner: string, repo: string): Promise<Record<string, string>> {
+  const raw = await getDecryptedSecretValue(githubEnvSecretName(owner, repo));
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * PUT /api/github/repos/:owner/:repo/config-values (voir routes/github.ts) — fusionne les valeurs
+ * fournies dans le secret JSON multi-clé de ce dépôt (créé au premier appel, mis à jour ensuite).
+ * Une valeur vide/absente n'écrase JAMAIS une valeur déjà stockée : un formulaire qui ne modifie
+ * que certains champs (les autres restant masqués "déjà configuré") ne doit jamais effacer le reste.
+ */
+export async function saveGithubEnvValues(owner: string, repo: string, values: Record<string, string>): Promise<void> {
+  const existing = await getStoredEnvValues(owner, repo);
+  const merged = { ...existing };
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== undefined && value !== "") merged[key] = value;
+  }
+  const name = githubEnvSecretName(owner, repo);
+  const all = await listSecrets();
+  const found = all.find((s) => s.name === name);
+  const payload = JSON.stringify(merged);
+  if (found) {
+    await updateSecret(found.id, { value: payload });
+  } else {
+    await createSecret({
+      name,
+      value: payload,
+      description: `Variables d'environnement résolues pour le déploiement GitHub ${owner}/${repo} (secret multi-clé, JSON) — réutilisées automatiquement à chaque redéploiement suivant.`,
+    });
+  }
+}
+
+/**
+ * GET /api/github/repos/:owner/:repo/config-schema (voir routes/github.ts) — même détection que
+ * detectRepo (API Contents GitHub, aperçu avant clone), mais orientée "ce qu'il faut configurer"
+ * plutôt que "quel moteur utiliser". Jamais de valeur réelle de secret dans le résultat.
+ */
+export async function buildDeployConfigSchema(
+  owner: string,
+  repo: string,
+  ref?: string,
+  explicitPath?: string,
+): Promise<DeployConfigSchema> {
+  const effective = await getEffectiveToken();
+  const token = effective?.token;
+  const resolvedRef = ref ?? (await fetchDefaultBranch(owner, repo, token));
+  const dirPath = explicitPath ?? "";
+  const filePath = (name: string) => (dirPath ? `${dirPath}/${name}` : name);
+
+  const { data } = await githubFetch(`${contentsApiPath(owner, repo, dirPath)}?ref=${encodeURIComponent(resolvedRef)}`, token);
+  const entries = Array.isArray(data) ? (data as GithubApiContentItem[]) : [];
+  const summary = summarizeEntries(entries);
+
+  const composeRaw = summary.hasCompose
+    ? await fetchFileContent(owner, repo, filePath(summary.composeFileName!), resolvedRef, token)
+    : undefined;
+  const composeDoc = composeRaw ? ((yaml.load(composeRaw) as ComposeDoc | undefined) ?? undefined) : undefined;
+  const dockerfileContent = summary.hasDockerfile
+    ? await fetchFileContent(owner, repo, filePath("Dockerfile"), resolvedRef, token)
+    : undefined;
+
+  let envExampleDefaults = new Map<string, string | undefined>();
+  for (const name of ENV_EXAMPLE_FILE_NAMES) {
+    const content = await fetchFileContent(owner, repo, filePath(name), resolvedRef, token);
+    if (content !== undefined) {
+      envExampleDefaults = parseEnvExampleDefaults(content);
+      break;
+    }
+  }
+
+  const storedValues = await getStoredEnvValues(owner, repo);
+  const envFileExists = async (relativePath: string): Promise<boolean> =>
+    (await fetchFileContent(owner, repo, filePath(relativePath), resolvedRef, token)) !== undefined;
+
+  const { envVars, missingRequiredKeys, unresolvableEnvFile } = await buildEnvRequirements({
+    ...(composeDoc ? { composeDoc } : {}),
+    ...(dockerfileContent ? { dockerfileContent } : {}),
+    envExampleDefaults,
+    resolvedValues: storedValues,
+    envFileExists,
+  });
+
+  const ports: DeployPortRequirement[] = [];
+  if (composeDoc?.services) {
+    for (const [serviceName, service] of Object.entries(composeDoc.services)) {
+      for (const entry of Array.isArray(service.ports) ? service.ports : []) {
+        const containerPort = containerPortFromPortsEntry(entry);
+        if (!containerPort) continue;
+        const hostPort = parseFixedHostPort(entry);
+        ports.push({ service: serviceName, containerPort, ...(hostPort ? { hostPort } : {}), overridable: true });
+      }
+    }
+  } else if (summary.hasDockerfile && dockerfileContent) {
+    const exposed = parseExposedPort(dockerfileContent);
+    if (exposed) ports.push({ containerPort: exposed, overridable: true });
+  }
+
+  const volumes: DeployVolumeInfo[] = [];
+  if (composeDoc?.services) {
+    for (const [serviceName, service] of Object.entries(composeDoc.services)) {
+      const rawVolumes = service.volumes;
+      if (!Array.isArray(rawVolumes)) continue;
+      for (const entry of rawVolumes) {
+        if (typeof entry === "string") {
+          const parts = entry.split(":");
+          if (parts.length < 2) continue; // volume anonyme ("/data" seul) : rien de significatif à afficher
+          const [source, target, mode] = parts;
+          volumes.push({ service: serviceName, source: source!, target: target!, readOnly: mode === "ro" });
+        } else if (entry && typeof entry === "object") {
+          const v = entry as { source?: string; target?: string; read_only?: boolean };
+          if (v.source && v.target) volumes.push({ service: serviceName, source: v.source, target: v.target, readOnly: Boolean(v.read_only) });
+        }
+      }
+    }
+  }
+
+  return {
+    owner,
+    repo,
+    ref: resolvedRef,
+    ...(dirPath ? { configPath: dirPath } : {}),
+    envVars,
+    missingRequiredKeys,
+    ports,
+    volumes,
+    ...(unresolvableEnvFile ? { unresolvableEnvFile } : {}),
+  };
+}
+
 interface GithubApiCommit {
   sha: string;
   commit: { message: string; author?: { name?: string } };
@@ -691,16 +1056,26 @@ async function deployViaDockerBuild(
   targetEnvironmentId: string | undefined,
   subdomain: string | undefined,
   portOverride: number | undefined,
+  /** ARG Dockerfile résolus (secret stocké ou défaut légitime .env.example, voir
+   * resolveAndWriteEnvConfig) — passés tels quels à `docker build --build-arg`, jamais devinés. */
+  buildArgs: Record<string, string> = {},
 ): Promise<void> {
   const docker = await getClient(targetEnvironmentId);
   const imageTag = `quai-gh/${sanitizeDockerName(owner)}-${sanitizeDockerName(repo)}:${deploymentId.slice(0, 8)}`;
 
-  await appendDeploymentLog(deploymentId, `$ docker build -t ${imageTag} .\n`);
+  const buildArgKeys = Object.keys(buildArgs);
+  await appendDeploymentLog(
+    deploymentId,
+    `$ docker build -t ${imageTag}${buildArgKeys.length > 0 ? ` ${buildArgKeys.map((k) => `--build-arg ${k}=***`).join(" ")}` : ""} .\n`,
+  );
   const files = await listBuildContextFiles(cloneDir);
   // buildImage() elle-même ne fait que POSTer la requête et retourne quasi immédiatement un
   // flux de progression — c'est la CONSOMMATION de ce flux (followProgress ci-dessous) qui dure
   // le temps réel du build : le timeout doit donc englober followProgress, pas ce seul appel.
-  const buildStream = await docker.buildImage({ context: cloneDir, src: files }, { t: imageTag });
+  const buildStream = await docker.buildImage(
+    { context: cloneDir, src: files },
+    { t: imageTag, ...(buildArgKeys.length > 0 ? { buildargs: buildArgs } : {}) },
+  );
 
   // Un échec RÉEL d'une étape du build (ex: `RUN` qui retourne un code non-zéro) n'est JAMAIS
   // remonté comme erreur du flux lui-même côté dockerode/l'API Docker — le flux se termine
@@ -932,6 +1307,26 @@ export function rewritePortEntry(entry: unknown, newHostPort: number): unknown {
   return { ...(entry as object), published: newHostPort };
 }
 
+/**
+ * Applique EN PLACE les ports hôte explicitement choisis par l'utilisateur (voir
+ * DeployPortRequirement#overridable, `composePortOverrides` sur POST .../deploy) — un port hôte
+ * précis plutôt que le remap automatique. Appliqué AVANT rewriteComposePortsForConflicts, qui reste
+ * la protection de dernier ressort : si le port demandé est malgré tout déjà occupé, il est
+ * remplacé par un port libre comme n'importe quel autre conflit, jamais un `docker compose up` qui
+ * échouerait à l'aveugle sur le choix explicite de l'utilisateur. Ignore silencieusement un service
+ * inconnu ou sans port déclaré (l'utilisateur ne peut choisir que parmi `DeployPortRequirement`,
+ * mais le fichier a pu changer entre la lecture du schéma et ce déploiement — best-effort, jamais
+ * bloquant).
+ */
+export function applyComposeHostPortOverrides(doc: ComposeDoc, overrides: Record<string, number>): void {
+  if (!doc.services) return;
+  for (const [serviceName, desiredHostPort] of Object.entries(overrides)) {
+    const service = doc.services[serviceName];
+    if (!service || !Array.isArray(service.ports) || service.ports.length === 0) continue;
+    service.ports[0] = rewritePortEntry(service.ports[0], desiredHostPort);
+  }
+}
+
 export interface ComposePortRemap {
   service: string;
   oldHostPort: number;
@@ -1124,6 +1519,9 @@ async function deployViaDockerCompose(
   targetEnvironmentId: string | undefined,
   subdomain: string | undefined,
   serviceForSubdomain: string | undefined,
+  /** Port hôte précis demandé par service (voir DeployPortRequirement#overridable) — {} = aucune
+   * surcharge, comportement historique inchangé (remap automatique uniquement sur conflit réel). */
+  portOverrides: Record<string, number> = {},
 ): Promise<void> {
   const docker = await getClient(targetEnvironmentId);
   // Nom de projet isolé dérivé de l'id de déploiement — même esprit que sanitizeDockerName déjà
@@ -1135,6 +1533,16 @@ async function deployViaDockerCompose(
 
   const rawYaml = await fs.readFile(path.join(composeDir, composeFileName), "utf-8");
   const doc = (yaml.load(rawYaml) as ComposeDoc | undefined) ?? {};
+
+  if (Object.keys(portOverrides).length > 0) {
+    applyComposeHostPortOverrides(doc, portOverrides);
+    await appendDeploymentLog(
+      deploymentId,
+      `Port(s) hôte demandé(s) explicitement : ${Object.entries(portOverrides)
+        .map(([service, port]) => `${service} -> ${port}`)
+        .join(", ")}.\n`,
+    );
+  }
 
   const used = await usedHostPorts(docker);
   let remaps = rewriteComposePortsForConflicts(doc, used);
@@ -1302,6 +1710,110 @@ async function prepareGitAskPass(token: string): Promise<{ env: NodeJS.ProcessEn
   };
 }
 
+export type ResolveEnvConfigResult =
+  | { ok: true; buildArgs: Record<string, string> }
+  | { ok: false; missingKeys: string[] };
+
+/**
+ * Analyse le VRAI clone local (`targetDir`) juste avant `docker build`/`docker compose up` — voir
+ * la section "Détection et résolution des variables d'environnement manquantes" plus haut dans ce
+ * fichier pour la logique partagée (buildEnvRequirements). Si des clés requises restent sans
+ * valeur : n'invoque NI `docker build` NI `docker compose`, retourne `{ok: false}` (le déploiement
+ * s'arrête à l'étape "configuration requise", status "needs-config", voir runDeployment). Sinon,
+ * écrit RÉELLEMENT le(s) fichier(s) `.env` nécessaires (jamais vide, jamais une valeur inventée) et
+ * retourne les ARG Dockerfile résolus (pour `docker build --build-arg`, voir deployViaDockerBuild).
+ */
+async function resolveAndWriteEnvConfig(
+  deploymentId: string,
+  owner: string,
+  repo: string,
+  targetDir: string,
+  detection: EntriesSummary,
+): Promise<ResolveEnvConfigResult> {
+  const filePath = (name: string) => path.join(targetDir, name);
+
+  const composeRaw = detection.hasCompose
+    ? await fs.readFile(filePath(detection.composeFileName!), "utf-8").catch(() => undefined)
+    : undefined;
+  const composeDoc = composeRaw ? ((yaml.load(composeRaw) as ComposeDoc | undefined) ?? undefined) : undefined;
+  const dockerfileContent = detection.hasDockerfile ? await fs.readFile(filePath("Dockerfile"), "utf-8").catch(() => undefined) : undefined;
+
+  let envExampleDefaults = new Map<string, string | undefined>();
+  for (const name of ENV_EXAMPLE_FILE_NAMES) {
+    const content = await fs.readFile(filePath(name), "utf-8").catch(() => undefined);
+    if (content !== undefined) {
+      envExampleDefaults = parseEnvExampleDefaults(content);
+      break;
+    }
+  }
+
+  const storedValues = await getStoredEnvValues(owner, repo);
+  const envFileExists = async (relativePath: string): Promise<boolean> =>
+    fs
+      .access(filePath(relativePath))
+      .then(() => true)
+      .catch(() => false);
+
+  const { envVars, missingRequiredKeys } = await buildEnvRequirements({
+    ...(composeDoc ? { composeDoc } : {}),
+    ...(dockerfileContent ? { dockerfileContent } : {}),
+    envExampleDefaults,
+    resolvedValues: storedValues,
+    envFileExists,
+  });
+
+  if (missingRequiredKeys.length > 0) {
+    await appendDeploymentLog(
+      deploymentId,
+      `Configuration requise avant de déployer : ${missingRequiredKeys.length} variable(s) d'environnement manquante(s) — ${missingRequiredKeys.join(", ")}.\n` +
+        `Aucun "docker build"/"docker compose" n'a été lancé. Renseignez ces valeurs (formulaire de configuration de ce dépôt) puis relancez ce déploiement — elles seront alors réutilisées automatiquement.\n`,
+    );
+    return { ok: false, missingKeys: missingRequiredKeys };
+  }
+
+  // Valeur finale par clé : secret déjà stocké prioritaire, sinon défaut légitime du .env.example.
+  const resolvedAll: Record<string, string> = {};
+  for (const v of envVars) {
+    const value = storedValues[v.key] ?? envExampleDefaults.get(v.key);
+    if (value !== undefined) resolvedAll[v.key] = value;
+  }
+
+  if (Object.keys(resolvedAll).length > 0) {
+    // Écrit un VRAI fichier .env à la racine du contexte : docker compose le charge automatiquement
+    // pour l'interpolation ${VAR} ET pour tout service qui s'appuie sur le shell/.env hôte, sans
+    // qu'un `env_file:` explicite le référence forcément — jamais un fichier vide ni une valeur
+    // inventée (voir resolvedAll ci-dessus, uniquement secret stocké ou défaut .env.example légitime).
+    const envFileContent = Object.entries(resolvedAll)
+      .map(([k, v]) => `${k}=${v}`)
+      .join("\n") + "\n";
+    await fs.writeFile(path.join(targetDir, ".env"), envFileContent, { encoding: "utf-8", mode: 0o600 });
+    let writtenFiles = 1;
+    if (composeDoc?.services) {
+      for (const service of Object.values(composeDoc.services)) {
+        for (const envFilePath of composeEnvFilePaths(service)) {
+          if (envFilePath === ".env") continue; // déjà écrit ci-dessus
+          if (await envFileExists(envFilePath)) continue; // déjà présent dans le dépôt, jamais écrasé
+          const target = filePath(envFilePath);
+          await fs.mkdir(path.dirname(target), { recursive: true });
+          await fs.writeFile(target, envFileContent, { encoding: "utf-8", mode: 0o600 });
+          writtenFiles += 1;
+        }
+      }
+    }
+    await appendDeploymentLog(
+      deploymentId,
+      `Fichier(s) d'environnement générés à partir de la configuration résolue (${Object.keys(resolvedAll).length} clé(s), ${writtenFiles} fichier(s)) — valeurs stockées chiffrées, jamais journalisées en clair.\n`,
+    );
+  }
+
+  const buildArgs: Record<string, string> = {};
+  for (const v of envVars) {
+    if (v.source === "dockerfile_arg" && resolvedAll[v.key] !== undefined) buildArgs[v.key] = resolvedAll[v.key]!;
+  }
+
+  return { ok: true, buildArgs };
+}
+
 async function runDeployment(
   deploymentId: string,
   owner: string,
@@ -1314,6 +1826,7 @@ async function runDeployment(
   port: number | undefined,
   configPath: string,
   serviceForSubdomain: string | undefined,
+  composePortOverrides: Record<string, number> = {},
 ): Promise<void> {
   const cloneDir = path.join(os.tmpdir(), `quai-github-deploy-${deploymentId}`);
   // Préparé AVANT le try (pour être nettoyé dans tous les cas via le `finally` ci-dessous) —
@@ -1359,13 +1872,43 @@ async function runDeployment(
     // (services dépendants, volumes, réseau, variables d'env) — sur-ensemble strict d'un
     // déploiement Dockerfile seul, jamais l'inverse (voir GithubDeploymentKind pour le détail).
     const engine = chooseDeploymentEngine(detection);
+
+    // AVANT tout `docker build`/`docker compose up` (voir mission "fichier .env manquant") :
+    // détecte/résout les variables d'environnement requises. Un échec ici arrête le déploiement à
+    // une étape claire "configuration requise" (status "needs-config"), jamais un échec docker brut.
+    if (engine === "compose" || engine === "dockerfile") {
+      const envResolution = await resolveAndWriteEnvConfig(deploymentId, owner, repo, targetDir, detection);
+      if (!envResolution.ok) {
+        await updateDeploymentRecord(deploymentId, {
+          status: "needs-config",
+          finishedAt: new Date().toISOString(),
+          missingConfigKeys: envResolution.missingKeys,
+        });
+        return;
+      }
+      switch (engine) {
+        case "compose":
+          await deployViaDockerCompose(
+            deploymentId,
+            targetDir,
+            detection.composeFileName!,
+            owner,
+            repo,
+            targetEnvironmentId,
+            subdomain,
+            serviceForSubdomain,
+            composePortOverrides,
+          );
+          break;
+        case "dockerfile":
+          await deployViaDockerBuild(deploymentId, targetDir, owner, repo, targetEnvironmentId, subdomain, port, envResolution.buildArgs);
+          break;
+      }
+      await updateDeploymentRecord(deploymentId, { status: "success", finishedAt: new Date().toISOString() });
+      return;
+    }
+
     switch (engine) {
-      case "compose":
-        await deployViaDockerCompose(deploymentId, targetDir, detection.composeFileName!, owner, repo, targetEnvironmentId, subdomain, serviceForSubdomain);
-        break;
-      case "dockerfile":
-        await deployViaDockerBuild(deploymentId, targetDir, owner, repo, targetEnvironmentId, subdomain, port);
-        break;
       case "terraform":
         await deployViaIacWorkspace(deploymentId, targetDir, owner, repo, detection.terraformFiles, startedBy);
         break;
@@ -1411,6 +1954,10 @@ export interface StartDeploymentInput {
   /** Déclenchement webhook : métadonnées de commit déjà connues (payload `push`), pour éviter un
    * appel GitHub supplémentaire — sinon récupérées ici via l'API (déclenchement manuel). */
   commit?: GithubDeploymentCommit;
+  /** kind "docker-compose" uniquement : port hôte précis demandé par service (voir
+   * DeployPortRequirement#overridable) — remplace le remap automatique pour CE service, voir
+   * applyComposeHostPortOverrides. Absent/{} = comportement historique inchangé. */
+  composePortOverrides?: Record<string, number>;
 }
 
 /**
@@ -1456,6 +2003,7 @@ export async function startDeployment(input: StartDeploymentInput): Promise<Gith
     input.port,
     configPath,
     input.serviceForSubdomain,
+    input.composePortOverrides ?? {},
   );
 
   return deployment;

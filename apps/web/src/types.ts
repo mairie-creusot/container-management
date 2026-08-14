@@ -1002,7 +1002,10 @@ export interface GithubRepoDetection {
   candidates?: GithubDetectionCandidate[];
 }
 
-export type GithubDeploymentStatus = "running" | "success" | "failed";
+/** "needs-config" : variables d'environnement requises sans valeur résolue — déploiement arrêté
+ * PROPREMENT avant tout docker build/compose up (jamais un échec docker brut), voir
+ * GithubDeployment#missingConfigKeys et DeployConfigSchema. */
+export type GithubDeploymentStatus = "running" | "success" | "failed" | "needs-config";
 export type GithubDeploymentKind = "docker-build-run" | "docker-compose" | "iac-workspace";
 export type GithubDeploymentTrigger = "manual" | "webhook";
 
@@ -1040,10 +1043,66 @@ export interface GithubDeployment {
   configPath?: string;
   subdomain?: string;
   reverseProxyRouteId?: string;
+  /** status "needs-config" uniquement : clés requises sans valeur résolue — à renseigner via
+   * PUT .../config-values puis "Redéployer" (réutilisées automatiquement ensuite). */
+  missingConfigKeys?: string[];
 }
 
 export interface GithubDeploymentDetail extends GithubDeployment {
   log: string;
+}
+
+// --- Configuration dynamique de déploiement (variables d'environnement manquantes, ports,
+// volumes, ARG Dockerfile) — voir apps/api/src/services/github.ts. Corrige un bug réel constaté le
+// 14/08/2026 (mairie-creusot/formulaire_hotline) : un docker-compose.yml référençant un .env absent
+// du clone frais (gitignored) faisait échouer platement `docker compose up` au lieu d'une détection
+// propre AVANT l'échec. GET .../config-schema décrit ce qui peut/doit être configuré (jamais une
+// vraie valeur de secret) ; PUT .../config-values enregistre les valeurs comme secret nommé
+// "github-env:<owner>/<repo>" (secretsStore.ts), réutilisé automatiquement au redéploiement suivant.
+
+export type EnvVarSource = "env_file" | "environment" | "dockerfile_arg";
+
+export interface EnvVarRequirement {
+  key: string;
+  required: boolean;
+  /** true si déjà résolue (secret stocké, ou défaut légitime non sensible d'un .env.example) —
+   * jamais la valeur elle-même. */
+  hasValue: boolean;
+  source: EnvVarSource;
+  service?: string; // absent pour "dockerfile_arg"
+  envFilePath?: string; // "env_file" uniquement
+  /** Heuristique sur le NOM de la clé — champ masqué côté formulaire pour ces clés. */
+  looksSensitive: boolean;
+}
+
+export interface DeployPortRequirement {
+  service?: string; // absent pour un déploiement Dockerfile seul
+  containerPort: number;
+  hostPort?: number; // port hôte actuellement fixé dans le compose, s'il y en a un
+  overridable: boolean;
+}
+
+/** Lecture seule dans ce premier lot — affichée pour information uniquement. */
+export interface DeployVolumeInfo {
+  service?: string;
+  source: string;
+  target: string;
+  readOnly: boolean;
+}
+
+/** GET /api/github/repos/:owner/:repo/config-schema. */
+export interface DeployConfigSchema {
+  owner: string;
+  repo: string;
+  ref: string;
+  configPath?: string;
+  envVars: EnvVarRequirement[];
+  missingRequiredKeys: string[];
+  ports: DeployPortRequirement[];
+  volumes: DeployVolumeInfo[];
+  /** Présent seulement si un `env_file:` référence un fichier introuvable ET qu'aucun
+   * .env.example/.env.sample n'a été trouvé pour en déduire les clés attendues. */
+  unresolvableEnvFile?: string;
 }
 
 /** GET/PUT /api/github/repos/:owner/:repo/auto-deploy — déploiement automatique sur push. */

@@ -1255,7 +1255,15 @@ export interface GithubRepoDetection {
   candidates?: GithubDetectionCandidate[];
 }
 
-export type GithubDeploymentStatus = "running" | "success" | "failed";
+/**
+ * "needs-config" (14/08/2026) : le clone/la détection ont trouvé des variables d'environnement
+ * requises SANS valeur résolue (voir DeployConfigSchema/GithubDeployment#missingConfigKeys) — le
+ * déploiement s'arrête PROPREMENT avant tout `docker build`/`docker compose up`, jamais un échec
+ * `docker compose` brut ("env file ... not found"). Distinct de "failed" : ce n'est pas une erreur,
+ * c'est une étape "configuration requise" que le frontend affiche différemment (formulaire à
+ * remplir plutôt qu'un journal d'échec), voir GitHubDeployPage.tsx.
+ */
+export type GithubDeploymentStatus = "running" | "success" | "failed" | "needs-config";
 
 /**
  * "docker-build-run" : Dockerfile détecté (seul, ou prioritaire) -> vrai `docker build` + `docker
@@ -1336,6 +1344,11 @@ export interface GithubDeployment {
    * déploiement — absent si aucun sous-domaine demandé, ou si la création a échoué (voir le log
    * du déploiement pour le détail dans ce dernier cas, jamais une route fantôme inventée ici). */
   reverseProxyRouteId?: string;
+  /** status "needs-config" UNIQUEMENT : clés d'environnement requises encore sans valeur résolue
+   * qui ont bloqué ce déploiement (voir DeployConfigSchema#missingRequiredKeys ci-dessous) —
+   * l'utilisateur les renseigne via PUT .../config-values puis relance le MÊME déploiement (bouton
+   * "Redéployer") : les valeurs fournies sont alors résolues automatiquement, sans re-demander. */
+  missingConfigKeys?: string[];
 }
 
 /** GithubDeployment + le log complet (clone + build + run entrelacés) — chargé à la demande, même principe que IacRunDetail. */
@@ -1357,6 +1370,81 @@ export interface GithubAutoDeployStatus {
   subdomain?: string;
   port?: number;
   updatedAt: string | null; // null si jamais configuré
+}
+
+// --- Configuration dynamique de déploiement (variables d'environnement manquantes, ports,
+// volumes, ARG Dockerfile) — voir apps/api/src/services/github.ts § "Détection et résolution des
+// variables d'environnement manquantes". Corrige un bug réel constaté le 14/08/2026
+// (mairie-creusot/formulaire_hotline) : un docker-compose.yml référençant un fichier .env absent
+// du clone frais (gitignored, jamais commité — pratique standard) faisait échouer platement
+// `docker compose up` ("env file ... not found", code 14) au lieu d'une détection propre AVANT
+// l'échec. GET .../config-schema calcule un résumé structuré de ce qui peut/doit être configuré
+// pour CE dépôt/emplacement (jamais une vraie valeur de secret) ; PUT .../config-values enregistre
+// les valeurs fournies comme un secret nommé "github-env:<owner>/<repo>" (secretsStore.ts, JSON
+// multi-clé, chiffré au repos comme tout secret) réutilisé automatiquement à chaque redéploiement
+// suivant — seul le tout premier déploiement d'un dépôt à variables manquantes demande une saisie.
+
+export type EnvVarSource = "env_file" | "environment" | "dockerfile_arg";
+
+export interface EnvVarRequirement {
+  key: string;
+  required: boolean;
+  /** true si une valeur est déjà résolue (secret stocké, ou valeur par défaut légitime NON
+   * sensible trouvée dans un .env.example/.env.sample du dépôt) — jamais la valeur elle-même. */
+  hasValue: boolean;
+  source: EnvVarSource;
+  /** Service docker-compose concerné — absent pour "dockerfile_arg" (build sans compose). */
+  service?: string;
+  /** "env_file" uniquement : chemin relatif référencé par `env_file:` dans le fichier compose. */
+  envFilePath?: string;
+  /** Heuristique sur le NOM de la clé (PASSWORD/SECRET/TOKEN/API_KEY/DSN/...) — le frontend affiche
+   * un champ masqué pour ces clés, jamais un texte en clair une fois saisi (même pattern que les
+   * champs token/password des registres). */
+  looksSensitive: boolean;
+}
+
+export interface DeployPortRequirement {
+  service?: string; // absent pour un déploiement Dockerfile seul (pas de notion de service)
+  containerPort: number;
+  /** Port hôte actuellement fixé dans le fichier compose, s'il y en a un — absent = Docker choisit
+   * lui-même un port hôte libre (comportement historique inchangé), voir pickFreeHostPort. */
+  hostPort?: number;
+  /** true = surchargeable via `composePortOverrides` (POST .../deploy) — toujours true dans ce
+   * premier lot (voir services/github.ts#applyComposeHostPortOverrides), champ conservé pour une
+   * future restriction honnête plutôt qu'une supposition côté frontend. */
+  overridable: boolean;
+}
+
+/** Lecture seule dans ce premier lot (voir mission) : affichée pour information, aucune route
+ * d'édition ne consomme ce type — un montage de volume touche à des données potentiellement
+ * existantes sur l'hôte, une édition à l'aveugle serait plus risquée qu'utile pour ce lot. */
+export interface DeployVolumeInfo {
+  service?: string;
+  source: string;
+  target: string;
+  readOnly: boolean;
+}
+
+/**
+ * GET /api/github/repos/:owner/:repo/config-schema — ce qui peut/doit être configuré pour CE
+ * dépôt/emplacement avant déploiement, jamais une valeur de secret réelle. `envVars` ne liste QUE
+ * les clés dont la valeur n'est PAS déjà résolue dans le fichier lui-même (une valeur littérale
+ * dans `environment:`/compose n'a rien à demander) — voir services/github.ts#buildEnvRequirements.
+ */
+export interface DeployConfigSchema {
+  owner: string;
+  repo: string;
+  ref: string;
+  configPath?: string;
+  envVars: EnvVarRequirement[];
+  /** Raccourci pratique : clés requises sans valeur résolue — [] si tout est déjà prêt à déployer. */
+  missingRequiredKeys: string[];
+  ports: DeployPortRequirement[];
+  volumes: DeployVolumeInfo[];
+  /** Présent seulement si au moins un `env_file:` référence un fichier introuvable dans le dépôt ET
+   * qu'aucun .env.example/.env.sample n'a été trouvé pour en déduire les clés attendues — limite
+   * honnête où QUAI ne peut proposer aucun champ pour ce fichier précis (voir services/github.ts). */
+  unresolvableEnvFile?: string;
 }
 
 // --- Sauvegardes automatiques (volumes Docker + bases de données) vers un stockage

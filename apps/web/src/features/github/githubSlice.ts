@@ -2,6 +2,7 @@ import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/tool
 import { apiGet, apiPost, apiPut, ApiError } from "@/api/client";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
 import type {
+  DeployConfigSchema,
   GithubAutoDeployStatus,
   GithubDeployment,
   GithubDeploymentDetail,
@@ -29,6 +30,16 @@ interface GithubState {
   autoDeploySaving: boolean;
   autoDeployError: string | null;
 
+  // Configuration dynamique de déploiement (variables d'environnement manquantes, ports, volumes,
+  // ARG Dockerfile) — voir DeployConfigSchema (types.ts) et services/github.ts côté API. Corrige le
+  // bug réel du 14/08/2026 (mairie-creusot/formulaire_hotline, .env manquant) : ce schéma alimente
+  // le formulaire dynamique de configuration (DeployConfigForm.tsx).
+  configSchema: DeployConfigSchema | null;
+  configSchemaStatus: "idle" | "loading" | "ready" | "error";
+  configSchemaError: string | null;
+  savingConfigValues: boolean;
+  saveConfigValuesError: string | null;
+
   deployments: GithubDeployment[];
   deploymentsStatus: "idle" | "loading" | "ready" | "error";
   selectedDeployment: GithubDeploymentDetail | null;
@@ -50,6 +61,11 @@ const initialState: GithubState = {
   autoDeployStatus: "idle",
   autoDeploySaving: false,
   autoDeployError: null,
+  configSchema: null,
+  configSchemaStatus: "idle",
+  configSchemaError: null,
+  savingConfigValues: false,
+  saveConfigValuesError: null,
   deployments: [],
   deploymentsStatus: "idle",
   selectedDeployment: null,
@@ -114,22 +130,65 @@ export const deployGithubRepo = createAsyncThunk<
     port?: number;
     configPath?: string;
     serviceForSubdomain?: string;
+    composePortOverrides?: Record<string, number>;
   },
   { rejectValue: string }
->("github/deploy", async ({ owner, repo, ref, targetEnvironmentId, subdomain, port, configPath, serviceForSubdomain }, { rejectWithValue, dispatch }) => {
+>(
+  "github/deploy",
+  async (
+    { owner, repo, ref, targetEnvironmentId, subdomain, port, configPath, serviceForSubdomain, composePortOverrides },
+    { rejectWithValue, dispatch },
+  ) => {
+    try {
+      const deployment = await apiPost<GithubDeployment>(`/github/repos/${owner}/${repo}/deploy`, {
+        ...(ref ? { ref } : {}),
+        ...(targetEnvironmentId ? { targetEnvironmentId } : {}),
+        ...(subdomain ? { subdomain } : {}),
+        ...(port !== undefined ? { port } : {}),
+        ...(configPath ? { configPath } : {}),
+        ...(serviceForSubdomain ? { serviceForSubdomain } : {}),
+        ...(composePortOverrides && Object.keys(composePortOverrides).length > 0 ? { composePortOverrides } : {}),
+      });
+      dispatch(pushNotification({ level: "info", message: `Déploiement de ${owner}/${repo} démarré.` }));
+      return deployment;
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : "Échec du démarrage du déploiement.";
+      return rejectWithValue(message);
+    }
+  },
+);
+
+/** GET .../config-schema — voir DeployConfigForm.tsx. */
+export const fetchGithubConfigSchema = createAsyncThunk<
+  DeployConfigSchema,
+  { owner: string; repo: string; ref?: string; path?: string },
+  { rejectValue: string }
+>("github/fetchConfigSchema", async ({ owner, repo, ref, path }, { rejectWithValue }) => {
   try {
-    const deployment = await apiPost<GithubDeployment>(`/github/repos/${owner}/${repo}/deploy`, {
-      ...(ref ? { ref } : {}),
-      ...(targetEnvironmentId ? { targetEnvironmentId } : {}),
-      ...(subdomain ? { subdomain } : {}),
-      ...(port !== undefined ? { port } : {}),
-      ...(configPath ? { configPath } : {}),
-      ...(serviceForSubdomain ? { serviceForSubdomain } : {}),
-    });
-    dispatch(pushNotification({ level: "info", message: `Déploiement de ${owner}/${repo} démarré.` }));
-    return deployment;
+    const params = new URLSearchParams();
+    if (ref) params.set("ref", ref);
+    if (path) params.set("path", path);
+    const query = params.toString();
+    return await apiGet<DeployConfigSchema>(`/github/repos/${owner}/${repo}/config-schema${query ? `?${query}` : ""}`);
   } catch (error) {
-    const message = error instanceof ApiError ? error.message : "Échec du démarrage du déploiement.";
+    const message = error instanceof ApiError ? error.message : "Échec du chargement de la configuration.";
+    return rejectWithValue(message);
+  }
+});
+
+/** PUT .../config-values — enregistre les valeurs saisies dans le formulaire dynamique comme
+ * secret nommé "github-env:<owner>/<repo>" (voir services/github.ts#saveGithubEnvValues côté API),
+ * réutilisé automatiquement au redéploiement suivant. */
+export const saveGithubConfigValues = createAsyncThunk<
+  void,
+  { owner: string; repo: string; values: Record<string, string> },
+  { rejectValue: string }
+>("github/saveConfigValues", async ({ owner, repo, values }, { rejectWithValue, dispatch }) => {
+  try {
+    await apiPut(`/github/repos/${owner}/${repo}/config-values`, { values });
+    dispatch(pushNotification({ level: "success", message: "Configuration enregistrée." }));
+  } catch (error) {
+    const message = error instanceof ApiError ? error.message : "Échec de l'enregistrement de la configuration.";
     return rejectWithValue(message);
   }
 });
@@ -189,6 +248,9 @@ const githubSlice = createSlice({
       state.autoDeploy = null;
       state.autoDeployStatus = "idle";
       state.autoDeployError = null;
+      state.configSchema = null;
+      state.configSchemaStatus = "idle";
+      state.configSchemaError = null;
     },
     selectDeployment(state, action: PayloadAction<GithubDeploymentDetail | null>) {
       state.selectedDeployment = action.payload;
@@ -287,6 +349,29 @@ const githubSlice = createSlice({
       .addCase(saveGithubAutoDeploy.rejected, (state, action) => {
         state.autoDeploySaving = false;
         state.autoDeployError = action.payload ?? "Échec de la mise à jour.";
+      })
+      .addCase(fetchGithubConfigSchema.pending, (state) => {
+        state.configSchemaStatus = "loading";
+        state.configSchemaError = null;
+      })
+      .addCase(fetchGithubConfigSchema.fulfilled, (state, action) => {
+        state.configSchemaStatus = "ready";
+        state.configSchema = action.payload;
+      })
+      .addCase(fetchGithubConfigSchema.rejected, (state, action) => {
+        state.configSchemaStatus = "error";
+        state.configSchemaError = action.payload ?? "Échec du chargement de la configuration.";
+      })
+      .addCase(saveGithubConfigValues.pending, (state) => {
+        state.savingConfigValues = true;
+        state.saveConfigValuesError = null;
+      })
+      .addCase(saveGithubConfigValues.fulfilled, (state) => {
+        state.savingConfigValues = false;
+      })
+      .addCase(saveGithubConfigValues.rejected, (state, action) => {
+        state.savingConfigValues = false;
+        state.saveConfigValuesError = action.payload ?? "Échec de l'enregistrement de la configuration.";
       });
   },
 });

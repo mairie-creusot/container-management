@@ -1,0 +1,262 @@
+/**
+ * Formulaire dynamique de configuration de déploiement — GÉNÉRIQUE, piloté par le schéma renvoyé
+ * par GET /api/github/repos/:owner/:repo/config-schema (DeployConfigSchema, voir types.ts), jamais
+ * codé en dur par type de projet. Corrige le bug réel du 14/08/2026 (mairie-creusot/formulaire_hotline) :
+ * un docker-compose.yml référençant un .env absent du clone frais faisait échouer platement
+ * `docker compose up` ("env file ... not found") au lieu d'une étape claire "configuration requise".
+ *
+ * Contrainte UX non négociable de ce projet : jamais plus de 5 champs visibles simultanément,
+ * jamais plus de 3 clics pour accomplir une action. Ici :
+ *  - les variables d'environnement REQUISES sans valeur sont le seul groupe ouvert par défaut,
+ *    paginé à 5 champs maximum à la fois (voir MAX_VISIBLE_FIELDS) ;
+ *  - les valeurs déjà configurées (modifiables plus tard, jamais figées) et les ports/volumes sont
+ *    repliés derrière des <details> distincts — jamais un mur de champs ;
+ *  - un champ dont la clé "ressemble" à un secret (EnvVarRequirement#looksSensitive) est un input
+ *    masqué (type="password"), jamais affiché en clair une fois enregistré — même pattern que le
+ *    champ "Valeur" de SecretsPage.tsx ;
+ *  - le fichier brut (docker-compose.yml/Dockerfile) n'est jamais affiché comme interaction
+ *    principale : seul ce formulaire généré l'est (voir mission).
+ *  - "Ouvrir" (déjà 1 clic) -> remplir les champs manquants -> "Enregistrer et déployer" (1 clic) :
+ *    3 clics au total depuis "Déployer" initial, cohérent avec la règle du projet.
+ */
+import { useEffect, useMemo, useState, type FormEvent } from "react";
+import Modal from "@/components/Modal";
+import type { DeployConfigSchema, EnvVarRequirement } from "@/types";
+
+const MAX_VISIBLE_FIELDS = 5;
+
+const SOURCE_LABEL: Record<EnvVarRequirement["source"], string> = {
+  env_file: "fichier d'environnement",
+  environment: "docker-compose",
+  dockerfile_arg: "ARG Dockerfile",
+};
+
+export interface DeployConfigFormSubmitInput {
+  values: Record<string, string>;
+  composePortOverrides?: Record<string, number>;
+}
+
+interface DeployConfigFormProps {
+  open: boolean;
+  onClose: () => void;
+  schema: DeployConfigSchema | null;
+  loading: boolean;
+  saving: boolean;
+  error: string | null;
+  /** Libellé du bouton principal — "Enregistrer et déployer" quand des clés requises manquent
+   * encore, "Enregistrer" pour une simple modification ultérieure (rien de bloquant). */
+  submitLabel: string;
+  onSubmit: (input: DeployConfigFormSubmitInput) => void;
+}
+
+export default function DeployConfigForm({ open, onClose, schema, loading, saving, error, submitLabel, onSubmit }: DeployConfigFormProps) {
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [portOverrides, setPortOverrides] = useState<Record<string, string>>({});
+  const [missingPage, setMissingPage] = useState(0);
+  const [showConfigured, setShowConfigured] = useState(false);
+
+  // Réinitialise le formulaire à chaque ouverture sur un NOUVEAU schéma (pas à chaque rendu — une
+  // frappe ne doit jamais réinitialiser ce qui est déjà tapé, même bug de principe que Modal.tsx).
+  useEffect(() => {
+    if (!open) return;
+    setValues({});
+    setPortOverrides({});
+    setMissingPage(0);
+    setShowConfigured(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, schema?.owner, schema?.repo, schema?.configPath]);
+
+  const missingVars = useMemo(() => (schema?.envVars ?? []).filter((v) => v.required && !v.hasValue), [schema]);
+  const configuredVars = useMemo(() => (schema?.envVars ?? []).filter((v) => v.hasValue), [schema]);
+  const overridablePorts = useMemo(() => (schema?.ports ?? []).filter((p) => p.overridable && p.service), [schema]);
+
+  const pageCount = Math.max(1, Math.ceil(missingVars.length / MAX_VISIBLE_FIELDS));
+  const pagedMissingVars = missingVars.slice(missingPage * MAX_VISIBLE_FIELDS, missingPage * MAX_VISIBLE_FIELDS + MAX_VISIBLE_FIELDS);
+
+  const readyToSubmit = missingVars.every((v) => (values[v.key] ?? "").trim().length > 0);
+
+  function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (!readyToSubmit) return;
+    const cleanedValues: Record<string, string> = {};
+    for (const [key, value] of Object.entries(values)) {
+      if (value.trim()) cleanedValues[key] = value.trim();
+    }
+    const cleanedPorts: Record<string, number> = {};
+    for (const [service, raw] of Object.entries(portOverrides)) {
+      const port = Number(raw);
+      if (raw.trim() && Number.isInteger(port) && port > 0 && port <= 65535) cleanedPorts[service] = port;
+    }
+    onSubmit({ values: cleanedValues, ...(Object.keys(cleanedPorts).length > 0 ? { composePortOverrides: cleanedPorts } : {}) });
+  }
+
+  function renderEnvField(v: EnvVarRequirement) {
+    const inputId = `deploy-config-${v.source}-${v.service ?? ""}-${v.key}`;
+    return (
+      <div className="field" key={inputId}>
+        <label htmlFor={inputId}>
+          <code>{v.key}</code>
+          {v.service && <span className="muted" style={{ fontWeight: 400 }}> — service {v.service}</span>}
+        </label>
+        <input
+          id={inputId}
+          type={v.looksSensitive ? "password" : "text"}
+          autoComplete="new-password"
+          value={values[v.key] ?? ""}
+          onChange={(e) => setValues((prev) => ({ ...prev, [v.key]: e.target.value }))}
+          disabled={saving}
+          placeholder={v.hasValue ? "•••••••• (déjà configuré — laisser vide pour conserver)" : "valeur requise"}
+        />
+        <p className="create-container-hint">
+          Source : {SOURCE_LABEL[v.source]}
+          {v.envFilePath ? ` (${v.envFilePath})` : ""}
+          {!v.hasValue && " — aucune valeur connue, ni secret stocké ni défaut légitime trouvé."}
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} labelledBy="deploy-config-title">
+      <form className="confirm-dialog" onSubmit={handleSubmit} style={{ minWidth: 380, maxWidth: 480 }}>
+        <h2 id="deploy-config-title" className="confirm-dialog__title">
+          Configuration du déploiement{schema ? ` — ${schema.owner}/${schema.repo}` : ""}
+        </h2>
+
+        {loading && <div className="empty-state">Analyse du dépôt en cours…</div>}
+
+        {!loading && schema && (
+          <>
+            {schema.unresolvableEnvFile && (
+              <p className="graph-popover__error">
+                Le fichier d'environnement "{schema.unresolvableEnvFile}" est référencé par le déploiement mais absent du
+                dépôt, et aucun .env.example/.env.sample n'a été trouvé pour en déduire les clés attendues — aucun champ
+                ne peut être proposé automatiquement pour ce fichier précis.
+              </p>
+            )}
+
+            {missingVars.length === 0 && configuredVars.length === 0 && overridablePorts.length === 0 && (
+              <p className="muted">Rien à configurer pour ce dépôt — toutes les valeurs nécessaires sont déjà résolues.</p>
+            )}
+
+            {missingVars.length > 0 && (
+              <>
+                <p className="muted" style={{ fontSize: 12.5 }}>
+                  {missingVars.length} variable{missingVars.length > 1 ? "s" : ""} d'environnement requise
+                  {missingVars.length > 1 ? "s" : ""}, sans valeur connue — stockées de manière chiffrée une fois
+                  saisies, réutilisées automatiquement aux prochains déploiements.
+                </p>
+                {pagedMissingVars.map(renderEnvField)}
+                {pageCount > 1 && (
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => setMissingPage((p) => Math.max(0, p - 1))}
+                      disabled={missingPage === 0}
+                    >
+                      ← Précédent
+                    </button>
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      Page {missingPage + 1}/{pageCount}
+                    </span>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => setMissingPage((p) => Math.min(pageCount - 1, p + 1))}
+                      disabled={missingPage >= pageCount - 1}
+                    >
+                      Suivant →
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Valeurs déjà configurées : jamais affichées en clair, mais modifiables explicitement
+                (voir mission "les secrets ne sont pas figés à vie") — repliées par défaut pour ne
+                jamais dépasser 5 champs visibles en même temps avec les champs manquants ci-dessus. */}
+            {configuredVars.length > 0 && (
+              <details open={showConfigured} onToggle={(e) => setShowConfigured((e.target as HTMLDetailsElement).open)}>
+                <summary style={{ cursor: "pointer", fontSize: 12.5, color: "var(--color-text-muted)" }}>
+                  Modifier une valeur déjà configurée ({configuredVars.length})
+                </summary>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                  {configuredVars.slice(0, MAX_VISIBLE_FIELDS).map(renderEnvField)}
+                  {configuredVars.length > MAX_VISIBLE_FIELDS && (
+                    <p className="muted" style={{ fontSize: 11 }}>
+                      +{configuredVars.length - MAX_VISIBLE_FIELDS} autre(s) — modifiables individuellement depuis le
+                      Gestionnaire de secrets (secret "github-env:{schema.owner}/{schema.repo}").
+                    </p>
+                  )}
+                </div>
+              </details>
+            )}
+
+            {overridablePorts.length > 0 && (
+              <details>
+                <summary style={{ cursor: "pointer", fontSize: 12.5, color: "var(--color-text-muted)" }}>
+                  Ports ({overridablePorts.length}) — surcharger le port hôte
+                </summary>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                  {overridablePorts.slice(0, MAX_VISIBLE_FIELDS).map((p) => (
+                    <div className="field" key={`${p.service}-${p.containerPort}`}>
+                      <label htmlFor={`deploy-port-${p.service}`}>
+                        {p.service} <span className="muted" style={{ fontWeight: 400 }}>(conteneur : {p.containerPort})</span>
+                      </label>
+                      <input
+                        id={`deploy-port-${p.service}`}
+                        type="number"
+                        min={1}
+                        max={65535}
+                        value={portOverrides[p.service!] ?? ""}
+                        onChange={(e) => setPortOverrides((prev) => ({ ...prev, [p.service!]: e.target.value }))}
+                        disabled={saving}
+                        placeholder={p.hostPort ? String(p.hostPort) : "port hôte choisi automatiquement"}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+
+            {schema.volumes.length > 0 && (
+              <details>
+                <summary style={{ cursor: "pointer", fontSize: 12.5, color: "var(--color-text-muted)" }}>
+                  Volumes ({schema.volumes.length}) — lecture seule
+                </summary>
+                <div className="iac-workspace-list" style={{ marginTop: 8 }}>
+                  {schema.volumes.map((v, i) => (
+                    <div className="iac-workspace-item" style={{ cursor: "default" }} key={`${v.service}-${v.target}-${i}`}>
+                      <span className="iac-workspace-item__name">
+                        {v.service ? `${v.service} : ` : ""}
+                        {v.source} → {v.target}
+                      </span>
+                      <span className="iac-workspace-item__engine">{v.readOnly ? "lecture seule" : "lecture/écriture"}</span>
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+          </>
+        )}
+
+        {error && <div className="graph-popover__error">{error}</div>}
+
+        <div className="confirm-dialog__actions">
+          <button type="button" className="btn btn-ghost" onClick={onClose} disabled={saving}>
+            Annuler
+          </button>
+          <button
+            type="submit"
+            className="btn btn-primary"
+            disabled={saving || loading || !schema || !readyToSubmit}
+            title={!readyToSubmit ? "Renseignez toutes les variables requises avant de continuer" : undefined}
+          >
+            {saving ? "Enregistrement…" : submitLabel}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
