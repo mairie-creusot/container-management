@@ -28,6 +28,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { config } from "../config.js";
 import { decryptSecret, encryptSecretIfNeeded } from "./crypto.js";
+import { appendFileRestricted, writeFileRestricted } from "../utils/secureFile.js";
 import type { BackupDefinition, BackupRun, BackupTarget } from "../types.js";
 
 export class BackupValidationError extends Error {}
@@ -86,9 +87,8 @@ async function readDefinitionsFromDisk(): Promise<StoredBackupDefinition[]> {
 }
 
 async function writeDefinitionsToDisk(next: StoredBackupDefinition[]): Promise<void> {
-  const filePath = resolvedStorePath();
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(next, null, 2), { encoding: "utf-8", mode: 0o600 });
+  // 0600 réellement forcé, y compris sur un fichier préexistant — voir utils/secureFile.ts.
+  await writeFileRestricted(resolvedStorePath(), JSON.stringify(next, null, 2));
 }
 
 async function getAllDefinitions(): Promise<StoredBackupDefinition[]> {
@@ -332,9 +332,8 @@ export async function getEffectiveBackupDestination(id: string): Promise<Effecti
  * panne d'écriture ne doit jamais faire échouer un cycle du scheduler. */
 export async function appendBackupRunEvent(run: BackupRun): Promise<void> {
   try {
-    const filePath = resolvedRunsLogPath();
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.appendFile(filePath, `${JSON.stringify(run)}\n`, { encoding: "utf-8", mode: 0o600 });
+    // 0600 réellement forcé, y compris sur un fichier préexistant — voir utils/secureFile.ts.
+    await appendFileRestricted(resolvedRunsLogPath(), `${JSON.stringify(run)}\n`);
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(`[backups] failed to persist run event: ${err instanceof Error ? err.message : String(err)}`);

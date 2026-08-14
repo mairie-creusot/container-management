@@ -24,6 +24,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { config } from "../config.js";
 import { decryptSecret, encryptSecretIfNeeded, isEncrypted } from "./crypto.js";
+import { writeFileRestricted } from "../utils/secureFile.js";
 import type { RegistryKind, Role } from "../types.js";
 
 export interface SetupLdapConfig {
@@ -194,11 +195,11 @@ async function readFromDisk(): Promise<SetupConfig | null> {
 }
 
 async function writeToDisk(next: SetupConfig): Promise<void> {
-  const filePath = resolvedConfigPath();
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  // mode 0o600 : lisible/écrivable uniquement par le compte qui fait tourner le process —
-  // le fichier contient des secrets chiffrés, mais autant limiter aussi l'accès au fichier.
-  await fs.writeFile(filePath, JSON.stringify(next, null, 2), { encoding: "utf-8", mode: 0o600 });
+  // 0600 réellement forcé (y compris sur un fichier déjà existant avec des permissions plus
+  // larges héritées d'une écriture antérieure à ce durcissement) — voir utils/secureFile.ts,
+  // le fichier contient des secrets chiffrés mais aussi des champs en clair (ldap.url/bindDn,
+  // groupRoleMap) dont l'altération suffirait à détourner l'authentification.
+  await writeFileRestricted(resolvedConfigPath(), JSON.stringify(next, null, 2));
 }
 
 export async function getCurrent(): Promise<SetupConfig> {

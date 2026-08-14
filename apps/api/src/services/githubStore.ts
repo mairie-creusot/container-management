@@ -18,6 +18,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { config } from "../config.js";
 import { decryptSecret, encryptSecretIfNeeded } from "./crypto.js";
+import { writeFileRestricted } from "../utils/secureFile.js";
 import { getEffectiveRegistryCredentials } from "./setupStore.js";
 import type { GithubAutoDeployStatus, GithubStatus } from "../types.js";
 
@@ -66,11 +67,8 @@ async function readFromDisk(): Promise<StoredGithubConfig> {
 }
 
 async function writeToDisk(next: StoredGithubConfig): Promise<void> {
-  const filePath = resolvedStorePath();
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  // mode 0o600 : même précaution que config.json/secrets.json — le fichier contient un jeton
-  // chiffré, mais autant restreindre aussi l'accès au fichier lui-même.
-  await fs.writeFile(filePath, JSON.stringify(next, null, 2), { encoding: "utf-8", mode: 0o600 });
+  // 0600 réellement forcé, y compris sur un fichier préexistant — voir utils/secureFile.ts.
+  await writeFileRestricted(resolvedStorePath(), JSON.stringify(next, null, 2));
 }
 
 async function getCurrent(): Promise<StoredGithubConfig> {

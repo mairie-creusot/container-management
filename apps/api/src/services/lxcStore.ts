@@ -16,6 +16,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { config } from "../config.js";
 import { decryptSecret, encryptSecretIfNeeded } from "./crypto.js";
+import { writeFileRestricted } from "../utils/secureFile.js";
 
 interface StoredLxcConfig {
   endpoint: string; // ex: "https://lxd.lecreusot.priv:8443"
@@ -58,9 +59,8 @@ async function readFromDisk(): Promise<StoredLxcConfig | null> {
 }
 
 async function writeToDisk(next: StoredLxcConfig | null): Promise<void> {
-  const filePath = resolvedStorePath();
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(next, null, 2), { encoding: "utf-8", mode: 0o600 });
+  // 0600 réellement forcé, y compris sur un fichier préexistant — voir utils/secureFile.ts.
+  await writeFileRestricted(resolvedStorePath(), JSON.stringify(next, null, 2));
 }
 
 async function getCurrent(): Promise<StoredLxcConfig | null> {
