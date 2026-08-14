@@ -1917,6 +1917,21 @@
   }
 }
 
+/* Variante compacte du même bouton flottant "Regrouper" — panneau embarqué "Réseau externe" de
+   "Composition interne" (TopologySubGraphPanel.tsx#renderExternalDependenciesGraph, `compact`),
+   ~280px de haut (voir .topology-interior__depgraph ci-dessous) : ancré plus près du bord et réduit
+   pour rester un simple overlay discret dans ce mini-canevas plutôt qu'un bouton qui déborderait. */
+.topology-toolbar-top-right--compact {
+  top: 6px;
+  right: 6px;
+}
+
+.topology-toolbar-top-right--compact .topology-group-action-btn {
+  padding: 3px 8px;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 /* --- Bouton flottant "Nettoyer les orphelins" (coin bas-gauche, glassmorphisme) ----------------- */
 
 /* Bug réel corrigé le 14/08/2026 (retour utilisateur : "il manque le button clean orphan") : le

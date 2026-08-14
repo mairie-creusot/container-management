@@ -83,6 +83,7 @@ import {
   buildTopologyEdges,
   deriveGroupPorts,
   edgeTypes,
+  GroupLabelPopover,
   idWithoutPrefix,
   nodeTypes,
   resolveGroupMemberNodeIds,
@@ -1554,69 +1555,6 @@ function RenamePopover({ containerId, initialName, x, y, onClose }: RenamePopove
           </button>
           <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !name.trim()}>
             {busy ? "…" : "Renommer"}
-          </button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-interface GroupLabelPopoverProps {
-  title: string;
-  initialLabel: string;
-  submitLabel: string;
-  x: number;
-  y: number;
-  onSubmit: (label: string) => Promise<{ ok: boolean; error?: string }>;
-  onClose: () => void;
-}
-
-/**
- * Popover de saisie du libellé d'un groupe — réutilisé pour "Regrouper" (label initial suggéré,
- * voir handleCreateGroup) ET pour "Renommer" un groupe existant (label initial = son nom actuel).
- * Même pattern que RenamePopover ci-dessus (un seul champ texte).
- */
-function GroupLabelPopover({ title, initialLabel, submitLabel, x, y, onSubmit, onClose }: GroupLabelPopoverProps) {
-  const { ref, style } = useDismiss(onClose, x, y);
-  const [label, setLabel] = useState(initialLabel);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  async function handleSubmit(event: FormEvent) {
-    event.preventDefault();
-    const trimmed = label.trim();
-    if (!trimmed) return;
-    setBusy(true);
-    setError(null);
-    const result = await onSubmit(trimmed);
-    setBusy(false);
-    if (result.ok) onClose();
-    else setError(result.error ?? "Échec de l'opération.");
-  }
-
-  return (
-    <div className="graph-popover" style={style} ref={ref}>
-      <div className="graph-popover__title">{title}</div>
-      <form onSubmit={handleSubmit}>
-        <div className="field">
-          <label htmlFor="graph-group-label-input">Nom du groupe</label>
-          <input
-            id="graph-group-label-input"
-            type="text"
-            autoFocus
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            disabled={busy}
-            required
-          />
-        </div>
-        {error && <p className="graph-popover__error">{error}</p>}
-        <div className="graph-popover__actions">
-          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={busy}>
-            Annuler
-          </button>
-          <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !label.trim()}>
-            {busy ? "…" : submitLabel}
           </button>
         </div>
       </form>

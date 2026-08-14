@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { ReactFlow, Background, MiniMap, applyNodeChanges, type Node, type NodeChange } from "@xyflow/react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { ReactFlow, Background, MiniMap, SelectionMode, applyNodeChanges, type Node, type NodeChange } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import { apiGet, apiPut, ApiError } from "@/api/client";
@@ -15,7 +15,7 @@ import {
 import { removeVolume } from "@/features/volumes/volumesSlice";
 import { removeNetwork } from "@/features/networks/networksSlice";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
-import { fetchTopology } from "@/features/topology/topologySlice";
+import { createTopologyGroup, fetchTopology } from "@/features/topology/topologySlice";
 import { fetchImageHistory, fetchImages } from "@/features/images/imagesSlice";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import { ContainerConsoleBody } from "@/components/ContainerConsole";
@@ -24,6 +24,7 @@ import VulnerabilitiesPanel from "@/components/VulnerabilitiesPanel";
 import { formatCpuTime, formatProcessAge, hexdumpRows } from "@/utils/containerInternalsFormat";
 import {
   ACTION_LABEL,
+  GroupLabelPopover,
   MINIMAP_NODE_COLOR,
   attachmentToTopologyNode,
   buildTopologyEdges,
@@ -202,6 +203,33 @@ export default function TopologySubGraphPanel({
   // Menu contextuel d'une carte de groupe (groupes imbriqués, 13/08/2026) — distinct de `nodeMenu`
   // ci-dessus (un groupe n'est pas un TopologyNode réel), même principe que TopologyGraph.tsx#groupMenu.
   const [groupMenu, setGroupMenu] = useState<{ x: number; y: number; group: TopologyGroup } | null>(null);
+
+  // --- Regroupement de nœuds dans le sous-graphe (14/08/2026, retour utilisateur : "dans le
+  // subgraph il faut garder le meme comportement que le graph layer 1 c'est a dire la posibiliter
+  // de refaire des groupes") — EXACTEMENT la même logique que TopologyGraph.tsx (mêmes noms d'état,
+  // même thunk createTopologyGroup, même popover GroupLabelPopover désormais partagé via
+  // topologyGraphShared.tsx), appliquée au(x) canevas <ReactFlow> de ce panneau qui affichent de
+  // VRAIS TopologyNode/TopologyGroup sélectionnables : renderExternalDependenciesGraph ci-dessous
+  // (vue "Dépendances" plein écran ET panneau embarqué "Réseau externe" de "Composition interne"),
+  // jamais la vue "processus"/"réseau interne" (docker top/ports en écoute, aucun vrai nœud QUAI à
+  // regrouper là). Un seul état partagé pour les deux usages de renderExternalDependenciesGraph :
+  // ils affichent toujours exactement les mêmes `flowNodes`/`flowEdges` et ne sont JAMAIS montés
+  // simultanément (un seul `viewMode` actif à la fois, voir sa JSDoc), rien à distinguer entre eux.
+  const [multiSelectedIds, setMultiSelectedIds] = useState<Set<string>>(new Set());
+  // Dernière sélection RAPPORTÉE par React Flow pendant un geste de rectangle de sélection — voir
+  // TopologyGraph.tsx#lastReactFlowSelectionIds, même rôle exact.
+  const lastReactFlowSelectionIds = useRef<string[]>([]);
+  /** Voir TopologyGraph.tsx#isBoxSelecting (bug réel corrigé le 13/08/2026, JSDoc complète là-bas) —
+   * même protection EXACTE ici : sans elle, le memo `nodesWithSelection` ci-dessous écraserait le
+   * `selected` que React Flow vient de poser pendant le glissé, empêchant la sélection d'aboutir. */
+  const [isBoxSelecting, setIsBoxSelecting] = useState(false);
+  const [groupLabelPopover, setGroupLabelPopover] = useState<{ mode: "create"; nodeIds: string[]; x: number; y: number } | null>(
+    null,
+  );
+  /** Clic droit sur le canevas VIDE pendant une sélection multiple active — voir
+   * TopologyGraph.tsx#selectionMenu, même rôle exact. */
+  const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number } | null>(null);
+
   const [viewMode, setViewMode] = useState<ViewMode>("dependencies");
   const session = useAppSelector((s) => s.auth.session);
   const operate = canOperate(session);
@@ -326,6 +354,11 @@ export default function TopologySubGraphPanel({
     setInspectedPackage(null);
     setHexdumpPath(null);
     setHexdumpOffset(0);
+    // Une sélection multiple en cours (voir multiSelectedIds ci-dessus) n'a plus de sens une fois la
+    // racine changée (drill-down/retour) — les nœuds sélectionnés ne sont même plus affichés.
+    setMultiSelectedIds(new Set());
+    setGroupLabelPopover(null);
+    setSelectionMenu(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentRootId]);
   const rootNode = currentRootId ? nodesById.get(currentRootId) ?? null : null;
@@ -486,6 +519,19 @@ export default function TopologySubGraphPanel({
   const flowEdges = useMemo(
     () => (currentGroup ? buildTopologyEdges(groupInternalEdges, nodesById) : buildTopologyEdges(subEdges, nodesById)),
     [currentGroup, groupInternalEdges, subEdges, nodesById],
+  );
+
+  // `selected` reflète la sélection multiple en cours pour "Regrouper" (`multiSelectedIds`) — même
+  // principe EXACT que TopologyGraph.tsx#nodes : pendant un glissé de rectangle (`isBoxSelecting`),
+  // on respecte le `selected` que React Flow vient de poser lui-même sur `n` plutôt que de le
+  // remplacer par `false`, sous peine d'empêcher le geste d'aboutir (voir isBoxSelecting ci-dessus).
+  const nodesWithSelection = useMemo(
+    () =>
+      flowNodes.map((n) => ({
+        ...n,
+        selected: multiSelectedIds.has(n.id) || (isBoxSelecting && !!n.selected),
+      })),
+    [flowNodes, multiSelectedIds, isBoxSelecting],
   );
 
   // --- Vue "Composition interne" (conteneurs uniquement, fusion du 13/08/2026) -------------------
@@ -703,6 +749,65 @@ export default function TopologySubGraphPanel({
     void apiPut(`/topology/groups/${encodeURIComponent(currentGroup.id)}/positions`, { positions: next });
   }
 
+  // --- Regroupement de nœuds (voir multiSelectedIds ci-dessus) — même comportement EXACT que
+  // TopologyGraph.tsx#handleNodeClick/handlePaneClick/handlePaneContextMenu/openCreateGroupPopover/
+  // submitGroupLabelPopover, appliqué ici à renderExternalDependenciesGraph.
+
+  /** Maj+clic accumule/retire de la sélection multiple, uniquement pour "Regrouper" — un clic simple
+   * (sans Maj) ne fait rien ici (ce panneau n'a pas de simple surbrillance de nœud comme le graphe
+   * principal, seul le double-clic — drillInto — et le clic droit — nodeMenu — ont un sens hors
+   * sélection multiple). */
+  function handleNodeClick(event: React.MouseEvent, node: Node) {
+    if (!event.shiftKey || !operate) return;
+    setMultiSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(node.id)) next.delete(node.id);
+      else next.add(node.id);
+      return next;
+    });
+  }
+
+  function handlePaneClick() {
+    if (multiSelectedIds.size > 0) setMultiSelectedIds(new Set());
+  }
+
+  /** Clic droit sur le canevas VIDE : propose "Grouper la sélection" seulement si une sélection
+   * multiple est active (voir TopologyGraph.tsx#handlePaneContextMenu) — sinon ne fait rien (ce
+   * panneau n'a pas de picker de création au clic droit sur le vide, contrairement au graphe
+   * principal, hors du périmètre de cette mission). */
+  function handlePaneContextMenu(event: MouseEvent | React.MouseEvent) {
+    if (!operate || multiSelectedIds.size < 2) return;
+    event.preventDefault();
+    const mouseEvent = event as MouseEvent;
+    setSelectionMenu({ x: mouseEvent.clientX, y: mouseEvent.clientY });
+  }
+
+  /** Ouvre le popover de nom pour la sélection multiple en cours (bouton flottant "Regrouper", voir
+   * renderExternalDependenciesGraph plus bas) — jamais moins de 2 nœuds (bouton non affiché sinon). */
+  function openCreateGroupPopover(x: number, y: number) {
+    if (multiSelectedIds.size < 2) return;
+    setGroupLabelPopover({ mode: "create", nodeIds: Array.from(multiSelectedIds), x, y });
+  }
+
+  /** Réutilise TEL QUEL le thunk createTopologyGroup (topologySlice.ts) — POST /api/topology/groups
+   * réel, EXACTEMENT la même route que le bouton "Regrouper" du graphe principal, jamais une
+   * seconde implémentation. `dispatch(fetchTopology())` après succès : ce panneau reçoit `topology`
+   * en PROP (pas de fetch propre), il faut donc explicitement redéclencher le rafraîchissement
+   * partagé pour voir le nouveau groupe apparaître ici (et dans le graphe principal en ressortant). */
+  async function submitGroupLabelPopover(label: string): Promise<{ ok: boolean; error?: string }> {
+    if (!groupLabelPopover) return { ok: false };
+    const result = await dispatch(createTopologyGroup({ label, nodeIds: groupLabelPopover.nodeIds }));
+    if (createTopologyGroup.fulfilled.match(result)) {
+      setMultiSelectedIds(new Set());
+      dispatch(
+        pushNotification({ level: "success", message: `Groupe « ${label} » créé (${groupLabelPopover.nodeIds.length} éléments).` }),
+      );
+      dispatch(fetchTopology());
+      return { ok: true };
+    }
+    return { ok: false, error: result.payload ?? "Échec de la création du groupe." };
+  }
+
   /** Re-centre le sous-graphe sur `id` (drill-down récursif) — double-clic sur un nœud du
    * sous-graphe ou "Visualiser ses dépendances" du menu contextuel. No-op sur la racine actuelle
    * (déjà affichée). Continue de fonctionner à l'identique dans ce panneau plein écran. */
@@ -814,7 +919,7 @@ export default function TopologySubGraphPanel({
     else dispatch(pushNotification({ level: "error", message: result.payload ?? "Échec de la suppression du network." }));
   }
 
-  function nodeMenuItems(node: TopologyNode): ContextMenuItem[] {
+  function nodeMenuItems(node: TopologyNode, x: number, y: number): ContextMenuItem[] {
     const items: ContextMenuItem[] = [{ label: "Voir le détail", onClick: () => onOpenDetail(node) }];
     // `nodesById.has(node.id)` exclut le drilldown sur une brique (TopologyNode synthétique
     // reconstruit par attachmentToTopologyNode, voir brickCallbacks ci-dessus) : son id ne
@@ -822,6 +927,11 @@ export default function TopologySubGraphPanel({
     // sous-graphe n'aurait rien de réel à recentrer dessus.
     if (node.id !== currentRootId && nodesById.has(node.id)) {
       items.push({ label: "Visualiser ses dépendances", onClick: () => drillInto(node.id) });
+    }
+    // "Grouper la sélection" (même règle EXACTE que TopologyGraph.tsx#nodeMenuItems) — affiché
+    // seulement quand CE nœud fait partie de la sélection multiple en cours (>= 2).
+    if (operate && multiSelectedIds.size >= 2 && multiSelectedIds.has(node.id)) {
+      items.push({ label: `Grouper la sélection (${multiSelectedIds.size})`, onClick: () => openCreateGroupPopover(x, y) });
     }
     if (!operate) return items;
     // Une brique (id absent de `nodesById`, voir ci-dessus) n'est qu'une vue de lecture d'un
@@ -882,37 +992,78 @@ export default function TopologySubGraphPanel({
    */
   function renderExternalDependenciesGraph(compact: boolean) {
     return (
-      <ReactFlow
-        key={currentRootId ?? "none"}
-        nodes={flowNodes}
-        edges={flowEdges}
-        nodeTypes={nodeTypes}
-        edgeTypes={edgeTypes}
-        onNodesChange={handleNodesChange}
-        onNodeDragStop={handleNodeDragStop}
-        onNodeDoubleClick={(_event, node) => drillInto(node.id)}
-        onNodeContextMenu={handleNodeContextMenu}
-        nodesConnectable={false}
-        deleteKeyCode={null}
-        fitView
-        proOptions={{ hideAttribution: true }}
-        minZoom={0.3}
-      >
-        <Background gap={20} size={1.6} color="var(--color-text-faint)" />
-        {!compact && (
-          <MiniMap
-            position="top-left"
-            nodeColor={(n) =>
-              n.type === "topologyGroupNode" ? "#e879f9" : MINIMAP_NODE_COLOR[(n.data as unknown as TopologyNode).kind]
+      <>
+        <ReactFlow
+          key={currentRootId ?? "none"}
+          nodes={nodesWithSelection}
+          edges={flowEdges}
+          nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          onNodesChange={handleNodesChange}
+          onNodeDragStop={handleNodeDragStop}
+          onNodeClick={handleNodeClick}
+          onNodeDoubleClick={(_event, node) => drillInto(node.id)}
+          onPaneClick={handlePaneClick}
+          onPaneContextMenu={handlePaneContextMenu}
+          onNodeContextMenu={handleNodeContextMenu}
+          nodesConnectable={false}
+          // Sélection multiple (Maj+clic, voir handleNodeClick) + rectangle de sélection au
+          // clic-glissé sur le canevas VIDE — EXACTEMENT les mêmes props que TopologyGraph.tsx (voir
+          // ses commentaires détaillés, non répétés ici) : réservé operator/admin, seul rôle qui peut
+          // ensuite "Regrouper" (le bouton flottant reste de toute façon masqué pour un viewer).
+          multiSelectionKeyCode="Shift"
+          panOnDrag={operate ? [1, 2] : true}
+          selectionOnDrag={operate}
+          selectionMode={SelectionMode.Partial}
+          onSelectionChange={(params) => {
+            lastReactFlowSelectionIds.current = params.nodes.map((n) => n.id);
+          }}
+          onSelectionStart={() => setIsBoxSelecting(true)}
+          onSelectionEnd={() => {
+            setIsBoxSelecting(false);
+            if (lastReactFlowSelectionIds.current.length >= 2) {
+              setMultiSelectedIds(new Set(lastReactFlowSelectionIds.current));
             }
-            nodeStrokeWidth={0}
-            nodeBorderRadius={4}
-            maskColor="rgba(11, 12, 16, 0.75)"
-            pannable
-            zoomable
-          />
+          }}
+          deleteKeyCode={null}
+          fitView
+          proOptions={{ hideAttribution: true }}
+          minZoom={0.3}
+        >
+          <Background gap={20} size={1.6} color="var(--color-text-faint)" />
+          {!compact && (
+            <MiniMap
+              position="top-left"
+              nodeColor={(n) =>
+                n.type === "topologyGroupNode" ? "#e879f9" : MINIMAP_NODE_COLOR[(n.data as unknown as TopologyNode).kind]
+              }
+              nodeStrokeWidth={0}
+              nodeBorderRadius={4}
+              maskColor="rgba(11, 12, 16, 0.75)"
+              pannable
+              zoomable
+            />
+          )}
+        </ReactFlow>
+
+        {/* Bouton flottant "Regrouper" (voir multiSelectedIds ci-dessus) — même bouton EXACT que
+            TopologyGraph.tsx, coin haut-droit de CE canevas précis (`renderExternalDependenciesGraph`
+            a deux appelants qui ne sont jamais montés simultanément, voir sa JSDoc). En contexte
+            `compact` (panneau embarqué "Réseau externe" de Composition interne, ~280px de haut, voir
+            .topology-interior__depgraph), un modificateur CSS réduit le bouton en overlay discret
+            plutôt qu'un bouton plein qui déborderait de ce mini-canevas (voir topology.css). */}
+        {operate && multiSelectedIds.size >= 2 && (
+          <div className={`topology-toolbar-top-right${compact ? " topology-toolbar-top-right--compact" : ""}`}>
+            <button
+              type="button"
+              className="btn btn-primary btn-sm topology-group-action-btn"
+              onClick={(event) => openCreateGroupPopover(event.clientX, event.clientY)}
+            >
+              Regrouper ({multiSelectedIds.size})
+            </button>
+          </div>
         )}
-      </ReactFlow>
+      </>
     );
   }
 
@@ -1394,11 +1545,42 @@ export default function TopologySubGraphPanel({
       )}
 
       {nodeMenu && (
-        <ContextMenu x={nodeMenu.x} y={nodeMenu.y} onClose={() => setNodeMenu(null)} items={nodeMenuItems(nodeMenu.node)} />
+        <ContextMenu
+          x={nodeMenu.x}
+          y={nodeMenu.y}
+          onClose={() => setNodeMenu(null)}
+          items={nodeMenuItems(nodeMenu.node, nodeMenu.x, nodeMenu.y)}
+        />
       )}
 
       {groupMenu && (
         <ContextMenu x={groupMenu.x} y={groupMenu.y} onClose={() => setGroupMenu(null)} items={groupMenuItems(groupMenu.group)} />
+      )}
+
+      {selectionMenu && operate && (
+        <ContextMenu
+          x={selectionMenu.x}
+          y={selectionMenu.y}
+          onClose={() => setSelectionMenu(null)}
+          items={[
+            {
+              label: `Grouper la sélection (${multiSelectedIds.size})`,
+              onClick: () => openCreateGroupPopover(selectionMenu.x, selectionMenu.y),
+            },
+          ]}
+        />
+      )}
+
+      {groupLabelPopover && (
+        <GroupLabelPopover
+          title="Regrouper la sélection"
+          initialLabel={`Groupe (${groupLabelPopover.nodeIds.length} éléments)`}
+          submitLabel="Regrouper"
+          x={groupLabelPopover.x}
+          y={groupLabelPopover.y}
+          onSubmit={submitGroupLabelPopover}
+          onClose={() => setGroupLabelPopover(null)}
+        />
       )}
     </div>
   );
