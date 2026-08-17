@@ -17,6 +17,7 @@ import {
   IconBranch,
   IconChevron,
   IconClock,
+  IconClose,
   IconContainers,
   IconFolder,
   IconGitOps,
@@ -443,6 +444,14 @@ export const zoomSelector = (s: { transform: [number, number, number] }) => s.tr
 // conteneur arrêté n'a plus de healthcheck qui tourne, ce n'est pas une panne (arrêt souvent
 // volontaire) donc pas rouge, mais clairement visuellement "injoignable" (voir POINTILLÉ,
 // buildTopologyEdges ci-dessous — axe séparé de la couleur, jamais une redite de "stopped").
+//
+// Extension du 17/08/2026 (retour utilisateur : "j'ai impression que le systeme n'est pas coherent
+// entre nutanyx et le systeme de container c'est comme si la logique etait seprarer en deux") :
+// une arête "hosts" hôte physique AHV -> VM (services/topology.ts#getNutanixTopologyParts) lit
+// elle aussi CETTE MÊME palette via nutanixVmHostEdgeState ci-dessous — jamais un second système
+// de couleurs parallèle pour Nutanix. Seule l'arête cluster -> hôte physique (PAS hôte -> VM) reste
+// hors de ce mécanisme : aucun signal de santé par hôte physique disponible côté Prism Central,
+// volontairement inchangée (voir buildTopologyEdges).
 export type EdgeHealthState = "healthy" | "unhealthy" | "starting" | "none" | "stopped";
 
 export const EDGE_STATE_COLOR: Record<EdgeHealthState, string> = {
@@ -491,6 +500,47 @@ function automationTriggerEdgeState(status: "ok" | "failing" | "unknown"): EdgeH
 }
 
 /**
+ * État réel + pointillé d'une arête "hosts" hôte physique AHV -> VM (voir services/topology.ts#
+ * getNutanixTopologyParts), `vmNode` étant le nœud `kind: "nutanix-vm"` à l'extrémité CIBLE de
+ * cette arête — MÊME grille couleur/pointillé que les arêtes conteneur ci-dessus (EDGE_STATE_COLOR
+ * ci-dessus), jamais un second système parallèle (retour utilisateur du 17/08/2026 : "j'ai
+ * impression que le systeme n'est pas coherent entre nutanyx et le systeme de container c'est
+ * comme si la logique etait seprarer en deux") :
+ *  - VM éteinte (`status === "stopped"`) -> "stopped" (gris), tirets larges — EXACTEMENT le même
+ *    code visuel qu'un conteneur arrêté (même valeur EdgeHealthState, même classe CSS
+ *    `.topology-edge--stopped`, voir buildTopologyEdges), jamais un style différent pour ce même
+ *    sens ("ressource inactive"). Prime sur tout le reste (même règle que "stopped" != healthStatus
+ *    côté conteneurs) : un arrêt volontaire n'est jamais une panne (jamais rouge) ni un placement
+ *    "incertain" (jamais orange) — un arrêt est un fait certain, pas une donnée douteuse.
+ *  - VM allumée avec un VRAI état d'erreur Prism Central (`nutanixApiError`, voir
+ *    services/nutanix.ts#NutanixVm#apiError — DISTINCT du simple power_state) -> "unhealthy"
+ *    (rouge), réservé à ce cas précis, jamais fabriqué pour une VM simplement éteinte.
+ *  - VM allumée, placement CONFIRMÉ EN DIRECT (`nutanixHostPlacementConfirmed === true`, voir
+ *    services/nutanix.ts#mapVmEntity) -> "healthy" (vert), plein.
+ *  - VM allumée, mais placement REPLIÉ sur le dernier hôte ASSIGNÉ/déclaré
+ *    (`nutanixHostPlacementConfirmed === false`) -> "starting" (orange, réutilisé pour "pas encore
+ *    confirmé/incertain" — jamais un nouvel état parallèle à retenir en plus des 5 déjà existants),
+ *    tirets fins.
+ *  - Tout le reste (power_state "unknown", jamais observé en conditions réelles à ce jour — voir
+ *    nutanix.ts#mapPowerState) -> "none" (gris), plein : aucun signal exploitable, jamais un état
+ *    inventé.
+ * Cluster -> hôte physique (PAS hôte -> VM) : jamais concerné par cette fonction, reste neutre/
+ * gris/plein — voir buildTopologyEdges, qui n'appelle cette fonction QUE quand la cible de l'arête
+ * "hosts" est un nœud `kind: "nutanix-vm"`.
+ */
+export function nutanixVmHostEdgeState(vmNode: TopologyNode): { state: EdgeHealthState; strokeDasharray: string | undefined } {
+  if (vmNode.status === "stopped") return { state: "stopped", strokeDasharray: "2 8" };
+  // Pointillé de confiance de placement, indépendant de la couleur ci-dessous (même principe que
+  // hasPublishedPort pour un conteneur) : "4 4" (tirets fins) tant que le placement n'est pas
+  // confirmé en direct, `undefined` (plein) dès qu'il l'est — s'applique aussi bien à "unhealthy"
+  // qu'à "healthy"/"starting", ces deux axes restant volontairement indépendants.
+  const strokeDasharray = vmNode.nutanixHostPlacementConfirmed ? undefined : "4 4";
+  if (vmNode.nutanixApiError) return { state: "unhealthy", strokeDasharray };
+  if (vmNode.status === "running") return { state: vmNode.nutanixHostPlacementConfirmed ? "healthy" : "starting", strokeDasharray };
+  return { state: "none", strokeDasharray: undefined };
+}
+
+/**
  * Construit les arêtes React Flow (couleur/état/animation) depuis les TopologyEdge bruts — logique
  * partagée par le graphe principal ET le sous-graphe de dépendances, pour un rendu identique.
  * `sourceHandle`/`targetHandle` optionnels : utilisés par TopologyGraph.tsx quand une arête a été
@@ -508,8 +558,37 @@ function automationTriggerEdgeState(status: "ok" | "failing" | "unknown"): EdgeH
  *    PLEIN = port publié sur l'hôte (Docker confirme un socket réellement lié, voir
  *    TopologyEdgePort#publicPort) ; tirets fins animés = configuré mais sans port publié à
  *    vérifier (trafic interne uniquement, ni prouvé ni infirmé) ; tirets larges = ressource
- *    arrêtée/inactive. Une arête "mount"/"hosts" reste structurelle (jamais de sonde active
- *    pertinente pour elle) : toujours pleine, seule sa couleur bouge.
+ *    arrêtée/inactive. Une arête "mount" reste structurelle (jamais de sonde active pertinente
+ *    pour elle) : toujours pleine, seule sa couleur bouge.
+ *
+ * Arête "hosts" (cluster Nutanix -> hôte physique AHV -> VM, voir services/topology.ts#
+ * getNutanixTopologyParts) : relation structurelle, jamais de tirets DÉFILANTS (`animated` reste
+ * toujours false pour ce kind, contrairement à "network") ni de particules (contrairement à
+ * "mount") — pas de flux de trafic à représenter. Deux cas bien distincts :
+ *  - cluster -> hôte physique : hors de portée de nutanixVmHostEdgeState ci-dessus, reste neutre
+ *    ("none", gris) et pleine, INCHANGÉ — aucun signal de santé PAR HÔTE PHYSIQUE disponible côté
+ *    Prism Central sur les endpoints utilisés ici.
+ *  - hôte physique -> VM (`target.kind === "nutanix-vm"`) : lit désormais la MÊME grille couleur/
+ *    pointillé que les arêtes conteneur ci-dessus via nutanixVmHostEdgeState (extension du
+ *    17/08/2026, retour utilisateur : "j'ai impression que le systeme n'est pas coherent entre
+ *    nutanyx et le systeme de container c'est comme si la logique etait seprarer en deux") — vert
+ *    plein = placement confirmé en direct, orange tirets fins = replié sur le dernier hôte
+ *    assigné/déclaré, gris tirets larges = VM éteinte (même code visuel qu'un conteneur arrêté),
+ *    rouge = vrai échec Prism Central. `animated` reste néanmoins false ici comme pour toute autre
+ *    arête "hosts" : ce pointillé communique une CONFIANCE de placement, pas un flux à animer.
+ *
+ * Nœuds "host" hostKind "remote-docker"/"lxc" (environnement Docker distant, LXD) — vérifié le
+ * 17/08/2026 (mission "vérifie les autres types d'hôtes pour la même ambiguïté") : PAS concernés
+ * par cette extension, et volontairement laissés hors de nutanixVmHostEdgeState. Deux raisons
+ * structurelles, pas un oubli : (1) ces nœuds ne portent AUJOURD'HUI aucune arête "hosts" vers un
+ * enfant dans services/topology.ts (seule la hiérarchie Nutanix cluster->hôte->VM en produit) —
+ * rien à colorer différemment ; (2) même s'ils en portaient une un jour, leur `status` reflète déjà
+ * la joignabilité RÉELLE recalculée à CHAQUE poll (docker.ts#getDockerHostInfo, jamais mis en
+ * cache) — il n'existe pas, pour un hôte Docker/LXD, de notion de "placement live confirmé VS
+ * dernier placement assigné" comparable à la migration live d'une VM AHV : un hôte Docker n'a pas
+ * de sous-ressource qui "migre" entre deux hôtes physiques. L'ambiguïté que corrige ce chantier est
+ * donc spécifique au modèle Nutanix (status vs spec, VM potentiellement mobile), jamais forcée ici
+ * où elle n'aurait pas de sens.
  */
 export function buildTopologyEdges(
   edges: (TopologyEdge & { sourceHandle?: string; targetHandle?: string })[],
@@ -530,19 +609,28 @@ export function buildTopologyEdges(
 
   return edges.map((e) => {
     const isAutomationFlowEdge = e.kind === "automation-flow";
+    const isMount = e.kind === "mount";
+    // "hosts" (cluster Nutanix -> hôte -> VM, voir services/topology.ts) : relation structurelle
+    // statique, pas un flux de trafic — jamais de tirets défilants (contrairement à "network") ni
+    // de particules (contrairement à "mount") pour ne pas laisser croire à une activité mesurée.
+    const isHostsEdge = e.kind === "hosts";
+    // Hôte physique -> VM (voir JSDoc ci-dessus) : SEUL cas d'arête "hosts" qui porte un vrai
+    // signal de santé — jamais le cas cluster -> hôte physique (target.kind === "host" dans ce cas,
+    // reste hors de ce chemin). `undefined` si la cible n'est pas (encore) connue de `nodesById`
+    // (course entre deux requêtes) — retombe alors sur "none"/plein comme avant ce chantier.
+    const hostsVmTarget = isHostsEdge ? nodesById.get(e.target) : undefined;
+    const nutanixVmEdgeInfo =
+      isHostsEdge && hostsVmTarget?.kind === "nutanix-vm" ? nutanixVmHostEdgeState(hostsVmTarget) : null;
     const containerNode = edgeContainerNode(e, nodesById);
     const stopped = containerNode ? containerNode.status !== "running" : false;
     const state: EdgeHealthState = isAutomationFlowEdge
       ? automationTriggerEdgeState(triggerStatusByNodeId.get(e.source) ?? "unknown")
-      : stopped
-        ? "stopped"
-        : (containerNode?.healthStatus ?? "none");
+      : nutanixVmEdgeInfo
+        ? nutanixVmEdgeInfo.state
+        : stopped
+          ? "stopped"
+          : (containerNode?.healthStatus ?? "none");
     const color = EDGE_STATE_COLOR[state];
-    const isMount = e.kind === "mount";
-    // "hosts" (cluster Nutanix -> VM, voir services/topology.ts) : relation structurelle statique,
-    // pas un flux de trafic — jamais de tirets défilants (contrairement à "network") ni de
-    // particules (contrairement à "mount") pour ne pas laisser croire à une activité mesurée.
-    const isHostsEdge = e.kind === "hosts";
     // Port(s) réellement publié(s) sur l'hôte (voir TopologyEdgePort#publicPort, jamais déduit —
     // absent si Docker n'a mappé aucun port hôte pour ce conteneur) : seul signal d'activité
     // "confirmée" dont QUAI dispose sans sonde active à chaque rafraîchissement du graphe (une
@@ -552,7 +640,7 @@ export function buildTopologyEdges(
     const strokeDasharray = isMount
       ? undefined // structurel, jamais de pointillé — cf. JSDoc ci-dessus
       : isHostsEdge
-        ? undefined // idem
+        ? (nutanixVmEdgeInfo?.strokeDasharray ?? undefined) // hôte->VM : voir nutanixVmHostEdgeState ; cluster->hôte : toujours plein
         : isAutomationFlowEdge
           ? "2 4" // axe pointillé non pertinent pour ce kind (pas de "port publié") : motif fixe distinctif
           : state === "stopped"
@@ -580,6 +668,14 @@ export function buildTopologyEdges(
         ...(e.private !== undefined ? { private: e.private } : {}),
         ...(e.encrypted !== undefined ? { encrypted: e.encrypted } : {}),
         ...(e.readOnly !== undefined ? { readOnly: e.readOnly } : {}),
+        // Badge "Placement confirmé"/"Dernier hôte connu" (voir edgeBadgeItems ci-dessous) —
+        // UNIQUEMENT sur une arête hôte physique -> VM, jamais sur cluster -> hôte (nutanixVmEdgeInfo
+        // reste null dans ce cas). Absent (pas juste `false`) pour une VM éteinte/en erreur : le
+        // badge ne concerne QUE la confiance de placement, déjà portée sans ambiguïté par la
+        // couleur/le pointillé pour les deux autres cas.
+        ...(nutanixVmEdgeInfo && hostsVmTarget?.status === "running" && !hostsVmTarget.nutanixApiError
+          ? { nutanixPlacementConfirmed: hostsVmTarget.nutanixHostPlacementConfirmed === true }
+          : {}),
       },
     };
   });
@@ -627,6 +723,11 @@ interface EdgeBadgeData {
   private?: boolean;
   encrypted?: boolean;
   readOnly?: boolean;
+  /** Arête "hosts" hôte physique -> VM Nutanix UNIQUEMENT (VM allumée sans erreur API, voir
+   * buildTopologyEdges ci-dessus) : true = placement confirmé en direct, false = replié sur le
+   * dernier hôte assigné/déclaré. Absent pour tout autre cas (VM éteinte/en erreur, cluster ->
+   * hôte, conteneur...) — la couleur/le pointillé suffisent déjà à ces cas, pas de badge en plus. */
+  nutanixPlacementConfirmed?: boolean;
 }
 
 interface EdgeBadgeItem {
@@ -641,6 +742,13 @@ function edgeBadgeItems(data: EdgeBadgeData): EdgeBadgeItem[] {
   if (data.private !== undefined) items.push({ text: data.private ? "Privé" : "Public", tone: data.private ? "good" : "neutral" });
   if (data.encrypted !== undefined) items.push({ text: data.encrypted ? "Chiffré" : "Non chiffré", tone: data.encrypted ? "good" : "warn" });
   if (data.readOnly !== undefined) items.push({ text: data.readOnly ? "ro" : "rw", tone: "neutral" });
+  if (data.nutanixPlacementConfirmed !== undefined) {
+    items.push(
+      data.nutanixPlacementConfirmed
+        ? { text: "Placement confirmé", tone: "good" }
+        : { text: "Dernier hôte connu", tone: "warn" },
+    );
+  }
   return items;
 }
 
@@ -717,6 +825,114 @@ function NetworkEdge({ id, sourceX, sourceY, sourcePosition, targetX, targetY, t
 }
 
 export const edgeTypes = { mountFlow: MountFlowEdge, networkEdge: NetworkEdge };
+
+// --- Panneau "Légende" repliable du graphe (TopologyGraph.tsx) ----------------------------------
+// Retour utilisateur (mission du 17/08/2026, point 4) : la grille couleur/pointillé documentée
+// juste au-dessus (buildTopologyEdges/nutanixVmHostEdgeState) n'existait QUE dans le code,
+// invisible pour quiconque utilise l'application sans lire les sources. Ce panneau reprend les
+// MÊMES valeurs EXACTES (EDGE_STATE_COLOR, mêmes libellés de pointillé) — jamais une seconde
+// palette/description à tenir cohérente en plus du code qui dessine réellement les arêtes.
+
+/** "il y a 3 min" / "à l'instant" / "il y a 2 h 05" — jamais une date absolue seule (moins lisible
+ * d'un coup d'œil pour juger une fraîcheur) : voir TopologyLegendPanel ci-dessous, seul usage. */
+function relativeTimeAgo(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return "à l'instant";
+  if (minutes < 60) return `il y a ${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return `il y a ${hours} h${rest > 0 ? ` ${String(rest).padStart(2, "0")}` : ""}`;
+}
+
+export interface TopologyLegendPanelProps {
+  /** Voir Topology#nutanixLastPoll (apps/api/src/types.ts) — absent tant que Nutanix n'a jamais
+   * été configuré ou jamais encore pollé depuis le démarrage du process API. `reachable: false` =
+   * le DERNIER poll a échoué : les VM/hôtes Nutanix peuvent être temporairement absents du graphe
+   * pour cette raison plutôt que réellement supprimés (voir services/nutanix.ts#
+   * lastKnownNutanixPoll) — jamais affiché comme une alerte permanente une fois qu'un poll
+   * ultérieur réussit à nouveau. */
+  nutanixLastPoll?: { reachable: boolean; at: string };
+  onClose?: () => void;
+}
+
+/** Une ligne "pastille de couleur + libellé" de la section "Couleur — santé" ci-dessous. */
+function LegendColorRow({ state, label }: { state: EdgeHealthState; label: string }) {
+  return (
+    <div className="topology-legend-row">
+      <span className="topology-legend-dot" style={{ background: EDGE_STATE_COLOR[state] }} />
+      <span>{label}</span>
+    </div>
+  );
+}
+
+/** Une ligne "trait + libellé" de la section "Pointillé — confiance" ci-dessous. */
+function LegendLineRow({ variant, label }: { variant: "solid" | "dashed-fine" | "dashed-wide"; label: string }) {
+  return (
+    <div className="topology-legend-row">
+      <span className={`topology-legend-line topology-legend-line--${variant}`} />
+      <span>{label}</span>
+    </div>
+  );
+}
+
+/**
+ * Contenu du panneau "Légende" — voir TopologyLegendPanelProps ci-dessus et TopologyGraph.tsx pour
+ * le bouton bascule (barre d'outils du canevas, façon Railway, même pattern que le bouton
+ * "vue d'ensemble"/MiniMap déjà en place) et le positionnement (coin bas-droit du canevas, seul
+ * coin libre : haut-gauche = Contrôles/MiniMap, haut-droit = "Regrouper" en sélection multiple,
+ * bas-gauche = "Nettoyer les orphelins").
+ */
+export function TopologyLegendPanel({ nutanixLastPoll, onClose }: TopologyLegendPanelProps) {
+  return (
+    <div className="topology-legend-panel nodrag nopan" onClick={(event) => event.stopPropagation()}>
+      <div className="topology-legend-panel__head">
+        <span className="topology-legend-panel__title">Légende</span>
+        {onClose && (
+          <button type="button" className="topology-legend-panel__close" title="Fermer la légende" onClick={onClose}>
+            <IconClose />
+          </button>
+        )}
+      </div>
+
+      <div className="topology-legend-panel__section">
+        <div className="topology-legend-panel__section-title">Couleur — santé</div>
+        <LegendColorRow state="healthy" label="Sain / placement confirmé en direct" />
+        <LegendColorRow state="starting" label="Healthcheck en cours / placement incertain" />
+        <LegendColorRow state="unhealthy" label="Panne / erreur réelle signalée" />
+        <LegendColorRow state="stopped" label="Arrêté (arrêt volontaire, pas une panne)" />
+        <LegendColorRow state="none" label="Aucun signal disponible" />
+      </div>
+
+      <div className="topology-legend-panel__section">
+        <div className="topology-legend-panel__section-title">Pointillé — confiance de connexion</div>
+        <LegendLineRow variant="solid" label="Confirmé (port publié / placement vérifié en direct)" />
+        <LegendLineRow variant="dashed-fine" label="Configuré, non confirmé (pas de sonde active)" />
+        <LegendLineRow variant="dashed-wide" label="Ressource arrêtée / inactive" />
+      </div>
+
+      <div className="topology-legend-panel__section">
+        <div className="topology-legend-panel__section-title">VM Nutanix (hôte physique → VM)</div>
+        <p className="topology-legend-panel__text">
+          Vert plein = la VM tourne sur l'hôte affiché, vérifié à ce poll. Orange tirets fins = la VM tourne, mais son
+          placement affiché est le dernier hôte assigné connu (pas reconfirmé à ce poll précis). Gris tirets larges =
+          VM éteinte. Rouge = VRAIE erreur signalée par Prism Central (jamais un simple arrêt).
+        </p>
+      </div>
+
+      {nutanixLastPoll && !nutanixLastPoll.reachable && (
+        // Retour utilisateur (mission du 17/08/2026, point 2) : sans caching d'aucune sorte côté
+        // API (voir services/nutanix.ts en-tête), un poll Nutanix en échec fait DISPARAÎTRE les
+        // nœuds VM/cluster/hôte de cette réponse plutôt que d'en afficher une valeur obsolète — ce
+        // bandeau est le seul moyen de savoir que c'est la cause, plutôt qu'une vraie absence de VM.
+        <div className="topology-legend-panel__note" title={new Date(nutanixLastPoll.at).toLocaleString("fr-FR")}>
+          Nutanix injoignable au dernier poll ({relativeTimeAgo(nutanixLastPoll.at)}) — les VM/hôtes Nutanix peuvent
+          être temporairement absents du graphe pour cette raison.
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** Icône par kind de brique — mêmes icônes que KIND_ICON, sous-ensemble volume/network uniquement
  * (les deux seuls kinds "briquables", voir TopologyNode#attachments). */

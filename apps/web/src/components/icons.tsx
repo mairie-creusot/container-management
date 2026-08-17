@@ -401,6 +401,20 @@ export function IconBranch({ className }: IconProps) {
   );
 }
 
+/** "i" encerclé — bouton "Légende" de la barre d'outils du graphe de topologie (TopologyGraph.tsx),
+ * même famille visuelle que IconBell/IconChevron ci-dessus (contour, base()), aucune icône
+ * d'information n'existait déjà dans ce fichier. */
+export function IconInfo({ className }: IconProps) {
+  return base(
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 11v5.5" />
+      <circle cx="12" cy="7.75" r="0.9" fill="currentColor" stroke="none" />
+    </>,
+    className,
+  );
+}
+
 /** GitHub (marque octocat simplifiée, tracé plein — pas base(), les autres icônes sont en contour) : Sidebar/GitHubDeployPage.tsx. */
 export function IconGithub({ className }: IconProps) {
   return (

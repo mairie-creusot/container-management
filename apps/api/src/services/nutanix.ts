@@ -201,10 +201,38 @@ interface NutanixReference {
   name?: string;
 }
 
+/** Un message d'erreur réel porté par `status.message_list` (Prism Central v3, uniquement peuplé
+ * quand `status.state === "ERROR"`) — vérifié en conditions réelles le 17/08/2026 sur l'instance
+ * 172.20.0.10:9440 : `status.state` existe bel et bien sur toutes les 24 VMs réelles observées
+ * (`"COMPLETE"` pour chacune, aucune en erreur à cet instant) — un signal DISTINCT et fiable du
+ * simple `power_state`, jamais confondu avec "éteinte" (voir mapVmEntity ci-dessous). La forme
+ * exacte de `message_list` en cas d'ERROR réel n'a PAS pu être vérifiée sur cette instance (aucune
+ * VM en erreur à disposition) — typée ici selon la sémantique v3 documentée par Nutanix, jamais
+ * supposée à l'aveugle : si la forme réelle diverge le jour où une VM entre effectivement en
+ * erreur, `message` resterait simplement absent plutôt que de faire planter le mapping (tous les
+ * champs sont optionnels ici).
+ */
+interface NutanixMessageListEntry {
+  message?: string;
+  reason?: string;
+}
+
 interface NutanixVmEntity {
   metadata?: { uuid?: string };
   spec?: { name?: string; resources?: NutanixEntityResources; cluster_reference?: NutanixReference };
-  status?: { name?: string; resources?: NutanixEntityResources; cluster_reference?: NutanixReference };
+  status?: {
+    name?: string;
+    resources?: NutanixEntityResources;
+    cluster_reference?: NutanixReference;
+    /** État RÉEL de l'entité côté Prism Central ("COMPLETE"/"PENDING"/"ERROR", vérifié en
+     * conditions réelles — voir NutanixMessageListEntry ci-dessus) — DISTINCT de
+     * `resources.power_state` : une VM peut être "COMPLETE" et éteinte (arrêt volontaire, pas une
+     * erreur) ou, en théorie, "ERROR" (échec réel constaté par Prism Central sur cette entité,
+     * quel que soit son power_state). Consommé par mapVmEntity ci-dessous pour distinguer "éteinte"
+     * (gris) d'une VRAIE erreur (rouge) côté topologyGraphShared.tsx (web) — jamais les confondre. */
+    state?: string;
+    message_list?: NutanixMessageListEntry[];
+  };
 }
 
 interface NutanixVmsListResponse {
@@ -303,10 +331,32 @@ function mapVmEntity(entity: NutanixVmEntity, hostsByUuid: NutanixHostByUuid, su
   // résolu via getNutanixHosts(), avec repli sur cette IP UNIQUEMENT si l'hôte n'a pas pu être
   // retrouvé dans la liste résolue à cet instant précis (course entre deux requêtes) — jamais un
   // nom inventé.
-  const hostRef = entity.status?.resources?.host_reference ?? entity.spec?.resources?.host_reference;
+  const liveHostRef = entity.status?.resources?.host_reference;
+  const hostRef = liveHostRef ?? entity.spec?.resources?.host_reference;
   const hostUuid = hostRef?.uuid;
   const resolvedHost = hostUuid ? hostsByUuid.get(hostUuid) : undefined;
   const hostName = resolvedHost?.name ?? hostRef?.name;
+  // true si `hostUuid` ci-dessus vient bien du placement CONSTATÉ en direct (`liveHostRef`, non
+  // undefined) ; false s'il vient du repli `spec.resources.host_reference` (dernier hôte
+  // assigné/déclaré, pas confirmé en direct à cet instant — typiquement une VM éteinte, voir JSDoc
+  // ci-dessus). `undefined` dans les mêmes conditions que `hostUuid` (VM jamais démarrée, ni
+  // status ni spec renseignés) : jamais un booléen fabriqué sans hôte déterminable derrière.
+  // Consommé par services/topology.ts#nutanixVmToNode puis topologyGraphShared.tsx (web) pour
+  // distinguer visuellement (vert "confirmé" vs orange "incertain") une arête "hosts" hôte
+  // physique -> VM — retour utilisateur du 17/08/2026 : "j'ai impression que le systeme n'est pas
+  // coherent entre nutanyx et le systeme de container c'est comme si la logique etait seprarer en
+  // deux", même grille couleur/pointillé qu'un conteneur, jamais un second système parallèle.
+  const hostPlacementConfirmed = hostUuid ? liveHostRef?.uuid !== undefined : undefined;
+
+  // Signal d'erreur RÉEL distinct de power_state (voir NutanixVmEntity#status#state ci-dessus,
+  // vérifié en conditions réelles le 17/08/2026 : le champ existe, vaut "COMPLETE" sur les 24 VMs
+  // réelles observées, aucune en erreur à cet instant — jamais exercé mais un champ authentique de
+  // cette instance, pas une supposition). Une VM ÉTEINTE n'est PAS en erreur (state reste
+  // "COMPLETE") : `apiError` ne devient true QUE sur un VRAI "ERROR" explicitement rapporté par
+  // Prism Central, jamais déduit du power_state — cohérent avec la règle déjà en place côté
+  // conteneurs ("stopped" != "unhealthy", un arrêt volontaire n'est pas une panne).
+  const apiError = entity.status?.state === "ERROR";
+  const apiErrorMessage = apiError ? entity.status?.message_list?.[0]?.message : undefined;
 
   const disks: NutanixVmDisk[] = (resources.disk_list ?? []).map((d) => ({
     ...(d.uuid ? { uuid: d.uuid } : {}),
@@ -336,8 +386,10 @@ function mapVmEntity(entity: NutanixVmEntity, hostsByUuid: NutanixHostByUuid, su
     ...(clusterUuid ? { clusterUuid } : {}),
     ...(hostUuid ? { hostUuid } : {}),
     ...(hostName ? { hostName } : {}),
+    ...(typeof hostPlacementConfirmed === "boolean" ? { hostPlacementConfirmed } : {}),
     ...(disks.length > 0 ? { disks } : {}),
     ...(networks.length > 0 ? { networks } : {}),
+    ...(apiError ? { apiError: true, ...(apiErrorMessage ? { apiErrorMessage } : {}) } : {}),
   };
 }
 
@@ -437,6 +489,31 @@ export async function testNutanixConnection(
 }
 
 /**
+ * Dernier essai RÉEL de rafraîchissement de l'intégration Nutanix (getNutanixVms ci-dessous,
+ * appelée à CHAQUE getTopology(), voir services/topology.ts#getNutanixTopologyParts) — en mémoire
+ * process UNIQUEMENT, perdu au redémarrage (même principe que reverseProxy.ts#lastKnownDnsSync
+ * pour AD DNS). N'est mis à jour QUE si Nutanix a été explicitement configuré (jamais pour "jamais
+ * configuré", qui n'est pas une notion de joignabilité) — voir getNutanixVms.
+ *
+ * Sert UNIQUEMENT à distinguer, côté UI (panneau Légende du graphe, topologyGraphShared.tsx), "ce
+ * poll n'a trouvé aucune VM" de "Nutanix est peut-être injoignable en ce moment" : sans caching
+ * d'aucune sorte (voir JSDoc de getNutanixVms ci-dessous, "jamais mis en cache entre deux polls"),
+ * un poll en échec fait simplement DISPARAÎTRE tous les nœuds nutanix-vm/nutanix-cluster/nutanix-
+ * host de la réponse ce cycle-là plutôt que d'afficher une dernière valeur connue obsolète —
+ * cohérent avec la philosophie "jamais de fausse donnée" de ce fichier, mais qui rend ce
+ * signal indispensable pour que l'utilisateur sache si l'absence est un fait réel ou un accroc
+ * réseau passager.
+ */
+export interface NutanixPollOutcome {
+  reachable: boolean;
+  at: string; // ISO 8601
+}
+let lastPollOutcome: NutanixPollOutcome | null = null;
+export function lastKnownNutanixPoll(): NutanixPollOutcome | null {
+  return lastPollOutcome;
+}
+
+/**
  * Liste les VMs du cluster Nutanix — [] si Nutanix n'a jamais été configuré (voir
  * loadNutanixConfig ci-dessus, même principe que getKubernetesContainers), également []
  * si configuré mais injoignable : il n'existe pas de jeu de VMs de démonstration Nutanix,
@@ -465,8 +542,10 @@ export async function getNutanixVms(): Promise<NutanixVm[]> {
       fetchNutanixSubnets(effective),
     ]);
     const hostsByUuid: NutanixHostByUuid = new Map(hosts.map((h) => [h.id, h]));
+    lastPollOutcome = { reachable: true, at: new Date().toISOString() };
     return (vmsData.entities ?? []).map((e) => mapVmEntity(e, hostsByUuid, subnetsByUuid));
   } catch {
+    lastPollOutcome = { reachable: false, at: new Date().toISOString() };
     return [];
   }
 }

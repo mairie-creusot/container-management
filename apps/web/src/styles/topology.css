@@ -2075,6 +2075,128 @@
   }
 }
 
+/* --- Panneau "Légende" repliable (coin bas-droit du canevas, .topology-toolbar-bottom-right
+   ci-dessus — seul coin resté libre) — voir topologyGraphShared.tsx#TopologyLegendPanel pour le
+   contenu, TopologyGraph.tsx pour le bouton bascule (barre d'outils, même pattern que le bouton
+   "vue d'ensemble"/MiniMap déjà en place). Retour utilisateur (mission du 17/08/2026, point 4) :
+   la grille couleur/pointillé des arêtes n'était documentée que dans le code, invisible depuis
+   l'UI. Même famille visuelle que .context-menu/.graph-popover (surface/bordure/ombre du thème),
+   pas "position: fixed" (ceux-ci sont positionnés au clic, ce panneau reste ancré au coin via son
+   wrapper .topology-toolbar-bottom-right). */
+.topology-legend-panel {
+  width: 268px;
+  max-height: min(420px, calc(100% - 24px));
+  overflow-y: auto;
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg, 0 12px 32px rgba(0, 0, 0, 0.35));
+  padding: 12px;
+  font-size: 12px;
+  color: var(--color-text);
+  animation: popover-in 0.15s ease-out;
+}
+
+.topology-legend-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.topology-legend-panel__title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.topology-legend-panel__close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--color-text-faint);
+  cursor: pointer;
+  padding: 2px;
+}
+
+.topology-legend-panel__close:hover {
+  color: var(--color-text);
+}
+
+.topology-legend-panel__close svg {
+  width: 14px;
+  height: 14px;
+}
+
+.topology-legend-panel__section + .topology-legend-panel__section {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.topology-legend-panel__section-title {
+  font-weight: 600;
+  color: var(--color-text-muted);
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.topology-legend-panel__text {
+  margin: 0;
+  color: var(--color-text-muted);
+  line-height: 1.45;
+}
+
+.topology-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  line-height: 1.35;
+}
+
+.topology-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.topology-legend-line {
+  width: 22px;
+  height: 0;
+  border-top: 2px solid var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.topology-legend-line--dashed-fine {
+  border-top-style: dashed;
+}
+
+.topology-legend-line--dashed-wide {
+  border-top-style: dashed;
+  border-top-width: 3px;
+}
+
+.topology-legend-panel__note {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topology-legend-panel {
+    animation: none;
+  }
+}
+
 /* --- Palette de création "spotlight" (façon Railway "What can we help with?") ------------------ */
 
 .graph-spotlight {

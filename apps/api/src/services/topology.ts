@@ -106,7 +106,7 @@ import { getClient, getDockerHostInfo, isDockerReachable, readContainerHealth, r
 import { getImages } from "./images.js";
 import { listGitOpsFiles } from "./gitops.js";
 import { listAllScans } from "./scan.js";
-import { getNutanixClusters, getNutanixHosts, getNutanixVms, isNutanixConfigured } from "./nutanix.js";
+import { getNutanixClusters, getNutanixHosts, getNutanixVms, isNutanixConfigured, lastKnownNutanixPoll } from "./nutanix.js";
 import { getEffectiveAdDnsConfig } from "./setupStore.js";
 import { lastKnownDnsSync, listRoutes } from "./reverseProxy.js";
 import { listGroups } from "./topologyGroupsStore.js";
@@ -247,8 +247,16 @@ function nutanixVmToNode(vm: NutanixVm): TopologyNode {
     // retour utilisateur du 14/08/2026) : simple report des champs déjà résolus par nutanix.ts,
     // aucun recalcul ici — TopologyNodeDetailPanel.tsx les affiche tels quels.
     ...(vm.hostName ? { nutanixHostName: vm.hostName } : {}),
+    // Placement CONFIRMÉ en direct (status.resources.host_reference) vs REPLI sur le dernier hôte
+    // assigné/déclaré (spec.resources.host_reference) — voir nutanix.ts#mapVmEntity pour le calcul
+    // complet. Consommé UNIQUEMENT par topologyGraphShared.tsx (web) pour la couleur/le pointillé
+    // d'une arête "hosts" hôte physique -> VM, jamais recalculé ici.
+    ...(typeof vm.hostPlacementConfirmed === "boolean" ? { nutanixHostPlacementConfirmed: vm.hostPlacementConfirmed } : {}),
     ...(vm.disks && vm.disks.length > 0 ? { nutanixDisks: vm.disks } : {}),
     ...(vm.networks && vm.networks.length > 0 ? { nutanixNetworks: vm.networks } : {}),
+    // VRAI état d'erreur Prism Central (status.state === "ERROR"), DISTINCT d'une VM simplement
+    // éteinte — voir nutanix.ts#mapVmEntity. Absent (pas false) si aucune erreur.
+    ...(vm.apiError ? { nutanixApiError: true, ...(vm.apiErrorMessage ? { nutanixApiErrorMessage: vm.apiErrorMessage } : {}) } : {}),
   };
 }
 
@@ -373,14 +381,24 @@ async function getNutanixTopologyParts(): Promise<{ vmNodes: TopologyNode[]; hos
   }
 
   // Hôte physique -> VM (placement réel, voir JSDoc ci-dessus : status.resources.host_reference en
-  // priorité, repli spec.resources.host_reference pour une VM éteinte). AUCUN repli cluster -> VM
-  // (retiré le 17/08/2026, voir JSDoc ci-dessus) : une VM sans hôte déterminable par AUCUN des deux
-  // champs, ou dont l'hôte référencé n'est plus dans la liste réellement retournée par
-  // getNutanixHosts() à cet instant (course entre deux requêtes), n'obtient simplement AUCUNE
-  // arête "hosts" — jamais de rattachement direct au cluster.
+  // priorité, repli spec.resources.host_reference pour une VM éteinte).
+  //
+  // Repli cluster -> VM RÉINTRODUIT le 17/08/2026 (retiré plus tôt le même jour, puis remis après
+  // retour utilisateur : "les vm arreter ici se sont pas relier" — un nœud totalement flottant,
+  // sans AUCUNE arête, est pire qu'un rattachement honnêtement affiché comme non confirmé). Ce qui
+  // a changé entre-temps : buildTopologyEdges (topologyGraphShared.tsx) sait maintenant distinguer
+  // visuellement un placement confirmé en direct (vert plein) d'un placement incertain (gris,
+  // tirets larges pour une VM éteinte) — le problème d'origine n'était donc pas "une arête
+  // cluster->VM existe", mais "elle ressemblait exactement à une arête hôte->VM confirmée". Une VM
+  // sans hôte déterminable par AUCUN des deux champs (status ni spec), ou dont l'hôte référencé
+  // n'est plus dans la liste réellement retournée par getNutanixHosts() à cet instant (course entre
+  // deux requêtes), se rattache donc au CLUSTER plutôt qu'à un hôte précis — jamais inventé,
+  // toujours visuellement distingué comme non confirmé côté frontend.
   for (const vm of vms) {
     if (vm.hostUuid && knownHostUuids.has(vm.hostUuid)) {
       hostEdges.push({ id: `hosts:${vm.hostUuid}:${vm.id}`, source: nutanixHostNodeId(vm.hostUuid), target: `nutanix-vm:${vm.id}`, kind: "hosts" });
+    } else if (vm.clusterUuid && knownClusterUuids.has(vm.clusterUuid)) {
+      hostEdges.push({ id: `hosts:${vm.clusterUuid}:${vm.id}`, source: nutanixClusterHostNodeId(vm.clusterUuid), target: `nutanix-vm:${vm.id}`, kind: "hosts" });
     }
   }
 
@@ -745,7 +763,18 @@ export async function getTopology(): Promise<Topology> {
     ...automationParts.nodes,
   ];
   const staticEdges: TopologyEdge[] = [...nutanixHostEdges, ...automationParts.edges];
-  const empty: Topology = { nodes: staticNodes, edges: staticEdges, generatedAt: new Date().toISOString(), groups };
+  // Dernier essai RÉEL de rafraîchissement Nutanix (voir services/nutanix.ts#lastKnownNutanixPoll,
+  // mis à jour PAR getNutanixTopologyParts ci-dessus via getNutanixVms) — lu APRÈS, jamais avant,
+  // l'appel qui vient de le produire. `undefined` (jamais un objet vide fabriqué) tant que Nutanix
+  // n'a jamais été configuré ou jamais encore pollé depuis le démarrage du process.
+  const nutanixLastPoll = lastKnownNutanixPoll() ?? undefined;
+  const empty: Topology = {
+    nodes: staticNodes,
+    edges: staticEdges,
+    generatedAt: new Date().toISOString(),
+    groups,
+    ...(nutanixLastPoll ? { nutanixLastPoll } : {}),
+  };
   if (!(await isDockerReachable(docker))) return empty;
 
   try {
@@ -1031,7 +1060,13 @@ export async function getTopology(): Promise<Topology> {
       });
     }
 
-    return { nodes: [...nodes, ...staticNodes], edges: [...edges, ...staticEdges], generatedAt: new Date().toISOString(), groups };
+    return {
+      nodes: [...nodes, ...staticNodes],
+      edges: [...edges, ...staticEdges],
+      generatedAt: new Date().toISOString(),
+      groups,
+      ...(nutanixLastPoll ? { nutanixLastPoll } : {}),
+    };
   } catch {
     return empty;
   }

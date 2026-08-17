@@ -45,7 +45,7 @@ import Modal from "@/components/Modal";
 import Skeleton from "@/components/Skeleton";
 import TopologyNodeDetailPanel, { type TabId } from "@/components/TopologyNodeDetailPanel";
 import TopologySubGraphPanel from "@/components/TopologySubGraphPanel";
-import { IconGithub, IconSearch, IconTopology, IconTrash } from "@/components/icons";
+import { IconGithub, IconInfo, IconSearch, IconTopology, IconTrash } from "@/components/icons";
 // Réutilise TEL QUEL le flux de déploiement GitHub existant (détection Dockerfile/compose/
 // Terraform, build, déploiement, déploiement auto sur push — voir ARCHITECTURE.md § "Intégration
 // GitHub") : CreateSpotlight ne fait que le monter dans une modal par-dessus le canevas, aucune
@@ -89,6 +89,7 @@ import {
   idWithoutPrefix,
   nodeTypes,
   resolveGroupMemberNodeIds,
+  TopologyLegendPanel,
   useDismiss,
   usePrefersReducedMotion,
   type CapabilityDef,
@@ -1844,6 +1845,10 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   // Bouton "grille" de la barre d'outils (voir <Controls> plus bas) — bascule la MiniMap, seule
   // "vue d'ensemble" que ce graphe propose pour l'instant.
   const [showMiniMap, setShowMiniMap] = useState(true);
+  // Bouton "i" de la barre d'outils (voir <Controls> plus bas) — bascule le panneau "Légende"
+  // (TopologyLegendPanel, topologyGraphShared.tsx), replié par défaut : mission du 17/08/2026,
+  // point 4 — la grille couleur/pointillé des arêtes n'était documentée que dans le code jusqu'ici.
+  const [showLegend, setShowLegend] = useState(false);
 
   useEffect(() => {
     dispatch(fetchTopology());
@@ -2911,6 +2916,16 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
             >
               <IconTopology />
             </button>
+            {/* Panneau "Légende" (couleur/pointillé des arêtes, TopologyLegendPanel ci-dessous) —
+                même pattern de bouton bascule que "vue d'ensemble" ci-dessus. */}
+            <button
+              type="button"
+              className="react-flow__controls-button topology-controls__minimap-toggle"
+              title={showLegend ? "Masquer la légende" : "Afficher la légende"}
+              onClick={() => setShowLegend((v) => !v)}
+            >
+              <IconInfo />
+            </button>
           </Controls>
           <Background gap={20} size={1.6} color="var(--color-text-faint)" />
           {showMiniMap && (
@@ -2972,6 +2987,16 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
             <IconTrash />
             {cleaningOrphans ? "Nettoyage…" : `Nettoyer les orphelins (${orphanCount})`}
           </button>
+        </div>
+      )}
+
+      {/* Panneau "Légende" (voir showLegend/bouton bascule ci-dessus) — coin bas-droit du canevas,
+          seul coin resté libre (haut-gauche = Contrôles/MiniMap, haut-droit = "Regrouper" en
+          sélection multiple, bas-gauche = "Nettoyer les orphelins"). `data?.nutanixLastPoll` :
+          voir Topology#nutanixLastPoll (types.ts), simple report — jamais recalculé ici. */}
+      {showLegend && (
+        <div className="topology-toolbar-bottom-right">
+          <TopologyLegendPanel {...(data?.nutanixLastPoll ? { nutanixLastPoll: data.nutanixLastPoll } : {})} onClose={() => setShowLegend(false)} />
         </div>
       )}
 

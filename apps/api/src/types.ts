@@ -415,6 +415,19 @@ export interface NutanixVm {
    * pas pu être retrouvé dans la liste résolue au moment de l'appel (course entre deux requêtes),
    * jamais un nom inventé. */
   hostName?: string;
+  /**
+   * true si `hostUuid` vient du placement CONSTATÉ en direct (`status.resources.host_reference`) ;
+   * false s'il vient du repli sur le dernier hôte ASSIGNÉ/déclaré (`spec.resources.host_reference`,
+   * pas confirmé en direct à cet instant — typiquement une VM éteinte). Absent dans les mêmes
+   * conditions que `hostUuid` (VM jamais démarrée, ni status ni spec renseignés) — voir
+   * services/nutanix.ts#mapVmEntity. Consommé par services/topology.ts#nutanixVmToNode puis par
+   * topologyGraphShared.tsx (web) pour distinguer visuellement (couleur verte "confirmé" vs orange
+   * "incertain") une arête "hosts" hôte physique -> VM, retour utilisateur du 17/08/2026 : "j'ai
+   * impression que le systeme n'est pas coherent entre nutanyx et le systeme de container c'est
+   * comme si la logique etait seprarer en deux" — même grille couleur/pointillé qu'un conteneur,
+   * jamais un second système parallèle.
+   */
+  hostPlacementConfirmed?: boolean;
   /** Disques réels de la VM (status.resources.disk_list, repli spec.resources.disk_list) — absent
    * si Prism Central n'a renvoyé aucun disque (jamais un tableau vide fabriqué en cas d'échec de
    * lecture du champ lui-même, distinct d'une VM réellement sans disque). */
@@ -422,6 +435,19 @@ export interface NutanixVm {
   /** Interfaces réseau réelles de la VM avec VLAN/subnet résolu et IP(s) — mêmes conditions
    * d'absence que `disks` ci-dessus. */
   networks?: NutanixVmNetwork[];
+  /**
+   * true si Prism Central rapporte un VRAI état d'erreur pour cette entité (`status.state ===
+   * "ERROR"`, vérifié en conditions réelles présent sur cette instance — voir
+   * services/nutanix.ts#NutanixVmEntity) — DISTINCT du power_state : une VM éteinte volontairement
+   * n'est jamais `apiError` (même règle que côté conteneurs : un arrêt volontaire n'est pas une
+   * panne). Absent (pas `false`) si aucune erreur — jamais un booléen "propre" fabriqué en
+   * l'absence du champ. Consommé pour la couleur rouge ("unhealthy") d'une arête "hosts" hôte
+   * physique -> VM (topologyGraphShared.tsx), jamais pour un simple arrêt.
+   */
+  apiError?: boolean;
+  /** Premier message réel de `status.message_list` quand `apiError` est true — absent si Prism
+   * Central n'a rapporté aucun message (state ERROR sans détail), jamais un message inventé. */
+  apiErrorMessage?: string;
 }
 
 export interface GitOpsFile {
@@ -809,12 +835,37 @@ export interface TopologyNode {
    * d'affichage direct dans le panneau de détail sans recalcul côté frontend.
    */
   nutanixHostName?: string;
+  /**
+   * VM Nutanix uniquement : true si `nutanixHostName`/le placement porté par l'arête `kind:
+   * "hosts"` hôte physique -> VM (voir services/topology.ts#getNutanixTopologyParts) vient du
+   * placement CONSTATÉ en direct (status.resources.host_reference, Prism Central) ; false s'il
+   * vient du repli sur le dernier hôte ASSIGNÉ/déclaré (spec.resources.host_reference, pas
+   * confirmé en direct à cet instant — typiquement une VM éteinte). Absent dans les mêmes
+   * conditions que `nutanixHostName` (VM jamais démarrée). Voir services/nutanix.ts#NutanixVm#
+   * hostPlacementConfirmed pour le calcul complet — consommé UNIQUEMENT par
+   * topologyGraphShared.tsx (web) pour la couleur/le pointillé de cette arête (vert "confirmé" vs
+   * orange "incertain"), même grille couleur/pointillé qu'un conteneur (retour utilisateur du
+   * 17/08/2026 : les deux systèmes doivent être UN SEUL système cohérent, jamais deux séparés).
+   */
+  nutanixHostPlacementConfirmed?: boolean;
   /** VM Nutanix uniquement : disques réels (voir services/nutanix.ts#NutanixVmDisk) — absent si
    * Prism Central n'a renvoyé aucun disque, jamais un tableau vide fabriqué en cas d'échec. */
   nutanixDisks?: NutanixVmDisk[];
   /** VM Nutanix uniquement : interfaces réseau réelles avec VLAN/subnet résolu et IP(s) (voir
    * services/nutanix.ts#NutanixVmNetwork). */
   nutanixNetworks?: NutanixVmNetwork[];
+  /**
+   * VM Nutanix uniquement : true si Prism Central rapporte un VRAI état d'erreur pour cette VM
+   * (status.state === "ERROR", voir services/nutanix.ts#NutanixVm#apiError) — DISTINCT d'une VM
+   * simplement éteinte (jamais déduit du power_state, même règle que "stopped" != "unhealthy" côté
+   * conteneurs : un arrêt volontaire n'est pas une panne). Absent (pas false) si aucune erreur.
+   * Mappé sur la couleur rouge ("unhealthy") d'une arête "hosts" hôte physique -> VM, jamais pour
+   * un simple arrêt — voir topologyGraphShared.tsx (web).
+   */
+  nutanixApiError?: boolean;
+  /** VM Nutanix uniquement : premier message réel de Prism Central quand `nutanixApiError` est
+   * true — absent si aucun message rapporté, jamais un message inventé. */
+  nutanixApiErrorMessage?: string;
   /**
    * Nœuds "host" de sous-type "nutanix-host" UNIQUEMENT (hôte physique AHV réel, voir
    * services/nutanix.ts#NutanixHost) — capacité RÉELLE rapportée par Prism Central au moment du
@@ -1064,6 +1115,18 @@ export interface Topology {
   /** Regroupements réels créés par un utilisateur (voir TopologyGroup ci-dessous et
    * services/topologyGroupsStore.ts) — [] tant qu'aucun groupement n'a jamais été créé. */
   groups: TopologyGroup[];
+  /**
+   * Dernier essai RÉEL de rafraîchissement de l'intégration Nutanix (services/nutanix.ts#
+   * lastKnownNutanixPoll, en mémoire process, perdu au redémarrage — même principe qu'AdDnsStatus#
+   * lastSync) — absent tant que Nutanix n'a jamais été configuré OU jamais encore pollé depuis le
+   * démarrage du process. `reachable: false` signifie que CE poll a échoué : les nœuds
+   * nutanix-vm/host(nutanix-cluster|nutanix-host) de CETTE réponse sont VIDES pour ce cycle (aucune
+   * donnée mise en cache/répétée d'un poll précédent, voir services/nutanix.ts en-tête) plutôt
+   * qu'obsolètes — sert uniquement à distinguer, côté UI (panneau "Légende" du graphe,
+   * topologyGraphShared.tsx), "Nutanix n'a simplement aucune VM" de "Nutanix est peut-être
+   * injoignable en ce moment", ce que l'absence de nœuds seule ne permet pas de savoir.
+   */
+  nutanixLastPoll?: { reachable: boolean; at: string };
 }
 
 /**

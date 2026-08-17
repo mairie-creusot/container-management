@@ -39,7 +39,7 @@ vi.mock("../src/services/setupStore.js", () => ({
   getEffectiveNutanixConfig: () => getEffectiveNutanixConfigMock(),
 }));
 
-const { getNutanixHosts, getNutanixVms } = await import("../src/services/nutanix.js");
+const { getNutanixHosts, getNutanixVms, lastKnownNutanixPoll } = await import("../src/services/nutanix.js");
 
 const VALID_CONFIG: SetupNutanixConfig = {
   prismCentralUrl: "https://172.20.0.10:9440",
@@ -261,6 +261,123 @@ describe("getNutanixVms — résolution hôte/disques/VLAN (host_reference, disk
     expect(vm).toMatchObject({ hostUuid: "9708aa74-e03a-4adf-ac1f-1cbfd82ea8eb", hostName: "HDVNUTA3" });
   });
 
+  /**
+   * Mission du 17/08/2026 : distingue le placement CONFIRMÉ en direct (status.resources.
+   * host_reference) du placement REPLIÉ sur le dernier hôte assigné (spec.resources.host_reference)
+   * — consommé par services/topology.ts#nutanixVmToNode puis topologyGraphShared.tsx (couleur/
+   * pointillé de l'arête "hosts" hôte -> VM).
+   */
+  it("hostPlacementConfirmed: true quand le placement vient de status.resources.host_reference (direct)", async () => {
+    getEffectiveNutanixConfigMock.mockResolvedValue(VALID_CONFIG);
+    setResponse("/api/nutanix/v3/hosts/list", {
+      entities: [{ metadata: { uuid: "9708aa74-e03a-4adf-ac1f-1cbfd82ea8eb" }, status: { name: "HDVNUTA3" } }],
+    });
+    setResponse("/api/nutanix/v3/subnets/list", { entities: [] });
+    setResponse("/api/nutanix/v3/vms/list", {
+      entities: [
+        {
+          metadata: { uuid: "vm-live" },
+          status: {
+            name: "vm-live",
+            resources: {
+              power_state: "ON",
+              host_reference: { kind: "host", uuid: "9708aa74-e03a-4adf-ac1f-1cbfd82ea8eb", name: "172.20.0.5" },
+            },
+          },
+        },
+      ],
+    });
+
+    const [vm] = await getNutanixVms();
+
+    expect(vm).toMatchObject({ hostUuid: "9708aa74-e03a-4adf-ac1f-1cbfd82ea8eb", hostPlacementConfirmed: true });
+  });
+
+  it("hostPlacementConfirmed: false quand le placement vient UNIQUEMENT du repli spec.resources.host_reference", async () => {
+    getEffectiveNutanixConfigMock.mockResolvedValue(VALID_CONFIG);
+    setResponse("/api/nutanix/v3/hosts/list", {
+      entities: [{ metadata: { uuid: "9708aa74-e03a-4adf-ac1f-1cbfd82ea8eb" }, status: { name: "HDVNUTA3" } }],
+    });
+    setResponse("/api/nutanix/v3/subnets/list", { entities: [] });
+    setResponse("/api/nutanix/v3/vms/list", {
+      entities: [
+        {
+          metadata: { uuid: "vm-off-with-spec-host" },
+          status: { name: "vm-off-with-spec-host", resources: { power_state: "OFF" } },
+          spec: {
+            name: "vm-off-with-spec-host",
+            resources: {
+              power_state: "OFF",
+              host_reference: { kind: "host", uuid: "9708aa74-e03a-4adf-ac1f-1cbfd82ea8eb", name: "172.20.0.5" },
+            },
+          },
+        },
+      ],
+    });
+
+    const [vm] = await getNutanixVms();
+
+    expect(vm).toMatchObject({ hostUuid: "9708aa74-e03a-4adf-ac1f-1cbfd82ea8eb", hostPlacementConfirmed: false });
+  });
+
+  it("hostPlacementConfirmed absent quand hostUuid lui-même est absent (VM jamais démarrée)", async () => {
+    getEffectiveNutanixConfigMock.mockResolvedValue(VALID_CONFIG);
+    setResponse("/api/nutanix/v3/hosts/list", { entities: [] });
+    setResponse("/api/nutanix/v3/subnets/list", { entities: [] });
+    setResponse("/api/nutanix/v3/vms/list", {
+      entities: [{ metadata: { uuid: "vm-never-started" }, status: { name: "vm-never-started", resources: { power_state: "OFF" } } }],
+    });
+
+    const [vm] = await getNutanixVms();
+
+    expect(vm).not.toHaveProperty("hostPlacementConfirmed");
+  });
+
+  /**
+   * Mission du 17/08/2026, point 1 : `status.state === "ERROR"` (vérifié en conditions réelles le
+   * 17/08/2026 sur l'instance 172.20.0.10:9440 — le champ `status.state` existe bel et bien,
+   * "COMPLETE" sur les 24 VMs réelles observées, aucune en erreur à cet instant) est un signal
+   * DISTINCT du simple power_state, jamais déduit d'une VM éteinte.
+   */
+  it("apiError: true + apiErrorMessage quand status.state === \"ERROR\" (signal Prism Central distinct de power_state)", async () => {
+    getEffectiveNutanixConfigMock.mockResolvedValue(VALID_CONFIG);
+    setResponse("/api/nutanix/v3/hosts/list", { entities: [] });
+    setResponse("/api/nutanix/v3/subnets/list", { entities: [] });
+    setResponse("/api/nutanix/v3/vms/list", {
+      entities: [
+        {
+          metadata: { uuid: "vm-error" },
+          status: {
+            name: "vm-error",
+            state: "ERROR",
+            message_list: [{ message: "disk unavailable", reason: "kInternalError" }],
+            resources: { power_state: "ON" },
+          },
+        },
+      ],
+    });
+
+    const [vm] = await getNutanixVms();
+
+    expect(vm).toMatchObject({ apiError: true, apiErrorMessage: "disk unavailable" });
+  });
+
+  it("apiError absent pour une VM simplement éteinte (status.state reste COMPLETE) — jamais déduit du power_state", async () => {
+    getEffectiveNutanixConfigMock.mockResolvedValue(VALID_CONFIG);
+    setResponse("/api/nutanix/v3/hosts/list", { entities: [] });
+    setResponse("/api/nutanix/v3/subnets/list", { entities: [] });
+    setResponse("/api/nutanix/v3/vms/list", {
+      entities: [
+        { metadata: { uuid: "vm-off" }, status: { name: "vm-off", state: "COMPLETE", resources: { power_state: "OFF" } } },
+      ],
+    });
+
+    const [vm] = await getNutanixVms();
+
+    expect(vm).not.toHaveProperty("apiError");
+    expect(vm).not.toHaveProperty("apiErrorMessage");
+  });
+
   it("subnet non résolu (course) : repli sur le nom brut de subnet_reference, VLAN absent (jamais inventé)", async () => {
     getEffectiveNutanixConfigMock.mockResolvedValue(VALID_CONFIG);
     setResponse("/api/nutanix/v3/hosts/list", { entities: [] });
@@ -284,5 +401,47 @@ describe("getNutanixVms — résolution hôte/disques/VLAN (host_reference, disk
 
     expect(vm.networks).toEqual([{ subnetUuid: "subnet-disparu", subnetName: "VLAN 7 (nom en cache)", ips: [] }]);
     expect(vm.networks?.[0]).not.toHaveProperty("vlanId");
+  });
+});
+
+/**
+ * Mission du 17/08/2026, point 2 : sans caching d'aucune sorte (voir en-tête de nutanix.ts),
+ * lastKnownNutanixPoll() est le SEUL moyen pour services/topology.ts/le frontend de distinguer
+ * "ce poll a échoué" de "Nutanix n'a simplement aucune VM" — mis à jour à CHAQUE appel de
+ * getNutanixVms(), jamais pour "jamais configuré" (pas une notion de joignabilité).
+ */
+describe("lastKnownNutanixPoll", () => {
+  it("jamais mis à jour pour \"jamais configuré\" (pas une notion de joignabilité) — reste EXACTEMENT ce qu'il était avant cet appel", async () => {
+    // Capture AVANT plutôt que d'attendre `null` : ce module partage un état en mémoire process
+    // avec les autres tests de ce fichier (même `let lastPollOutcome`, jamais réinitialisé entre
+    // deux `it` du même fichier) — un poll RÉUSSI par un test précédent peut donc déjà l'avoir
+    // renseigné avant que ce test-ci ne s'exécute. Le VRAI invariant à vérifier est que "jamais
+    // configuré" ne le TOUCHE PAS du tout (voir services/nutanix.ts#getNutanixVms, retour avant
+    // le try/catch qui seul écrit lastPollOutcome), pas sa valeur absolue.
+    const before = lastKnownNutanixPoll();
+    getEffectiveNutanixConfigMock.mockResolvedValue(null);
+    expect(await getNutanixVms()).toEqual([]);
+    expect(lastKnownNutanixPoll()).toBe(before);
+  });
+
+  it("reachable: true après un poll réussi", async () => {
+    getEffectiveNutanixConfigMock.mockResolvedValue(VALID_CONFIG);
+    setResponse("/api/nutanix/v3/hosts/list", { entities: [] });
+    setResponse("/api/nutanix/v3/subnets/list", { entities: [] });
+    setResponse("/api/nutanix/v3/vms/list", { entities: [] });
+
+    await getNutanixVms();
+
+    const outcome = lastKnownNutanixPoll();
+    expect(outcome?.reachable).toBe(true);
+    expect(typeof outcome?.at).toBe("string");
+  });
+
+  it("reachable: false après un poll en échec (Prism Central injoignable/en erreur)", async () => {
+    getEffectiveNutanixConfigMock.mockResolvedValue(VALID_CONFIG);
+    setResponse("/api/nutanix/v3/vms/list", { message: "unreachable" }, 500);
+
+    expect(await getNutanixVms()).toEqual([]);
+    expect(lastKnownNutanixPoll()?.reachable).toBe(false);
   });
 });

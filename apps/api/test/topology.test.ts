@@ -23,12 +23,17 @@ const isNutanixConfiguredMock = vi.fn<[], Promise<boolean>>();
 const getNutanixVmsMock = vi.fn<[], Promise<NutanixVm[]>>();
 const getNutanixClustersMock = vi.fn<[], Promise<{ uuid: string; name: string }[]>>();
 const getNutanixHostsMock = vi.fn<[], Promise<import("../src/types.js").NutanixHost[]>>();
+// Voir services/nutanix.ts#lastKnownNutanixPoll (mission du 17/08/2026, point 2 — distinguer "ce
+// poll a échoué" de "aucune VM") : `null` par défaut (jamais configuré/jamais pollé), écrasé
+// explicitement par les tests dédiés à getTopology()#nutanixLastPoll ci-dessous.
+const lastKnownNutanixPollMock = vi.fn<[], import("../src/services/nutanix.js").NutanixPollOutcome | null>();
 
 vi.mock("../src/services/nutanix.js", () => ({
   isNutanixConfigured: () => isNutanixConfiguredMock(),
   getNutanixVms: () => getNutanixVmsMock(),
   getNutanixClusters: () => getNutanixClustersMock(),
   getNutanixHosts: () => getNutanixHostsMock(),
+  lastKnownNutanixPoll: () => lastKnownNutanixPollMock(),
 }));
 
 // Isolation des nœuds "host" Docker distant/LXD (voir services/topology.ts) : sans ce mock,
@@ -61,6 +66,7 @@ beforeEach(() => {
   listRemoteDockerEnvironmentsMock.mockResolvedValue([]);
   getLxcEnvironmentMock.mockResolvedValue(null);
   getEffectiveLxcConfigMock.mockResolvedValue(null);
+  lastKnownNutanixPollMock.mockReturnValue(null);
 });
 
 afterEach(() => {
@@ -109,6 +115,47 @@ describe("getTopology — nœuds VM Nutanix (kind \"nutanix-vm\")", () => {
     // Pas d'arête forcée vers des nœuds Docker, et pas d'arête "hosts" ici (getNutanixClusters()
     // renvoie [] par défaut dans ce test, voir beforeEach) — nœuds isolés (voir en-tête de topology.ts).
     expect(topology.edges.some((e) => e.source.startsWith("nutanix-vm:") || e.target.startsWith("nutanix-vm:"))).toBe(false);
+  });
+
+  /**
+   * Mission du 17/08/2026 : propage `hostPlacementConfirmed`/`apiError` (services/nutanix.ts#
+   * NutanixVm, déjà résolus par mapVmEntity) sur le TopologyNode sans les recalculer ici — même
+   * principe de simple report que `nutanixHostName`/`nutanixDisks` déjà en place. Consommé
+   * uniquement par topologyGraphShared.tsx#nutanixVmHostEdgeState (couleur/pointillé de l'arête
+   * "hosts" hôte -> VM), jamais recalculé côté API au-delà de ce simple passage de champ.
+   */
+  it("propage nutanixHostPlacementConfirmed (placement confirmé en direct vs replié) sur le TopologyNode", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(true);
+    getNutanixVmsMock.mockResolvedValue([
+      { id: "vm-confirmed", name: "vm-confirmed", powerState: "on", numVcpus: 1, memoryMib: 1024, cluster: "c", hostUuid: "h1", hostPlacementConfirmed: true },
+      { id: "vm-fallback", name: "vm-fallback", powerState: "off", numVcpus: 1, memoryMib: 1024, cluster: "c", hostUuid: "h1", hostPlacementConfirmed: false },
+      { id: "vm-never-started", name: "vm-never-started", powerState: "off", numVcpus: 1, memoryMib: 1024, cluster: "c" },
+    ]);
+
+    const topology = await getTopology();
+    const byId = (id: string) => topology.nodes.find((n) => n.id === id);
+
+    expect(byId("nutanix-vm:vm-confirmed")).toMatchObject({ nutanixHostPlacementConfirmed: true });
+    expect(byId("nutanix-vm:vm-fallback")).toMatchObject({ nutanixHostPlacementConfirmed: false });
+    // Jamais un booléen fabriqué quand hostUuid lui-même est absent (VM jamais démarrée).
+    expect(byId("nutanix-vm:vm-never-started")).not.toHaveProperty("nutanixHostPlacementConfirmed");
+  });
+
+  it("propage nutanixApiError/nutanixApiErrorMessage (vrai échec Prism Central, distinct d'un simple arrêt)", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(true);
+    getNutanixVmsMock.mockResolvedValue([
+      { id: "vm-error", name: "vm-error", powerState: "on", numVcpus: 1, memoryMib: 1024, cluster: "c", apiError: true, apiErrorMessage: "disk unavailable" },
+      { id: "vm-off", name: "vm-off", powerState: "off", numVcpus: 1, memoryMib: 1024, cluster: "c" },
+    ]);
+
+    const topology = await getTopology();
+
+    expect(topology.nodes.find((n) => n.id === "nutanix-vm:vm-error")).toMatchObject({
+      nutanixApiError: true,
+      nutanixApiErrorMessage: "disk unavailable",
+    });
+    // Un simple arrêt volontaire n'est JAMAIS une erreur API (même règle que côté conteneurs).
+    expect(topology.nodes.find((n) => n.id === "nutanix-vm:vm-off")).not.toHaveProperty("nutanixApiError");
   });
 
   it("liste vide si Nutanix est configuré mais getNutanixVms() retombe sur [] (injoignable)", async () => {
@@ -176,13 +223,20 @@ describe("getTopology — nœuds host cluster Nutanix (kind \"host\", hostKind \
       subtitle: "Cluster Nutanix · 0 VM",
     });
 
-    // Retour utilisateur du 17/08/2026 : plus aucun repli "cluster -> VM" — vm-uuid-1/vm-uuid-2 ont
+    // Repli cluster -> VM réintroduit le 17/08/2026 (voir tests ci-dessus) : vm-uuid-1/vm-uuid-2 ont
     // bien un clusterUuid réel (voir subtitle "2 VMs" ci-dessus, dérivé indépendamment de
     // vmCountByClusterUuid) mais AUCUN hostUuid déterminable ici (aucun hôte physique mocké dans ce
-    // bloc de test), donc AUCUNE arête "hosts" — jamais un rattachement direct au cluster.
+    // bloc de test) — se rattachent donc au cluster plutôt que de rester flottantes.
     const hostEdges = topology.edges.filter((e) => e.kind === "hosts");
-    expect(hostEdges).toHaveLength(0);
-    // vm-c (clusterUuid absent) n'a, comme avant, produit aucune arête.
+    expect(hostEdges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "nutanix-vm:vm-uuid-1" }),
+        expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "nutanix-vm:vm-uuid-2" }),
+      ]),
+    );
+    expect(hostEdges).toHaveLength(2);
+    // vm-c (clusterUuid ABSENT, pas seulement l'hôte) : aucun cluster vers lequel se replier, donc
+    // toujours aucune arête — seul ce cas précis reste sans arête "hosts".
     expect(topology.edges.some((e) => e.target === "nutanix-vm:vm-uuid-3")).toBe(false);
   });
 });
@@ -230,8 +284,10 @@ describe("getTopology — nœuds host physique Nutanix (kind \"host\", hostKind 
         networks: [{ subnetUuid: "subnet-1", subnetName: "VLAN 1", vlanId: 1, ips: ["172.16.8.48"] }],
       },
       // VM éteinte, hostUuid absent (ni status ni spec côté nutanix.ts#mapVmEntity, VM jamais
-      // démarrée) : ne doit produire AUCUNE arête "hosts" — retour utilisateur du 17/08/2026,
-      // jamais de rattachement direct au cluster (voir services/topology.ts).
+      // démarrée) : se rattache au CLUSTER (repli réintroduit le 17/08/2026 après retour
+      // utilisateur — "les vm arreter ici se sont pas relier", un nœud totalement flottant sans la
+      // moindre arête est pire qu'un rattachement honnêtement affiché comme non confirmé côté
+      // frontend, voir nutanixVmHostEdgeState/topologyGraphShared.tsx).
       { id: "vm-uuid-2", name: "vm-b", powerState: "off", numVcpus: 1, memoryMib: 1024, cluster: "CLUSTER_AHV_HDV", clusterUuid: "cluster-uuid-1" },
     ]);
 
@@ -252,18 +308,17 @@ describe("getTopology — nœuds host physique Nutanix (kind \"host\", hostKind 
     expect(host1?.subtitle).toContain("1 VM");
 
     const hostEdges = topology.edges.filter((e) => e.kind === "hosts");
-    // cluster -> host-uuid-1, cluster -> host-uuid-2, host-uuid-1 -> vm-uuid-1 (placement réel).
-    // vm-uuid-2 (éteinte, aucun hostUuid déterminable) n'apparaît dans AUCUNE arête "hosts" —
-    // invariant demandé le 17/08/2026 : le cluster ne porte jamais d'arête directe vers une VM.
+    // cluster -> host-uuid-1, cluster -> host-uuid-2, host-uuid-1 -> vm-uuid-1 (placement réel),
+    // cluster -> vm-uuid-2 (repli, VM éteinte sans hôte déterminable — voir commentaire ci-dessus).
     expect(hostEdges).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "host:nutanix-host:host-uuid-1" }),
         expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "host:nutanix-host:host-uuid-2" }),
         expect.objectContaining({ source: "host:nutanix-host:host-uuid-1", target: "nutanix-vm:vm-uuid-1" }),
+        expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "nutanix-vm:vm-uuid-2" }),
       ]),
     );
-    expect(hostEdges.some((e) => e.target === "nutanix-vm:vm-uuid-2")).toBe(false);
-    expect(hostEdges).toHaveLength(3);
+    expect(hostEdges).toHaveLength(4);
     // Jamais un rattachement DOUBLE (host ET cluster en même temps) pour la même VM placée.
     expect(topology.edges.filter((e) => e.target === "nutanix-vm:vm-uuid-1")).toHaveLength(1);
 
@@ -277,7 +332,7 @@ describe("getTopology — nœuds host physique Nutanix (kind \"host\", hostKind 
     });
   });
 
-  it("si l'hôte visé par une VM n'est plus dans la liste réellement retournée (course), aucune arête « hosts » n'est fabriquée pour cette VM (jamais de repli cluster)", async () => {
+  it("si l'hôte visé par une VM n'est plus dans la liste réellement retournée (course), la VM se rattache au cluster (repli, jamais flottante)", async () => {
     isNutanixConfiguredMock.mockResolvedValue(true);
     getNutanixClustersMock.mockResolvedValue([{ uuid: "cluster-uuid-1", name: "CLUSTER_AHV_HDV" }]);
     getNutanixHostsMock.mockResolvedValue([]); // hôte supprimé/injoignable entre les deux appels
@@ -297,9 +352,12 @@ describe("getTopology — nœuds host physique Nutanix (kind \"host\", hostKind 
     const topology = await getTopology();
 
     expect(topology.nodes.some((n) => n.kind === "host" && n.hostKind === "nutanix-host")).toBe(false);
-    // Retour utilisateur du 17/08/2026 : plus aucun repli "cluster -> VM" — cette VM reste un nœud
-    // visible mais sans la moindre arête "hosts" tant que son hôte réel n'est pas déterminable.
-    expect(topology.edges.some((e) => e.kind === "hosts" && e.target === "nutanix-vm:vm-uuid-1")).toBe(false);
+    // Repli cluster -> VM réintroduit le 17/08/2026 (voir commentaire du test précédent) : cette VM
+    // n'obtient plus jamais une arête vers un hôte disparu de la liste réelle, mais reste rattachée
+    // au cluster plutôt que de rester un nœud totalement flottant sans la moindre arête "hosts".
+    expect(topology.edges).toContainEqual(
+      expect.objectContaining({ kind: "hosts", source: "host:nutanix-cluster:cluster-uuid-1", target: "nutanix-vm:vm-uuid-1" }),
+    );
   });
 });
 
@@ -413,5 +471,44 @@ describe("getTopology — nœud host LXD (kind \"host\", hostKind \"lxc\")", () 
     const unreachableTopology = await getTopology();
     const unreachableNode = unreachableTopology.nodes.find((n) => n.id === "host:lxc");
     expect(unreachableNode).toMatchObject({ status: "stopped", subtitle: "https://lxd.lecreusot.priv:8443" });
+  });
+});
+
+/**
+ * Mission du 17/08/2026, point 2 : sans caching d'aucune sorte côté services/nutanix.ts (voir son
+ * en-tête), un poll Nutanix en échec fait DISPARAÎTRE tous les nœuds VM/cluster/hôte de la réponse
+ * plutôt que d'en afficher une valeur obsolète — `Topology#nutanixLastPoll` est le SEUL moyen pour
+ * le frontend de distinguer "aucune VM réellement" de "Nutanix injoignable à ce poll précis".
+ */
+describe("getTopology — Topology#nutanixLastPoll (fraîcheur du dernier poll Nutanix)", () => {
+  it("absent si Nutanix n'a jamais été configuré/jamais encore pollé", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(false);
+    getNutanixVmsMock.mockResolvedValue([]);
+    lastKnownNutanixPollMock.mockReturnValue(null);
+
+    const topology = await getTopology();
+
+    expect(topology).not.toHaveProperty("nutanixLastPoll");
+  });
+
+  it("reachable: true après un poll réussi (simple report de services/nutanix.ts#lastKnownNutanixPoll)", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(true);
+    getNutanixVmsMock.mockResolvedValue([]);
+    lastKnownNutanixPollMock.mockReturnValue({ reachable: true, at: "2026-08-17T10:00:00.000Z" });
+
+    const topology = await getTopology();
+
+    expect(topology.nutanixLastPoll).toEqual({ reachable: true, at: "2026-08-17T10:00:00.000Z" });
+  });
+
+  it("reachable: false après un poll en échec — jamais une VM inventée pour combler l'absence", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(true);
+    getNutanixVmsMock.mockResolvedValue([]); // échec du poll -> [] (voir services/nutanix.ts#getNutanixVms)
+    lastKnownNutanixPollMock.mockReturnValue({ reachable: false, at: "2026-08-17T10:05:00.000Z" });
+
+    const topology = await getTopology();
+
+    expect(topology.nutanixLastPoll).toEqual({ reachable: false, at: "2026-08-17T10:05:00.000Z" });
+    expect(topology.nodes.some((n) => n.kind === "nutanix-vm")).toBe(false);
   });
 });
