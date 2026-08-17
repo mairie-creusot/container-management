@@ -457,6 +457,8 @@ export function buildTopologyEdges(
         state,
         color,
         hasPublishedPort,
+        // Nature du lien (pastille au milieu de l'arête, voir EDGE_KIND_LABEL/edgeBadgeItems).
+        kindLabel: EDGE_KIND_LABEL[e.kind](nodesById.get(e.source), nodesById.get(e.target)),
         ...(e.ports ? { ports: e.ports } : {}),
         ...(e.private !== undefined ? { private: e.private } : {}),
         ...(e.encrypted !== undefined ? { encrypted: e.encrypted } : {}),
@@ -533,7 +535,23 @@ function formatPortLabel(ports?: TopologyEdgePort[]): string | null {
   return ports.length > 1 ? `${base} +${ports.length - 1}` : base;
 }
 
-interface EdgeBadgeData {
+/** Libellé de la NATURE du lien, par kind d'arête (pastille au milieu — maquette validée).
+ * network : NOM RÉEL du network à l'extrémité, jamais un libellé générique quand il est connu. */
+export const EDGE_KIND_LABEL: Record<
+  TopologyEdge["kind"],
+  (source: TopologyNode | undefined, target: TopologyNode | undefined) => string
+> = {
+  network: (source, target) => {
+    const networkNode = target?.kind === "network" ? target : source?.kind === "network" ? source : undefined;
+    return networkNode ? `réseau ${networkNode.label}` : "réseau";
+  },
+  mount: () => "montage",
+  // Cluster -> hôte AHV = "hôte physique" ; hôte/environnement -> conteneur ou VM = "hébergement".
+  hosts: (_source, target) => (target?.kind === "host" ? "hôte physique" : "hébergement"),
+  "automation-flow": () => "automatisation",
+};
+
+export interface EdgeBadgeData {
   ports?: TopologyEdgePort[];
   private?: boolean;
   encrypted?: boolean;
@@ -543,14 +561,26 @@ interface EdgeBadgeData {
    * dernier hôte assigné/déclaré. Absent pour tout autre cas (VM éteinte/en erreur, cluster ->
    * hôte, conteneur...) — la couleur/le pointillé suffisent déjà à ces cas, pas de badge en plus. */
   nutanixPlacementConfirmed?: boolean;
+  /** Libellé de nature du lien (EDGE_KIND_LABEL) — masqué si un badge spécifique prime. */
+  kindLabel?: string;
+  /** État de santé de l'arête (buildTopologyEdges) — colore la pastille de nature du lien. */
+  state?: EdgeHealthState;
 }
 
 interface EdgeBadgeItem {
   text: string;
-  tone: "neutral" | "good" | "warn";
+  tone: "neutral" | "good" | "warn" | "critical";
 }
 
-function edgeBadgeItems(data: EdgeBadgeData): EdgeBadgeItem[] {
+/** Couleur de la pastille de nature du lien, héritée de l'état de l'arête. */
+function edgeStateTone(state: EdgeHealthState | undefined): EdgeBadgeItem["tone"] {
+  if (state === "healthy") return "good";
+  if (state === "starting") return "warn";
+  if (state === "unhealthy") return "critical";
+  return "neutral";
+}
+
+export function edgeBadgeItems(data: EdgeBadgeData): EdgeBadgeItem[] {
   const items: EdgeBadgeItem[] = [];
   const portLabel = formatPortLabel(data.ports);
   if (portLabel) items.push({ text: portLabel, tone: "neutral" });
@@ -563,6 +593,10 @@ function edgeBadgeItems(data: EdgeBadgeData): EdgeBadgeItem[] {
         ? { text: "Placement confirmé", tone: "good" }
         : { text: "Dernier hôte connu", tone: "warn" },
     );
+  }
+  // Un badge spécifique (port publié, placement Nutanix) prime : jamais un 2e libellé empilé dessus.
+  if (data.kindLabel && !portLabel && data.nutanixPlacementConfirmed === undefined) {
+    items.unshift({ text: data.kindLabel, tone: edgeStateTone(data.state) });
   }
   return items;
 }

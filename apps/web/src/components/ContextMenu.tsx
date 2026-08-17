@@ -3,6 +3,8 @@ import { useEffect, useRef } from "react";
 export interface ContextMenuItem {
   label: string;
   onClick: () => void;
+  /** Icône optionnelle affichée devant le libellé (ex : picker "Attacher" du graphe). */
+  icon?: (props: { className?: string }) => JSX.Element;
   /** Style rouge pour les actions destructrices (ex : Supprimer). */
   danger?: boolean;
   disabled?: boolean;
@@ -44,21 +46,29 @@ export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) 
 
   return (
     <div className="context-menu" style={{ left, top }} ref={ref} role="menu">
-      {items.map((item, index) => (
-        <button
-          key={index}
-          type="button"
-          role="menuitem"
-          className={`context-menu__item${item.danger ? " context-menu__item--danger" : ""}`}
-          disabled={item.disabled}
-          onClick={() => {
-            onClose();
-            item.onClick();
-          }}
-        >
-          {item.label}
-        </button>
-      ))}
+      {items.map((item, index) => {
+        const Icon = item.icon;
+        return (
+          <button
+            key={index}
+            type="button"
+            role="menuitem"
+            className={`context-menu__item${item.danger ? " context-menu__item--danger" : ""}`}
+            disabled={item.disabled}
+            onClick={() => {
+              onClose();
+              item.onClick();
+            }}
+          >
+            {Icon && (
+              <span className="context-menu__item-icon">
+                <Icon />
+              </span>
+            )}
+            {item.label}
+          </button>
+        );
+      })}
     </div>
   );
 }

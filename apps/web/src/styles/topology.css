@@ -1095,6 +1095,12 @@
   background: var(--color-warning-bg);
 }
 
+/* Pastille de nature du lien sur une arête en panne réelle (edgeStateTone, topologyGraphShared.tsx). */
+.topology-edge-badge__item--critical {
+  color: var(--color-critical);
+  background: var(--color-critical-bg);
+}
+
 /* Menu contextuel (clic droit sur le canevas, un nœud ou une arête) — même pattern visuel que
    .profile-menu (Topbar.tsx), mais positionné librement au point de clic. */
 .context-menu {
@@ -1131,6 +1137,23 @@
 
 .context-menu__item:hover:not(:disabled) {
   background: var(--color-surface-2);
+}
+
+/* Icône optionnelle d'un item (ex : picker "Attacher" — clé pour Secret, engrenage pour Variable). */
+.context-menu__item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-right: 8px;
+  flex: none;
+  color: var(--color-text-muted);
+}
+
+.context-menu__item-icon svg {
+  width: 100%;
+  height: 100%;
 }
 
 .context-menu__item:disabled {
@@ -1178,6 +1201,38 @@
   font-size: 13px;
   font-weight: 600;
   margin-bottom: 10px;
+}
+
+/* Sous-titre d'un popover (ex : AttachEnvPopover — Variable vs Secret clairement distincts). */
+.graph-popover__desc {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--color-text-muted);
+  margin: -6px 0 10px;
+}
+
+/* Lien de navigation interne (ex : "Gérer les secrets" -> page Secrets). */
+.graph-popover__nav-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--accent-end);
+  cursor: pointer;
+}
+
+.graph-popover__nav-link:hover {
+  text-decoration: underline;
+}
+
+.graph-popover__nav-link svg {
+  width: 12px;
+  height: 12px;
+  flex: none;
 }
 
 .graph-popover .field {

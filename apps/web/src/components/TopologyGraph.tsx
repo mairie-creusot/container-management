@@ -57,7 +57,7 @@ import Modal from "@/components/Modal";
 import Skeleton from "@/components/Skeleton";
 import TopologyNodeDetailPanel, { type TabId } from "@/components/TopologyNodeDetailPanel";
 import TopologySubGraphPanel from "@/components/TopologySubGraphPanel";
-import { IconGithub, IconInfo, IconSearch, IconTopology, IconTrash } from "@/components/icons";
+import { IconGithub, IconInfo, IconKey, IconSearch, IconSettings, IconTopology, IconTrash, IconVolumes } from "@/components/icons";
 // Réutilise TEL QUEL le flux de déploiement GitHub existant (détection Dockerfile/compose/
 // Terraform, build, déploiement, déploiement auto sur push — voir ARCHITECTURE.md § "Intégration
 // GitHub") : CreateSpotlight ne fait que le monter dans une modal par-dessus le canevas, aucune
@@ -1990,6 +1990,12 @@ function AttachEnvPopover({ containerNode, variant, x, y, onClose }: AttachEnvPo
   const canSubmit = nameValid && (variant === "env" || !!secretId);
   const selectedSecret = secrets.find((s) => s.id === secretId) ?? null;
 
+  // Navigue vers la vraie page Secrets (création/gestion) — ferme le popover en partant.
+  function goToSecrets() {
+    dispatch(setCurrentView("secrets"));
+    onClose();
+  }
+
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (!canSubmit) return;
@@ -2025,6 +2031,11 @@ function AttachEnvPopover({ containerNode, variant, x, y, onClose }: AttachEnvPo
           ? `Variable d'environnement pour « ${containerNode.label} »`
           : `Attacher un secret à « ${containerNode.label} »`}
       </div>
+      <p className="graph-popover__desc">
+        {variant === "env"
+          ? "Valeur saisie ici, en clair. Pour une valeur sensible, préférez un secret."
+          : "La valeur vient du gestionnaire de secrets — résolue côté serveur, jamais retapée ici."}
+      </p>
       <form onSubmit={handleSubmit}>
         <div className="field">
           <label htmlFor="graph-env-name">Nom de la variable</label>
@@ -2069,12 +2080,15 @@ function AttachEnvPopover({ containerNode, variant, x, y, onClose }: AttachEnvPo
             </select>
             {secrets.length === 0 && (
               <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
-                Aucun secret dans le gestionnaire — créez-en un depuis la page Secrets.
+                Aucun secret dans le gestionnaire — créez-en un d'abord depuis la page Secrets.
               </span>
             )}
             {selectedSecret?.description && (
               <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>{selectedSecret.description}</span>
             )}
+            <button type="button" className="graph-popover__nav-link" onClick={goToSecrets} disabled={busy}>
+              <IconKey /> {secrets.length === 0 ? "Créer un secret — ouvrir la page Secrets" : "Gérer les secrets"}
+            </button>
           </div>
         )}
         <p className="create-container-hint">
@@ -3620,15 +3634,19 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           items={[
             {
               label: "Stockage (volume)…",
+              icon: IconVolumes,
               onClick: () =>
                 setMountVolumePopover({ target: { kind: "new-volume", containerNode: attachPicker.node }, x: attachPicker.x, y: attachPicker.y }),
             },
             {
               label: "Variable d'environnement…",
+              icon: IconSettings,
               onClick: () => setAttachEnvPopover({ node: attachPicker.node, variant: "env", x: attachPicker.x, y: attachPicker.y }),
             },
+            // Clé (vs engrenage) : la valeur vient du gestionnaire de secrets, jamais retapée.
             {
-              label: "Secret…",
+              label: "Secret (du gestionnaire)…",
+              icon: IconKey,
               onClick: () => setAttachEnvPopover({ node: attachPicker.node, variant: "secret", x: attachPicker.x, y: attachPicker.y }),
             },
           ]}
