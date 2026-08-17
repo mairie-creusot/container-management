@@ -112,7 +112,7 @@
    grandit), quelle que soit la Position utilisée. Règle générique, indépendante du côté : reste
    valable même après le correctif SÉPARÉ du même jour qui a fait passer les nœuds "host"/
    "nutanix-vm" de Position.Top/Bottom à Position.Left/Right (cohérence avec le reste du graphe,
-   voir NODE_CAPABILITIES dans topologyGraphShared.tsx) — ces nœuds ne posent donc plus AUCUN
+   voir NODE_CONTRACT dans topologyNodeContract.tsx) — ces nœuds ne posent donc plus AUCUN
    Handle en Top/Bottom, mais les 4 règles ci-dessous restent nécessaires pour tout nœud qui, lui,
    utilise réellement ces côtés (aucun dans ce graphe aujourd'hui, gardées pour rester générique).
    Correctif : on pousse chaque poignée ENTIÈREMENT à

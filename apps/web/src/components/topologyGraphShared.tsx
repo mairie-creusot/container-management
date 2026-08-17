@@ -11,27 +11,46 @@ import {
   type EdgeProps,
   type NodeProps,
 } from "@xyflow/react";
+import { IconBell, IconChevron, IconClose, IconFolder, IconGlobe, IconNetworks, IconVolumes } from "@/components/icons";
 import {
-  IconBackup,
-  IconBell,
-  IconBranch,
-  IconChevron,
-  IconClock,
-  IconClose,
-  IconContainers,
-  IconFolder,
-  IconGitOps,
-  IconGlobe,
-  IconHostMachine,
-  IconNetworks,
-  IconPlay,
-  IconServer,
-  IconStack,
-  IconVm,
-  IconVolumes,
-} from "@/components/icons";
+  CAPABILITY_DEFS,
+  CAPABILITY_PORT_META,
+  KIND_ICON,
+  NODE_CONTRACT,
+  type AutomationTriggerStatus,
+  type CapabilityId,
+  type EdgeHealthInfo,
+  type EdgeHealthState,
+  type PortSpec,
+} from "@/components/topologyNodeContract";
 import type { TopologyEdge, TopologyEdgePort, TopologyGroup, TopologyNode, TopologyNodeAttachment } from "@/types";
 import type { LifecycleAction } from "@/features/containers/containersSlice";
+
+/**
+ * Registre déclaratif des kinds (17/08/2026) : TOUT ce qui est spécifique à un `kind` de nœud
+ * (icône, couleur MiniMap, ports/Handles, santé d'arête, seuils d'alertes de ressources, actions
+ * du menu contextuel, colonne par défaut) vit désormais dans topologyNodeContract.tsx#NODE_CONTRACT
+ * — ce fichier n'est plus que le MOTEUR DE RENDU générique qui le consomme (GraphNode,
+ * buildTopologyEdges, computeNodeResourceAlerts...), sans plus aucun `if (kind === ...)` de
+ * plateforme. Ré-exports ci-dessous : compatibilité d'import pour les consommateurs historiques
+ * (TopologyGraph.tsx, TopologySubGraphPanel.tsx, TopologyNodeDetailPanel.tsx,
+ * topologyGraphShared.test.ts) — mêmes noms publics qu'avant la migration, un seul déménagement de
+ * source de vérité, pas une cascade de changements d'imports dans la même passe.
+ */
+export {
+  CAPABILITY_DEFS,
+  CPU_ALERT_THRESHOLD_PERCENT,
+  KIND_ICON,
+  MEMORY_ALERT_RATIO,
+  MINIMAP_NODE_COLOR,
+  NODE_CONTRACT,
+  VOLUME_MOUNT_INFO,
+  nutanixVmHostEdgeState,
+  type CapabilityDef,
+  type CapabilityId,
+  type EdgeHealthState,
+  type PortSpec,
+} from "@/components/topologyNodeContract";
 
 /**
  * Éléments du graphe de topologie partagés entre le graphe principal (TopologyGraph.tsx) et le
@@ -51,41 +70,6 @@ export function formatMem(bytes: number): string {
   return `${(mb / 1024).toFixed(2)} Go`;
 }
 
-export const KIND_ICON: Record<TopologyNode["kind"], (props: { className?: string }) => JSX.Element> = {
-  container: IconContainers,
-  volume: IconVolumes,
-  network: IconNetworks,
-  "nutanix-vm": IconVm,
-  "ad-server": IconServer,
-  host: IconHostMachine,
-  // Icône générique "infra" (empilement de couches) — un seul kind de nœud pour les 3 moteurs
-  // (tofu/ansible/packer, voir TopologyNode#iacEngine), pas d'icône distincte par moteur : IconStack
-  // était déjà l'icône Sidebar de l'ancienne page Infra-as-code (voir Sidebar.tsx), aucune icône
-  // dédiée par outil n'existe dans icons.tsx et en ajouter 3 pour une distinction que le sous-titre
-  // du nœud (label du moteur, services/topology.ts#getIacWorkspaceNodes) porte déjà n'aurait rien
-  // apporté de plus lisible sur une carte de 260px de large.
-  "iac-workspace": IconStack,
-  // Cron job (services/cronJobsStore.ts) — horloge, façon Railway "Cron Jobs".
-  "cron-job": IconClock,
-  // Sauvegarde (services/backupsStore.ts) — même icône que l'ancienne page BackupsPage.tsx/Sidebar.
-  backup: IconBackup,
-  // Dépôt Git source GitOps (services/topology.ts#getGitOpsSourceNode) — même icône que l'ancienne
-  // page GitOps.tsx/Sidebar (voir icons.tsx#IconGitOps), réutilisée telle quelle.
-  "gitops-source": IconGitOps,
-  // Déclenchement d'une automatisation (services/automationStore.ts) — cloche d'alerte (IconBell,
-  // déjà utilisée par Topbar.tsx pour les notifications) : un trigger surveille un état et "sonne
-  // l'alarme", aucune icône éclair dédiée n'existe dans ce fichier, IconBell porte déjà ce sens.
-  "automation-trigger": IconBell,
-  // Condition d'une automatisation — point de décision qui divise la chaîne en deux issues
-  // possibles (voir icons.tsx#IconBranch, ajoutée pour ce chantier faute d'icône de fourche déjà
-  // disponible dans icons.tsx).
-  "automation-condition": IconBranch,
-  // Action d'une automatisation — déclenchement/exécution réelle (voir icons.tsx#IconPlay, déjà
-  // utilisée pour "Démarrer"/"Exécuter maintenant" ailleurs dans l'appli), même sens ici : cette
-  // action "joue" la commande configurée.
-  "automation-action": IconPlay,
-};
-
 /** Libellés d'action conteneur (start/stop/restart/remove) — source UNIQUE partagée entre
  * TopologyGraph.tsx (menu contextuel du graphe principal) et TopologySubGraphPanel.tsx (menu
  * contextuel du sous-graphe, retour utilisateur du 13/08/2026 : "le clic droit n'est pas sur le
@@ -96,236 +80,6 @@ export const ACTION_LABEL: Record<LifecycleAction, string> = {
   stop: "Arrêter",
   restart: "Redémarrer",
   remove: "Supprimer",
-};
-
-/** Couleurs de la MiniMap par type de nœud — mêmes valeurs que celles utilisées pour l'icône du
- * nœud correspondant dans topology.css (--accent-start, --color-warning, --accent-end). */
-export const MINIMAP_NODE_COLOR: Record<TopologyNode["kind"], string> = {
-  container: "#3b6fef",
-  volume: "#f5a524",
-  network: "#7c5cfc",
-  "nutanix-vm": "#22c55e",
-  "ad-server": "#e879f9",
-  // Teal — distinct des cinq autres couleurs déjà utilisées ci-dessus, cohérent avec
-  // .topology-node--host/.topology-detail-panel__icon--host dans topology.css.
-  host: "#14b8a6",
-  // Orange brûlé — distinct des six autres couleurs déjà utilisées ci-dessus (notamment de l'ambre
-  // du volume, #f5a524), cohérent avec .topology-node--iac-workspace/.topology-detail-panel__icon--
-  // iac-workspace dans topology.css.
-  "iac-workspace": "#f97316",
-  // Jaune — distinct des sept autres couleurs déjà utilisées (notamment de l'ambre du volume et de
-  // l'orange brûlé de "iac-workspace" ci-dessus), cohérent avec .topology-node--cron-job/
-  // .topology-detail-panel__icon--cron-job dans topology.css.
-  "cron-job": "#facc15",
-  // Bleu ciel — distinct des huit autres couleurs déjà utilisées (notamment du bleu royal du
-  // conteneur), cohérent avec .topology-node--backup/.topology-detail-panel__icon--backup dans
-  // topology.css.
-  backup: "#0ea5e9",
-  // Rose/rouge — distinct des neuf autres couleurs déjà utilisées ci-dessus, cohérent avec
-  // .topology-node--gitops-source/.topology-detail-panel__icon--gitops-source dans topology.css.
-  "gitops-source": "#f43f5e",
-  // Rouge vif "alerte" — distinct des dix autres couleurs déjà utilisées ci-dessus (notamment du
-  // rose/rouge de gitops-source, plus froid), cohérent avec .topology-node--automation-trigger/
-  // .topology-detail-panel__icon--automation-trigger dans topology.css.
-  "automation-trigger": "#dc2626",
-  // Gris-bleu neutre — une condition n'a pas d'état "positif/négatif" propre, distinct des onze
-  // autres couleurs déjà utilisées, cohérent avec .topology-node--automation-condition/
-  // .topology-detail-panel__icon--automation-condition dans topology.css.
-  "automation-condition": "#64748b",
-  // Vert vif (lime) — volontairement une nuance DIFFÉRENTE de --color-success (#22c55e, déjà pris
-  // par le statut "running"/nutanix-vm) pour ne pas laisser croire à un statut, distinct des douze
-  // autres couleurs déjà utilisées, cohérent avec .topology-node--automation-action/
-  // .topology-detail-panel__icon--automation-action dans topology.css.
-  "automation-action": "#84cc16",
-};
-
-/**
- * Connexions par capacité, ports typés (façon Railway) — chaque type de nœud déclare la liste des
- * "ports" qu'il expose. Un port a une capacité (ce qu'il peut relier) et un type de Handle React
- * Flow (source/target) qui fixe son côté du nœud. Pour ajouter un futur 4e type de nœud (ex :
- * registry), il suffit de lui déclarer sa propre entrée dans NODE_CAPABILITIES + une entrée dans
- * CAPABILITY_DEFS pour toute nouvelle capacité qu'il introduit — classifyConnection/
- * isValidConnection/handleConnect (TopologyGraph.tsx) restent inchangés, ils ne lisent que ces
- * deux tables.
- */
-export type CapabilityId = "network" | "attach" | "volume-mount" | "provide" | "hosted-by" | "hosts";
-
-export interface PortSpec {
-  /** Id du Handle React Flow — unique au sein d'un même type de nœud. */
-  id: string;
-  capability: CapabilityId;
-  handleType: "source" | "target";
-  position: Position;
-  /** Tooltip du Handle. */
-  label: string;
-  /** Suffixe de classe .topology-handle--<token> — couleur reprise de celle de l'icône du même
-   * type de nœud (variables.css), pas de couleur arbitraire ajoutée. */
-  colorToken: "network" | "volume" | "host";
-}
-
-export const NODE_CAPABILITIES: Record<TopologyNode["kind"], PortSpec[]> = {
-  container: [
-    { id: "network", capability: "network", handleType: "source", position: Position.Right, label: "Network", colorToken: "network" },
-    {
-      id: "volume-mount",
-      capability: "volume-mount",
-      handleType: "target",
-      position: Position.Left,
-      label: "Volume (lecture seule)",
-      colorToken: "volume",
-    },
-  ],
-  volume: [
-    { id: "provide", capability: "provide", handleType: "source", position: Position.Right, label: "Fournit un volume", colorToken: "volume" },
-  ],
-  network: [
-    { id: "attach", capability: "attach", handleType: "target", position: Position.Left, label: "Attache un conteneur", colorToken: "network" },
-  ],
-  // Bug réel corrigé le 14/08/2026 (retour utilisateur sur capture d'écran : "c'est pas relier
-  // corectement cluster au hote 1 2 3 eu vm cncerner") : `ports: []` ici faisait que GraphNode
-  // (voir plus bas, `ports.map(...)`) ne posait AUCUN <Handle> React Flow sur ce nœud — sans
-  // ancrage DOM des deux côtés, React Flow ne peut simplement PAS dessiner une arête, même quand
-  // elle existe bel et bien dans les données (services/topology.ts#getNutanixTopologyParts
-  // produisait déjà la bonne arête `kind: "hosts"` host->VM, invisible côté rendu uniquement). Un
-  // seul port TARGET ("hosted-by", même capacité/position/couleur que le port synthétique déjà
-  // posé sur un groupe hébergé, voir CAPABILITY_PORT_META ci-dessous) suffit : une VM Nutanix n'est
-  // jamais elle-même la SOURCE d'une arête "hosts" (jamais l'hôte de quoi que ce soit d'autre).
-  // Reste non-interactif au clic-glissé (voir CAPABILITY_DEFS["hosted-by"] ci-dessous) : ce
-  // placement est une vérité serveur recalculée à chaque poll, pas une intention à modifier à la
-  // main depuis ce port.
-  //
-  // Position.Left (PAS Top, bug corrigé le 17/08/2026 — retour utilisateur, capture d'écran à
-  // l'appui : "les input et outpute ne sont pas a gauche et droite comme les autre node il sont en
-  // haut en bas donc sa vas pas regarde exemple quai dev capture") : une mission précédente avait
-  // posé ce port en Position.Top/Bottom pour "coller" visuellement à la hiérarchie Cluster->Hôte->
-  // VM qui se LIT verticalement — mais AUCUN autre nœud de ce graphe (conteneur, volume, network,
-  // et le port synthétique "hosted-by" d'un groupe hébergé, voir CAPABILITY_PORT_META ci-dessous)
-  // n'utilise Top/Bottom : la convention établie partout ailleurs est TARGET = Left / SOURCE =
-  // Right, quelle que soit la disposition spatiale réelle des nœuds (les nœuds sont librement
-  // déplaçables par l'utilisateur, la position d'un Handle sur la carte ne doit refléter QUE son
-  // rôle source/target, jamais une hypothèse de mise en page). Voir hostHierarchyPositions
-  // (plus bas dans ce fichier) pour l'ajustement de layout qui accompagne ce changement (arbre
-  // désormais disposé horizontalement, niveau -> colonne, pour que ces ports Left/Right relient
-  // proprement parent/enfant sans repli en S disgracieux).
-  "nutanix-vm": [
-    { id: "hosted-by", capability: "hosted-by", handleType: "target", position: Position.Left, label: "Hébergé par", colorToken: "host" },
-  ],
-  // Même principe pour le contrôleur de domaine/DNS AD (services/adDns.ts) : jamais relié par une
-  // arête (aucune donnée ne prouve un lien réel avec un nœud Docker/Nutanix précis).
-  "ad-server": [],
-  // Nœuds "host" (cluster Nutanix physique / hôte AHV physique / environnement Docker distant /
-  // hôte LXD, voir services/topology.ts) — même correctif que "nutanix-vm" ci-dessus, mais ce kind
-  // peut être BOTH bout d'une arête "hosts" selon le hostKind réel (un cluster Nutanix est
-  // toujours SOURCE vers ses hôtes physiques ; un hôte physique AHV est TARGET depuis son cluster
-  // ET SOURCE vers les VMs qu'il héberge, voir getNutanixTopologyParts) : les deux Handles sont
-  // posés INCONDITIONNELLEMENT sur tout nœud "host" (même table statique par `kind`, pas par
-  // `hostKind` — NODE_CAPABILITIES est indexée uniquement par `kind`), exactement comme un
-  // conteneur affiche toujours ses deux ports network/volume-mount même s'il n'utilise que l'un
-  // des deux. Un hôte Docker distant/LXD qui ne participe à aucune arête "hosts" affiche donc ces
-  // deux points de connexion sans jamais s'en servir — cosmétique, pas un bug (même compromis
-  // assumé que pour tout autre kind du graphe). `hosts` reste non-interactif au clic-glissé (voir
-  // CAPABILITY_DEFS ci-dessous) — jamais de fausse relation d'hébergement crée à la main.
-  //
-  // Position.Left/Right (PAS Top/Bottom, même correctif du 17/08/2026 que "nutanix-vm" ci-dessus) :
-  // TARGET ("hosted-by", reçoit d'un parent) à Gauche, SOURCE ("hosts", pointe vers les enfants) à
-  // Droite — exactement la même convention que container(Left target volume-mount/Right source
-  // network)/network(Left target attach)/volume(Right source provide) déjà en place partout
-  // ailleurs dans ce fichier.
-  host: [
-    { id: "hosted-by", capability: "hosted-by", handleType: "target", position: Position.Left, label: "Hébergé par", colorToken: "host" },
-    { id: "hosts", capability: "hosts", handleType: "source", position: Position.Right, label: "Héberge", colorToken: "host" },
-  ],
-  // Workspaces IaC (voir services/topology.ts#getIacWorkspaceNodes) : indépendants de l'infra Docker
-  // locale comme les VMs Nutanix/le contrôleur AD ci-dessus — un `tofu apply`/`ansible-playbook`/
-  // `packer build` peut provisionner une ressource Docker, mais QUAI n'a aucune donnée reliant
-  // RÉELLEMENT ce workspace à un nœud précis du graphe, jamais d'arête ou de port inventés.
-  "iac-workspace": [],
-  // Cron job/sauvegarde (voir services/topology.ts#getCronJobNodes/getBackupNodes) : même principe
-  // — définitions indépendantes de Docker, jamais reliées par une arête à leur conteneur/volume
-  // cible (QUAI n'a aucune garantie que cette relation reste vraie dans le temps, ex : conteneur
-  // cible renommé/supprimé — voir CronJobDefinition#containerName dénormalisé).
-  "cron-job": [],
-  backup: [],
-  // Dépôt Git source GitOps (voir services/topology.ts#getGitOpsSourceNode) — même principe qu'ad-
-  // server/host/iac-workspace ci-dessus : une config globale indépendante de Docker, jamais reliée
-  // par une arête à un nœud précis du graphe (QUAI n'a aucune donnée reliant réellement un manifeste
-  // à la ressource Docker/Kubernetes qu'il décrit au-delà du rapprochement best-effort déjà utilisé
-  // pour le badge "Dérive GitOps" des conteneurs, jamais assez fiable pour une arête).
-  "gitops-source": [],
-  // Nœuds d'automatisation (trigger/condition/action, voir services/automationStore.ts) : PAS de
-  // "port" de connexion typé réseau/volume comme un conteneur — restent [] ici, comme host/
-  // iac-workspace/cron-job/backup/gitops-source ci-dessus. Ils sont néanmoins bien connectables
-  // entre eux par glisser-déposer (trigger->condition, trigger->action, condition->action) : ce
-  // câblage est géré directement par GraphNode (Handles génériques posés ci-dessous, hors de cette
-  // table de capacités typées) et par TopologyGraph.tsx#classifyConnection/handleConnect (cas
-  // spécial "les deux bouts sont des nœuds d'automatisation", POST /api/automation/edges — voir
-  // apps/api/src/routes/automation.ts#isValidConnection pour la même règle d'ordre appliquée ici
-  // côté UI avant tout appel réseau).
-  "automation-trigger": [],
-  "automation-condition": [],
-  "automation-action": [],
-};
-
-export interface CapabilityDef {
-  /** Capacité compatible attendue à l'autre bout de la connexion. */
-  linksTo: CapabilityId;
-  /** true = action réelle déclenchée au drop (docker network connect) ; false = message d'info. */
-  interactive: boolean;
-  infoMessage?: string;
-}
-
-export const VOLUME_MOUNT_INFO =
-  "Impossible d'attacher un volume à un conteneur existant : Docker ne permet pas de modifier les montages sans recréer le conteneur.";
-
-export const CAPABILITY_DEFS: Record<CapabilityId, CapabilityDef> = {
-  network: { linksTo: "attach", interactive: true },
-  attach: { linksTo: "network", interactive: true },
-  "volume-mount": { linksTo: "provide", interactive: false, infoMessage: VOLUME_MOUNT_INFO },
-  provide: { linksTo: "volume-mount", interactive: false, infoMessage: VOLUME_MOUNT_INFO },
-  // Posé À LA FOIS sur les ports synthétiques d'un groupe replié (deriveGroupPorts ci-dessous, ex:
-  // docker-local -> conteneur membre) ET, depuis le correctif du 14/08/2026 (voir NODE_CAPABILITIES
-  // ci-dessus), sur tout vrai nœud "nutanix-vm"/"host" — toujours le bout TARGET d'une arête
-  // "hosts" (jamais l'origine d'une connexion glissée par l'utilisateur, React Flow ne démarre un
-  // geste de connexion que depuis un Handle `type="source"`). `linksTo: "hosts"` (le pendant SOURCE,
-  // voir juste en dessous) : jamais interactif, ce placement est une vérité serveur recalculée à
-  // chaque poll, pas une intention à modifier à la main depuis ce port.
-  "hosted-by": { linksTo: "hosts", interactive: false, infoMessage: "Relation d'hébergement posée par le serveur, non modifiable ici." },
-  // Pendant SOURCE de "hosted-by" ci-dessus — posé UNIQUEMENT sur un vrai nœud "host" (voir
-  // NODE_CAPABILITIES), jamais sur un port synthétique de groupe (un groupe n'est jamais lui-même
-  // la source d'une arête "hosts" dans ce premier lot, voir deriveGroupPorts). Même garde non-
-  // interactive que "hosted-by" : un clic-glissé depuis ce port affiche le même message plutôt que
-  // de ne rien faire silencieusement (avant ce correctif, le nœud "host" n'avait tout simplement
-  // aucun port, glisser depuis lui n'était même pas possible).
-  hosts: { linksTo: "hosted-by", interactive: false, infoMessage: "Relation d'hébergement posée par le serveur, non modifiable ici." },
-};
-
-/**
- * Métadonnées de rendu d'un port PAR CAPACITÉ (indépendantes du type de nœud qui le porte) —
- * reprises telles quelles des entrées NODE_CAPABILITIES existantes (même position/couleur/libellé
- * pour une capacité donnée, quel que soit le nœud) : un groupe (voir deriveGroupPorts ci-dessous)
- * n'est PAS un type de nœud avec ses propres ports fixes, ses ports dépendent de ce qu'il contient
- * réellement — cette table permet de construire un Handle synthétique cohérent avec le reste du
- * graphe pour n'importe quelle capacité, sans dupliquer position/couleur/libellé à chaque usage.
- */
-const CAPABILITY_PORT_META: Record<CapabilityId, Pick<PortSpec, "handleType" | "position" | "colorToken" | "label">> = {
-  network: { handleType: "source", position: Position.Right, colorToken: "network", label: "Network" },
-  attach: { handleType: "target", position: Position.Left, colorToken: "network", label: "Attache un conteneur" },
-  "volume-mount": { handleType: "target", position: Position.Left, colorToken: "volume", label: "Volume (lecture seule)" },
-  provide: { handleType: "source", position: Position.Right, colorToken: "volume", label: "Fournit un volume" },
-  // Position.Left (bug corrigé le 17/08/2026, même correctif que NODE_CAPABILITIES["nutanix-vm"/
-  // "host"] ci-dessus — voir leur commentaire pour le détail du retour utilisateur) : un groupe
-  // hébergé par un nœud "host" externe (ex: un groupe de VMs Nutanix relié à son cluster physique
-  // via une arête "hosts", voir services/topology.ts) utilise désormais la même convention TARGET
-  // = Left que le reste de ce fichier (volume-mount/attach), jamais un côté à part — voir
-  // deriveGroupPorts ci-dessous.
-  "hosted-by": { handleType: "target", position: Position.Left, colorToken: "host", label: "Hébergé par" },
-  // Jamais réellement lue par deriveGroupPorts (un groupe n'est jamais SOURCE d'une arête "hosts",
-  // voir CAPABILITY_DEFS["hosts"] ci-dessus) — entrée requise uniquement pour que ce
-  // `Record<CapabilityId, ...>` reste total après l'ajout de "hosts" à CapabilityId (NODE_CAPABILITIES
-  // pose ce port directement avec ses propres métadonnées pour un vrai nœud "host", sans passer par
-  // cette table synthétique). Valeurs alignées sur NODE_CAPABILITIES["host"] pour rester cohérentes
-  // si jamais réutilisées un jour (Position.Right, même correctif du 17/08/2026).
-  hosts: { handleType: "source", position: Position.Right, colorToken: "host", label: "Héberge" },
 };
 
 /**
@@ -384,9 +138,9 @@ export function resolveGroupMemberNodeIds(nodeIds: string[], allGroups: Topology
  * target d'une vraie TopologyEdge).
  *
  * Règle de correspondance capacité <-> (kind d'arête, membre source ou cible) — copie directe de
- * NODE_CAPABILITIES pour les kinds connectables (container/network/volume), plus "hosts" (source =
- * nœud host, ex: docker-local ; target = conteneur — voir services/topology.ts) qui n'a lui aucun
- * NODE_CAPABILITIES propre (jamais glissé à la main) mais reste réel et doit rester VISIBLE une
+ * NODE_CONTRACT[kind].ports (topologyNodeContract.tsx) pour les kinds connectables (container/
+ * network/volume), plus "hosts" (source = nœud host, ex: docker-local ; target = conteneur — voir
+ * services/topology.ts) qui n'a lui aucun port propre (jamais glissé à la main) mais reste réel et doit rester VISIBLE une
  * fois le groupe replié plutôt que silencieusement masqué :
  *  - arête "mount" (source = volume, target = conteneur) : conteneur membre -> "volume-mount"
  *    (le groupe consomme un volume extérieur) ; volume membre -> "provide" (le groupe fournit un
@@ -412,22 +166,6 @@ export function deriveGroupPorts(group: Pick<TopologyGroup, "nodeIds">, edges: T
   return Array.from(capabilities).map((capability) => ({ id: capability, capability, ...CAPABILITY_PORT_META[capability] }));
 }
 
-/** Seuil réel (pourcentage, cohérent avec TopologyNode#cpuPercent, voir apps/api/src/types.ts) à
- * partir duquel un conteneur `running` déclenche une alerte "CPU élevé" (voir
- * computeNodeResourceAlerts/TopologyAlertStack ci-dessous) — réévalué à chaque rafraîchissement de
- * la topologie (TopologyGraph.tsx, REFRESH_INTERVAL_MS), aucun débounce/hystérésis supplémentaire
- * pour ce premier lot : la carte apparaît/disparaît avec l'état réel. */
-export const CPU_ALERT_THRESHOLD_PERCENT = 90;
-
-/** Même principe que CPU_ALERT_THRESHOLD_PERCENT ci-dessus, mais pour la mémoire — RATIO (pas un
- * seuil absolu en octets, qui n'aurait aucun sens comparé d'un conteneur à l'autre) de
- * `memBytes` sur `memoryLimitBytes`. Contrairement au CPU (plafond naturel implicite, 100% par
- * cœur), la mémoire n'a AUCUN plafond réel sans une limite explicitement configurée à la création
- * du conteneur (voir services/docker.ts#ContainerHealthAndLimits) — cette alerte ne se déclenche
- * donc QUE quand `memoryLimitBytes` existe réellement, jamais un seuil absolu inventé en son
- * absence (voir computeNodeResourceAlerts ci-dessous). */
-export const MEMORY_ALERT_RATIO = 0.9;
-
 /** Une alerte de ressource RÉELLE détectée pour un nœud précis — `key` distingue CPU/mémoire quand
  * les deux sont dépassées simultanément sur le même nœud (voir computeNodeResourceAlerts). */
 export interface NodeResourceAlert {
@@ -437,9 +175,12 @@ export interface NodeResourceAlert {
 }
 
 /**
- * Détecte les alertes de ressource (CPU/mémoire) RÉELLES d'un nœud — fonction PURE, seule source de
- * vérité pour cette règle de seuil (CPU_ALERT_THRESHOLD_PERCENT/MEMORY_ALERT_RATIO ci-dessus),
- * appelée par TopologyAlertStack ci-dessous (pile fixe haut-droite, TopologyGraph.tsx) pour
+ * Détecte les alertes de ressource (CPU/mémoire) RÉELLES d'un nœud — fonction PURE, moteur
+ * GÉNÉRIQUE des seuils désormais déclarés PAR KIND dans le contrat (NODE_CONTRACT[kind].
+ * resourceAlerts, topologyNodeContract.tsx — seul "container" en déclare aujourd'hui, les kinds
+ * sans métriques live déclarent explicitement `null` et retournent [] ici, jamais un
+ * `if kind === "container"` implicite qui oublierait la prochaine plateforme à métriques).
+ * Appelée par TopologyAlertStack ci-dessous (pile fixe haut-droite, TopologyGraph.tsx) pour
  * construire la liste d'alertes à travers TOUS les nœuds du graphe. Extraite ici (retour
  * utilisateur du 17/08/2026, capture d'écran à l'appui : "ce genre alert devrais aparaitre en haut
  * a droite" — l'ancien rendu, ANCRÉ à chaque nœud individuellement dans le canevas, restait
@@ -447,19 +188,21 @@ export interface NodeResourceAlert {
  * précis) précisément pour que la logique de seuil ne puisse plus JAMAIS diverger entre deux
  * emplacements de rendu : un seul calcul, réutilisé partout où une alerte doit être affichée.
  * Seuils RÉELS sur node.cpuPercent/memBytes (déjà calculés server-side, docker.ts#
- * readContainerUsage), jamais sur un conteneur arrêté.
+ * readContainerUsage), jamais sur une ressource arrêtée. L'alerte mémoire ne se déclenche QUE
+ * quand `memoryLimitBytes` existe réellement — jamais un seuil absolu inventé en son absence
+ * (voir MEMORY_ALERT_RATIO, topologyNodeContract.tsx).
  */
 export function computeNodeResourceAlerts(node: TopologyNode): NodeResourceAlert[] {
-  const isContainer = node.kind === "container";
+  const spec = NODE_CONTRACT[node.kind].resourceAlerts;
+  if (!spec) return [];
   const hasCpuAlert =
-    isContainer && node.status === "running" && typeof node.cpuPercent === "number" && node.cpuPercent > CPU_ALERT_THRESHOLD_PERCENT;
+    node.status === "running" && typeof node.cpuPercent === "number" && node.cpuPercent > spec.cpuThresholdPercent;
   const hasMemoryAlert =
-    isContainer &&
     node.status === "running" &&
     typeof node.memBytes === "number" &&
     typeof node.memoryLimitBytes === "number" &&
     node.memoryLimitBytes > 0 &&
-    node.memBytes / node.memoryLimitBytes > MEMORY_ALERT_RATIO;
+    node.memBytes / node.memoryLimitBytes > spec.memoryRatio;
   return [
     ...(hasCpuAlert
       ? [
@@ -547,25 +290,15 @@ export const ZOOM_DETAIL_THRESHOLD = 0.6;
 export const zoomSelector = (s: { transform: [number, number, number] }) => s.transform[2];
 
 // --- Couleur des arêtes selon la santé réelle de la ressource qu'elles touchent ------------------
-// Une arête ne porte aucune donnée de santé propre (voir services/topology.ts côté API) : on lit
-// `healthStatus`/`status` du nœud conteneur à l'une ou l'autre extrémité (mount : volume<->
-// conteneur ; network : conteneur<->network — il y a toujours exactement un nœud conteneur parmi
-// les deux bouts) — ou, pour une arête "automation-flow", `automationLastStatus` du déclencheur
-// qui l'alimente (voir automationTriggerEdgeState ci-dessous), MÊME palette, jamais un système de
-// couleurs parallèle à retenir en plus pour ce seul kind. "stopped" prime sur healthStatus : un
-// conteneur arrêté n'a plus de healthcheck qui tourne, ce n'est pas une panne (arrêt souvent
-// volontaire) donc pas rouge, mais clairement visuellement "injoignable" (voir POINTILLÉ,
-// buildTopologyEdges ci-dessous — axe séparé de la couleur, jamais une redite de "stopped").
-//
-// Extension du 17/08/2026 (retour utilisateur : "j'ai impression que le systeme n'est pas coherent
-// entre nutanyx et le systeme de container c'est comme si la logique etait seprarer en deux") :
-// une arête "hosts" hôte physique AHV -> VM (services/topology.ts#getNutanixTopologyParts) lit
-// elle aussi CETTE MÊME palette via nutanixVmHostEdgeState ci-dessous — jamais un second système
-// de couleurs parallèle pour Nutanix. Seule l'arête cluster -> hôte physique (PAS hôte -> VM) reste
-// hors de ce mécanisme : aucun signal de santé par hôte physique disponible côté Prism Central,
-// volontairement inchangée (voir buildTopologyEdges).
-export type EdgeHealthState = "healthy" | "unhealthy" | "starting" | "none" | "stopped";
-
+// Une arête ne porte aucune donnée de santé propre (voir services/topology.ts côté API) : c'est le
+// CONTRAT du nœud "pertinent" à l'une de ses extrémités qui fournit couleur/pointillé
+// (NODE_CONTRACT[kind].edgeHealth, topologyNodeContract.tsx — conteneur, VM Nutanix, source
+// d'automatisation... chacun une implémentation de la MÊME interface, projetée sur la MÊME palette
+// ci-dessous, jamais un système de couleurs parallèle par plateforme). buildTopologyEdges
+// (ci-dessous) n'est plus qu'un moteur générique : il interroge source puis cible, sans plus aucun
+// `if (kind === ...)` de plateforme — le pourquoi de chaque grille (conteneur "stopped" prime sur
+// healthStatus, Nutanix placement confirmé/incertain, propagation de statut de déclencheur) est
+// documenté SUR le contrat du kind concerné, à côté de la donnée qu'il lit.
 export const EDGE_STATE_COLOR: Record<EdgeHealthState, string> = {
   healthy: "var(--color-success)",
   unhealthy: "var(--color-critical)",
@@ -577,79 +310,6 @@ export const EDGE_STATE_COLOR: Record<EdgeHealthState, string> = {
 export interface TopologyEdgeLike {
   source: string;
   target: string;
-}
-
-/** Le nœud conteneur (s'il y en a un) parmi les deux extrémités d'une arête — jamais les deux à
- * la fois dans ce graphe (mount = volume<->conteneur, network = conteneur<->network). */
-export function edgeContainerNode(edge: TopologyEdgeLike, nodesById: Map<string, TopologyNode>): TopologyNode | null {
-  const source = nodesById.get(edge.source);
-  if (source?.kind === "container") return source;
-  const target = nodesById.get(edge.target);
-  if (target?.kind === "container") return target;
-  return null;
-}
-
-/**
- * Construit les arêtes React Flow (couleur/état/animation) depuis les TopologyEdge bruts — logique
- * partagée par le graphe principal ET le sous-graphe de dépendances, pour un rendu identique.
- * `sourceHandle`/`targetHandle` optionnels : utilisés par TopologyGraph.tsx quand une arête a été
- * redirigée vers un nœud de groupe replié (voir deriveGroupPorts ci-dessus) — un groupe peut porter
- * PLUSIEURS handles du même côté (ex: "network" ET "provide", tous deux source/Right), l'id du
- * handle cible devient alors nécessaire pour lever l'ambiguïté (React Flow ne peut plus déduire le
- * bon handle tout seul dès qu'il y en a plusieurs du même type sur un nœud).
- */
-/**
- * État réel d'un déclencheur d'automatisation (TopologyNode#automationLastStatus, voir
- * services/automationEngine.ts) projeté sur la même palette que EDGE_STATE_COLOR — "ok" partage
- * le vert "healthy", "failing" le rouge "unhealthy", "unknown" (jamais encore évalué) le gris
- * "none" : un SEUL système de couleurs pour tout le graphe, jamais une palette parallèle à retenir
- * en plus pour ce seul kind d'arête.
- */
-function automationTriggerEdgeState(status: "ok" | "failing" | "unknown"): EdgeHealthState {
-  if (status === "ok") return "healthy";
-  if (status === "failing") return "unhealthy";
-  return "none";
-}
-
-/**
- * État réel + pointillé d'une arête "hosts" hôte physique AHV -> VM (voir services/topology.ts#
- * getNutanixTopologyParts), `vmNode` étant le nœud `kind: "nutanix-vm"` à l'extrémité CIBLE de
- * cette arête — MÊME grille couleur/pointillé que les arêtes conteneur ci-dessus (EDGE_STATE_COLOR
- * ci-dessus), jamais un second système parallèle (retour utilisateur du 17/08/2026 : "j'ai
- * impression que le systeme n'est pas coherent entre nutanyx et le systeme de container c'est
- * comme si la logique etait seprarer en deux") :
- *  - VM éteinte (`status === "stopped"`) -> "stopped" (gris), tirets larges — EXACTEMENT le même
- *    code visuel qu'un conteneur arrêté (même valeur EdgeHealthState, même classe CSS
- *    `.topology-edge--stopped`, voir buildTopologyEdges), jamais un style différent pour ce même
- *    sens ("ressource inactive"). Prime sur tout le reste (même règle que "stopped" != healthStatus
- *    côté conteneurs) : un arrêt volontaire n'est jamais une panne (jamais rouge) ni un placement
- *    "incertain" (jamais orange) — un arrêt est un fait certain, pas une donnée douteuse.
- *  - VM allumée avec un VRAI état d'erreur Prism Central (`nutanixApiError`, voir
- *    services/nutanix.ts#NutanixVm#apiError — DISTINCT du simple power_state) -> "unhealthy"
- *    (rouge), réservé à ce cas précis, jamais fabriqué pour une VM simplement éteinte.
- *  - VM allumée, placement CONFIRMÉ EN DIRECT (`nutanixHostPlacementConfirmed === true`, voir
- *    services/nutanix.ts#mapVmEntity) -> "healthy" (vert), plein.
- *  - VM allumée, mais placement REPLIÉ sur le dernier hôte ASSIGNÉ/déclaré
- *    (`nutanixHostPlacementConfirmed === false`) -> "starting" (orange, réutilisé pour "pas encore
- *    confirmé/incertain" — jamais un nouvel état parallèle à retenir en plus des 5 déjà existants),
- *    tirets fins.
- *  - Tout le reste (power_state "unknown", jamais observé en conditions réelles à ce jour — voir
- *    nutanix.ts#mapPowerState) -> "none" (gris), plein : aucun signal exploitable, jamais un état
- *    inventé.
- * Cluster -> hôte physique (PAS hôte -> VM) : jamais concerné par cette fonction, reste neutre/
- * gris/plein — voir buildTopologyEdges, qui n'appelle cette fonction QUE quand la cible de l'arête
- * "hosts" est un nœud `kind: "nutanix-vm"`.
- */
-export function nutanixVmHostEdgeState(vmNode: TopologyNode): { state: EdgeHealthState; strokeDasharray: string | undefined } {
-  if (vmNode.status === "stopped") return { state: "stopped", strokeDasharray: "2 8" };
-  // Pointillé de confiance de placement, indépendant de la couleur ci-dessous (même principe que
-  // hasPublishedPort pour un conteneur) : "4 4" (tirets fins) tant que le placement n'est pas
-  // confirmé en direct, `undefined` (plein) dès qu'il l'est — s'applique aussi bien à "unhealthy"
-  // qu'à "healthy"/"starting", ces deux axes restant volontairement indépendants.
-  const strokeDasharray = vmNode.nutanixHostPlacementConfirmed ? undefined : "4 4";
-  if (vmNode.nutanixApiError) return { state: "unhealthy", strokeDasharray };
-  if (vmNode.status === "running") return { state: vmNode.nutanixHostPlacementConfirmed ? "healthy" : "starting", strokeDasharray };
-  return { state: "none", strokeDasharray: undefined };
 }
 
 /**
@@ -664,54 +324,44 @@ export function nutanixVmHostEdgeState(vmNode: TopologyNode): { state: EdgeHealt
  * Deux axes visuels INDÉPENDANTS, chacun porteur d'une information réelle distincte (revu le
  * 13/08/2026 suite à un retour utilisateur — l'ancien système faisait porter au pointillé
  * essentiellement la même information que la couleur) :
- *  - COULEUR = santé/état réel de la ressource à une extrémité (conteneur ou déclencheur
- *    d'automatisation) — jamais un axe de type de relation.
+ *  - COULEUR = santé/état réel de la ressource à une extrémité — jamais un axe de type de relation.
  *  - POINTILLÉ = confiance de connectivité RÉELLE, jamais une simple redite de la couleur : trait
- *    PLEIN = port publié sur l'hôte (Docker confirme un socket réellement lié, voir
- *    TopologyEdgePort#publicPort) ; tirets fins animés = configuré mais sans port publié à
- *    vérifier (trafic interne uniquement, ni prouvé ni infirmé) ; tirets larges = ressource
- *    arrêtée/inactive. Une arête "mount" reste structurelle (jamais de sonde active pertinente
- *    pour elle) : toujours pleine, seule sa couleur bouge.
+ *    PLEIN = port publié sur l'hôte / placement vérifié en direct ; tirets fins = configuré mais
+ *    non confirmé ; tirets larges = ressource arrêtée/inactive. Une arête "mount" reste
+ *    structurelle (jamais de sonde active pertinente pour elle) : toujours pleine.
  *
- * Arête "hosts" (cluster Nutanix -> hôte physique AHV -> VM, voir services/topology.ts#
- * getNutanixTopologyParts) : relation structurelle, jamais de tirets DÉFILANTS (`animated` reste
- * toujours false pour ce kind, contrairement à "network") ni de particules (contrairement à
- * "mount") — pas de flux de trafic à représenter. Deux cas bien distincts :
- *  - cluster -> hôte physique : hors de portée de nutanixVmHostEdgeState ci-dessus, reste neutre
- *    ("none", gris) et pleine, INCHANGÉ — aucun signal de santé PAR HÔTE PHYSIQUE disponible côté
- *    Prism Central sur les endpoints utilisés ici.
- *  - hôte physique -> VM (`target.kind === "nutanix-vm"`) : lit désormais la MÊME grille couleur/
- *    pointillé que les arêtes conteneur ci-dessus via nutanixVmHostEdgeState (extension du
- *    17/08/2026, retour utilisateur : "j'ai impression que le systeme n'est pas coherent entre
- *    nutanyx et le systeme de container c'est comme si la logique etait seprarer en deux") — vert
- *    plein = placement confirmé en direct, orange tirets fins = replié sur le dernier hôte
- *    assigné/déclaré, gris tirets larges = VM éteinte (même code visuel qu'un conteneur arrêté),
- *    rouge = vrai échec Prism Central. `animated` reste néanmoins false ici comme pour toute autre
- *    arête "hosts" : ce pointillé communique une CONFIANCE de placement, pas un flux à animer.
+ * MOTEUR GÉNÉRIQUE depuis la migration vers le contrat (17/08/2026) : quelle extrémité porte le
+ * signal et comment il se projette sur couleur/pointillé est déclaré PAR KIND dans
+ * NODE_CONTRACT[kind].edgeHealth (topologyNodeContract.tsx) — conteneur (healthStatus/
+ * hasPublishedPort), VM Nutanix (nutanixVmHostEdgeState : placement confirmé/incertain, mêmes
+ * détails que la légende), source d'automatisation (statut de déclencheur propagé)... Cette
+ * fonction interroge la SOURCE puis la CIBLE de chaque arête et retient la première réponse — un
+ * contrat se garde LUI-MÊME (edgeKind/role du contexte), ce moteur ne contient plus aucun
+ * `if (kind === ...)` de plateforme. Une arête dont aucune extrémité ne répond (ex : cluster ->
+ * hôte physique, deux nœuds "host" au contrat edgeHealth null — aucun signal de santé par hôte
+ * disponible côté Prism Central) retombe sur le rendu neutre : gris "none", pointillé générique
+ * par kind d'arête ci-dessous.
  *
- * Nœuds "host" hostKind "remote-docker"/"lxc" (environnement Docker distant, LXD) — vérifié le
- * 17/08/2026 (mission "vérifie les autres types d'hôtes pour la même ambiguïté") : PAS concernés
- * par cette extension, et volontairement laissés hors de nutanixVmHostEdgeState. Deux raisons
- * structurelles, pas un oubli : (1) ces nœuds ne portent AUJOURD'HUI aucune arête "hosts" vers un
- * enfant dans services/topology.ts (seule la hiérarchie Nutanix cluster->hôte->VM en produit) —
- * rien à colorer différemment ; (2) même s'ils en portaient une un jour, leur `status` reflète déjà
- * la joignabilité RÉELLE recalculée à CHAQUE poll (docker.ts#getDockerHostInfo, jamais mis en
- * cache) — il n'existe pas, pour un hôte Docker/LXD, de notion de "placement live confirmé VS
- * dernier placement assigné" comparable à la migration live d'une VM AHV : un hôte Docker n'a pas
- * de sous-ressource qui "migre" entre deux hôtes physiques. L'ambiguïté que corrige ce chantier est
- * donc spécifique au modèle Nutanix (status vs spec, VM potentiellement mobile), jamais forcée ici
- * où elle n'aurait pas de sens.
+ * Seuls les kinds D'ARÊTE (mount/network/hosts/automation-flow — une notion transverse aux
+ * plateformes, portée par TopologyEdge#kind côté API) restent testés ici : type de rendu
+ * (particules pour "mount"), animation (jamais de tirets défilants pour "hosts", relation
+ * structurelle sans flux de trafic à représenter — ni pour "mount", qui a ses particules) et
+ * pointillé PAR DÉFAUT quand aucune extrémité ne porte de signal.
  */
 export function buildTopologyEdges(
   edges: (TopologyEdge & { sourceHandle?: string; targetHandle?: string })[],
   nodesById: Map<string, TopologyNode>,
 ): Edge[] {
-  // Pré-passe : propage le statut RÉEL de chaque déclencheur à la/aux condition(s) qu'il alimente,
-  // pour qu'une arête condition -> action (qui n'a elle-même aucun déclencheur à l'une de ses deux
-  // extrémités) hérite quand même d'un état réel plutôt que de retomber sur "aucun signal".
-  const triggerStatusByNodeId = new Map<string, "ok" | "failing" | "unknown">();
+  // Pré-passe GÉNÉRIQUE : chaque kind peut déclarer un statut qu'il INJECTE dans la propagation le
+  // long des arêtes "automation-flow" (NODE_CONTRACT[kind].automationStatusSeed — seul
+  // "automation-trigger" en déclare un aujourd'hui). Le statut se propage à la/aux condition(s)
+  // alimentée(s), pour qu'une arête condition -> action (qui n'a elle-même aucun déclencheur à
+  // l'une de ses deux extrémités) hérite quand même d'un état réel plutôt que de retomber sur
+  // "aucun signal".
+  const triggerStatusByNodeId = new Map<string, AutomationTriggerStatus>();
   for (const n of nodesById.values()) {
-    if (n.kind === "automation-trigger") triggerStatusByNodeId.set(n.id, n.automationLastStatus ?? "unknown");
+    const seed = NODE_CONTRACT[n.kind].automationStatusSeed;
+    if (seed) triggerStatusByNodeId.set(n.id, seed(n));
   }
   for (const e of edges) {
     if (e.kind !== "automation-flow") continue;
@@ -720,46 +370,55 @@ export function buildTopologyEdges(
   }
 
   return edges.map((e) => {
-    const isAutomationFlowEdge = e.kind === "automation-flow";
     const isMount = e.kind === "mount";
-    // "hosts" (cluster Nutanix -> hôte -> VM, voir services/topology.ts) : relation structurelle
-    // statique, pas un flux de trafic — jamais de tirets défilants (contrairement à "network") ni
-    // de particules (contrairement à "mount") pour ne pas laisser croire à une activité mesurée.
     const isHostsEdge = e.kind === "hosts";
-    // Hôte physique -> VM (voir JSDoc ci-dessus) : SEUL cas d'arête "hosts" qui porte un vrai
-    // signal de santé — jamais le cas cluster -> hôte physique (target.kind === "host" dans ce cas,
-    // reste hors de ce chemin). `undefined` si la cible n'est pas (encore) connue de `nodesById`
-    // (course entre deux requêtes) — retombe alors sur "none"/plein comme avant ce chantier.
-    const hostsVmTarget = isHostsEdge ? nodesById.get(e.target) : undefined;
-    const nutanixVmEdgeInfo =
-      isHostsEdge && hostsVmTarget?.kind === "nutanix-vm" ? nutanixVmHostEdgeState(hostsVmTarget) : null;
-    const containerNode = edgeContainerNode(e, nodesById);
-    const stopped = containerNode ? containerNode.status !== "running" : false;
-    const state: EdgeHealthState = isAutomationFlowEdge
-      ? automationTriggerEdgeState(triggerStatusByNodeId.get(e.source) ?? "unknown")
-      : nutanixVmEdgeInfo
-        ? nutanixVmEdgeInfo.state
-        : stopped
-          ? "stopped"
-          : (containerNode?.healthStatus ?? "none");
-    const color = EDGE_STATE_COLOR[state];
     // Port(s) réellement publié(s) sur l'hôte (voir TopologyEdgePort#publicPort, jamais déduit —
     // absent si Docker n'a mappé aucun port hôte pour ce conteneur) : seul signal d'activité
     // "confirmée" dont QUAI dispose sans sonde active à chaque rafraîchissement du graphe (une
     // vraie sonde TCP par arête, à chaque fetch, coûterait cher — voir services/automationEngine.ts
     // pour la sonde active RÉSERVÉE aux seules routes reverse-proxy explicitement surveillées).
     const hasPublishedPort = e.ports?.some((p) => p.publicPort !== undefined) ?? false;
-    const strokeDasharray = isMount
-      ? undefined // structurel, jamais de pointillé — cf. JSDoc ci-dessus
-      : isHostsEdge
-        ? (nutanixVmEdgeInfo?.strokeDasharray ?? undefined) // hôte->VM : voir nutanixVmHostEdgeState ; cluster->hôte : toujours plein
-        : isAutomationFlowEdge
-          ? "2 4" // axe pointillé non pertinent pour ce kind (pas de "port publié") : motif fixe distinctif
-          : state === "stopped"
-            ? "2 8" // large : ressource inactive
-            : hasPublishedPort
-              ? undefined // plein : connectivité confirmée
-              : "4 4"; // fin animé : configuré, non confirmable sans sonde active
+
+    // Interroge le contrat de chaque extrémité — SOURCE d'abord (une arête "automation-flow" lit
+    // son signal côté source, comportement historique conservé), puis CIBLE (arêtes "mount" volume
+    // -> conteneur, "hosts" hôte -> VM). Chaque contrat se garde lui-même via le contexte
+    // (edgeKind/role) et rend null pour toute arête où son signal n'a pas de sens ; une extrémité
+    // absente de `nodesById` (course entre deux requêtes, ou id de groupe replié — jamais un
+    // TopologyNode) est simplement sautée — retombe sur le rendu neutre comme avant ce chantier.
+    let edgeHealthInfo: EdgeHealthInfo | null = null;
+    for (const endpoint of [
+      { id: e.source, role: "source" as const },
+      { id: e.target, role: "target" as const },
+    ]) {
+      const node = nodesById.get(endpoint.id);
+      if (!node) continue;
+      const edgeHealth = NODE_CONTRACT[node.kind].edgeHealth;
+      if (!edgeHealth) continue;
+      edgeHealthInfo = edgeHealth(node, {
+        edgeKind: e.kind,
+        role: endpoint.role,
+        hasPublishedPort,
+        automationUpstreamStatus: triggerStatusByNodeId.get(e.source) ?? "unknown",
+      });
+      if (edgeHealthInfo) break;
+    }
+
+    const state: EdgeHealthState = edgeHealthInfo?.state ?? "none";
+    const color = EDGE_STATE_COLOR[state];
+    // Pointillé : celui décidé par le contrat porteur du signal — sinon le défaut PAR KIND D'ARÊTE
+    // (aucune extrémité ne répond) : mount/hosts structurels toujours pleins, "automation-flow" son
+    // motif fixe distinctif (l'axe "port publié" n'a pas de sens pour lui), "network" retombe sur
+    // l'axe de confiance générique (plein si port publié, tirets fins sinon — l'état ne peut être
+    // "stopped" ici, ce cas n'existe que via un contrat qui a répondu).
+    const strokeDasharray = edgeHealthInfo
+      ? edgeHealthInfo.strokeDasharray
+      : isMount || isHostsEdge
+        ? undefined
+        : e.kind === "automation-flow"
+          ? "2 4"
+          : hasPublishedPort
+            ? undefined
+            : "4 4";
     return {
       id: e.id,
       source: e.source,
@@ -780,14 +439,11 @@ export function buildTopologyEdges(
         ...(e.private !== undefined ? { private: e.private } : {}),
         ...(e.encrypted !== undefined ? { encrypted: e.encrypted } : {}),
         ...(e.readOnly !== undefined ? { readOnly: e.readOnly } : {}),
-        // Badge "Placement confirmé"/"Dernier hôte connu" (voir edgeBadgeItems ci-dessous) —
-        // UNIQUEMENT sur une arête hôte physique -> VM, jamais sur cluster -> hôte (nutanixVmEdgeInfo
-        // reste null dans ce cas). Absent (pas juste `false`) pour une VM éteinte/en erreur : le
-        // badge ne concerne QUE la confiance de placement, déjà portée sans ambiguïté par la
-        // couleur/le pointillé pour les deux autres cas.
-        ...(nutanixVmEdgeInfo && hostsVmTarget?.status === "running" && !hostsVmTarget.nutanixApiError
-          ? { nutanixPlacementConfirmed: hostsVmTarget.nutanixHostPlacementConfirmed === true }
-          : {}),
+        // Données supplémentaires posées par le contrat porteur du signal (ex :
+        // nutanixPlacementConfirmed pour le badge "Placement confirmé"/"Dernier hôte connu", voir
+        // edgeBadgeItems ci-dessous et NODE_CONTRACT["nutanix-vm"].edgeHealth) — recopiées telles
+        // quelles, ce moteur n'en connaît aucune clé.
+        ...(edgeHealthInfo?.extraEdgeData ?? {}),
       },
     };
   });
@@ -1165,19 +821,12 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   // volontairement inchangée : son sous-titre porte déjà CPU/RAM (voir services/topology.ts,
   // formatHostMemorySubtitle) — un résumé identique en double sur la carte n'ajouterait rien.
   const isNutanixVm = node.kind === "nutanix-vm";
-  const ports = NODE_CAPABILITIES[node.kind];
-  // Nœuds d'automatisation (voir NODE_CAPABILITIES ci-dessus pour le pourquoi de leur entrée []) :
-  // Handles génériques posés directement ici plutôt que via la table de ports typés réseau/volume —
-  // un trigger n'est jamais une cible (toujours la racine d'une chaîne), une action n'est jamais
-  // une source (toujours une feuille, voir isValidConnection côté routes/automation.ts), une
-  // condition a les deux. classifyConnection (TopologyGraph.tsx) ne lit jamais ces ids de Handle
-  // (aucune entrée NODE_CAPABILITIES correspondante) : la validation/le POST réel d'une connexion
-  // entre deux nœuds d'automatisation passe par un chemin dédié dans handleConnect, qui ne se fie
-  // qu'au kind des deux nœuds visés, jamais à l'id du Handle glissé.
-  const isAutomationTrigger = node.kind === "automation-trigger";
-  const isAutomationCondition = node.kind === "automation-condition";
-  const isAutomationAction = node.kind === "automation-action";
-  const isAutomationNode = isAutomationTrigger || isAutomationCondition || isAutomationAction;
+  // TOUS les Handles du nœud viennent du contrat (NODE_CONTRACT[kind].ports,
+  // topologyNodeContract.tsx) — y compris ceux des nœuds d'automatisation, autrefois posés par un
+  // JSX conditionnel par-kind juste en dessous (comportement implicite rendu explicite par la
+  // migration du 17/08/2026 : mêmes ids "automation-out"/"automation-in", mêmes côtés, même classe
+  // .topology-handle--automation, désormais déclarés comme n'importe quel autre port).
+  const ports = NODE_CONTRACT[node.kind].ports;
   // Zoom sémantique : en dessous du seuil, on masque libellé/badges/métriques et on ne garde que
   // l'icône + le point de statut — évite un canevas illisible une fois dézoomé sur toute l'infra.
   const zoom = useStore(zoomSelector);
@@ -1200,24 +849,6 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
           {...(portOffsetStyle(port, ports) ? { style: portOffsetStyle(port, ports) } : {})}
         />
       ))}
-      {isAutomationNode && !isAutomationAction && (
-        <Handle
-          id="automation-out"
-          type="source"
-          position={Position.Right}
-          className="topology-handle topology-handle--automation"
-          title="Relier vers une condition/action"
-        />
-      )}
-      {isAutomationNode && !isAutomationTrigger && (
-        <Handle
-          id="automation-in"
-          type="target"
-          position={Position.Left}
-          className="topology-handle topology-handle--automation"
-          title="Relié depuis un déclencheur/une condition"
-        />
-      )}
       {/* Alertes de ressource "CPU élevé"/"Mémoire élevée" (voir CPU_ALERT_THRESHOLD_PERCENT/
           MEMORY_ALERT_RATIO/computeNodeResourceAlerts ci-dessus) : plus rendues ICI, ancrées au
           nœud — retour utilisateur du 17/08/2026 ("ce genre alert devrais aparaitre en haut a
@@ -1627,8 +1258,8 @@ export function layeredGroupPositions(
 // logique de layout sans rapport avec le reste de ce fichier.
 //
 // Orientation HORIZONTALE (niveau -> colonne X, fratrie -> ligne Y), pas verticale — changé le
-// 17/08/2026 EN MÊME TEMPS que le correctif des ports Left/Right ci-dessus (NODE_CAPABILITIES
-// ["nutanix-vm"/"host"]) : la mission précédente avait disposé cet arbre verticalement (parent
+// 17/08/2026 EN MÊME TEMPS que le correctif des ports Left/Right (NODE_CONTRACT
+// ["nutanix-vm"/"host"].ports, topologyNodeContract.tsx) : la mission précédente avait disposé cet arbre verticalement (parent
 // au-dessus, enfants dessous) pour accompagner des ports Top/Bottom — une fois les ports remis en
 // Left/Right (cohérence avec TOUT le reste du graphe, voir plus haut), garder un arbre vertical
 // aurait fait partir chaque arête du CÔTÉ d'une carte pour rejoindre le dessus/dessous de la
@@ -1652,7 +1283,7 @@ const HOST_TREE_SIBLING_SPACING = 300;
 const HOST_TREE_GRID_LINE_SPACING = 210;
 /** Distance (px) entre deux NIVEAUX de la hiérarchie (cluster -> hôte -> VM), le long de l'axe X —
  * plus généreuse que HOST_TREE_GRID_LINE_SPACING seul : une carte "host" (CPU/mémoire/hyperviseur
- * réels, NODE_CAPABILITIES ci-dessus) affiche souvent plus de contenu qu'une carte "nutanix-vm". */
+ * réels) affiche souvent plus de contenu qu'une carte "nutanix-vm". */
 const HOST_TREE_LEVEL_SPACING = 260;
 /** Au-delà de ce nombre d'enfants DIRECTS et tous eux-mêmes sans enfant propre (des feuilles, ex :
  * des VMs — jamais un hôte, qui a lui-même des VMs dessous), on arrête de les aligner sur une seule
@@ -1678,7 +1309,7 @@ function allChildrenAreLeaves(childIds: string[], childrenOf: Map<string, string
  * via `hostsEdges`) de tout sous-ensemble `nodeIds` relié par des arêtes "hosts" — chaque enfant
  * est centré À DROITE de son parent (axe X = niveau, axe Y = fratrie ; orientation choisie le
  * 17/08/2026 pour rester cohérente avec les ports Left/Right désormais posés sur "nutanix-vm"/
- * "host", voir NODE_CAPABILITIES ci-dessus et le bloc de constantes HOST_TREE_* juste au-dessus) ;
+ * "host", voir NODE_CONTRACT (topologyNodeContract.tsx) et le bloc de constantes HOST_TREE_* juste au-dessus) ;
  * un parent avec BEAUCOUP d'enfants-feuilles (ex : un hôte AHV avec 29 VMs) les replie en grille
  * compacte (voir HOST_TREE_MAX_LINE_CHILDREN/HOST_TREE_MAX_GRID_LINES ci-dessus) plutôt que de les
  * aligner sur une seule ligne géante ; un nœud sans parent DANS ce sous-ensemble (racine réelle —

@@ -74,12 +74,20 @@ import { fetchRoutes } from "@/features/reverseProxy/reverseProxySlice";
 import { fetchNotificationChannels } from "@/features/notificationChannels/notificationChannelsSlice";
 import { migrateNutanixVm, runNutanixVmAction, type NutanixVmLifecycleAction } from "@/features/nutanix/nutanixSlice";
 import type { IacEngine } from "@/types";
+// Registre déclaratif des kinds (voir topologyNodeContract.tsx#NODE_CONTRACT) — ports, actions de
+// menu par kind, colonne par défaut : ce composant n'est plus qu'un consommateur générique qui
+// injecte les callbacks réels (dispatch/confirm/popovers) par id d'action.
+import {
+  CAPABILITY_DEFS,
+  NODE_CONTRACT,
+  buildNodeMenuItems,
+  mapNodeContract,
+  type NodeMenuActionId,
+} from "@/components/topologyNodeContract";
 import {
   ACTION_LABEL,
-  CAPABILITY_DEFS,
   KIND_ICON,
   MINIMAP_NODE_COLOR,
-  NODE_CAPABILITIES,
   attachmentToTopologyNode,
   buildTopologyEdges,
   deriveGroupPorts,
@@ -114,28 +122,13 @@ import type {
 const SKELETON_COLUMN_ROWS = [2, 3, 2];
 
 const REFRESH_INTERVAL_MS = 15_000;
-// Colonnes "nutanix-vm"/"ad-server"/"host"/"iac-workspace"/"cron-job"/"backup" à part, après
-// network — nœuds isolés ou reliés entre eux uniquement (jamais d'arête vers Docker), des
-// colonnes dédiées les gardent lisibles plutôt que de les mélanger aux conteneurs.
-const COLUMN_X: Record<TopologyNode["kind"], number> = {
-  volume: 0,
-  container: 340,
-  network: 680,
-  "nutanix-vm": 1020,
-  "ad-server": 1360,
-  host: 1700,
-  "iac-workspace": 2040,
-  "cron-job": 2380,
-  backup: 2720,
-  "gitops-source": 3060,
-  // Zone "Automatisation" (trigger -> condition -> action, voir services/automationStore.ts) —
-  // 3 colonnes adjacentes après gitops-source, dans l'ordre de lecture naturel de la chaîne
-  // (gauche = déclencheur, milieu = condition, droite = action), même largeur de colonne (340) que
-  // le reste de ce tableau.
-  "automation-trigger": 3400,
-  "automation-condition": 3740,
-  "automation-action": 4080,
-};
+// Colonnes par défaut PAR KIND — valeurs désormais déclarées dans le contrat
+// (NODE_CONTRACT[kind].defaultColumnX, topologyNodeContract.tsx : mêmes abscisses qu'avant la
+// migration, le pourquoi de chaque colonne est documenté sur l'entrée du kind), projetées ici en
+// table plate. Colonnes "nutanix-vm"/"ad-server"/"host"/"iac-workspace"/"cron-job"/"backup" à
+// part, après network — nœuds isolés ou reliés entre eux uniquement (jamais d'arête vers Docker),
+// des colonnes dédiées les gardent lisibles plutôt que de les mélanger aux conteneurs.
+const COLUMN_X: Record<TopologyNode["kind"], number> = mapNodeContract((c) => c.defaultColumnX);
 const ROW_HEIGHT = 130;
 
 /**
@@ -144,8 +137,8 @@ const ROW_HEIGHT = 130;
  * placée APRÈS la dernière colonne fixe ci-dessus (automation-action = 4080, largeur de colonne
  * ~340) pour ne JAMAIS chevaucher ad-server/iac-workspace/cron-job/etc. L'arbre est désormais
  * disposé HORIZONTALEMENT (niveau -> colonne X, fratrie -> ligne Y, changé le 17/08/2026 pour
- * rester cohérent avec les ports Left/Right de "nutanix-vm"/"host" — voir NODE_CAPABILITIES,
- * topologyGraphShared.tsx) : cette ancre borne uniquement où COMMENCE le niveau racine (cluster/
+ * rester cohérent avec les ports Left/Right de "nutanix-vm"/"host" — voir NODE_CONTRACT,
+ * topologyNodeContract.tsx) : cette ancre borne uniquement où COMMENCE le niveau racine (cluster/
  * hôte isolé) le long de X, la largeur totale de l'arbre s'étend alors surtout le long de Y (jusqu'à
  * HOST_TREE_MAX_GRID_LINES lignes pour une grille de VMs repliée, topologyGraphShared.tsx), jamais
  * vers la gauche dans les colonnes fixes ci-dessus. COLUMN_X["host"]/COLUMN_X["nutanix-vm"]
@@ -1688,7 +1681,7 @@ interface TopologyGraphProps {
 // Réutilise le drag de POSITION déjà en place pour TOUT nœud du graphe (nodesDraggable={operate},
 // handleNodeDragStop persiste déjà la position finale via PUT /api/topology/positions) — PAS le
 // mécanisme de connexion par Handle/port (handleConnect/classifyConnection) : la relation "hosts"/
-// "hosted-by" y est délibérément non-interactive (voir NODE_CAPABILITIES, topologyGraphShared.tsx)
+// "hosted-by" y est délibérément non-interactive (voir NODE_CONTRACT, topologyNodeContract.tsx)
 // car c'est une vérité SERVEUR, jamais une intention à glisser à la main comme un network. Détecter
 // une "dépose sur un hôte" est donc un test géométrique simple sur les positions déjà connues du
 // canevas, pas un nouveau type de Handle.
@@ -1892,21 +1885,10 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       setFlowNodes([]);
       return;
     }
-    const columnCounters: Record<TopologyNode["kind"], number> = {
-      volume: 0,
-      container: 0,
-      network: 0,
-      "nutanix-vm": 0,
-      "ad-server": 0,
-      host: 0,
-      "iac-workspace": 0,
-      "cron-job": 0,
-      backup: 0,
-      "gitops-source": 0,
-      "automation-trigger": 0,
-      "automation-condition": 0,
-      "automation-action": 0,
-    };
+    // Un compteur de ligne par kind — initialisé depuis le registre (mapNodeContract,
+    // topologyNodeContract.tsx) plutôt qu'un littéral à 13 entrées à maintenir à la main : un
+    // futur kind ajouté au contrat a automatiquement son compteur ici.
+    const columnCounters: Record<TopologyNode["kind"], number> = mapNodeContract(() => 0);
     // Membres d'un groupe REPLIÉ : n'apparaissent plus comme des nœuds individuels (voir plus bas,
     // un seul nœud "topologyGroupNode" les représente) — un membre d'un groupe DÉPLIÉ continue en
     // revanche d'être rendu ici tel quel (voir topologyGraphShared.tsx en-tête § "Regroupement").
@@ -2118,7 +2100,8 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   );
 
   // Recherche O(1) du nœud à chaque bout d'une arête pour en dériver sa couleur (voir
-  // edgeContainerNode ci-dessus) — recalculée seulement quand les données de topologie changent.
+  // buildTopologyEdges/NODE_CONTRACT[kind].edgeHealth) — recalculée seulement quand les données de
+  // topologie changent.
   const nodesById = useMemo(() => new Map((data?.nodes ?? []).map((n) => [n.id, n])), [data]);
 
   /**
@@ -2241,11 +2224,11 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     if (!nodeId || !handleId) return null;
     const node = data?.nodes.find((n) => n.id === nodeId);
     if (!node) return null;
-    return NODE_CAPABILITIES[node.kind].find((p) => p.id === handleId) ?? null;
+    return NODE_CONTRACT[node.kind].ports.find((p) => p.id === handleId) ?? null;
   }
 
   /** Classe une tentative de connexion glissée en comparant les capacités des deux ports visés
-   * (table déclarative NODE_CAPABILITIES/CAPABILITY_DEFS ci-dessus) — remplace l'ancienne logique
+   * (table déclarative NODE_CONTRACT[kind].ports/CAPABILITY_DEFS, topologyNodeContract.tsx) — remplace l'ancienne logique
    * à deux paires de kinds codées en dur, sans changer le comportement fonctionnel : container<->
    * network reste la seule connexion réelle, container<->volume reste un message d'information. */
   function classifyConnection(connection: Edge | Connection): CapabilityDef | null {
@@ -2258,7 +2241,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   }
 
   /** true si ce kind est l'un des 3 nœuds du moteur d'automatisation (voir
-   * services/automationStore.ts) — jamais connectés via NODE_CAPABILITIES/CAPABILITY_DEFS (ports
+   * services/automationStore.ts) — jamais validés via classifyConnection/CAPABILITY_DEFS (ports
    * typés réseau/volume, sans objet ici), toujours via ce chemin dédié. */
   function isAutomationNodeKind(kind: TopologyNode["kind"] | undefined): boolean {
     return kind === "automation-trigger" || kind === "automation-condition" || kind === "automation-action";
@@ -2758,49 +2741,33 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     }
     if (!operate) return items;
 
-    if (node.kind === "container") {
-      const id = idWithoutPrefix(node.id);
-      if (node.status === "running") {
-        items.push({ label: "Arrêter", onClick: () => handleContainerAction(id, node.label, "stop") });
-      } else {
-        items.push({ label: "Démarrer", onClick: () => handleContainerAction(id, node.label, "start") });
-      }
-      items.push({ label: "Redémarrer", onClick: () => handleContainerAction(id, node.label, "restart") });
-      items.push({
-        label: "Renommer",
-        onClick: () => setRenamePopover({ containerId: id, initialName: node.label, x, y }),
-      });
+    // Actions PAR KIND : la LISTE (id/libellé/danger/condition de visibilité sur l'état réel du
+    // nœud) est déclarée dans le contrat (NODE_CONTRACT[kind].menuItems, topologyNodeContract.tsx
+    // — mêmes entrées, même ordre, mêmes gardes qu'avant la migration du 17/08/2026, y compris
+    // l'absence volontaire de "Supprimer" pour une VM Nutanix : la confirmation lourde "taper le
+    // nom de la VM" reste réservée à TopologyNodeDetailPanel.tsx, voir le contrat) ; seuls les
+    // CALLBACKS réels sont fournis ici, par id d'action — ce composant est le seul à avoir accès à
+    // dispatch/confirm/aux popovers. `id` : partie utile de l'id du nœud (id Docker brut, uuid de
+    // VM, nom de volume... selon le kind — même convention idWithoutPrefix qu'avant).
+    const id = idWithoutPrefix(node.id);
+    const actionHandlers: Record<NodeMenuActionId, () => void> = {
+      "container-stop": () => void handleContainerAction(id, node.label, "stop"),
+      "container-start": () => void handleContainerAction(id, node.label, "start"),
+      "container-restart": () => void handleContainerAction(id, node.label, "restart"),
+      "container-rename": () => setRenamePopover({ containerId: id, initialName: node.label, x, y }),
       // Depuis les "briques" (voir GraphNode/services/topology.ts), un network mono-conteneur
       // n'est plus un nœud du graphe à viser au glisser-déposer — cette action couvre ce cas (et
       // reste disponible aussi pour un network resté un vrai nœud, résultat identique).
-      items.push({
-        label: "Connecter à un network…",
-        onClick: () => setNetworkConnectPopover({ containerId: id, x, y }),
-      });
-      items.push({ label: "Supprimer", danger: true, onClick: () => handleContainerAction(id, node.label, "remove") });
-    } else if (node.kind === "nutanix-vm") {
-      // Voir handleNutanixVmAction ci-dessus pour le pourquoi de l'absence volontaire de
-      // "Supprimer" ici (confirmation lourde réservée à TopologyNodeDetailPanel.tsx). Démarrer/
-      // Arrêter/Redémarrer mutuellement exclusifs selon l'état RÉEL (node.status), même principe
-      // que "container" ci-dessus.
-      const uuid = idWithoutPrefix(node.id);
-      if (node.status === "running") {
-        items.push({ label: "Arrêter", onClick: () => void handleNutanixVmAction(uuid, node.label, "stop") });
-        items.push({ label: "Redémarrer", onClick: () => void handleNutanixVmAction(uuid, node.label, "restart") });
-      } else if (node.status === "stopped") {
-        items.push({ label: "Démarrer", onClick: () => void handleNutanixVmAction(uuid, node.label, "start") });
-      }
-    } else if (node.kind === "volume") {
-      const name = idWithoutPrefix(node.id);
-      items.push({ label: "Supprimer", danger: true, onClick: () => handleRemoveVolume(name) });
-    } else if (node.kind === "network") {
-      const id = idWithoutPrefix(node.id);
-      if (!["bridge", "host", "none"].includes(node.label)) {
-        items.push({ label: "Supprimer", danger: true, onClick: () => handleRemoveNetwork(id, node.label) });
-      }
-    } else if (node.kind === "automation-trigger" || node.kind === "automation-condition" || node.kind === "automation-action") {
-      items.push({ label: "Supprimer", danger: true, onClick: () => void handleDeleteAutomationNode(node) });
-    }
+      "container-connect-network": () => setNetworkConnectPopover({ containerId: id, x, y }),
+      "container-remove": () => void handleContainerAction(id, node.label, "remove"),
+      "nutanix-vm-stop": () => void handleNutanixVmAction(id, node.label, "stop"),
+      "nutanix-vm-restart": () => void handleNutanixVmAction(id, node.label, "restart"),
+      "nutanix-vm-start": () => void handleNutanixVmAction(id, node.label, "start"),
+      "volume-remove": () => void handleRemoveVolume(id),
+      "network-remove": () => void handleRemoveNetwork(id, node.label),
+      "automation-node-remove": () => void handleDeleteAutomationNode(node),
+    };
+    items.push(...buildNodeMenuItems(node, actionHandlers));
     return items;
   }
 

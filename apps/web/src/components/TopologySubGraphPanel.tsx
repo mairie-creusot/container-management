@@ -22,6 +22,9 @@ import { ContainerConsoleBody } from "@/components/ContainerConsole";
 import { ContainerLogsBody } from "@/features/containers/ContainerLogs";
 import VulnerabilitiesPanel from "@/components/VulnerabilitiesPanel";
 import { formatCpuTime, formatProcessAge, hexdumpRows } from "@/utils/containerInternalsFormat";
+// Actions de menu par kind déclarées dans le registre (voir topologyNodeContract.tsx#NODE_CONTRACT
+// et nodeMenuItems ci-dessous) — ce panneau n'injecte qu'un sous-ensemble volontaire de callbacks.
+import { buildNodeMenuItems } from "@/components/topologyNodeContract";
 import {
   ACTION_LABEL,
   GroupLabelPopover,
@@ -948,23 +951,24 @@ export default function TopologySubGraphPanel({
     // attachement — aucune action de cycle de vie propre ici (déjà proposées, le cas échéant,
     // depuis le vrai nœud conteneur qui la porte).
     if (!nodesById.has(node.id)) return items;
-    if (node.kind === "container") {
-      const id = idWithoutPrefix(node.id);
-      if (node.status === "running") {
-        items.push({ label: "Arrêter", onClick: () => void handleContainerAction(id, node.label, "stop") });
-      } else {
-        items.push({ label: "Démarrer", onClick: () => void handleContainerAction(id, node.label, "start") });
-      }
-      items.push({ label: "Redémarrer", onClick: () => void handleContainerAction(id, node.label, "restart") });
-      items.push({ label: "Supprimer", danger: true, onClick: () => void handleContainerAction(id, node.label, "remove") });
-    } else if (node.kind === "volume") {
-      items.push({ label: "Supprimer", danger: true, onClick: () => void handleRemoveVolume(idWithoutPrefix(node.id)) });
-    } else if (node.kind === "network") {
-      const id = idWithoutPrefix(node.id);
-      if (!["bridge", "host", "none"].includes(node.label)) {
-        items.push({ label: "Supprimer", danger: true, onClick: () => void handleRemoveNetwork(id, node.label) });
-      }
-    }
+    // Actions PAR KIND : la LISTE (id/libellé/danger/condition de visibilité) est déclarée dans le
+    // contrat (NODE_CONTRACT[kind].menuItems, topologyNodeContract.tsx — même source de vérité que
+    // le menu du graphe principal, jamais une liste dupliquée qui pourrait diverger) ; ce panneau
+    // ne fournit VOLONTAIREMENT qu'un sous-ensemble de callbacks — pas de "Renommer"/"Connecter à
+    // un network…" ni d'action VM Nutanix/automatisation dans le sous-graphe (comportement
+    // historique, inchangé par la migration du 17/08/2026) : buildNodeMenuItems omet simplement
+    // toute action déclarée sans handler, jamais un item mort.
+    const id = idWithoutPrefix(node.id);
+    items.push(
+      ...buildNodeMenuItems(node, {
+        "container-stop": () => void handleContainerAction(id, node.label, "stop"),
+        "container-start": () => void handleContainerAction(id, node.label, "start"),
+        "container-restart": () => void handleContainerAction(id, node.label, "restart"),
+        "container-remove": () => void handleContainerAction(id, node.label, "remove"),
+        "volume-remove": () => void handleRemoveVolume(id),
+        "network-remove": () => void handleRemoveNetwork(id, node.label),
+      }),
+    );
     return items;
   }
 
