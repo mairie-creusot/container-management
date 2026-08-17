@@ -192,8 +192,22 @@ export const NODE_CAPABILITIES: Record<TopologyNode["kind"], PortSpec[]> = {
   // Reste non-interactif au clic-glissé (voir CAPABILITY_DEFS["hosted-by"] ci-dessous) : ce
   // placement est une vérité serveur recalculée à chaque poll, pas une intention à modifier à la
   // main depuis ce port.
+  //
+  // Position.Left (PAS Top, bug corrigé le 17/08/2026 — retour utilisateur, capture d'écran à
+  // l'appui : "les input et outpute ne sont pas a gauche et droite comme les autre node il sont en
+  // haut en bas donc sa vas pas regarde exemple quai dev capture") : une mission précédente avait
+  // posé ce port en Position.Top/Bottom pour "coller" visuellement à la hiérarchie Cluster->Hôte->
+  // VM qui se LIT verticalement — mais AUCUN autre nœud de ce graphe (conteneur, volume, network,
+  // et le port synthétique "hosted-by" d'un groupe hébergé, voir CAPABILITY_PORT_META ci-dessous)
+  // n'utilise Top/Bottom : la convention établie partout ailleurs est TARGET = Left / SOURCE =
+  // Right, quelle que soit la disposition spatiale réelle des nœuds (les nœuds sont librement
+  // déplaçables par l'utilisateur, la position d'un Handle sur la carte ne doit refléter QUE son
+  // rôle source/target, jamais une hypothèse de mise en page). Voir hostHierarchyPositions
+  // (plus bas dans ce fichier) pour l'ajustement de layout qui accompagne ce changement (arbre
+  // désormais disposé horizontalement, niveau -> colonne, pour que ces ports Left/Right relient
+  // proprement parent/enfant sans repli en S disgracieux).
   "nutanix-vm": [
-    { id: "hosted-by", capability: "hosted-by", handleType: "target", position: Position.Top, label: "Hébergé par", colorToken: "host" },
+    { id: "hosted-by", capability: "hosted-by", handleType: "target", position: Position.Left, label: "Hébergé par", colorToken: "host" },
   ],
   // Même principe pour le contrôleur de domaine/DNS AD (services/adDns.ts) : jamais relié par une
   // arête (aucune donnée ne prouve un lien réel avec un nœud Docker/Nutanix précis).
@@ -210,9 +224,15 @@ export const NODE_CAPABILITIES: Record<TopologyNode["kind"], PortSpec[]> = {
   // deux points de connexion sans jamais s'en servir — cosmétique, pas un bug (même compromis
   // assumé que pour tout autre kind du graphe). `hosts` reste non-interactif au clic-glissé (voir
   // CAPABILITY_DEFS ci-dessous) — jamais de fausse relation d'hébergement crée à la main.
+  //
+  // Position.Left/Right (PAS Top/Bottom, même correctif du 17/08/2026 que "nutanix-vm" ci-dessus) :
+  // TARGET ("hosted-by", reçoit d'un parent) à Gauche, SOURCE ("hosts", pointe vers les enfants) à
+  // Droite — exactement la même convention que container(Left target volume-mount/Right source
+  // network)/network(Left target attach)/volume(Right source provide) déjà en place partout
+  // ailleurs dans ce fichier.
   host: [
-    { id: "hosted-by", capability: "hosted-by", handleType: "target", position: Position.Top, label: "Hébergé par", colorToken: "host" },
-    { id: "hosts", capability: "hosts", handleType: "source", position: Position.Bottom, label: "Héberge", colorToken: "host" },
+    { id: "hosted-by", capability: "hosted-by", handleType: "target", position: Position.Left, label: "Hébergé par", colorToken: "host" },
+    { id: "hosts", capability: "hosts", handleType: "source", position: Position.Right, label: "Héberge", colorToken: "host" },
   ],
   // Workspaces IaC (voir services/topology.ts#getIacWorkspaceNodes) : indépendants de l'infra Docker
   // locale comme les VMs Nutanix/le contrôleur AD ci-dessus — un `tofu apply`/`ansible-playbook`/
@@ -291,18 +311,20 @@ const CAPABILITY_PORT_META: Record<CapabilityId, Pick<PortSpec, "handleType" | "
   attach: { handleType: "target", position: Position.Left, colorToken: "network", label: "Attache un conteneur" },
   "volume-mount": { handleType: "target", position: Position.Left, colorToken: "volume", label: "Volume (lecture seule)" },
   provide: { handleType: "source", position: Position.Right, colorToken: "volume", label: "Fournit un volume" },
-  // Position.Top (jamais Left/Right, déjà pris par network/volume) : un groupe hébergé par un
-  // nœud "host" externe (ex: un groupe de VMs Nutanix relié à son cluster physique via une arête
-  // "hosts", voir services/topology.ts) reste visuellement distinct de ses connexions
-  // réseau/volume habituelles — voir deriveGroupPorts ci-dessous.
-  "hosted-by": { handleType: "target", position: Position.Top, colorToken: "host", label: "Hébergé par" },
+  // Position.Left (bug corrigé le 17/08/2026, même correctif que NODE_CAPABILITIES["nutanix-vm"/
+  // "host"] ci-dessus — voir leur commentaire pour le détail du retour utilisateur) : un groupe
+  // hébergé par un nœud "host" externe (ex: un groupe de VMs Nutanix relié à son cluster physique
+  // via une arête "hosts", voir services/topology.ts) utilise désormais la même convention TARGET
+  // = Left que le reste de ce fichier (volume-mount/attach), jamais un côté à part — voir
+  // deriveGroupPorts ci-dessous.
+  "hosted-by": { handleType: "target", position: Position.Left, colorToken: "host", label: "Hébergé par" },
   // Jamais réellement lue par deriveGroupPorts (un groupe n'est jamais SOURCE d'une arête "hosts",
   // voir CAPABILITY_DEFS["hosts"] ci-dessus) — entrée requise uniquement pour que ce
   // `Record<CapabilityId, ...>` reste total après l'ajout de "hosts" à CapabilityId (NODE_CAPABILITIES
   // pose ce port directement avec ses propres métadonnées pour un vrai nœud "host", sans passer par
   // cette table synthétique). Valeurs alignées sur NODE_CAPABILITIES["host"] pour rester cohérentes
-  // si jamais réutilisées un jour.
-  hosts: { handleType: "source", position: Position.Bottom, colorToken: "host", label: "Héberge" },
+  // si jamais réutilisées un jour (Position.Right, même correctif du 17/08/2026).
+  hosts: { handleType: "source", position: Position.Right, colorToken: "host", label: "Héberge" },
 };
 
 /**
@@ -793,6 +815,11 @@ function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
     a.healthStatus === b.healthStatus &&
     a.cpuPercent === b.cpuPercent &&
     a.memBytes === b.memBytes &&
+    // VM Nutanix (voir isNutanixVm/topology-node__specs, GraphNodeImpl ci-dessous, 17/08/2026) —
+    // mêmes raisons que cpuPercent/memBytes ci-dessus : réellement rendus, doivent invalider le memo.
+    a.numVcpus === b.numVcpus &&
+    a.memoryMib === b.memoryMib &&
+    a.nutanixHostName === b.nutanixHostName &&
     attachmentsEqual(a.attachments, b.attachments) &&
     domainsEqual(a.domains, b.domains)
   );
@@ -802,6 +829,21 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   const node = data as unknown as TopologyNode & GraphNodeCallbacks;
   const Icon = KIND_ICON[node.kind];
   const isContainer = node.kind === "container";
+  // Retour utilisateur du 17/08/2026 : "le meme logique que pour els container na pas ete
+  // appliquer verifie tout" — une carte "nutanix-vm" n'affichait jusqu'ici QUE icône/libellé/
+  // sous-titre/statut, une fraction du niveau d'info déjà dense d'une carte conteneur (badges/
+  // métriques/briques), ce qui la faisait paraître disproportionnée pour son contenu réel ("il son
+  // gros" — même largeur fixe de carte que tout le reste du graphe, voir topology.css, mais très
+  // peu remplie). vCPUs/mémoire/hôte physique actuel sont déjà des données RÉELLES exposées par
+  // apps/api/src/services/topology.ts#nutanixVmToNode (jamais recalculées ici) — voir le résumé
+  // compact ajouté plus bas (topology-node__specs), même esprit que le résumé CPU/mémoire d'un
+  // conteneur juste en dessous, mais des specs STATIQUES (vCPU/RAM alloués) plutôt qu'une jauge
+  // d'usage live : Prism Central ne renvoie aucune métrique d'utilisation courante par VM sur les
+  // endpoints déjà utilisés ici (voir NutanixHostResources côté nutanix.ts), jamais une jauge
+  // inventée pour imiter visuellement le conteneur. La carte "host" (cluster/hôte physique) reste
+  // volontairement inchangée : son sous-titre porte déjà CPU/RAM (voir services/topology.ts,
+  // formatHostMemorySubtitle) — un résumé identique en double sur la carte n'ajouterait rien.
+  const isNutanixVm = node.kind === "nutanix-vm";
   const ports = NODE_CAPABILITIES[node.kind];
   // Nœuds d'automatisation (voir NODE_CAPABILITIES ci-dessus pour le pourquoi de leur entrée []) :
   // Handles génériques posés directement ici plutôt que via la table de ports typés réseau/volume —
@@ -1001,6 +1043,28 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
         </div>
       )}
       <div className="topology-node__subtitle">{node.subtitle}</div>
+      {isNutanixVm && (typeof node.numVcpus === "number" || typeof node.memoryMib === "number" || !!node.nutanixHostName) && (
+        // Résumé compact des specs RÉELLES de la VM (voir isNutanixVm ci-dessus pour le pourquoi) —
+        // chips non interactives (pas de nodrag/nopan/stopPropagation nécessaires, rien n'est
+        // cliquable ici contrairement aux briques d'un conteneur juste plus bas).
+        <div className="topology-node__specs">
+          {typeof node.numVcpus === "number" && (
+            <span className="topology-node__spec-chip" title="vCPUs alloués">
+              {node.numVcpus} vCPU
+            </span>
+          )}
+          {typeof node.memoryMib === "number" && (
+            <span className="topology-node__spec-chip" title="Mémoire allouée">
+              {formatMem(node.memoryMib * 1024 * 1024)}
+            </span>
+          )}
+          {!!node.nutanixHostName && (
+            <span className="topology-node__spec-chip" title="Hôte physique actuel">
+              {node.nutanixHostName}
+            </span>
+          )}
+        </div>
+      )}
       {isContainer && !!node.domains?.length && (
         // Domaine(s) de reverse proxy réellement associés à ce conteneur (voir TopologyNode#domains,
         // rapproché par targetContainerId côté services/topology.ts) — affiché directement sous le
@@ -1309,27 +1373,46 @@ export function layeredGroupPositions(
 // touchent" tiré du retour utilisateur du 13/08/2026, même principe "position calculée seulement en
 // l'absence de position sauvegardée" — voir l'appelant, TopologyGraph.tsx) plutôt qu'une seconde
 // logique de layout sans rapport avec le reste de ce fichier.
-/** Largeur (px) d'une "colonne" de la grille de l'arbre — même largeur de référence que LAYER_WIDTH
- * ci-dessus (layeredGroupPositions), une carte .topology-node fait 260px de large. */
-const HOST_TREE_COL_WIDTH = 300;
-/** Hauteur (px) d'une ligne SUPPLÉMENTAIRE au sein d'une grille d'enfants repliée (voir
- * HOST_TREE_MAX_ROW_CHILDREN ci-dessous) — une carte "nutanix-vm" reste compacte (un seul port, peu
- * de badges), suffisant pour ne jamais chevaucher la ligne suivante de la même grille. */
-const HOST_TREE_ROW_HEIGHT = 210;
-/** Distance verticale (px) entre deux NIVEAUX de la hiérarchie (cluster -> hôte -> VM) — plus
- * généreuse que HOST_TREE_ROW_HEIGHT seul : une carte "host" (CPU/mémoire/hyperviseur réels,
- * NODE_CAPABILITIES ci-dessus) affiche souvent plus de contenu qu'une carte "nutanix-vm". */
-const HOST_TREE_LEVEL_HEIGHT = 260;
+//
+// Orientation HORIZONTALE (niveau -> colonne X, fratrie -> ligne Y), pas verticale — changé le
+// 17/08/2026 EN MÊME TEMPS que le correctif des ports Left/Right ci-dessus (NODE_CAPABILITIES
+// ["nutanix-vm"/"host"]) : la mission précédente avait disposé cet arbre verticalement (parent
+// au-dessus, enfants dessous) pour accompagner des ports Top/Bottom — une fois les ports remis en
+// Left/Right (cohérence avec TOUT le reste du graphe, voir plus haut), garder un arbre vertical
+// aurait fait partir chaque arête du CÔTÉ d'une carte pour rejoindre le dessus/dessous de la
+// suivante (un repli en S disgracieux, le parent et l'enfant centrés à la même abscisse). Tourner
+// l'arbre de 90° aligne au contraire ce correctif sur la convention DÉJÀ établie par TOUT le reste
+// de ce graphe (COLUMN_X, TopologyGraph.tsx) : les nœuds reliés par un port source/target Left/
+// Right sont disposés en COLONNES horizontales adjacentes (source à gauche, target à droite),
+// jamais empilés verticalement — le port "Right" d'un parent (capacité "hosts") pointe alors
+// naturellement vers le port "Left" de son enfant (capacité "hosted-by") juste à sa droite, sans
+// repli. L'algorithme lui-même (largeur de sous-arbre bornée, grille compacte au-delà de
+// HOST_TREE_MAX_LINE_CHILDREN feuilles) reste IDENTIQUE à celui qui a réglé "29 VMs empilées en une
+// colonne géante" le 17/08/2026 — seul l'axe (x <-> y) est inversé, jamais réinventé.
+/** Distance (px) entre deux NŒUDS D'UNE MÊME FRATRIE le long de l'axe perpendiculaire à l'arbre
+ * (axe Y) — même largeur de référence que LAYER_WIDTH ci-dessus (layeredGroupPositions), une carte
+ * .topology-node fait 260px de large/haut. */
+const HOST_TREE_SIBLING_SPACING = 300;
+/** Distance (px) SUPPLÉMENTAIRE le long de l'axe des niveaux (X) entre deux "lignes" d'une grille
+ * d'enfants repliée (voir HOST_TREE_MAX_LINE_CHILDREN ci-dessous) — une carte "nutanix-vm" reste
+ * compacte (un seul port, peu de badges), suffisant pour ne jamais chevaucher la colonne suivante
+ * de la même grille. */
+const HOST_TREE_GRID_LINE_SPACING = 210;
+/** Distance (px) entre deux NIVEAUX de la hiérarchie (cluster -> hôte -> VM), le long de l'axe X —
+ * plus généreuse que HOST_TREE_GRID_LINE_SPACING seul : une carte "host" (CPU/mémoire/hyperviseur
+ * réels, NODE_CAPABILITIES ci-dessus) affiche souvent plus de contenu qu'une carte "nutanix-vm". */
+const HOST_TREE_LEVEL_SPACING = 260;
 /** Au-delà de ce nombre d'enfants DIRECTS et tous eux-mêmes sans enfant propre (des feuilles, ex :
  * des VMs — jamais un hôte, qui a lui-même des VMs dessous), on arrête de les aligner sur une seule
  * ligne (c'était exactement le bug du 17/08/2026 : jusqu'à 29 VMs en une colonne géante) — ils sont
  * repliés en grille compacte plutôt qu'empilés à l'infini dans une seule direction. */
-const HOST_TREE_MAX_ROW_CHILDREN = 5;
-/** Nombre de colonnes MAXIMUM d'une grille repliée (voir ci-dessus) — le nombre réel de colonnes
- * utilisées est `min(HOST_TREE_MAX_GRID_COLUMNS, ceil(sqrt(nombre d'enfants)))`, une grille aussi
- * proche que possible d'un carré ("circuit imprimé" plutôt qu'une bande large et basse ou haute et
- * étroite) plafonnée pour ne jamais produire une rangée plus large que ce plafond. */
-const HOST_TREE_MAX_GRID_COLUMNS = 6;
+const HOST_TREE_MAX_LINE_CHILDREN = 5;
+/** Nombre de "lignes" MAXIMUM (le long de l'axe des fratries, Y) d'une grille repliée (voir
+ * ci-dessus) — le nombre réel utilisé est `min(HOST_TREE_MAX_GRID_LINES, ceil(sqrt(nombre
+ * d'enfants)))`, une grille aussi proche que possible d'un carré ("circuit imprimé" plutôt qu'une
+ * bande large et basse ou haute et étroite) plafonnée pour ne jamais produire une grille plus
+ * "haute" que ce plafond. */
+const HOST_TREE_MAX_GRID_LINES = 6;
 
 /** true si tous les `childIds` donnés n'ont eux-mêmes AUCUN enfant dans `childrenOf` — un hôte avec
  * des VMs dessous ne doit JAMAIS être replié en grille (il a sa propre sous-hiérarchie à dessiner
@@ -1339,26 +1422,32 @@ function allChildrenAreLeaves(childIds: string[], childrenOf: Map<string, string
 }
 
 /**
- * Disposition en ARBRE (façon organigramme, un seul parent par nœud via `hostsEdges`) de tout
- * sous-ensemble `nodeIds` relié par des arêtes "hosts" — chaque enfant est centré sous son parent ;
+ * Disposition en ARBRE HORIZONTAL (façon organigramme couché sur le côté, un seul parent par nœud
+ * via `hostsEdges`) de tout sous-ensemble `nodeIds` relié par des arêtes "hosts" — chaque enfant
+ * est centré À DROITE de son parent (axe X = niveau, axe Y = fratrie ; orientation choisie le
+ * 17/08/2026 pour rester cohérente avec les ports Left/Right désormais posés sur "nutanix-vm"/
+ * "host", voir NODE_CAPABILITIES ci-dessus et le bloc de constantes HOST_TREE_* juste au-dessus) ;
  * un parent avec BEAUCOUP d'enfants-feuilles (ex : un hôte AHV avec 29 VMs) les replie en grille
- * compacte (voir HOST_TREE_MAX_ROW_CHILDREN/HOST_TREE_MAX_GRID_COLUMNS ci-dessus) plutôt que de les
- * aligner sur une ligne géante ; un nœud sans parent DANS ce sous-ensemble (racine réelle — cluster
- * Nutanix, ou tout hôte/VM isolé sans arête "hosts", ex : un environnement Docker distant sans VM
- * hébergée) devient sa propre racine d'arbre, plusieurs racines étant simplement placées côte à
- * côte (jamais de collision, chaque sous-arbre réserve sa propre largeur, voir `place` ci-dessous).
+ * compacte (voir HOST_TREE_MAX_LINE_CHILDREN/HOST_TREE_MAX_GRID_LINES ci-dessus) plutôt que de les
+ * aligner sur une seule ligne géante ; un nœud sans parent DANS ce sous-ensemble (racine réelle —
+ * cluster Nutanix, ou tout hôte/VM isolé sans arête "hosts", ex : un environnement Docker distant
+ * sans VM hébergée) devient sa propre racine d'arbre, plusieurs racines étant simplement empilées
+ * les unes sous les autres (jamais de collision, chaque sous-arbre réserve sa propre plage sur
+ * l'axe des fratries, voir `place` ci-dessous).
  *
  * Algorithme classique en deux passes (garanti sans chevauchement, PAS de minimisation de
  * croisements au-delà de ce que le centrage parent/enfant apporte déjà — largement suffisant pour
- * la profondeur réelle de ce graphe, 2-3 niveaux) :
- *  1) `subtreeWidthUnits` (post-ordre, mémoïsé) : largeur du sous-arbre de chaque nœud, en "unités
- *     de colonne" — 1 pour une feuille ; somme des largeurs des enfants pour un nœud à peu
- *     d'enfants (alignés sur une ligne, cas normal : un cluster avec 3 hôtes) ; BORNÉE par
- *     `ceil(sqrt(n))` (plafonnée) pour un nœud à beaucoup d'enfants-feuilles (cas réel : un hôte
- *     avec 29 VMs) — c'est cette borne, jamais proportionnelle au nombre d'enfants, qui empêche la
- *     colonne géante du 17/08/2026.
+ * la profondeur réelle de ce graphe, 2-3 niveaux) — IDENTIQUE dans son principe à la version
+ * verticale d'origine (17/08/2026, "29 VMs empilées en une colonne géante"), seul l'axe change :
+ *  1) `subtreeWidthUnits` (post-ordre, mémoïsé) : "largeur" du sous-arbre de chaque nœud le long de
+ *     l'axe des fratries (Y), en unités — 1 pour une feuille ; somme des largeurs des enfants pour
+ *     un nœud à peu d'enfants (alignés sur une même ligne verticale, cas normal : un cluster avec 3
+ *     hôtes) ; BORNÉE par `ceil(sqrt(n))` (plafonnée) pour un nœud à beaucoup d'enfants-feuilles
+ *     (cas réel : un hôte avec 29 VMs) — c'est cette borne, jamais proportionnelle au nombre
+ *     d'enfants, qui empêche la colonne géante du 17/08/2026.
  *  2) `place` (pré-ordre) : attribue une position centrée à chaque nœud à partir de la largeur déjà
- *     connue de son sous-arbre, avance le curseur horizontal pour le frère suivant.
+ *     connue de son sous-arbre, avance le curseur le long de l'axe des fratries (Y) pour le frère
+ *     suivant.
  */
 export function hostHierarchyPositions(
   nodeIds: string[],
@@ -1380,37 +1469,48 @@ export function hostHierarchyPositions(
 
   const positions: Record<string, { x: number; y: number }> = {};
   const widthCache = new Map<string, number>();
+  /** "Largeur" du sous-arbre = combien d'unités il occupe le long de l'axe des FRATRIES (Y) — le
+   * nom garde le vocabulaire "largeur/colonne" de l'algorithme d'origine (17/08/2026), seul l'axe
+   * physique auquel il correspond a tourné de 90° (voir JSDoc de hostHierarchyPositions/le bloc de
+   * constantes ci-dessus). */
   function subtreeWidthUnits(id: string): number {
     const cached = widthCache.get(id);
     if (cached !== undefined) return cached;
     const children = childrenOf.get(id) ?? [];
     let width: number;
     if (children.length === 0) width = 1;
-    else if (children.length > HOST_TREE_MAX_ROW_CHILDREN && allChildrenAreLeaves(children, childrenOf)) {
-      width = Math.min(HOST_TREE_MAX_GRID_COLUMNS, Math.ceil(Math.sqrt(children.length)));
+    else if (children.length > HOST_TREE_MAX_LINE_CHILDREN && allChildrenAreLeaves(children, childrenOf)) {
+      width = Math.min(HOST_TREE_MAX_GRID_LINES, Math.ceil(Math.sqrt(children.length)));
     } else width = children.reduce((sum, c) => sum + subtreeWidthUnits(c), 0);
     const clamped = Math.max(1, width);
     widthCache.set(id, clamped);
     return clamped;
   }
 
-  /** Place `id` (et tout son sous-arbre) à partir de la colonne libre `startUnits` ; retourne la
-   * première colonne libre APRÈS lui pour que le frère suivant reprenne juste à côté. */
+  /** Place `id` (et tout son sous-arbre) à partir de l'unité libre `startUnits` le long de l'axe
+   * des fratries (Y) ; retourne la première unité libre APRÈS lui pour que le frère suivant
+   * reprenne juste après. `depth` porte l'axe des NIVEAUX (X) — un parent est toujours une colonne
+   * X entière à gauche de ses enfants, jamais au-dessus (voir JSDoc ci-dessus pour le pourquoi de
+   * cette orientation horizontale, cohérente avec les ports Left/Right du 17/08/2026). */
   function place(id: string, depth: number, startUnits: number): number {
     const ownWidth = subtreeWidthUnits(id);
     const centerUnits = startUnits + ownWidth / 2;
-    positions[id] = { x: anchor.x + centerUnits * HOST_TREE_COL_WIDTH, y: anchor.y + depth * HOST_TREE_LEVEL_HEIGHT };
+    positions[id] = { x: anchor.x + depth * HOST_TREE_LEVEL_SPACING, y: anchor.y + centerUnits * HOST_TREE_SIBLING_SPACING };
     const children = childrenOf.get(id) ?? [];
     if (children.length === 0) return startUnits + ownWidth;
-    if (children.length > HOST_TREE_MAX_ROW_CHILDREN && allChildrenAreLeaves(children, childrenOf)) {
-      const columns = Math.min(HOST_TREE_MAX_GRID_COLUMNS, Math.ceil(Math.sqrt(children.length)));
-      const gridStartUnits = centerUnits - columns / 2;
+    if (children.length > HOST_TREE_MAX_LINE_CHILDREN && allChildrenAreLeaves(children, childrenOf)) {
+      const lines = Math.min(HOST_TREE_MAX_GRID_LINES, Math.ceil(Math.sqrt(children.length)));
+      const gridStartUnits = centerUnits - lines / 2;
       children.forEach((child, index) => {
-        const col = index % columns;
-        const row = Math.floor(index / columns);
+        // `line` avance le long de l'axe des fratries (Y, même axe que `centerUnits`) ; `extraLevel`
+        // pousse plus loin le long de l'axe des niveaux (X) pour ne jamais chevaucher la colonne
+        // suivante de la même grille repliée — mêmes indices que l'algorithme d'origine (`col`/`row`
+        // avant rotation), juste réassignés au nouvel axe physique correspondant.
+        const line = index % lines;
+        const extraLevel = Math.floor(index / lines);
         positions[child] = {
-          x: anchor.x + (gridStartUnits + col + 0.5) * HOST_TREE_COL_WIDTH,
-          y: anchor.y + (depth + 1) * HOST_TREE_LEVEL_HEIGHT + row * HOST_TREE_ROW_HEIGHT,
+          x: anchor.x + (depth + 1) * HOST_TREE_LEVEL_SPACING + extraLevel * HOST_TREE_GRID_LINE_SPACING,
+          y: anchor.y + (gridStartUnits + line + 0.5) * HOST_TREE_SIBLING_SPACING,
         };
       });
     } else {

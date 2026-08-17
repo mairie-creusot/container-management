@@ -48,11 +48,19 @@
  *  - "nutanix-host" (14/08/2026) : niveau intermédiaire NOUVEAU, un nœud par hôte AHV physique
  *    réellement listé (nutanix.ts#getNutanixHosts, endpoint /hosts/list) — 3 hôtes physiques
  *    confirmés en conditions réelles pour CLUSTER_AHV_HDV (172.20.0.10:9440). Relié à son cluster
- *    parent par une arête "hosts", et à chaque VM qu'il exécute ACTUELLEMENT par une autre arête
- *    "hosts" (`vm.hostUuid`, recalculé à CHAQUE poll depuis status.resources.host_reference — une
- *    VM qui migre en live migration change donc de rattachement dès le prochain rafraîchissement).
- *    Une VM sans hôte déterminable (éteinte, champ absent) reste rattachée directement au nœud
- *    cluster, comme avant l'introduction de ce niveau intermédiaire.
+ *    parent par une arête "hosts", et à chaque VM qu'il exécute (ou a exécutée en dernier, VM
+ *    éteinte) par une autre arête "hosts" (`vm.hostUuid`, recalculé à CHAQUE poll, avec repli
+ *    status -> spec côté nutanix.ts#mapVmEntity pour une VM éteinte — une VM qui migre en live
+ *    migration change donc de rattachement dès le prochain rafraîchissement). Retour utilisateur
+ *    du 17/08/2026, capture d'écran à l'appui : "ya des edge en trop... je doi en avoir que troie
+ *    [arêtes] la entre ahv et nut 1 nut 2 nut 3" — une VM sans AUCUN hôte déterminable (ni
+ *    status.resources.host_reference ni son repli spec, VM jamais démarrée) ne produit PLUS
+ *    d'arête "hosts" DU TOUT (voir getNutanixTopologyParts ci-dessous) : jamais de rattachement
+ *    direct au nœud cluster, qui inventerait une relation "cluster héberge directement cette VM"
+ *    fausse — un cluster ne doit visuellement porter QUE ses arêtes vers ses hôtes physiques réels
+ *    (invariant explicitement demandé). Ce cas résiduel (VM restant sans la moindre arête "hosts")
+ *    reste une carte de nœud visible dans le graphe, juste non reliée à sa hiérarchie physique
+ *    tant qu'aucune donnée de placement n'existe pour elle.
  *  - "remote-docker" : un nœud par environnement Docker distant PERSISTÉ (remoteDockerStore.ts,
  *    SSH ou TCP+TLS) — TOUJOURS présent dès qu'il est configuré (l'utilisateur l'a créé, il
  *    existe), `status` reflète honnêtement la joignabilité RÉELLE au moment de la construction du
@@ -275,11 +283,23 @@ function formatHostMemorySubtitle(memoryCapacityMib: number): string {
  * réelles sur l'instance 172.20.0.10:9440) : cluster (nœud "host"/hostKind "nutanix-cluster", déjà
  * existant) -> hôte physique AHV (nœud "host"/hostKind "nutanix-host", NOUVEAU) -> VM. Le
  * rattachement VM -> hôte est réévalué à CHAQUE appel (jamais figé) : `vm.hostUuid` vient de
- * nutanix.ts#getNutanixVms, recalculé à chaque poll depuis `status.resources.host_reference` —
- * une VM qui a migré en live migration change donc d'arête dès le prochain rafraîchissement du
- * graphe. Si `vm.hostUuid` est absent (VM éteinte, champ non renvoyé) OU que l'hôte visé n'est
- * plus dans la liste réellement retournée par getNutanixHosts() à cet instant (course entre deux
- * requêtes), repli sur l'ancien comportement : rattachement direct au nœud cluster.
+ * nutanix.ts#getNutanixVms, recalculé à chaque poll depuis `status.resources.host_reference`
+ * (placement live) avec repli sur `spec.resources.host_reference` (dernier hôte assigné/déclaré)
+ * pour une VM éteinte — voir nutanix.ts#mapVmEntity. Une VM qui a migré en live migration change
+ * donc d'arête dès le prochain rafraîchissement du graphe.
+ *
+ * Bug réel corrigé le 17/08/2026 (retour utilisateur, capture d'écran à l'appui : "ya un probleme
+ * dans les edge normalement je doi en avoir que troie la entre ahv et nut 1 nut 2 nut 3 car les vm
+ * sont atacher e ceux ci donc ya des edge en trop") : si `vm.hostUuid` est absent OU que l'hôte
+ * visé n'est plus dans la liste réellement retournée par getNutanixHosts() à cet instant (course
+ * entre deux requêtes), on NE FABRIQUE PLUS d'arête "hosts" DU TOUT pour cette VM — l'ancien repli
+ * "rattachement direct au nœud cluster" produisait jusqu'à 6 arêtes en trop sur le nœud cluster
+ * (une par VM éteinte sans hôte déterminable, confirmé en conditions réelles sur CLUSTER_AHV_HDV),
+ * polluant visuellement le seul invariant que l'utilisateur attend du nœud cluster : au plus une
+ * arête PAR HÔTE PHYSIQUE réel, jamais une arête directe vers une VM. Une VM qui reste sans la
+ * moindre donnée de placement (jamais démarrée, ou instance Nutanix injoignable) reste un nœud
+ * visible dans le graphe, simplement sans arête "hosts" tant qu'aucun placement n'est connu —
+ * cohérent avec le reste de ce fichier ("jamais une relation inventée").
  *
  * [] partout si Nutanix n'a jamais été configuré via l'assistant (isNutanixConfigured, même garde
  * que nutanix.ts#getNutanixEnvironment) — ni VM, ni cluster, ni hôte, ni arête inventée. Si
@@ -352,13 +372,15 @@ async function getNutanixTopologyParts(): Promise<{ vmNodes: TopologyNode[]; hos
     hostEdges.push({ id: `hosts:${h.clusterUuid}:${h.id}`, source: nutanixClusterHostNodeId(h.clusterUuid), target: nutanixHostNodeId(h.id), kind: "hosts" });
   }
 
-  // Hôte physique -> VM (placement réel et vivant, voir JSDoc ci-dessus) ; repli sur cluster -> VM
-  // (comportement historique) si l'hôte de la VM n'est pas déterminable à cet instant.
+  // Hôte physique -> VM (placement réel, voir JSDoc ci-dessus : status.resources.host_reference en
+  // priorité, repli spec.resources.host_reference pour une VM éteinte). AUCUN repli cluster -> VM
+  // (retiré le 17/08/2026, voir JSDoc ci-dessus) : une VM sans hôte déterminable par AUCUN des deux
+  // champs, ou dont l'hôte référencé n'est plus dans la liste réellement retournée par
+  // getNutanixHosts() à cet instant (course entre deux requêtes), n'obtient simplement AUCUNE
+  // arête "hosts" — jamais de rattachement direct au cluster.
   for (const vm of vms) {
     if (vm.hostUuid && knownHostUuids.has(vm.hostUuid)) {
       hostEdges.push({ id: `hosts:${vm.hostUuid}:${vm.id}`, source: nutanixHostNodeId(vm.hostUuid), target: `nutanix-vm:${vm.id}`, kind: "hosts" });
-    } else if (vm.clusterUuid && knownClusterUuids.has(vm.clusterUuid)) {
-      hostEdges.push({ id: `hosts:${vm.clusterUuid}:${vm.id}`, source: nutanixClusterHostNodeId(vm.clusterUuid), target: `nutanix-vm:${vm.id}`, kind: "hosts" });
     }
   }
 

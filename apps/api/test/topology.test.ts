@@ -133,7 +133,7 @@ describe("getTopology — nœuds host cluster Nutanix (kind \"host\", hostKind \
     expect(getNutanixClustersMock).not.toHaveBeenCalled();
   });
 
-  it("un nœud host par cluster réel + une arête « hosts » vers chaque VM dont le clusterUuid correspond", async () => {
+  it("un nœud host par cluster réel ; VMs sans hôte physique déterminable (hostUuid) n'ont plus AUCUNE arête « hosts » directe (retrait du repli cluster -> VM, 17/08/2026)", async () => {
     isNutanixConfiguredMock.mockResolvedValue(true);
     getNutanixClustersMock.mockResolvedValue([
       { uuid: "cluster-uuid-1", name: "Cluster Mairie" },
@@ -176,15 +176,13 @@ describe("getTopology — nœuds host cluster Nutanix (kind \"host\", hostKind \
       subtitle: "Cluster Nutanix · 0 VM",
     });
 
+    // Retour utilisateur du 17/08/2026 : plus aucun repli "cluster -> VM" — vm-uuid-1/vm-uuid-2 ont
+    // bien un clusterUuid réel (voir subtitle "2 VMs" ci-dessus, dérivé indépendamment de
+    // vmCountByClusterUuid) mais AUCUN hostUuid déterminable ici (aucun hôte physique mocké dans ce
+    // bloc de test), donc AUCUNE arête "hosts" — jamais un rattachement direct au cluster.
     const hostEdges = topology.edges.filter((e) => e.kind === "hosts");
-    expect(hostEdges).toHaveLength(2);
-    expect(hostEdges).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "nutanix-vm:vm-uuid-1" }),
-        expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "nutanix-vm:vm-uuid-2" }),
-      ]),
-    );
-    // vm-c (clusterUuid absent) n'a produit aucune arête.
+    expect(hostEdges).toHaveLength(0);
+    // vm-c (clusterUuid absent) n'a, comme avant, produit aucune arête.
     expect(topology.edges.some((e) => e.target === "nutanix-vm:vm-uuid-3")).toBe(false);
   });
 });
@@ -231,7 +229,9 @@ describe("getTopology — nœuds host physique Nutanix (kind \"host\", hostKind 
         disks: [{ uuid: "disk-1", deviceType: "DISK", sizeBytes: 805306368000 }],
         networks: [{ subnetUuid: "subnet-1", subnetName: "VLAN 1", vlanId: 1, ips: ["172.16.8.48"] }],
       },
-      // VM éteinte, hostUuid absent : doit retomber sur un rattachement direct au cluster.
+      // VM éteinte, hostUuid absent (ni status ni spec côté nutanix.ts#mapVmEntity, VM jamais
+      // démarrée) : ne doit produire AUCUNE arête "hosts" — retour utilisateur du 17/08/2026,
+      // jamais de rattachement direct au cluster (voir services/topology.ts).
       { id: "vm-uuid-2", name: "vm-b", powerState: "off", numVcpus: 1, memoryMib: 1024, cluster: "CLUSTER_AHV_HDV", clusterUuid: "cluster-uuid-1" },
     ]);
 
@@ -252,16 +252,18 @@ describe("getTopology — nœuds host physique Nutanix (kind \"host\", hostKind 
     expect(host1?.subtitle).toContain("1 VM");
 
     const hostEdges = topology.edges.filter((e) => e.kind === "hosts");
-    // cluster -> host-uuid-1, cluster -> host-uuid-2, host-uuid-1 -> vm-uuid-1 (placement réel),
-    // cluster -> vm-uuid-2 (repli : pas de hostUuid pour cette VM éteinte).
+    // cluster -> host-uuid-1, cluster -> host-uuid-2, host-uuid-1 -> vm-uuid-1 (placement réel).
+    // vm-uuid-2 (éteinte, aucun hostUuid déterminable) n'apparaît dans AUCUNE arête "hosts" —
+    // invariant demandé le 17/08/2026 : le cluster ne porte jamais d'arête directe vers une VM.
     expect(hostEdges).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "host:nutanix-host:host-uuid-1" }),
         expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "host:nutanix-host:host-uuid-2" }),
         expect.objectContaining({ source: "host:nutanix-host:host-uuid-1", target: "nutanix-vm:vm-uuid-1" }),
-        expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "nutanix-vm:vm-uuid-2" }),
       ]),
     );
+    expect(hostEdges.some((e) => e.target === "nutanix-vm:vm-uuid-2")).toBe(false);
+    expect(hostEdges).toHaveLength(3);
     // Jamais un rattachement DOUBLE (host ET cluster en même temps) pour la même VM placée.
     expect(topology.edges.filter((e) => e.target === "nutanix-vm:vm-uuid-1")).toHaveLength(1);
 
@@ -275,7 +277,7 @@ describe("getTopology — nœuds host physique Nutanix (kind \"host\", hostKind 
     });
   });
 
-  it("si l'hôte visé par une VM n'est plus dans la liste réellement retournée (course), repli sur le rattachement direct au cluster", async () => {
+  it("si l'hôte visé par une VM n'est plus dans la liste réellement retournée (course), aucune arête « hosts » n'est fabriquée pour cette VM (jamais de repli cluster)", async () => {
     isNutanixConfiguredMock.mockResolvedValue(true);
     getNutanixClustersMock.mockResolvedValue([{ uuid: "cluster-uuid-1", name: "CLUSTER_AHV_HDV" }]);
     getNutanixHostsMock.mockResolvedValue([]); // hôte supprimé/injoignable entre les deux appels
@@ -295,9 +297,9 @@ describe("getTopology — nœuds host physique Nutanix (kind \"host\", hostKind 
     const topology = await getTopology();
 
     expect(topology.nodes.some((n) => n.kind === "host" && n.hostKind === "nutanix-host")).toBe(false);
-    expect(topology.edges).toEqual(
-      expect.arrayContaining([expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "nutanix-vm:vm-uuid-1" })]),
-    );
+    // Retour utilisateur du 17/08/2026 : plus aucun repli "cluster -> VM" — cette VM reste un nœud
+    // visible mais sans la moindre arête "hosts" tant que son hôte réel n'est pas déterminable.
+    expect(topology.edges.some((e) => e.kind === "hosts" && e.target === "nutanix-vm:vm-uuid-1")).toBe(false);
   });
 });
 

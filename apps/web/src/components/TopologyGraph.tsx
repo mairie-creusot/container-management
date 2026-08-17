@@ -140,10 +140,15 @@ const ROW_HEIGHT = 130;
  * Ancre horizontale de l'arbre "host" auto-disposé (voir hostHierarchyPositions,
  * topologyGraphShared.tsx, et son branchement dans le calcul de `defaultPosition` plus bas) —
  * placée APRÈS la dernière colonne fixe ci-dessus (automation-action = 4080, largeur de colonne
- * ~340) pour ne JAMAIS chevaucher ad-server/iac-workspace/cron-job/etc., même quand l'arbre
- * s'élargit beaucoup (jusqu'à HOST_TREE_MAX_GRID_COLUMNS colonnes pour une grille de VMs repliée) :
- * COLUMN_X["host"]/COLUMN_X["nutanix-vm"] ci-dessus ne servent donc plus qu'en repli défensif
- * (nœud absent de l'arbre calculé, ne devrait jamais arriver en usage normal).
+ * ~340) pour ne JAMAIS chevaucher ad-server/iac-workspace/cron-job/etc. L'arbre est désormais
+ * disposé HORIZONTALEMENT (niveau -> colonne X, fratrie -> ligne Y, changé le 17/08/2026 pour
+ * rester cohérent avec les ports Left/Right de "nutanix-vm"/"host" — voir NODE_CAPABILITIES,
+ * topologyGraphShared.tsx) : cette ancre borne uniquement où COMMENCE le niveau racine (cluster/
+ * hôte isolé) le long de X, la largeur totale de l'arbre s'étend alors surtout le long de Y (jusqu'à
+ * HOST_TREE_MAX_GRID_LINES lignes pour une grille de VMs repliée, topologyGraphShared.tsx), jamais
+ * vers la gauche dans les colonnes fixes ci-dessus. COLUMN_X["host"]/COLUMN_X["nutanix-vm"]
+ * ci-dessus ne servent donc plus qu'en repli défensif (nœud absent de l'arbre calculé, ne devrait
+ * jamais arriver en usage normal).
  */
 const HOST_TREE_ANCHOR_X = 4700;
 const NETWORK_DRIVERS = ["bridge", "overlay", "host", "none"];

@@ -177,11 +177,20 @@ interface NutanixEntityResources {
   num_sockets?: number;
   num_vcpus_per_socket?: number;
   memory_size_mib?: number;
-  /** uuid + nom de l'hôte AHV qui exécute ACTUELLEMENT la VM — UNIQUEMENT sur `status.resources`
-   * (jamais `spec.resources`, vérifié en conditions réelles) : un placement est un état CONSTATÉ,
-   * pas une intention de configuration. IMPORTANT (vérifié en conditions réelles) : `name` ici
-   * porte en fait l'IP de l'hyperviseur ("172.20.0.5"), PAS un nom lisible façon "HDVNUTA3" — voir
-   * mapVmEntity ci-dessous, qui résout le vrai nom via getNutanixHosts() plutôt que ce champ brut. */
+  /** uuid + nom de l'hôte AHV — sur `status.resources`, c'est l'hôte qui exécute ACTUELLEMENT la VM
+   * (état CONSTATÉ, absent pour une VM éteinte : Prism Central ne rapporte un placement live que
+   * pour une VM allumée, vérifié en conditions réelles le 14/08/2026). Retour utilisateur du
+   * 17/08/2026 (VMs éteintes rattachées à tort directement au nœud cluster faute d'hôte
+   * déterminable, voir mapVmEntity) : `spec.resources.host_reference` porte lui le dernier hôte
+   * ASSIGNÉ/déclaré à la VM et reste présent même VM éteinte pour toute VM déjà démarrée au moins
+   * une fois — utilisé désormais comme repli quand `status.resources.host_reference` est absent.
+   * Vérification en conditions réelles de CE repli spec précis bloquée le 17/08/2026 par une
+   * indisponibilité temporaire de l'instance 172.20.0.10:9440 (401 Prism Central, condition
+   * externe) — à reconfirmer dès l'instance de nouveau joignable (voir mapVmEntity pour le detail
+   * du repli et le cas résiduel où AUCUN des deux n'est renseigné). IMPORTANT (vérifié en
+   * conditions réelles) : `name` ici porte en fait l'IP de l'hyperviseur ("172.20.0.5"), PAS un nom
+   * lisible façon "HDVNUTA3" — voir mapVmEntity ci-dessous, qui résout le vrai nom via
+   * getNutanixHosts() plutôt que ce champ brut. */
   host_reference?: NutanixReference;
   disk_list?: NutanixDiskEntry[];
   nic_list?: NutanixNicEntry[];
@@ -274,13 +283,27 @@ function mapVmEntity(entity: NutanixVmEntity, hostsByUuid: NutanixHostByUuid, su
   // fragile (deux clusters pourraient théoriquement partager un nom).
   const clusterUuid = entity.status?.cluster_reference?.uuid ?? entity.spec?.cluster_reference?.uuid;
 
-  // Placement RÉEL et VIVANT de la VM sur son hôte physique — UNIQUEMENT status.resources (voir
-  // NutanixEntityResources#host_reference ci-dessus), jamais spec (pas de notion d'"hôte voulu"
-  // côté AHV). `host_reference.name` porte en réalité l'IP de l'hyperviseur (vérifié en conditions
-  // réelles) : on préfère le VRAI nom résolu via getNutanixHosts(), avec repli sur cette IP
-  // UNIQUEMENT si l'hôte n'a pas pu être retrouvé dans la liste résolue à cet instant précis
-  // (course entre deux requêtes) — jamais un nom inventé.
-  const hostRef = entity.status?.resources?.host_reference;
+  // Placement de la VM sur son hôte physique — préfère TOUJOURS le placement RÉEL et VIVANT
+  // (status.resources.host_reference). Retour utilisateur du 17/08/2026, capture d'écran à
+  // l'appui : "ya des edge en trop... normalement je doi en avoir que troie [arêtes] la entre ahv
+  // et nut 1 nut 2 nut 3 car les vm sont atacher e ceux ci" — vérifié en conditions réelles le
+  // même jour : une VM ÉTEINTE ne renvoie simplement PAS status.resources.host_reference (Prism
+  // Central ne rapporte un placement "live" que pour une VM allumée), ce qui faisait retomber
+  // TopologyGraph sur un rattachement direct cluster -> VM (voir l'ancien commentaire de
+  // services/topology.ts#getNutanixTopologyParts) — plusieurs arêtes en plus des 3 attendues
+  // cluster -> hôte, polluant visuellement le nœud cluster. Repli sur spec.resources.host_reference
+  // (l'hôte DÉCLARÉ/persisté, distinct du placement live) AVANT de renoncer complètement : le
+  // modèle de données Prism Central v3 sépare `status` (état constaté) de `spec` (config
+  // déclarée) — `spec.resources.host_reference` porte le dernier hôte assigné à la VM et reste
+  // présent dans la réponse même VM éteinte pour une VM déjà démarrée au moins une fois. `hostUuid`
+  // reste `undefined` si NI l'un NI l'autre n'est renseigné (VM jamais démarrée) : voir
+  // services/topology.ts#getNutanixTopologyParts, qui ne fabrique alors plus AUCUNE arête "hosts"
+  // pour cette VM plutôt que d'inventer un rattachement direct au cluster. `host_reference.name`
+  // porte en réalité l'IP de l'hyperviseur (vérifié en conditions réelles) : on préfère le VRAI nom
+  // résolu via getNutanixHosts(), avec repli sur cette IP UNIQUEMENT si l'hôte n'a pas pu être
+  // retrouvé dans la liste résolue à cet instant précis (course entre deux requêtes) — jamais un
+  // nom inventé.
+  const hostRef = entity.status?.resources?.host_reference ?? entity.spec?.resources?.host_reference;
   const hostUuid = hostRef?.uuid;
   const resolvedHost = hostUuid ? hostsByUuid.get(hostUuid) : undefined;
   const hostName = resolvedHost?.name ?? hostRef?.name;

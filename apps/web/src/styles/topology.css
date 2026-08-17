@@ -107,10 +107,15 @@
    style.css) centre CHAQUE poignée exactement SUR la ligne de bordure de la carte
    (`transform: translate(-50%, -50%)` etc.) : la moitié du petit cercle (9px) se retrouve donc
    TOUJOURS à l'intérieur du padding de la carte (12-14px), par-dessus le début du contenu réel —
-   visible surtout sur les nœuds "host"/"nutanix-vm" (Position.Top/Bottom, juste au-dessus de
-   l'en-tête icône+libellé) mais vrai pour TOUS les types de nœuds de ce graphe (Position.Left/
-   Right d'un conteneur, par ex., retombe au milieu vertical de la carte — badges/métriques/
-   attachements compris dès qu'elle grandit). Correctif : on pousse chaque poignée ENTIÈREMENT à
+   vrai pour TOUS les types de nœuds de ce graphe (Position.Left/Right d'un conteneur, par ex.,
+   retombe au milieu vertical de la carte — badges/métriques/attachements compris dès qu'elle
+   grandit), quelle que soit la Position utilisée. Règle générique, indépendante du côté : reste
+   valable même après le correctif SÉPARÉ du même jour qui a fait passer les nœuds "host"/
+   "nutanix-vm" de Position.Top/Bottom à Position.Left/Right (cohérence avec le reste du graphe,
+   voir NODE_CAPABILITIES dans topologyGraphShared.tsx) — ces nœuds ne posent donc plus AUCUN
+   Handle en Top/Bottom, mais les 4 règles ci-dessous restent nécessaires pour tout nœud qui, lui,
+   utilise réellement ces côtés (aucun dans ce graphe aujourd'hui, gardées pour rester générique).
+   Correctif : on pousse chaque poignée ENTIÈREMENT à
    l'EXTÉRIEUR de la carte (son propre bord touche la bordure de la carte, rien ne chevauche plus
    jamais le contenu), quel que soit le nombre de ports sur ce côté — spécificité de sélecteur
    (deux classes) suffisante pour l'emporter sur les règles génériques `.react-flow__handle-*` de
@@ -329,6 +334,42 @@
   overflow: hidden;
   text-overflow: ellipsis;
   margin-bottom: 8px;
+}
+
+/* Résumé compact des specs RÉELLES d'une VM Nutanix (vCPU/RAM/hôte physique actuel — voir
+   isNutanixVm, GraphNodeImpl dans topologyGraphShared.tsx, retour utilisateur du 17/08/2026 :
+   "le meme logique que pour els container na pas ete appliquer") — même famille visuelle que
+   .topology-brick (chip arrondie, surface 2) mais NON interactive (pas de :hover/cursor pointer,
+   rien n'est cliquable ici, contrairement à une brique volume/network d'un conteneur). */
+.topology-node__specs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.topology-node__spec-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topology-node--compact .topology-node__specs {
+  opacity: 0;
+  max-height: 0;
+  margin: 0;
+  pointer-events: none;
 }
 
 .topology-node__status {
@@ -620,6 +661,7 @@
 .topology-node__badges,
 .topology-node__metrics,
 .topology-node__attachments,
+.topology-node__specs,
 .topology-node__status-label {
   transition: opacity 0.15s ease, max-height 0.15s ease, margin 0.15s ease;
   max-height: 60px;

@@ -208,7 +208,7 @@ describe("getNutanixVms — résolution hôte/disques/VLAN (host_reference, disk
     expect(vm).toMatchObject({ hostUuid: "host-disparu", hostName: "172.20.0.9" });
   });
 
-  it("VM éteinte sans host_reference : hostUuid/hostName absents, jamais inventés", async () => {
+  it("VM éteinte sans host_reference (ni status ni spec) : hostUuid/hostName absents, jamais inventés", async () => {
     getEffectiveNutanixConfigMock.mockResolvedValue(VALID_CONFIG);
     setResponse("/api/nutanix/v3/hosts/list", { entities: [] });
     setResponse("/api/nutanix/v3/subnets/list", { entities: [] });
@@ -224,6 +224,41 @@ describe("getNutanixVms — résolution hôte/disques/VLAN (host_reference, disk
     expect(vm).not.toHaveProperty("hostName");
     expect(vm).not.toHaveProperty("disks");
     expect(vm).not.toHaveProperty("networks");
+  });
+
+  /**
+   * Retour utilisateur du 17/08/2026, capture d'écran à l'appui : "ya des edge en trop... je doi
+   * en avoir que troie [arêtes] la entre ahv et nut 1 nut 2 nut 3" — une VM éteinte (donc sans
+   * status.resources.host_reference, jamais rapporté pour une VM éteinte par Prism Central) doit
+   * quand même résoudre son hôte via spec.resources.host_reference (dernier hôte assigné/déclaré,
+   * conservé même VM éteinte) AVANT de renoncer, pour ne plus jamais retomber sur un rattachement
+   * direct au cluster côté services/topology.ts#getNutanixTopologyParts.
+   */
+  it("VM éteinte SANS status.resources.host_reference mais AVEC spec.resources.host_reference : résout hostUuid/hostName via le repli spec", async () => {
+    getEffectiveNutanixConfigMock.mockResolvedValue(VALID_CONFIG);
+    setResponse("/api/nutanix/v3/hosts/list", {
+      entities: [{ metadata: { uuid: "9708aa74-e03a-4adf-ac1f-1cbfd82ea8eb" }, status: { name: "HDVNUTA3" } }],
+    });
+    setResponse("/api/nutanix/v3/subnets/list", { entities: [] });
+    setResponse("/api/nutanix/v3/vms/list", {
+      entities: [
+        {
+          metadata: { uuid: "vm-off-with-spec-host" },
+          status: { name: "vm-off-with-spec-host", resources: { power_state: "OFF" } },
+          spec: {
+            name: "vm-off-with-spec-host",
+            resources: {
+              power_state: "OFF",
+              host_reference: { kind: "host", uuid: "9708aa74-e03a-4adf-ac1f-1cbfd82ea8eb", name: "172.20.0.5" },
+            },
+          },
+        },
+      ],
+    });
+
+    const [vm] = await getNutanixVms();
+
+    expect(vm).toMatchObject({ hostUuid: "9708aa74-e03a-4adf-ac1f-1cbfd82ea8eb", hostName: "HDVNUTA3" });
   });
 
   it("subnet non résolu (course) : repli sur le nom brut de subnet_reference, VLAN absent (jamais inventé)", async () => {
