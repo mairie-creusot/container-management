@@ -85,6 +85,7 @@ import {
   deriveGroupPorts,
   edgeTypes,
   GroupLabelPopover,
+  hostHierarchyPositions,
   idWithoutPrefix,
   nodeTypes,
   resolveGroupMemberNodeIds,
@@ -134,6 +135,17 @@ const COLUMN_X: Record<TopologyNode["kind"], number> = {
   "automation-action": 4080,
 };
 const ROW_HEIGHT = 130;
+
+/**
+ * Ancre horizontale de l'arbre "host" auto-disposé (voir hostHierarchyPositions,
+ * topologyGraphShared.tsx, et son branchement dans le calcul de `defaultPosition` plus bas) —
+ * placée APRÈS la dernière colonne fixe ci-dessus (automation-action = 4080, largeur de colonne
+ * ~340) pour ne JAMAIS chevaucher ad-server/iac-workspace/cron-job/etc., même quand l'arbre
+ * s'élargit beaucoup (jusqu'à HOST_TREE_MAX_GRID_COLUMNS colonnes pour une grille de VMs repliée) :
+ * COLUMN_X["host"]/COLUMN_X["nutanix-vm"] ci-dessus ne servent donc plus qu'en repli défensif
+ * (nœud absent de l'arbre calculé, ne devrait jamais arriver en usage normal).
+ */
+const HOST_TREE_ANCHOR_X = 4700;
 const NETWORK_DRIVERS = ["bridge", "overlay", "host", "none"];
 
 // --- Regroupement de nœuds ("encapsulation façon Railway/Logisim", voir topologyGraphShared.tsx
@@ -1843,6 +1855,24 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     dispatch(fetchTopologyPositions());
   }, [dispatch]);
 
+  /**
+   * Disposition automatique en arbre de TOUTE la hiérarchie "host" du graphe (cluster Nutanix ->
+   * hôte AHV -> VM, mais aussi tout autre nœud "host" isolé — environnement Docker distant/hôte
+   * LXD sans VM hébergée — devenu sa propre racine d'arbre à une seule feuille) — voir
+   * hostHierarchyPositions (topologyGraphShared.tsx) pour l'algorithme. Recalculée seulement quand
+   * `data` change (nouveau poll/arêtes), jamais à chaque render : un `useMemo`, pas un calcul posé
+   * inline dans l'effet ci-dessous, pour ne pas le refaire à chaque changement de `positions` (une
+   * simple sauvegarde de position manuelle n'a AUCUNE raison de redisposer tout l'arbre calculé,
+   * seul le nœud déplacé doit changer — voir `defaultPosition` plus bas qui reste de toute façon
+   * ignoré dès qu'une position sauvegardée existe pour ce nœud précis).
+   */
+  const hostTreePositions = useMemo(() => {
+    if (!data) return {};
+    const hostTreeNodeIds = data.nodes.filter((n) => n.kind === "host" || n.kind === "nutanix-vm").map((n) => n.id);
+    const hostsEdges = data.edges.filter((e) => e.kind === "hosts");
+    return hostHierarchyPositions(hostTreeNodeIds, hostsEdges, { x: HOST_TREE_ANCHOR_X, y: 0 });
+  }, [data]);
+
   // Recalcule la liste des nœuds à chaque nouveau fetch (toutes les 15s) ou changement de
   // positions sauvegardées — sans écraser la position d'un nœud déjà positionné (à la main ou par
   // un calcul précédent), contrairement à l'ancien recalcul systématique en 3 colonnes fixes.
@@ -1882,7 +1912,15 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         .filter((n) => !collapsedMemberIds.has(n.id))
         .map((n) => {
           const row = columnCounters[n.kind]++;
-          const defaultPosition = { x: COLUMN_X[n.kind], y: row * ROW_HEIGHT };
+          // Hiérarchie "host" (cluster/hôte/VM Nutanix, environnement Docker distant, hôte LXD) :
+          // position par défaut calculée par l'arbre auto-disposé ci-dessus plutôt que la colonne
+          // fixe historique (COLUMN_X) — celle-ci ne sert plus qu'en repli défensif improbable (id
+          // absent de l'arbre, ne devrait jamais arriver puisqu'il est calculé sur TOUS les nœuds
+          // "host"/"nutanix-vm" de `data.nodes`, exactement ceux filtrés ici par `n.kind`).
+          const defaultPosition =
+            n.kind === "host" || n.kind === "nutanix-vm"
+              ? hostTreePositions[n.id] ?? { x: COLUMN_X[n.kind], y: row * ROW_HEIGHT }
+              : { x: COLUMN_X[n.kind], y: row * ROW_HEIGHT };
           const prevNode = prevById.get(n.id);
           // Défense en profondeur contre un id de nœud recyclé DANS LA MÊME SESSION : un volume
           // (ou network) supprimé puis recréé sous EXACTEMENT le même nom reprend le même id
@@ -1951,7 +1989,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       }
       return nodes;
     });
-  }, [data, positions]);
+  }, [data, positions, hostTreePositions]);
 
   /**
    * Cadre décoratif (voir topologyGraphShared.tsx#GroupFrameNode) autour des membres d'un groupe

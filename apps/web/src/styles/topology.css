@@ -91,10 +91,50 @@
   background: var(--color-surface-3);
   border: 1.5px solid var(--color-text-faint);
   transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+  /* Au-dessus des cartes voisines très rapprochées (voir hostHierarchyPositions,
+     topologyGraphShared.tsx) — sans ça, un point posé pile à la limite de deux cartes adjacentes
+     pourrait apparaître visuellement "sous" le bord de la carte suivante. */
+  z-index: 1;
 }
 
 .topology-handle.react-flow__handle:hover {
   transform: scale(1.35);
+}
+
+/* Bug réel corrigé le 17/08/2026 (retour utilisateur, captures d'écran à l'appui : "mettre les
+   input output sur les coter et pas dessus car ce n'est pas jolie") — root-causé : le CSS par
+   défaut de React Flow (.react-flow__handle-left/-right/-top/-bottom, voir @xyflow/react/dist/
+   style.css) centre CHAQUE poignée exactement SUR la ligne de bordure de la carte
+   (`transform: translate(-50%, -50%)` etc.) : la moitié du petit cercle (9px) se retrouve donc
+   TOUJOURS à l'intérieur du padding de la carte (12-14px), par-dessus le début du contenu réel —
+   visible surtout sur les nœuds "host"/"nutanix-vm" (Position.Top/Bottom, juste au-dessus de
+   l'en-tête icône+libellé) mais vrai pour TOUS les types de nœuds de ce graphe (Position.Left/
+   Right d'un conteneur, par ex., retombe au milieu vertical de la carte — badges/métriques/
+   attachements compris dès qu'elle grandit). Correctif : on pousse chaque poignée ENTIÈREMENT à
+   l'EXTÉRIEUR de la carte (son propre bord touche la bordure de la carte, rien ne chevauche plus
+   jamais le contenu), quel que soit le nombre de ports sur ce côté — spécificité de sélecteur
+   (deux classes) suffisante pour l'emporter sur les règles génériques `.react-flow__handle-*` de
+   la librairie sans avoir besoin de `!important`. `portOffsetStyle` (topologyGraphShared.tsx, pose
+   un `top`/`left` en % par-dessus pour écarter plusieurs ports du même côté) reste compatible : il
+   ne touche jamais `transform`, seulement la position de base le long du bord. */
+.react-flow__handle-left.topology-handle {
+  left: -1px;
+  transform: translate(-100%, -50%);
+}
+
+.react-flow__handle-right.topology-handle {
+  right: -1px;
+  transform: translate(100%, -50%);
+}
+
+.react-flow__handle-top.topology-handle {
+  top: -1px;
+  transform: translate(-50%, -100%);
+}
+
+.react-flow__handle-bottom.topology-handle {
+  bottom: -1px;
+  transform: translate(-50%, 100%);
 }
 
 .topology-handle--network.react-flow__handle {

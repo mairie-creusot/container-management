@@ -1288,6 +1288,143 @@ export function layeredGroupPositions(
   return positions;
 }
 
+// --- Disposition automatique de la hiérarchie "host" (cluster Nutanix -> hôte AHV -> VM, mais
+// générique à TOUTE hiérarchie reliée par une arête "hosts" — un environnement Docker distant/un
+// hôte LXD isolé, sans enfant, y devient simplement un arbre à une seule racine) -----------------
+// Retour utilisateur du 17/08/2026, captures d'écran à l'appui : "29 VMs Nutanix empilées en une
+// colonne géante, plein d'arêtes qui se croisent en éventail... un système qui permet de placer
+// correctement... un peu à un circuit imprimé". Root-causé (TopologyGraph.tsx, avant ce correctif) :
+// TOUS les nœuds "nutanix-vm" partageaient une seule colonne fixe (COLUMN_X["nutanix-vm"]) et un
+// simple compteur de ligne PAR TYPE, sans aucune notion de "sous quel hôte/cluster" — d'où la
+// colonne géante, jamais une vraie disposition en arbre.
+//
+// N'est volontairement PAS un simple appel à layeredGroupPositions ci-dessus : cette dernière
+// résout une forme de problème différente (placer les MEMBRES D'UN GROUPE, un DAG en couches par
+// plus long chemin, sans notion de parent unique à centrer dessus) — la hiérarchie host est, elle,
+// un VRAI arbre (chaque nœud a AU PLUS un parent, voir l'arête "hosts" source -> target côté
+// services/topology.ts#getNutanixTopologyParts) qui doit se lire comme un organigramme : chaque
+// enfant centré sous SON parent, jamais un simple index de ligne global qui mélangerait les VMs de
+// plusieurs hôtes différents. On reprend en revanche le même ESPRIT que layeredGroupPositions
+// (mêmes noms de constantes, même espacement généreux "mieux vaut trop que des cartes qui se
+// touchent" tiré du retour utilisateur du 13/08/2026, même principe "position calculée seulement en
+// l'absence de position sauvegardée" — voir l'appelant, TopologyGraph.tsx) plutôt qu'une seconde
+// logique de layout sans rapport avec le reste de ce fichier.
+/** Largeur (px) d'une "colonne" de la grille de l'arbre — même largeur de référence que LAYER_WIDTH
+ * ci-dessus (layeredGroupPositions), une carte .topology-node fait 260px de large. */
+const HOST_TREE_COL_WIDTH = 300;
+/** Hauteur (px) d'une ligne SUPPLÉMENTAIRE au sein d'une grille d'enfants repliée (voir
+ * HOST_TREE_MAX_ROW_CHILDREN ci-dessous) — une carte "nutanix-vm" reste compacte (un seul port, peu
+ * de badges), suffisant pour ne jamais chevaucher la ligne suivante de la même grille. */
+const HOST_TREE_ROW_HEIGHT = 210;
+/** Distance verticale (px) entre deux NIVEAUX de la hiérarchie (cluster -> hôte -> VM) — plus
+ * généreuse que HOST_TREE_ROW_HEIGHT seul : une carte "host" (CPU/mémoire/hyperviseur réels,
+ * NODE_CAPABILITIES ci-dessus) affiche souvent plus de contenu qu'une carte "nutanix-vm". */
+const HOST_TREE_LEVEL_HEIGHT = 260;
+/** Au-delà de ce nombre d'enfants DIRECTS et tous eux-mêmes sans enfant propre (des feuilles, ex :
+ * des VMs — jamais un hôte, qui a lui-même des VMs dessous), on arrête de les aligner sur une seule
+ * ligne (c'était exactement le bug du 17/08/2026 : jusqu'à 29 VMs en une colonne géante) — ils sont
+ * repliés en grille compacte plutôt qu'empilés à l'infini dans une seule direction. */
+const HOST_TREE_MAX_ROW_CHILDREN = 5;
+/** Nombre de colonnes MAXIMUM d'une grille repliée (voir ci-dessus) — le nombre réel de colonnes
+ * utilisées est `min(HOST_TREE_MAX_GRID_COLUMNS, ceil(sqrt(nombre d'enfants)))`, une grille aussi
+ * proche que possible d'un carré ("circuit imprimé" plutôt qu'une bande large et basse ou haute et
+ * étroite) plafonnée pour ne jamais produire une rangée plus large que ce plafond. */
+const HOST_TREE_MAX_GRID_COLUMNS = 6;
+
+/** true si tous les `childIds` donnés n'ont eux-mêmes AUCUN enfant dans `childrenOf` — un hôte avec
+ * des VMs dessous ne doit JAMAIS être replié en grille (il a sa propre sous-hiérarchie à dessiner
+ * dessous), seul un groupe de VRAIES feuilles (VMs, ou un hôte sans VM le cas échéant) le peut. */
+function allChildrenAreLeaves(childIds: string[], childrenOf: Map<string, string[]>): boolean {
+  return childIds.every((id) => (childrenOf.get(id)?.length ?? 0) === 0);
+}
+
+/**
+ * Disposition en ARBRE (façon organigramme, un seul parent par nœud via `hostsEdges`) de tout
+ * sous-ensemble `nodeIds` relié par des arêtes "hosts" — chaque enfant est centré sous son parent ;
+ * un parent avec BEAUCOUP d'enfants-feuilles (ex : un hôte AHV avec 29 VMs) les replie en grille
+ * compacte (voir HOST_TREE_MAX_ROW_CHILDREN/HOST_TREE_MAX_GRID_COLUMNS ci-dessus) plutôt que de les
+ * aligner sur une ligne géante ; un nœud sans parent DANS ce sous-ensemble (racine réelle — cluster
+ * Nutanix, ou tout hôte/VM isolé sans arête "hosts", ex : un environnement Docker distant sans VM
+ * hébergée) devient sa propre racine d'arbre, plusieurs racines étant simplement placées côte à
+ * côte (jamais de collision, chaque sous-arbre réserve sa propre largeur, voir `place` ci-dessous).
+ *
+ * Algorithme classique en deux passes (garanti sans chevauchement, PAS de minimisation de
+ * croisements au-delà de ce que le centrage parent/enfant apporte déjà — largement suffisant pour
+ * la profondeur réelle de ce graphe, 2-3 niveaux) :
+ *  1) `subtreeWidthUnits` (post-ordre, mémoïsé) : largeur du sous-arbre de chaque nœud, en "unités
+ *     de colonne" — 1 pour une feuille ; somme des largeurs des enfants pour un nœud à peu
+ *     d'enfants (alignés sur une ligne, cas normal : un cluster avec 3 hôtes) ; BORNÉE par
+ *     `ceil(sqrt(n))` (plafonnée) pour un nœud à beaucoup d'enfants-feuilles (cas réel : un hôte
+ *     avec 29 VMs) — c'est cette borne, jamais proportionnelle au nombre d'enfants, qui empêche la
+ *     colonne géante du 17/08/2026.
+ *  2) `place` (pré-ordre) : attribue une position centrée à chaque nœud à partir de la largeur déjà
+ *     connue de son sous-arbre, avance le curseur horizontal pour le frère suivant.
+ */
+export function hostHierarchyPositions(
+  nodeIds: string[],
+  hostsEdges: TopologyEdgeLike[],
+  anchor: { x: number; y: number } = { x: 0, y: 0 },
+): Record<string, { x: number; y: number }> {
+  const idSet = new Set(nodeIds);
+  const childrenOf = new Map<string, string[]>();
+  const parentOf = new Map<string, string>();
+  for (const e of hostsEdges) {
+    // Un enfant n'a jamais deux parents dans ce modèle (une VM n'est jamais hébergée par deux
+    // hôtes/clusters à la fois) — `parentOf.has` défend malgré tout contre une arête dupliquée/
+    // corrompue plutôt que d'écraser silencieusement le premier parent trouvé.
+    if (!idSet.has(e.source) || !idSet.has(e.target) || parentOf.has(e.target)) continue;
+    parentOf.set(e.target, e.source);
+    (childrenOf.get(e.source) ?? childrenOf.set(e.source, []).get(e.source)!).push(e.target);
+  }
+  const roots = nodeIds.filter((id) => !parentOf.has(id));
+
+  const positions: Record<string, { x: number; y: number }> = {};
+  const widthCache = new Map<string, number>();
+  function subtreeWidthUnits(id: string): number {
+    const cached = widthCache.get(id);
+    if (cached !== undefined) return cached;
+    const children = childrenOf.get(id) ?? [];
+    let width: number;
+    if (children.length === 0) width = 1;
+    else if (children.length > HOST_TREE_MAX_ROW_CHILDREN && allChildrenAreLeaves(children, childrenOf)) {
+      width = Math.min(HOST_TREE_MAX_GRID_COLUMNS, Math.ceil(Math.sqrt(children.length)));
+    } else width = children.reduce((sum, c) => sum + subtreeWidthUnits(c), 0);
+    const clamped = Math.max(1, width);
+    widthCache.set(id, clamped);
+    return clamped;
+  }
+
+  /** Place `id` (et tout son sous-arbre) à partir de la colonne libre `startUnits` ; retourne la
+   * première colonne libre APRÈS lui pour que le frère suivant reprenne juste à côté. */
+  function place(id: string, depth: number, startUnits: number): number {
+    const ownWidth = subtreeWidthUnits(id);
+    const centerUnits = startUnits + ownWidth / 2;
+    positions[id] = { x: anchor.x + centerUnits * HOST_TREE_COL_WIDTH, y: anchor.y + depth * HOST_TREE_LEVEL_HEIGHT };
+    const children = childrenOf.get(id) ?? [];
+    if (children.length === 0) return startUnits + ownWidth;
+    if (children.length > HOST_TREE_MAX_ROW_CHILDREN && allChildrenAreLeaves(children, childrenOf)) {
+      const columns = Math.min(HOST_TREE_MAX_GRID_COLUMNS, Math.ceil(Math.sqrt(children.length)));
+      const gridStartUnits = centerUnits - columns / 2;
+      children.forEach((child, index) => {
+        const col = index % columns;
+        const row = Math.floor(index / columns);
+        positions[child] = {
+          x: anchor.x + (gridStartUnits + col + 0.5) * HOST_TREE_COL_WIDTH,
+          y: anchor.y + (depth + 1) * HOST_TREE_LEVEL_HEIGHT + row * HOST_TREE_ROW_HEIGHT,
+        };
+      });
+    } else {
+      let cursor = startUnits;
+      for (const child of children) cursor = place(child, depth + 1, cursor);
+    }
+    return startUnits + ownWidth;
+  }
+
+  let cursor = 0;
+  for (const root of roots) cursor = place(root, 0, cursor);
+  return positions;
+}
+
 export const nodeTypes = { graphNode: GraphNode, topologyGroupNode: GroupNode, topologyGroupFrame: GroupFrameNode };
 
 /**
