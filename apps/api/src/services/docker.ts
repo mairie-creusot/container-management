@@ -345,14 +345,10 @@ export async function createAndStartContainer(options: CreateContainerOptions): 
   return { id: container.id };
 }
 
-// --- Montage d'un volume sur un conteneur EXISTANT (recréation réelle, 17/08/2026) ---------------
-// Docker ne permet PAS d'ajouter un montage à un conteneur déjà créé (aucun endpoint Engine pour
-// ça — c'est la limite documentée depuis le début côté web par VOLUME_MOUNT_INFO,
-// topologyNodeContract.tsx) : la SEULE façon honnête est de recréer le conteneur avec la même
-// configuration + le nouveau montage (stop → rename → create → start → remove de l'ancien), ce que
-// fait mountVolumeOnContainer ci-dessous. Les helpers purs (rebuildBindsFromMounts,
-// sanitizeRecreateNetworkingConfig) sont exportés pour être verrouillés par des tests unitaires
-// sans démon Docker (apps/api/test/containerMounts.test.ts).
+// --- Recréation d'un conteneur EXISTANT avec des modifications (montages/env) --------------------
+// Docker n'a aucun endpoint pour modifier montages ou env d'un conteneur créé : recreateContainerWith
+// est la SEULE implémentation de la séquence stop → rename → create → start → remove (+ rollback).
+// Les valeurs de secrets sont résolues par la route appelante — jamais ici.
 
 /** Sous-ensemble d'un élément de `inspect.Mounts` réellement utilisé par la recréation — typé à la
  * main : @types/dockerode ne type Mounts que très partiellement. */
@@ -364,6 +360,13 @@ export interface InspectedMount {
   RW?: boolean;
 }
 
+/** Montage à ajouter lors d'une recréation — mountPath absolu déjà validé côté route. */
+export interface MountAddition {
+  volumeName: string;
+  mountPath: string;
+  readOnly: boolean;
+}
+
 /**
  * Reconstruit la liste `HostConfig.Binds` de la recréation depuis les montages RÉELS observés
  * (`inspect.Mounts`) plutôt que depuis l'ancien `HostConfig.Binds` seul — différence cruciale :
@@ -372,21 +375,15 @@ export interface InspectedMount {
  * réel). Le re-binder explicitement par ce nom hash préserve ses DONNÉES à travers la recréation —
  * sans ça, `Config.Volumes` recréerait un volume anonyme NEUF et VIDE (perte de données réelle,
  * silencieuse). Les montages tmpfs (et tout autre type exotique) sont ignorés ici : ils viennent
- * de `HostConfig.Tmpfs`, recopié tel quel par mountVolumeOnContainer.
- *
- * `addition` : le nouveau montage demandé. Lève si sa destination est déjà occupée par un montage
- * existant (Docker refuserait de toute façon avec un "Duplicate mount point" moins lisible).
+ * de `HostConfig.Tmpfs`, recopié tel quel par recreateContainerWith.
+ * Lève si une destination demandée est déjà occupée (montage existant ou autre addition).
  */
-export function rebuildBindsFromMounts(
-  mounts: InspectedMount[],
-  addition: { volumeName: string; mountPath: string; readOnly: boolean },
-): string[] {
+export function rebuildBindsFromMounts(mounts: InspectedMount[], additions: MountAddition[]): string[] {
   const binds: string[] = [];
+  const takenDestinations = new Set<string>();
   for (const m of mounts) {
     if (!m.Destination) continue;
-    if (m.Destination === addition.mountPath) {
-      throw new Error(`Mount path "${addition.mountPath}" is already used by an existing mount on this container`);
-    }
+    takenDestinations.add(m.Destination);
     if (m.Type === "volume" && m.Name) {
       binds.push(`${m.Name}:${m.Destination}${m.RW === false ? ":ro" : ""}`);
     } else if (m.Type === "bind" && m.Source) {
@@ -394,8 +391,35 @@ export function rebuildBindsFromMounts(
     }
     // tmpfs/npipe/... : jamais re-bindés ici (voir JSDoc) — tmpfs est porté par HostConfig.Tmpfs.
   }
-  binds.push(`${addition.volumeName}:${addition.mountPath}${addition.readOnly ? ":ro" : ""}`);
+  for (const addition of additions) {
+    if (takenDestinations.has(addition.mountPath)) {
+      throw new Error(`Mount path "${addition.mountPath}" is already used by an existing mount on this container`);
+    }
+    takenDestinations.add(addition.mountPath);
+    binds.push(`${addition.volumeName}:${addition.mountPath}${addition.readOnly ? ":ro" : ""}`);
+  }
   return binds;
+}
+
+/**
+ * Fusionne des entrées "CLE=valeur" dans l'env observé : l'existant est préservé (ordre compris),
+ * une clé déjà présente est remplacée à sa position (jamais dupliquée), les nouvelles clés sont
+ * ajoutées en fin.
+ */
+export function mergeEnvAdditions(existingEnv: string[], additions: string[]): string[] {
+  const keyOf = (entry: string): string => {
+    const eq = entry.indexOf("=");
+    return eq === -1 ? entry : entry.slice(0, eq);
+  };
+  const additionByKey = new Map(additions.map((a) => [keyOf(a), a]));
+  const merged = existingEnv.map((entry) => {
+    const replacement = additionByKey.get(keyOf(entry));
+    if (replacement === undefined) return entry;
+    additionByKey.delete(keyOf(entry));
+    return replacement;
+  });
+  for (const addition of additionByKey.values()) merged.push(addition);
+  return merged;
 }
 
 /** Sous-ensemble d'un endpoint de `inspect.NetworkSettings.Networks` réutilisé à la recréation. */
@@ -434,46 +458,50 @@ export interface MountVolumeOnContainerOptions {
   readOnly: boolean;
 }
 
-/**
- * Monte un volume nommé sur un conteneur EXISTANT en le RECRÉANT réellement — séquence complète,
- * avec remise en état (rollback) si la recréation échoue à mi-chemin :
- *  1. inspect complet de l'ancien conteneur (Config/HostConfig/Mounts/Networks — la configuration
- *     RÉELLE observée par le démon, jamais une reconstruction partielle) ;
- *  2. stop (si en cours d'exécution — libère nom réseau/ports publiés) puis rename de l'ancien
- *     vers un nom temporaire (libère le NOM pour le nouveau, tout en gardant l'ancien intact tant
- *     que le nouveau n'a pas réellement démarré) ;
- *  3. create du nouveau conteneur : MÊME nom, MÊME Config (sauf Hostname auto-généré = short id de
- *     l'ancien, jamais rejoué — un hostname personnalisé est lui conservé), MÊME HostConfig avec
- *     Binds reconstruits depuis les montages réels + le nouveau (voir rebuildBindsFromMounts —
- *     préserve aussi les volumes anonymes), `Mounts` API-style neutralisé (tout est porté par
- *     Binds, jamais les deux — "Duplicate mount point" sinon) ;
- *  4. reconnexion des réseaux ADDITIONNELS (le premier passe par NetworkingConfig au create, les
- *     autres par network.connect — l'API create n'en accepte qu'un seul) ;
- *  5. start (seulement si l'ancien tournait — un conteneur arrêté est recréé arrêté) ;
- *  6. remove de l'ancien UNIQUEMENT une fois le nouveau réellement créé/démarré.
- * En cas d'échec aux étapes 3-5 : le nouveau (s'il existe) est supprimé, l'ancien retrouve son nom
- * et est redémarré s'il tournait — jamais un conteneur perdu ou deux conteneurs concurrents.
- */
-export async function mountVolumeOnContainer(options: MountVolumeOnContainerOptions): Promise<{ id: string }> {
-  const docker = await requireReachableClient();
+export interface RecreateContainerModifications {
+  containerId: string;
+  addMounts?: MountAddition[];
+  /** Entrées "CLE=valeur" déjà résolues par l'appelant (jamais un id/nom de secret ici). */
+  addEnv?: string[];
+}
 
-  // Le volume doit réellement exister — message net en amont plutôt qu'un échec de create ambigu.
-  try {
-    await docker.getVolume(options.volumeName).inspect();
-  } catch {
-    throw new Error(`Volume "${options.volumeName}" not found`);
+export interface RecreateContainerResult {
+  id: string;
+  /** Id de l'ancien conteneur — permet à la route de faire suivre les usages de secrets. */
+  previousId: string;
+  /** Nom Docker, inchangé par la recréation. */
+  name: string;
+}
+
+/**
+ * Recrée un conteneur avec des modifications (montages/env) : inspect → stop → rename temporaire →
+ * create (même config, Binds reconstruits, env fusionné) → reconnexion des réseaux additionnels →
+ * start si l'ancien tournait → remove de l'ancien. Rollback complet si le create/start échoue.
+ */
+export async function recreateContainerWith(modifications: RecreateContainerModifications): Promise<RecreateContainerResult> {
+  const addMounts = modifications.addMounts ?? [];
+  const addEnv = modifications.addEnv ?? [];
+  if (addMounts.length === 0 && addEnv.length === 0) {
+    throw new Error("recreateContainerWith requires at least one modification (addMounts or addEnv)");
   }
 
-  const oldContainer = docker.getContainer(options.containerId);
+  const docker = await requireReachableClient();
+
+  // Vérifié AVANT d'arrêter le conteneur réel : un volume absent ne doit rien interrompre.
+  for (const mount of addMounts) {
+    try {
+      await docker.getVolume(mount.volumeName).inspect();
+    } catch {
+      throw new Error(`Volume "${mount.volumeName}" not found`);
+    }
+  }
+
+  const oldContainer = docker.getContainer(modifications.containerId);
   const inspect = await oldContainer.inspect();
   const name = inspect.Name.replace(/^\//, "");
   const wasRunning = inspect.State.Running === true;
 
-  const binds = rebuildBindsFromMounts((inspect.Mounts ?? []) as InspectedMount[], {
-    volumeName: options.volumeName,
-    mountPath: options.mountPath,
-    readOnly: options.readOnly,
-  });
+  const binds = rebuildBindsFromMounts((inspect.Mounts ?? []) as InspectedMount[], addMounts);
 
   const networks = sanitizeRecreateNetworkingConfig(
     (inspect.NetworkSettings?.Networks ?? {}) as Record<string, InspectedNetworkEndpoint>,
@@ -492,12 +520,16 @@ export async function mountVolumeOnContainer(options: MountVolumeOnContainerOpti
   const config: Record<string, unknown> = { ...inspect.Config };
   if (config.Hostname === oldShortId) delete config.Hostname;
 
+  if (addEnv.length > 0) {
+    config.Env = mergeEnvAdditions(Array.isArray(inspect.Config?.Env) ? inspect.Config.Env : [], addEnv);
+  }
+
   const hostConfig: Record<string, unknown> = { ...inspect.HostConfig, Binds: binds };
   // Tout montage est désormais porté par Binds (rebuildBindsFromMounts) — garder aussi l'ancien
   // HostConfig.Mounts (style API, utilisé par certains outils) dupliquerait chaque destination.
   delete hostConfig.Mounts;
 
-  const tempName = `${name}.premount.${Date.now()}`;
+  const tempName = `${name}.prerecreate.${Date.now()}`;
 
   if (wasRunning) await oldContainer.stop();
   await oldContainer.rename({ name: tempName });
@@ -537,7 +569,15 @@ export async function mountVolumeOnContainer(options: MountVolumeOnContainerOpti
 
   // Le nouveau est réellement créé (et démarré si nécessaire) : l'ancien peut disparaître.
   await oldContainer.remove({ force: true });
-  return { id: created.id };
+  return { id: created.id, previousId: inspect.Id, name };
+}
+
+/** Monte un volume sur un conteneur existant — simple appelant de recreateContainerWith. */
+export async function mountVolumeOnContainer(options: MountVolumeOnContainerOptions): Promise<RecreateContainerResult> {
+  return recreateContainerWith({
+    containerId: options.containerId,
+    addMounts: [{ volumeName: options.volumeName, mountPath: options.mountPath, readOnly: options.readOnly }],
+  });
 }
 
 export interface ContainerUsage {

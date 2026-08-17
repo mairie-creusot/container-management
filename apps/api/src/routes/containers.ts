@@ -33,6 +33,10 @@
  *                                         compris). operator/admin (garde globale plugins/auth.ts),
  *                                         audité automatiquement (plugins/audit.ts). Body :
  *                                         { volumeName, mountPath (absolu), readOnly? }.
+ * POST   /api/containers/:id/env       — ajoute des variables d'env (en clair ou résolues depuis le
+ *                                         gestionnaire de secrets par id) en RECRÉANT le conteneur —
+ *                                         voir services/docker.ts#recreateContainerWith. La valeur
+ *                                         d'un secret ne transite jamais vers/depuis le client.
  * DELETE /api/containers/:id           — supprime un conteneur (?force=true pour un conteneur en cours d'exécution).
  * GET    /api/containers/:id/files/hexdump — hexdump en lecture seule d'une fenêtre d'octets d'un
  *                                         fichier ARBITRAIRE dans le conteneur (équivalent `docker
@@ -78,6 +82,7 @@ import {
   killContainerProcess,
   mountVolumeOnContainer,
   readContainerFileHexdump,
+  recreateContainerWith,
   removeContainer,
   renameContainer,
   restartContainer,
@@ -89,7 +94,9 @@ import { getContainerProcessDetails } from "../services/containerInternals.js";
 import { getKubernetesContainers } from "../services/kubernetes.js";
 import {
   getDecryptedSecretValue,
+  getSecretRef,
   listSecrets,
+  reassignSecretUsagesToContainer,
   recordSecretUsage,
   removeSecretUsagesForContainer,
   renameSecretUsageContainer,
@@ -165,6 +172,16 @@ interface MountVolumeBody {
   mountPath?: string;
   readOnly?: boolean;
 }
+
+/** Body de POST /api/containers/:id/env — env en clair et/ou références de secrets (par id,
+ * la valeur est résolue ici côté serveur, jamais reçue du client ni renvoyée). */
+interface AddEnvBody {
+  env?: { name?: string; value?: string }[];
+  secretEnv?: { envName?: string; secretId?: string }[];
+}
+
+// Noms de variables d'env POSIX — assez strict pour éviter tout "=" / espace / caractère de contrôle.
+const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 interface FileHexdumpQuery {
   path?: string;
@@ -383,6 +400,8 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
           mountPath,
           readOnly: request.body?.readOnly === true,
         });
+        // L'id Docker change à la recréation : fait suivre les liens secret<->conteneur existants.
+        await reassignSecretUsagesToContainer(result.previousId, result.id);
         return reply.send({ ok: true, id: result.id });
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -395,6 +414,92 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
           return reply.code(404).send({ error: message });
         }
         return sendDockerActionError(reply, err);
+      }
+    },
+  );
+
+  // Ajoute des variables d'env à un conteneur EXISTANT en le recréant (voir
+  // services/docker.ts#recreateContainerWith). Route dédiée plutôt qu'une extension de /mounts :
+  // corps et validations sans rapport, seule la recréation est commune (déjà factorisée côté
+  // service). Un secret est référencé par id : sa valeur est résolue ICI, injectée dans l'env du
+  // nouveau conteneur, jamais renvoyée au client (la réponse ne contient que { ok, id }).
+  fastify.post<{ Params: { id: string }; Body: AddEnvBody }>(
+    "/api/containers/:id/env",
+    async (request, reply) => {
+      const plainEntries = request.body?.env ?? [];
+      const secretEntries = request.body?.secretEnv ?? [];
+      if (!Array.isArray(plainEntries) || !Array.isArray(secretEntries)) {
+        return reply.code(400).send({ error: "env and secretEnv must be arrays" });
+      }
+      if (plainEntries.length + secretEntries.length === 0) {
+        return reply.code(400).send({ error: "at least one env or secretEnv entry is required" });
+      }
+
+      const seenNames = new Set<string>();
+      const addEnv: string[] = [];
+      const resolvedSecretRefs: { key: string; secretName: string }[] = [];
+
+      for (const entry of plainEntries) {
+        const name = entry?.name?.trim();
+        if (!name || !ENV_NAME_PATTERN.test(name)) {
+          return reply.code(400).send({ error: `env entries require a valid name (letters, digits, "_", not starting with a digit)` });
+        }
+        if (typeof entry.value !== "string") {
+          return reply.code(400).send({ error: `env entry "${name}" requires a string value` });
+        }
+        if (seenNames.has(name)) {
+          return reply.code(400).send({ error: `Duplicate env name "${name}"` });
+        }
+        seenNames.add(name);
+        addEnv.push(`${name}=${entry.value}`);
+      }
+
+      for (const entry of secretEntries) {
+        const envName = entry?.envName?.trim();
+        const secretId = entry?.secretId?.trim();
+        if (!envName || !ENV_NAME_PATTERN.test(envName)) {
+          return reply.code(400).send({ error: `secretEnv entries require a valid envName (letters, digits, "_", not starting with a digit)` });
+        }
+        if (!secretId) {
+          return reply.code(400).send({ error: "secretEnv entries require both envName and secretId" });
+        }
+        if (seenNames.has(envName)) {
+          return reply.code(400).send({ error: `Duplicate env name "${envName}"` });
+        }
+        seenNames.add(envName);
+        const ref = await getSecretRef(secretId);
+        if (!ref) {
+          return reply.code(400).send({ error: `Secret "${secretId}" not found` });
+        }
+        // Résolution par NOM via getDecryptedSecretValue : seule fonction qui refuse un secret
+        // expiré (même garde que secretEnv sur POST /api/containers).
+        let value: string | null;
+        try {
+          value = await getDecryptedSecretValue(ref.name);
+        } catch (err) {
+          if (err instanceof SecretExpiredError) {
+            return reply.code(400).send({ error: err.message });
+          }
+          throw err;
+        }
+        if (value === null) {
+          return reply.code(400).send({ error: `Secret "${ref.name}" not found` });
+        }
+        addEnv.push(`${envName}=${value}`);
+        resolvedSecretRefs.push({ key: envName, secretName: ref.name });
+      }
+
+      try {
+        const result = await recreateContainerWith({ containerId: request.params.id, addEnv });
+        await reassignSecretUsagesToContainer(result.previousId, result.id);
+        // Enregistré APRÈS la recréation réussie : active le masquage de la valeur dans
+        // GET /api/containers/:id (maskSecretEnvValues) et l'affichage usedBy des secrets.
+        for (const ref of resolvedSecretRefs) {
+          await recordSecretUsage(ref.secretName, { containerId: result.id, containerName: result.name, key: ref.key });
+        }
+        return reply.send({ ok: true, id: result.id });
+      } catch (err) {
+        sendDockerActionError(reply, err);
       }
     },
   );

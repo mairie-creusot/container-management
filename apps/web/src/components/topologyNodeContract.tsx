@@ -288,6 +288,7 @@ export type NodeMenuActionId =
   | "container-restart"
   | "container-rename"
   | "container-connect-network"
+  | "container-attach"
   | "container-remove"
   | "nutanix-vm-stop"
   | "nutanix-vm-restart"
@@ -295,6 +296,8 @@ export type NodeMenuActionId =
   | "volume-mount-on-container"
   | "volume-remove"
   | "network-remove"
+  | "host-add-environment"
+  | "host-create-vm"
   | "automation-node-remove";
 
 export interface NodeMenuActionSpec {
@@ -304,6 +307,9 @@ export interface NodeMenuActionSpec {
   danger?: boolean;
   /** Rendue seulement si vrai pour CE nœud (état réel) — absente = toujours proposée. */
   visible?: (node: TopologyNode) => boolean;
+  /** Entrée visible mais non cliquable, au libellé honnête ("bientôt") — même sémantique que
+   * ContextMenuItem#disabled ; incluse SANS handler (une entrée désactivée n'a pas d'action). */
+  disabled?: boolean;
 }
 
 /** Networks Docker par défaut — jamais supprimables depuis le graphe (partagés par nature au
@@ -322,12 +328,17 @@ export const DEFAULT_DOCKER_NETWORK_NAMES = ["bridge", "host", "none"];
 export function buildNodeMenuItems(
   node: TopologyNode,
   handlers: Partial<Record<NodeMenuActionId, () => void>>,
-): { label: string; danger?: boolean; onClick: () => void }[] {
+): { label: string; danger?: boolean; disabled?: boolean; onClick: () => void }[] {
   const specs = NODE_CONTRACT[node.kind].menuItems;
   const resolved = typeof specs === "function" ? specs(node) : specs;
-  const items: { label: string; danger?: boolean; onClick: () => void }[] = [];
+  const items: { label: string; danger?: boolean; disabled?: boolean; onClick: () => void }[] = [];
   for (const spec of resolved) {
     if (spec.visible && !spec.visible(node)) continue;
+    // Une entrée désactivée est incluse sans handler (aucune action par définition).
+    if (spec.disabled) {
+      items.push({ label: spec.label, disabled: true, onClick: () => {} });
+      continue;
+    }
     const handler = handlers[spec.id];
     if (!handler) continue;
     items.push({ label: spec.label, ...(spec.danger ? { danger: true } : {}), onClick: handler });
@@ -476,6 +487,8 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
       // n'est plus un nœud du graphe à viser au glisser-déposer — cette action couvre ce cas (et
       // reste disponible aussi pour un network resté un vrai nœud, résultat identique).
       { id: "container-connect-network", label: "Connecter à un network…" },
+      // Même picker que le bouton ＋ au survol de la carte (TopologyGraph.tsx#attachPickerItems).
+      { id: "container-attach", label: "Attacher (stockage, variable, secret)…" },
       { id: "container-remove", label: "Supprimer", danger: true },
     ],
   },
@@ -614,10 +627,18 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     edgeHealth: null,
     automationStatusSeed: null,
     resourceAlerts: null,
-    // Aucune action de cycle de vie depuis le graphe : un cluster/hôte physique/environnement
-    // distant ne se démarre/supprime pas depuis QUAI (la suppression d'un environnement Docker
-    // distant passe par sa modale de gestion dédiée, jamais par le canevas).
-    menuItems: [],
+    // Aucune action de cycle de vie (un cluster/hôte ne se démarre/supprime pas depuis QUAI).
+    // "Créer une VM ici" : aucun backend de création de VM Nutanix n'existe — entrée désactivée
+    // honnête plutôt qu'une fausse action. "Ajouter un environnement…" ouvre la vraie modale
+    // RemoteEnvironmentCreateModal (handler injecté par TopologyGraph.tsx, admin uniquement).
+    menuItems: (node) => {
+      const createVmSoon: NodeMenuActionSpec = { id: "host-create-vm", label: "Créer une VM ici — bientôt", disabled: true };
+      if (node.hostKind === "nutanix-cluster") {
+        return [{ id: "host-add-environment", label: "Ajouter un environnement…" }, createVmSoon];
+      }
+      if (node.hostKind === "nutanix-host") return [createVmSoon];
+      return [];
+    },
   },
   // Cron job (services/cronJobsStore.ts) — horloge, façon Railway "Cron Jobs". Jamais relié par
   // une arête à son conteneur cible (QUAI n'a aucune garantie que cette relation reste vraie dans

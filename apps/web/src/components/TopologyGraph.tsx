@@ -22,6 +22,7 @@ import {
   updateTopologyGroup,
 } from "@/features/topology/topologySlice";
 import {
+  addContainerEnv,
   createContainer,
   fetchContainers,
   renameContainer,
@@ -30,6 +31,7 @@ import {
   type LifecycleAction,
 } from "@/features/containers/containersSlice";
 import { createVolume, mountVolumeOnContainer, removeVolume } from "@/features/volumes/volumesSlice";
+import { fetchSecrets } from "@/features/secrets/secretsSlice";
 import {
   connectContainerToNetwork,
   createNetwork,
@@ -1769,11 +1771,12 @@ function NetworkConnectPopover({ containerId, excludeNetworkIds, x, y, onClose }
   );
 }
 
+/** Cible du popover de montage : volume existant (choisir le conteneur — menu du nœud volume) ou
+ * conteneur fixé (créer un volume neuf puis le monter — bouton ＋ / "Attacher"). */
+type MountPopoverTarget = { kind: "existing-volume"; volumeName: string } | { kind: "new-volume"; containerNode: TopologyNode };
+
 interface MountVolumePopoverProps {
-  /** Nom Docker brut du volume (id du nœud sans le préfixe "volume:"). */
-  volumeName: string;
-  /** Nœuds RÉELS du graphe (TopologyGraph#data.nodes) — seuls les kind "container" sont proposés
-   * comme cible, jamais une liste inventée/refetchée (le graphe est déjà la vérité rafraîchie). */
+  target: MountPopoverTarget;
   topologyNodes: TopologyNode[];
   x: number;
   y: number;
@@ -1781,33 +1784,32 @@ interface MountVolumePopoverProps {
 }
 
 /**
- * Popover "Monter sur un conteneur…" (menu contextuel d'un nœud volume — action déclarée dans le
- * contrat, NODE_CONTRACT.volume.menuItems, topologyNodeContract.tsx ; Phase 2 du 17/08/2026, flux
- * Railway "volume non monté -> Monter"). Décision d'implémentation tranchée (option b de la
- * mission) : Docker ne permet PAS d'ajouter un montage à un conteneur existant (aucun endpoint
- * Engine de hot-mount) — l'action RECRÉE donc réellement le conteneur côté serveur
- * (POST /api/containers/:id/mounts -> services/docker.ts#mountVolumeOnContainer : stop → rename →
- * create avec la même config observée + le nouveau montage → start → remove de l'ancien, rollback
- * si échec à mi-chemin). Le formulaire l'annonce EXPLICITEMENT (avertissement permanent) et une
- * confirmation danger est exigée AVANT tout appel — jamais un bouton qui ment sur ce qu'il fait.
+ * Popover de montage d'un volume par RECRÉATION réelle du conteneur (POST /api/containers/:id/
+ * mounts) — source unique pour les deux flux (menu du volume ET bouton ＋ d'un conteneur) :
+ * avertissement permanent + confirmation danger avant tout appel.
  */
-function MountVolumePopover({ volumeName, topologyNodes, x, y, onClose }: MountVolumePopoverProps) {
+function MountVolumePopover({ target, topologyNodes, x, y, onClose }: MountVolumePopoverProps) {
   const dispatch = useAppDispatch();
   const confirm = useConfirm();
   const { ref, style } = useDismiss(onClose, x, y);
   const containers = topologyNodes.filter((n) => n.kind === "container");
-  const [containerNodeId, setContainerNodeId] = useState(containers[0]?.id ?? "");
+  const fixedContainer = target.kind === "new-volume" ? target.containerNode : null;
+  const [containerNodeId, setContainerNodeId] = useState(fixedContainer?.id ?? containers[0]?.id ?? "");
+  const [newVolumeName, setNewVolumeName] = useState(() =>
+    target.kind === "new-volume" ? `${target.containerNode.label}-data-${shortId()}` : "",
+  );
   const [mountPath, setMountPath] = useState("");
   const [readOnly, setReadOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const selectedContainer = containers.find((c) => c.id === containerNodeId) ?? null;
+  const selectedContainer = fixedContainer ?? containers.find((c) => c.id === containerNodeId) ?? null;
+  const volumeName = target.kind === "existing-volume" ? target.volumeName : newVolumeName.trim();
   const trimmedPath = mountPath.trim();
-  // Mêmes règles que la validation serveur (routes/containers.ts#POST /:id/mounts) — vérifiées ici
-  // pour un retour immédiat, le serveur revalide de toute façon en dernier recours.
+  // Mêmes règles que la validation serveur (retour immédiat, le serveur revalide de toute façon).
   const pathValid = trimmedPath.startsWith("/") && !trimmedPath.includes(":");
-  const canSubmit = !!selectedContainer && trimmedPath.length > 0 && pathValid;
+  const volumeNameValid = /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(volumeName);
+  const canSubmit = !!selectedContainer && trimmedPath.length > 0 && pathValid && volumeNameValid;
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -1821,6 +1823,14 @@ function MountVolumePopover({ volumeName, topologyNodes, x, y, onClose }: MountV
     if (!ok) return;
     setBusy(true);
     setError(null);
+    if (target.kind === "new-volume") {
+      const createResult = await dispatch(createVolume(volumeName));
+      if (!createVolume.fulfilled.match(createResult)) {
+        setBusy(false);
+        setError(createResult.payload ?? "Échec de la création du volume.");
+        return;
+      }
+    }
     const result = await dispatch(
       mountVolumeOnContainer({
         volumeName,
@@ -1835,42 +1845,68 @@ function MountVolumePopover({ volumeName, topologyNodes, x, y, onClose }: MountV
       dispatch(fetchTopology());
       onClose();
     } else {
+      // Volume créé mais montage échoué : suppression best-effort pour ne pas laisser un orphelin.
+      if (target.kind === "new-volume") void dispatch(removeVolume({ name: volumeName, silent: true }));
       setError(result.payload ?? "Échec du montage du volume.");
     }
   }
 
   return (
     <div className="graph-popover" style={style} ref={ref}>
-      <div className="graph-popover__title">Monter « {volumeName} » sur un conteneur</div>
+      <div className="graph-popover__title">
+        {target.kind === "existing-volume"
+          ? `Monter « ${target.volumeName} » sur un conteneur`
+          : `Nouveau stockage pour « ${target.containerNode.label} »`}
+      </div>
       <form onSubmit={handleSubmit}>
-        {containers.length === 0 ? (
+        {target.kind === "existing-volume" && containers.length === 0 ? (
           <p className="graph-popover__error" style={{ color: "var(--color-text-faint)" }}>
             Aucun conteneur connu de QUAI sur lequel monter ce volume.
           </p>
         ) : (
           <>
-            <div className="field">
-              <label htmlFor="graph-mount-container">Conteneur cible</label>
-              <select
-                id="graph-mount-container"
-                value={containerNodeId}
-                onChange={(e) => setContainerNodeId(e.target.value)}
-                disabled={busy}
-                required
-              >
-                {containers.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.label} ({c.subtitle})
-                  </option>
-                ))}
-              </select>
-            </div>
+            {target.kind === "existing-volume" && (
+              <div className="field">
+                <label htmlFor="graph-mount-container">Conteneur cible</label>
+                <select
+                  id="graph-mount-container"
+                  value={containerNodeId}
+                  onChange={(e) => setContainerNodeId(e.target.value)}
+                  disabled={busy}
+                  required
+                >
+                  {containers.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.label} ({c.subtitle})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {target.kind === "new-volume" && (
+              <div className="field">
+                <label htmlFor="graph-mount-volume-name">Nom du volume (créé puis monté)</label>
+                <input
+                  id="graph-mount-volume-name"
+                  type="text"
+                  value={newVolumeName}
+                  onChange={(e) => setNewVolumeName(e.target.value)}
+                  disabled={busy}
+                  required
+                />
+                {volumeName.length > 0 && !volumeNameValid && (
+                  <span style={{ fontSize: 12, color: "var(--color-critical)" }}>
+                    Nom de volume invalide (lettres/chiffres puis lettres, chiffres, « _ . - »).
+                  </span>
+                )}
+              </div>
+            )}
             <div className="field">
               <label htmlFor="graph-mount-path">Chemin de montage (dans le conteneur)</label>
               <input
                 id="graph-mount-path"
                 type="text"
-                autoFocus
+                autoFocus={target.kind === "existing-volume"}
                 placeholder="ex : /data"
                 value={mountPath}
                 onChange={(e) => setMountPath(e.target.value)}
@@ -1887,8 +1923,6 @@ function MountVolumePopover({ volumeName, topologyNodes, x, y, onClose }: MountV
               <input type="checkbox" checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} disabled={busy} />
               Lecture seule (ro)
             </label>
-            {/* Avertissement PERMANENT (pas seulement dans la confirmation) — voir la JSDoc du
-                composant : l'action recrée réellement le conteneur, jamais présenté comme anodin. */}
             <p className="create-container-hint">
               Nécessite la recréation du conteneur : Docker ne permet pas d'ajouter un montage à un conteneur
               existant. Le conteneur sera arrêté puis recréé avec sa configuration actuelle plus ce montage
@@ -1904,7 +1938,159 @@ function MountVolumePopover({ volumeName, topologyNodes, x, y, onClose }: MountV
             Annuler
           </button>
           <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !canSubmit}>
-            {busy ? "Recréation…" : "Monter"}
+            {busy ? "Recréation…" : target.kind === "new-volume" ? "Créer et monter" : "Monter"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+interface AttachEnvPopoverProps {
+  containerNode: TopologyNode;
+  /** "env" = NOM/VALEUR saisis ; "secret" = NOM + secret existant (valeur résolue côté serveur). */
+  variant: "env" | "secret";
+  x: number;
+  y: number;
+  onClose: () => void;
+}
+
+/** Popover "Variable d'environnement" / "Secret" du picker ＋ — POST /api/containers/:id/env,
+ * recréation réelle du conteneur (avertissement permanent + confirmation danger). */
+function AttachEnvPopover({ containerNode, variant, x, y, onClose }: AttachEnvPopoverProps) {
+  const dispatch = useAppDispatch();
+  const confirm = useConfirm();
+  const { ref, style } = useDismiss(onClose, x, y);
+  const secrets = useAppSelector((s) => s.secrets.items);
+  const [envName, setEnvName] = useState("");
+  const [envValue, setEnvValue] = useState("");
+  const [secretId, setSecretId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (variant === "secret") dispatch(fetchSecrets());
+  }, [dispatch, variant]);
+
+  useEffect(() => {
+    if (variant === "secret" && !secretId && secrets.length > 0) setSecretId(secrets[0]!.id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [secrets.length]);
+
+  const trimmedName = envName.trim();
+  // Même règle que la route (ENV_NAME_PATTERN côté API).
+  const nameValid = /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmedName);
+  const canSubmit = nameValid && (variant === "env" || !!secretId);
+  const selectedSecret = secrets.find((s) => s.id === secretId) ?? null;
+
+  async function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (!canSubmit) return;
+    const ok = await confirm({
+      title: variant === "env" ? "Recréer le conteneur pour ajouter la variable" : "Recréer le conteneur pour attacher le secret",
+      description: `Ajouter la variable ${trimmedName} à "${containerNode.label}" nécessite de RECRÉER ce conteneur : il sera arrêté puis recréé avec sa configuration actuelle plus cette variable (son id Docker change), et brièvement indisponible s'il est en cours d'exécution.`,
+      confirmLabel: "Recréer et ajouter",
+      variant: "danger",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    const result = await dispatch(
+      addContainerEnv({
+        containerId: idWithoutPrefix(containerNode.id),
+        containerName: containerNode.label,
+        ...(variant === "env" ? { env: [{ name: trimmedName, value: envValue }] } : { secretEnv: [{ envName: trimmedName, secretId }] }),
+      }),
+    );
+    setBusy(false);
+    if (addContainerEnv.fulfilled.match(result)) {
+      dispatch(fetchTopology());
+      onClose();
+    } else {
+      setError(result.payload ?? "Échec de l'ajout de la variable.");
+    }
+  }
+
+  return (
+    <div className="graph-popover" style={style} ref={ref}>
+      <div className="graph-popover__title">
+        {variant === "env"
+          ? `Variable d'environnement pour « ${containerNode.label} »`
+          : `Attacher un secret à « ${containerNode.label} »`}
+      </div>
+      <form onSubmit={handleSubmit}>
+        <div className="field">
+          <label htmlFor="graph-env-name">Nom de la variable</label>
+          <input
+            id="graph-env-name"
+            type="text"
+            autoFocus
+            className="cell-mono"
+            placeholder="ex : DATABASE_URL"
+            value={envName}
+            onChange={(e) => setEnvName(e.target.value)}
+            disabled={busy}
+            required
+          />
+          {trimmedName.length > 0 && !nameValid && (
+            <span style={{ fontSize: 12, color: "var(--color-critical)" }}>
+              Nom invalide (lettres, chiffres, « _ », ne commence pas par un chiffre).
+            </span>
+          )}
+        </div>
+        {variant === "env" ? (
+          <div className="field">
+            <label htmlFor="graph-env-value">Valeur</label>
+            <input
+              id="graph-env-value"
+              type="text"
+              className="cell-mono"
+              value={envValue}
+              onChange={(e) => setEnvValue(e.target.value)}
+              disabled={busy}
+            />
+          </div>
+        ) : (
+          <div className="field">
+            <label htmlFor="graph-env-secret">Secret</label>
+            <select id="graph-env-secret" value={secretId} onChange={(e) => setSecretId(e.target.value)} disabled={busy} required>
+              {secrets.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+            </select>
+            {secrets.length === 0 && (
+              <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+                Aucun secret dans le gestionnaire — créez-en un depuis la page Secrets.
+              </span>
+            )}
+            {selectedSecret?.description && (
+              <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>{selectedSecret.description}</span>
+            )}
+          </div>
+        )}
+        <p className="create-container-hint">
+          Nécessite la recréation du conteneur : Docker ne permet pas de modifier l'environnement d'un conteneur
+          existant. Le conteneur sera arrêté puis recréé avec sa configuration actuelle plus cette variable
+          (réseaux, ports, variables et montages existants conservés — son id Docker change).
+          {variant === "secret" && (
+            <>
+              {" "}La valeur du secret est résolue côté serveur et devient une variable d'environnement Docker
+              ordinaire : elle sera visible dans l'inspect Docker du conteneur sur l'hôte (QUAI la masque dans
+              son propre panneau de détail).
+            </>
+          )}
+        </p>
+
+        {error && <p className="graph-popover__error">{error}</p>}
+
+        <div className="graph-popover__actions">
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={busy}>
+            Annuler
+          </button>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !canSubmit}>
+            {busy ? "Recréation…" : "Recréer et ajouter"}
           </button>
         </div>
       </form>
@@ -1972,6 +2158,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const { data, status, error, positions } = useAppSelector((s) => s.topology);
   const session = useAppSelector((s) => s.auth.session);
   const operate = canOperate(session);
+  const admin = canAdminister(session);
   const confirm = useConfirm();
   const [cleaningOrphans, setCleaningOrphans] = useState(false);
 
@@ -2008,10 +2195,16 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [networkConnectPopover, setNetworkConnectPopover] = useState<{ containerId: string; x: number; y: number } | null>(
     null,
   );
-  // Popover "Monter sur un conteneur…" (menu contextuel d'un volume, action déclarée dans le
-  // contrat — voir MountVolumePopover ci-dessus : recréation RÉELLE du conteneur, avertissement +
-  // confirmation danger).
-  const [mountVolumePopover, setMountVolumePopover] = useState<{ volumeName: string; x: number; y: number } | null>(null);
+  // Popover de montage (voir MountVolumePopover : deux cibles, volume existant ou volume neuf).
+  const [mountVolumePopover, setMountVolumePopover] = useState<{ target: MountPopoverTarget; x: number; y: number } | null>(null);
+  // Picker "Attacher" (bouton ＋ au survol d'une carte conteneur, ou entrée du clic droit).
+  const [attachPicker, setAttachPicker] = useState<{ x: number; y: number; node: TopologyNode } | null>(null);
+  // Popover Variable/Secret du picker (voir AttachEnvPopover).
+  const [attachEnvPopover, setAttachEnvPopover] = useState<{ node: TopologyNode; variant: "env" | "secret"; x: number; y: number } | null>(
+    null,
+  );
+  // "Ajouter un environnement…" depuis un nœud cluster Nutanix — même modale réelle que le spotlight.
+  const [remoteEnvModalOpen, setRemoteEnvModalOpen] = useState(false);
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
   // Panneau de détail complet, ancré en overlay sur le canevas (clic droit sur un nœud ou une
   // brique -> "Voir le détail") — voir TopologyNodeDetailPanel.tsx. Distincte de `selectedId`
@@ -2187,6 +2380,15 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
               ? {
                   onOpenAttachment: (attachment) => handleOpenAttachment(attachment),
                   onAttachmentContextMenu: (event, attachment) => handleAttachmentContextMenu(event, n.id, attachment),
+                  // Bouton ＋ (operator+ uniquement — non injecté = non rendu) : picker ancré sous le bouton.
+                  ...(operate
+                    ? {
+                        onOpenAttachPicker: (event: React.MouseEvent) => {
+                          const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+                          setAttachPicker({ x: rect.left, y: rect.bottom + 6, node: n });
+                        },
+                      }
+                    : {}),
                 }
               : {};
           return {
@@ -3009,12 +3211,13 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       "nutanix-vm-stop": () => void handleNutanixVmAction(id, node.label, "stop"),
       "nutanix-vm-restart": () => void handleNutanixVmAction(id, node.label, "restart"),
       "nutanix-vm-start": () => void handleNutanixVmAction(id, node.label, "start"),
-      // Recréation réelle du conteneur cible (voir MountVolumePopover) — le popover porte
-      // l'avertissement et la confirmation danger, ce handler ne fait qu'ouvrir le formulaire.
-      "volume-mount-on-container": () => setMountVolumePopover({ volumeName: id, x, y }),
+      "volume-mount-on-container": () => setMountVolumePopover({ target: { kind: "existing-volume", volumeName: id }, x, y }),
       "volume-remove": () => void handleRemoveVolume(id),
       "network-remove": () => void handleRemoveNetwork(id, node.label),
       "automation-node-remove": () => void handleDeleteAutomationNode(node),
+      "container-attach": () => setAttachPicker({ x, y, node }),
+      "host-add-environment": () => setRemoteEnvModalOpen(true),
+      "host-create-vm": () => {}, // entrée désactivée "bientôt" — aucun backend de création de VM
     };
     items.push(...buildNodeMenuItems(node, actionHandlers));
     return items;
@@ -3343,13 +3546,49 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
 
       {mountVolumePopover && (
         <MountVolumePopover
-          volumeName={mountVolumePopover.volumeName}
+          target={mountVolumePopover.target}
           topologyNodes={data?.nodes ?? []}
           x={mountVolumePopover.x}
           y={mountVolumePopover.y}
           onClose={() => setMountVolumePopover(null)}
         />
       )}
+
+      {/* Picker du bouton ＋ (ou "Attacher…" du menu) : 3 flux réels, tous par recréation. */}
+      {attachPicker && (
+        <ContextMenu
+          x={attachPicker.x}
+          y={attachPicker.y}
+          onClose={() => setAttachPicker(null)}
+          items={[
+            {
+              label: "Stockage (volume)…",
+              onClick: () =>
+                setMountVolumePopover({ target: { kind: "new-volume", containerNode: attachPicker.node }, x: attachPicker.x, y: attachPicker.y }),
+            },
+            {
+              label: "Variable d'environnement…",
+              onClick: () => setAttachEnvPopover({ node: attachPicker.node, variant: "env", x: attachPicker.x, y: attachPicker.y }),
+            },
+            {
+              label: "Secret…",
+              onClick: () => setAttachEnvPopover({ node: attachPicker.node, variant: "secret", x: attachPicker.x, y: attachPicker.y }),
+            },
+          ]}
+        />
+      )}
+
+      {attachEnvPopover && (
+        <AttachEnvPopover
+          containerNode={attachEnvPopover.node}
+          variant={attachEnvPopover.variant}
+          x={attachEnvPopover.x}
+          y={attachEnvPopover.y}
+          onClose={() => setAttachEnvPopover(null)}
+        />
+      )}
+
+      {remoteEnvModalOpen && <RemoteEnvironmentCreateModal open onClose={() => setRemoteEnvModalOpen(false)} />}
 
       {/* Sous-graphe de dépendances/composition interne (double-clic sur un nœud, ou "Visualiser
           les dépendances" du menu contextuel) — remplace le graphe principal EN PLACE (voir

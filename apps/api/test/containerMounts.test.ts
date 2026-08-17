@@ -121,7 +121,7 @@ describe("rebuildBindsFromMounts — reconstruction des Binds de la recréation"
         // nom hash réel (inspect.Mounts) permet de préserver ses données à travers la recréation.
         { Type: "volume", Name: "9f2c3d4e5a6b7c8d9e0f1a2b3c4d5e6f", Destination: "/anon", RW: true },
       ],
-      { volumeName: "extra", mountPath: "/extra", readOnly: false },
+      [{ volumeName: "extra", mountPath: "/extra", readOnly: false }],
     );
     expect(binds).toEqual([
       "pgdata:/var/lib/postgresql/data",
@@ -132,14 +132,14 @@ describe("rebuildBindsFromMounts — reconstruction des Binds de la recréation"
   });
 
   it("appends \":ro\" for a read-only addition", () => {
-    const binds = rebuildBindsFromMounts([], { volumeName: "conf", mountPath: "/conf", readOnly: true });
+    const binds = rebuildBindsFromMounts([], [{ volumeName: "conf", mountPath: "/conf", readOnly: true }]);
     expect(binds).toEqual(["conf:/conf:ro"]);
   });
 
   it("skips tmpfs mounts (carried by HostConfig.Tmpfs, never re-bound)", () => {
     const binds = rebuildBindsFromMounts(
       [{ Type: "tmpfs", Destination: "/tmp/cache", RW: true }],
-      { volumeName: "data", mountPath: "/data", readOnly: false },
+      [{ volumeName: "data", mountPath: "/data", readOnly: false }],
     );
     expect(binds).toEqual(["data:/data"]);
   });
@@ -148,7 +148,7 @@ describe("rebuildBindsFromMounts — reconstruction des Binds de la recréation"
     expect(() =>
       rebuildBindsFromMounts(
         [{ Type: "volume", Name: "pgdata", Destination: "/data", RW: true }],
-        { volumeName: "other", mountPath: "/data", readOnly: false },
+        [{ volumeName: "other", mountPath: "/data", readOnly: false }],
       ),
     ).toThrowError(/already used by an existing mount/);
   });

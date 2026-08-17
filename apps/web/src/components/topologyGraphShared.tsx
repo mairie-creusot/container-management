@@ -11,7 +11,7 @@ import {
   type EdgeProps,
   type NodeProps,
 } from "@xyflow/react";
-import { IconBell, IconChevron, IconClose, IconFolder, IconGlobe, IconNetworks, IconVolumes } from "@/components/icons";
+import { IconBell, IconChevron, IconClose, IconFolder, IconGlobe, IconNetworks, IconPlus, IconVolumes } from "@/components/icons";
 import {
   CAPABILITY_DEFS,
   CAPABILITY_PORT_META,
@@ -720,6 +720,9 @@ const ATTACHMENT_ICON: Record<TopologyNodeAttachment["kind"], (props: { classNam
 export interface GraphNodeCallbacks {
   onOpenAttachment?: (attachment: TopologyNodeAttachment) => void;
   onAttachmentContextMenu?: (event: React.MouseEvent, attachment: TopologyNodeAttachment) => void;
+  /** Bouton ＋ au survol d'une carte conteneur (picker Stockage/Variable/Secret) — injecté par
+   * TopologyGraph.tsx uniquement pour un rôle operator+ ; absent = bouton non rendu. */
+  onOpenAttachPicker?: (event: React.MouseEvent) => void;
 }
 
 /** Reconstruit un TopologyNode "synthétique" pour une brique (voir TopologyNode#attachments) —
@@ -1026,6 +1029,22 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
             );
           })}
         </div>
+      )}
+      {/* ＋ révélé au survol (CSS) — conteneurs uniquement : les VMs Nutanix n'ont pas encore de
+          backend d'attache, pas de bouton qui mentirait. Rendu seulement si le callback est
+          injecté (operator+, voir GraphNodeCallbacks). */}
+      {isContainer && !isCompact && node.onOpenAttachPicker && (
+        <button
+          type="button"
+          className="topology-node__attach-btn nodrag nopan"
+          title="Attacher un stockage, une variable ou un secret"
+          onClick={(event) => {
+            event.stopPropagation();
+            node.onOpenAttachPicker?.(event);
+          }}
+        >
+          <IconPlus />
+        </button>
       )}
       <div className={`topology-node__status topology-node__status--${node.status}`}>
         <span className="topology-node__status-dot" />

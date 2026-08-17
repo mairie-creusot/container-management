@@ -796,6 +796,48 @@
   }
 }
 
+/* Bouton ＋ "Attacher" — coin bas-droit d'une carte conteneur, révélé au survol (maquette validée). */
+.topology-node__attach-btn {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  z-index: 2;
+  transition: opacity 0.12s ease, border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.topology-node:hover .topology-node__attach-btn,
+.topology-node__attach-btn:focus-visible {
+  opacity: 1;
+}
+
+.topology-node__attach-btn:hover {
+  border-color: var(--accent-start);
+  background: var(--color-surface-3);
+  color: var(--color-text);
+}
+
+.topology-node__attach-btn svg {
+  width: 12px;
+  height: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topology-node__attach-btn {
+    transition: none;
+  }
+}
+
 .topology-node--compact .topology-node__attachments {
   opacity: 0;
   max-height: 0;

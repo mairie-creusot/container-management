@@ -348,6 +348,31 @@ export async function removeSecretUsagesForContainer(containerId: string): Promi
 }
 
 /**
+ * Fait suivre les usages d'un conteneur RECRÉÉ (son id Docker change) vers son nouvel id —
+ * sans ça, purgeStaleSecretUsages purgerait le lien et GET /api/containers/:id cesserait de
+ * masquer les valeurs de secrets injectées. Appelée par routes/containers.ts après recréation.
+ */
+export async function reassignSecretUsagesToContainer(previousContainerId: string, newContainerId: string): Promise<void> {
+  const all = await getAll();
+  let changed = false;
+  const next = all.map((secret) => {
+    const current = secret.usedBy ?? [];
+    let localChanged = false;
+    const updated = current.map((u) => {
+      if (u.containerId !== previousContainerId) return u;
+      localChanged = true;
+      return { ...u, containerId: newContainerId };
+    });
+    if (!localChanged) return secret;
+    changed = true;
+    return { ...secret, usedBy: updated };
+  });
+  if (!changed) return;
+  await writeToDisk(next);
+  cache = next;
+}
+
+/**
  * Met à jour `containerName` sur toute entrée d'usage référençant ce conteneur — appelée par
  * routes/containers.ts juste après un `POST /api/containers/:id/rename` réussi, pour que le nom
  * affiché dans SecretsPage.tsx reste exact plutôt que de figer le nom au moment de la création.

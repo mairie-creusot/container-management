@@ -243,6 +243,34 @@ export const renameContainer = createAsyncThunk<
   }
 });
 
+/** Ajoute des variables d'env (en clair ou par référence de secret) en RECRÉANT le conteneur —
+ * voir POST /api/containers/:id/env. La valeur d'un secret ne transite jamais côté client. */
+export const addContainerEnv = createAsyncThunk<
+  { id: string },
+  {
+    containerId: string;
+    containerName: string;
+    env?: { name: string; value: string }[];
+    secretEnv?: { envName: string; secretId: string }[];
+  },
+  { rejectValue: string }
+>("containers/addEnv", async ({ containerId, containerName, env, secretEnv }, { rejectWithValue, dispatch }) => {
+  try {
+    const result = await apiPost<{ ok: boolean; id: string }>(`/containers/${encodeURIComponent(containerId)}/env`, {
+      ...(env ? { env } : {}),
+      ...(secretEnv ? { secretEnv } : {}),
+    });
+    const names = [...(env ?? []).map((e) => e.name), ...(secretEnv ?? []).map((e) => e.envName)].join(", ");
+    dispatch(
+      pushNotification({ level: "success", message: `Variable(s) ${names} ajoutée(s) à "${containerName}" — conteneur recréé.` }),
+    );
+    return { id: result.id };
+  } catch (error) {
+    const message = error instanceof ApiError ? error.message : "Échec de l'ajout de la variable d'environnement.";
+    return rejectWithValue(message);
+  }
+});
+
 const containersSlice = createSlice({
   name: "containers",
   initialState,
