@@ -475,27 +475,55 @@
   color: var(--color-text-faint);
 }
 
-/* --- Carte(s) flottante(s) d'alerte "CPU élevé"/"Mémoire élevée" (façon Railway) — voir
-   GraphNodeImpl, topologyGraphShared.tsx#CPU_ALERT_THRESHOLD_PERCENT/MEMORY_ALERT_RATIO. La PILE
-   entière (.topology-node-alert-stack, une ou deux cartes si les deux seuils sont dépassés
-   simultanément) est ANCRÉE au nœud (parent .topology-node en position: relative, voir plus haut
-   dans ce fichier) : reste un enfant DOM du nœud React Flow, suit donc automatiquement le
-   pan/zoom, contrairement à un popover flottant hors du système de coordonnées du graphe. Même
-   famille visuelle que .graph-popover/.toast (fond teinté critique, bordure de même teinte, ombre
-   portée façon toast pour bien détacher chaque carte du reste du canevas) — pas une esthétique à
-   part. `pointer-events` par défaut (auto) : la pile occupe exactement sa propre boîte au-dessus
-   du nœud, elle ne déborde donc jamais sur une zone cliquable du nœud dessous ; `nodrag nopan`
-   (posées côté JSX) empêchent en plus qu'un clic dessus ne fasse glisser le nœud ou ne panne le
-   canevas. */
-.topology-node-alert-stack {
-  position: absolute;
-  left: 0;
-  bottom: calc(100% + 10px);
-  width: 224px;
-  z-index: 10;
+/* --- Pile FIXE d'alertes de ressources "CPU élevé"/"Mémoire élevée" — haut à droite de l'ÉCRAN,
+   INDÉPENDANTE du pan/zoom du graphe (voir TopologyAlertStack/computeNodeResourceAlerts,
+   topologyGraphShared.tsx, montée par TopologyGraph.tsx). Retour utilisateur du 17/08/2026 (capture
+   d'écran à l'appui : "ce genre alert devrais aparaitre en haut a droite") : REMPLACE l'ancienne
+   version (`.topology-node-alert-stack`, retirée) qui ancrait chaque pile individuellement AU-DESSUS
+   du nœud concerné dans le canevas (position: absolute, enfant DOM du nœud React Flow, façon
+   Railway) — sur un graphe pouvant contenir des dizaines de nœuds éparpillés, rien ne garantissait
+   que le nœud en alerte soit dans la zone actuellement visible/zoomée : l'alerte restait invisible
+   en pratique tant que l'utilisateur n'avait pas cliqué/zoomé dessus précisément.
+   `position: fixed` (jamais `absolute`) : montée par TopologyGraph.tsx en sibling direct de
+   `.topology-graph__main` (PAS un enfant, voir son JSX) — `.topology-graph__main--receded` applique
+   un `transform` CONDITIONNEL (pendant l'ouverture du sous-graphe) qui redéfinirait le bloc
+   englobant de tout descendant `position: fixed` (règle CSS standard), cassant le positionnement
+   "haut-droite de l'écran" voulu ; en restant hors de cet arbre, la pile reste positionnée par
+   rapport au VIEWPORT quel que soit l'état d'animation du canevas.
+   `top` décalé de la hauteur RÉELLE du Topbar (`--topbar-height`, variables.css) + une marge
+   généreuse de 56px (pas juste un petit espacement) : le Topbar est `position: sticky` en haut de
+   l'écran (layout.css), mais le VRAI autre occupant de ce même coin haut-droite est
+   `.topology-toolbar-top-right` juste en dessous (le bouton flottant "Regrouper", top:12/right:12
+   RELATIF à `.topology-graph` qui commence pile où le Topbar finit — voir OverviewPage.tsx, un bug
+   réel avec ce même coin a d'ailleurs déjà été corrigé le 13/08/2026 pour `.overview-refresh-overlay`,
+   voir layout.css) : 56px de marge couvre Topbar + le bouton "Regrouper" (top 12px + ~34px de
+   hauteur) avec une marge de sécurité, la pile ne chevauche donc jamais ce bouton même quand une
+   sélection multiple est active en même temps que des alertes.
+   z-index 35 : au-dessus du canevas/de sa barre d'outils (`.topology-toolbar-*`, 20) pour rester
+   visible au-dessus du graphe, mais SOUS `.profile-menu` (40, layout.css) et `.topology-subgraph-panel`
+   (40, tous deux DANS la même arborescence directe que cette pile, voir JSDoc ci-dessus) : un menu/
+   panneau ouvert DÉLIBÉRÉMENT par l'utilisateur dans ce même coin doit toujours rester visible et
+   cliquable par-dessus une alerte passive plutôt que l'inverse — mission : "décale proprement si
+   besoin plutôt que de superposer", ici résolu par un ordre d'empilement explicite plutôt qu'un
+   chevauchement non maîtrisé. Reste sous `.topology-detail-panel` (50)/`.context-menu`/
+   `.graph-popover` (60)/`.toast-stack` (100, base.css, ancré en BAS-droite — aucune collision
+   géométrique possible avec lui, coins opposés).
+   `max-height`/`overflow-y` : empilement vertical propre même avec un grand nombre d'alertes
+   simultanées (mission point 4) — défile PROPREMENT dans sa propre boîte plutôt que de déborder
+   hors de l'écran ou de chevaucher un autre élément.
+   Réutilise TEL QUEL le style visuel existant ci-dessous (`.topology-node-cpu-alert` et ses
+   sous-classes, mêmes couleurs/bordures/ombres qu'avant) — seul CE conteneur change. */
+.topology-alert-stack {
+  position: fixed;
+  top: calc(var(--topbar-height) + 56px);
+  right: 20px;
+  z-index: 35;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  width: min(300px, calc(100vw - 40px));
+  max-height: calc(100vh - var(--topbar-height) - 72px);
+  overflow-y: auto;
 }
 
 .topology-node-cpu-alert {

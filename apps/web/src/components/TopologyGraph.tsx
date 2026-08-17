@@ -89,6 +89,7 @@ import {
   idWithoutPrefix,
   nodeTypes,
   resolveGroupMemberNodeIds,
+  TopologyAlertStack,
   TopologyLegendPanel,
   useDismiss,
   usePrefersReducedMotion,
@@ -1948,17 +1949,16 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           // Briques (voir GraphNode, topologyGraphShared.tsx) : callbacks posés UNIQUEMENT sur les
           // nœuds conteneur (seul kind qui en rend), liés par fermeture à CE nœud précis — une
           // brique elle-même ne porte aucun id de nœud top-level, ces callbacks sont son seul moyen
-          // d'ouvrir son détail / son menu contextuel. Même principe pour les cartes flottantes
-          // d'alerte "CPU élevé"/"Mémoire élevée" (onViewMetrics/onRestartFromAlert) : GraphNode est
-          // un composant partagé sans accès direct à dispatch/useConfirm/onOpenDetail, ces callbacks
-          // sont son seul moyen de déclencher une action réelle.
+          // d'ouvrir son détail / son menu contextuel. Les cartes d'alerte "CPU élevé"/"Mémoire
+          // élevée" ne passent PLUS par ici (onViewMetrics/onRestartFromAlert retirés du 17/08/2026,
+          // voir TopologyAlertStack ci-dessous) : la nouvelle pile fixe vit directement dans ce
+          // composant, qui a déjà accès à openNodeDetail/handleCpuAlertRestart sans détour par
+          // node.data.
           const callbacks: GraphNodeCallbacks =
             n.kind === "container"
               ? {
                   onOpenAttachment: (attachment) => handleOpenAttachment(attachment),
                   onAttachmentContextMenu: (event, attachment) => handleAttachmentContextMenu(event, n.id, attachment),
-                  onViewMetrics: (node) => openNodeDetail(node, "metrics"),
-                  onRestartFromAlert: (node) => void handleCpuAlertRestart(node),
                 }
               : {};
           return {
@@ -2532,11 +2532,12 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     setDetailInitialTab(initialTab);
   }
 
-  /** Bouton "Redémarrer" d'une carte flottante d'alerte "CPU élevé"/"Mémoire élevée" (GraphNode,
-   * topologyGraphShared.tsx#onRestartFromAlert) — MÊME chemin réel que "Redémarrer" du menu
-   * contextuel du nœud (handleContainerAction/runContainerAction), avec une confirmation `useConfirm`
-   * posée ICI (handleContainerAction lui-même ne confirme que stop/remove) : un redémarrage
-   * interrompt le service, mérite lui aussi une confirmation explicite depuis cette carte d'alerte. */
+  /** Bouton "Redémarrer" d'une carte de la pile d'alertes "CPU élevé"/"Mémoire élevée"
+   * (TopologyAlertStack, topologyGraphShared.tsx, voir son montage plus bas dans ce fichier) —
+   * MÊME chemin réel que "Redémarrer" du menu contextuel du nœud (handleContainerAction/
+   * runContainerAction), avec une confirmation `useConfirm` posée ICI (handleContainerAction
+   * lui-même ne confirme que stop/remove) : un redémarrage interrompt le service, mérite lui aussi
+   * une confirmation explicite depuis cette carte d'alerte. */
   async function handleCpuAlertRestart(node: TopologyNode) {
     const ok = await confirm({
       title: "Redémarrer le conteneur",
@@ -2945,6 +2946,27 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           )}
         </ReactFlow>
       </div>
+
+      {/* Pile FIXE d'alertes de ressources "CPU élevé"/"Mémoire élevée" (TopologyAlertStack,
+          topologyGraphShared.tsx) — retour utilisateur du 17/08/2026 : "ce genre alert devrais
+          aparaitre en haut a droite", capture d'écran à l'appui (l'ancien rendu, ancré à chaque
+          nœud DANS le canevas, restait invisible dès que l'utilisateur n'était pas en train de
+          regarder/zoomer exactement sur ce nœud précis parmi des dizaines de nœuds éparpillés).
+          Montée ICI, sibling direct de `.topology-graph__main` (PAS un enfant) : `.topology-graph__
+          main--receded` applique un `transform` conditionnel qui redéfinirait le bloc englobant
+          d'un descendant `position: fixed`, ce qui casserait le positionnement "haut-droite de
+          l'ÉCRAN" voulu (voir topology.css#.topology-alert-stack pour le détail). `data?.nodes ??
+          []` : TOUS les nœuds du graphe, pas seulement ceux du rendu React Flow actuel
+          (`flowNodes` exclut déjà les membres de groupes repliés) — une alerte doit rester
+          découvrable même pour un conteneur caché dans un groupe replié. `onViewMetrics`/
+          `onRestart` réutilisent directement openNodeDetail/handleCpuAlertRestart (ce composant y a
+          déjà accès, plus besoin de les faire transiter par node.data comme l'ancien rendu ancré au
+          nœud). */}
+      <TopologyAlertStack
+        nodes={data?.nodes ?? []}
+        onViewMetrics={(node) => openNodeDetail(node, "metrics")}
+        onRestart={(node) => void handleCpuAlertRestart(node)}
+      />
 
       {/* Bouton flottant "Regrouper" (apparaît uniquement sur une sélection multiple d'au moins
           2 nœuds, voir multiSelectedIds/handleNodeClick) — coin haut-droit du canevas. La création

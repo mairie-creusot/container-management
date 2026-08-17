@@ -413,10 +413,10 @@ export function deriveGroupPorts(group: Pick<TopologyGroup, "nodeIds">, edges: T
 }
 
 /** Seuil réel (pourcentage, cohérent avec TopologyNode#cpuPercent, voir apps/api/src/types.ts) à
- * partir duquel un conteneur `running` affiche la carte flottante d'alerte "CPU élevé" (voir
- * GraphNodeImpl ci-dessous) — réévalué à chaque rafraîchissement de la topologie
- * (TopologyGraph.tsx, REFRESH_INTERVAL_MS), aucun débounce/hystérésis supplémentaire pour ce
- * premier lot : la carte apparaît/disparaît avec l'état réel. */
+ * partir duquel un conteneur `running` déclenche une alerte "CPU élevé" (voir
+ * computeNodeResourceAlerts/TopologyAlertStack ci-dessous) — réévalué à chaque rafraîchissement de
+ * la topologie (TopologyGraph.tsx, REFRESH_INTERVAL_MS), aucun débounce/hystérésis supplémentaire
+ * pour ce premier lot : la carte apparaît/disparaît avec l'état réel. */
 export const CPU_ALERT_THRESHOLD_PERCENT = 90;
 
 /** Même principe que CPU_ALERT_THRESHOLD_PERCENT ci-dessus, mais pour la mémoire — RATIO (pas un
@@ -425,8 +425,120 @@ export const CPU_ALERT_THRESHOLD_PERCENT = 90;
  * cœur), la mémoire n'a AUCUN plafond réel sans une limite explicitement configurée à la création
  * du conteneur (voir services/docker.ts#ContainerHealthAndLimits) — cette alerte ne se déclenche
  * donc QUE quand `memoryLimitBytes` existe réellement, jamais un seuil absolu inventé en son
- * absence (voir hasMemoryAlert, GraphNodeImpl ci-dessous). */
+ * absence (voir computeNodeResourceAlerts ci-dessous). */
 export const MEMORY_ALERT_RATIO = 0.9;
+
+/** Une alerte de ressource RÉELLE détectée pour un nœud précis — `key` distingue CPU/mémoire quand
+ * les deux sont dépassées simultanément sur le même nœud (voir computeNodeResourceAlerts). */
+export interface NodeResourceAlert {
+  key: "cpu" | "memory";
+  title: string;
+  message: string;
+}
+
+/**
+ * Détecte les alertes de ressource (CPU/mémoire) RÉELLES d'un nœud — fonction PURE, seule source de
+ * vérité pour cette règle de seuil (CPU_ALERT_THRESHOLD_PERCENT/MEMORY_ALERT_RATIO ci-dessus),
+ * appelée par TopologyAlertStack ci-dessous (pile fixe haut-droite, TopologyGraph.tsx) pour
+ * construire la liste d'alertes à travers TOUS les nœuds du graphe. Extraite ici (retour
+ * utilisateur du 17/08/2026, capture d'écran à l'appui : "ce genre alert devrais aparaitre en haut
+ * a droite" — l'ancien rendu, ANCRÉ à chaque nœud individuellement dans le canevas, restait
+ * invisible dès que l'utilisateur n'était pas en train de regarder/zoomer exactement sur ce nœud
+ * précis) précisément pour que la logique de seuil ne puisse plus JAMAIS diverger entre deux
+ * emplacements de rendu : un seul calcul, réutilisé partout où une alerte doit être affichée.
+ * Seuils RÉELS sur node.cpuPercent/memBytes (déjà calculés server-side, docker.ts#
+ * readContainerUsage), jamais sur un conteneur arrêté.
+ */
+export function computeNodeResourceAlerts(node: TopologyNode): NodeResourceAlert[] {
+  const isContainer = node.kind === "container";
+  const hasCpuAlert =
+    isContainer && node.status === "running" && typeof node.cpuPercent === "number" && node.cpuPercent > CPU_ALERT_THRESHOLD_PERCENT;
+  const hasMemoryAlert =
+    isContainer &&
+    node.status === "running" &&
+    typeof node.memBytes === "number" &&
+    typeof node.memoryLimitBytes === "number" &&
+    node.memoryLimitBytes > 0 &&
+    node.memBytes / node.memoryLimitBytes > MEMORY_ALERT_RATIO;
+  return [
+    ...(hasCpuAlert
+      ? [
+          {
+            key: "cpu" as const,
+            title: "CPU élevé",
+            message: `« ${node.label} » utilise ${node.cpuPercent!.toFixed(0)}% de CPU — risque de ralentissement ou d'arrêt.`,
+          },
+        ]
+      : []),
+    ...(hasMemoryAlert
+      ? [
+          {
+            key: "memory" as const,
+            title: "Mémoire élevée",
+            message: `« ${node.label} » utilise ${formatMem(node.memBytes!)} sur ${formatMem(node.memoryLimitBytes!)} configurés (${Math.round((node.memBytes! / node.memoryLimitBytes!) * 100)}%) — risque d'arrêt (OOM kill).`,
+          },
+        ]
+      : []),
+  ];
+}
+
+export interface TopologyAlertStackProps {
+  /** TOUS les nœuds du graphe (TopologyGraph.tsx#data.nodes) — pas seulement ceux actuellement
+   * visibles/dépliés à l'écran : une alerte doit rester découvrable même si le nœud concerné est
+   * replié dans un groupe ou hors de la zone de zoom actuelle. */
+  nodes: TopologyNode[];
+  /** Ouvre le panneau de détail du nœud concerné sur l'onglet "Métriques" (même callback que
+   * l'ancien "Voir les métriques" ancré-au-nœud, voir TopologyGraph.tsx#openNodeDetail). */
+  onViewMetrics: (node: TopologyNode) => void;
+  /** Redémarre le conteneur concerné — MÊME chemin réel (runContainerAction) que "Redémarrer" du
+   * menu contextuel du nœud, avec confirmation posée par l'appelant (voir TopologyGraph.tsx#
+   * handleCpuAlertRestart). */
+  onRestart: (node: TopologyNode) => void;
+}
+
+/**
+ * Pile FIXE (indépendante du pan/zoom du graphe, `position: fixed` — voir topology.css#
+ * .topology-alert-stack) en haut à droite de l'écran, listant TOUTES les alertes CPU/mémoire
+ * actives à travers TOUS les nœuds du graphe — REMPLACE l'ancien rendu qui ancrait chaque carte
+ * d'alerte individuellement au-dessus du nœud concerné dans le canevas (`.topology-node-alert-stack`,
+ * retiré de GraphNodeImpl ci-dessous, voir son historique dans le commentaire resté sur
+ * CPU_ALERT_THRESHOLD_PERCENT/MEMORY_ALERT_RATIO). Recalculée à CHAQUE rendu depuis `nodes` via
+ * computeNodeResourceAlerts ci-dessus (même fonction pure, jamais dupliquée) : une carte disparaît
+ * donc automatiquement dès que le nœud concerné repasse sous le seuil au prochain rafraîchissement
+ * de la topologie (REFRESH_INTERVAL_MS, TopologyGraph.tsx) — aucun état à nettoyer explicitement
+ * ici, la pile n'est jamais qu'une simple projection de `nodes` à l'instant présent. Réutilise TEL
+ * QUEL le style visuel existant (`.topology-node-cpu-alert` et ses sous-classes) — seul le
+ * conteneur change (`.topology-alert-stack`, `position: fixed` plutôt qu'absolute-ancré-au-nœud).
+ */
+export function TopologyAlertStack({ nodes, onViewMetrics, onRestart }: TopologyAlertStackProps) {
+  const alerts = nodes.flatMap((node) => computeNodeResourceAlerts(node).map((alert) => ({ node, ...alert })));
+  if (alerts.length === 0) return null;
+  return (
+    <div className="topology-alert-stack" role="region" aria-label="Alertes de ressources">
+      {alerts.map(({ node, key, title, message }) => (
+        <div key={`${node.id}:${key}`} className="topology-node-cpu-alert">
+          <div className="topology-node-cpu-alert__head">
+            <IconBell className="topology-node-cpu-alert__icon" />
+            <span className="topology-node-cpu-alert__title">{title}</span>
+          </div>
+          <p className="topology-node-cpu-alert__message">{message}</p>
+          <div className="topology-node-cpu-alert__actions">
+            <button type="button" className="topology-node-cpu-alert__btn" onClick={() => onViewMetrics(node)}>
+              Voir les métriques
+            </button>
+            <button
+              type="button"
+              className="topology-node-cpu-alert__btn topology-node-cpu-alert__btn--danger"
+              onClick={() => onRestart(node)}
+            >
+              Redémarrer
+            </button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 /** Zoom sémantique : sous ce niveau, un nœud n'affiche plus que son icône et son point de statut. */
 export const ZOOM_DETAIL_THRESHOLD = 0.6;
@@ -952,13 +1064,6 @@ const ATTACHMENT_ICON: Record<TopologyNodeAttachment["kind"], (props: { classNam
 export interface GraphNodeCallbacks {
   onOpenAttachment?: (attachment: TopologyNodeAttachment) => void;
   onAttachmentContextMenu?: (event: React.MouseEvent, attachment: TopologyNodeAttachment) => void;
-  /** Cartes flottantes d'alerte "CPU élevé"/"Mémoire élevée" (voir CPU_ALERT_THRESHOLD_PERCENT/
-   * MEMORY_ALERT_RATIO/GraphNodeImpl ci-dessous) — ouvre le panneau de détail de CE nœud
-   * directement sur l'onglet "Métriques". */
-  onViewMetrics?: (node: TopologyNode) => void;
-  /** Idem : redémarre CE conteneur — même chemin réel (runContainerAction) que "Redémarrer" du menu
-   * contextuel du nœud, avec confirmation posée côté TopologyGraph.tsx (useConfirm). */
-  onRestartFromAlert?: (node: TopologyNode) => void;
 }
 
 /** Reconstruit un TopologyNode "synthétique" pour une brique (voir TopologyNode#attachments) —
@@ -1077,40 +1182,6 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   // l'icône + le point de statut — évite un canevas illisible une fois dézoomé sur toute l'infra.
   const zoom = useStore(zoomSelector);
   const isCompact = zoom < ZOOM_DETAIL_THRESHOLD;
-  // Cartes flottantes d'alerte "CPU élevé"/"Mémoire élevée" (façon Railway) — seuils RÉELS sur
-  // node.cpuPercent/memBytes (déjà calculés server-side, docker.ts#readContainerUsage), jamais sur
-  // un conteneur arrêté. La mémoire, contrairement au CPU, n'a de sens QUE si une limite RÉELLE
-  // est configurée (memoryLimitBytes, voir MEMORY_ALERT_RATIO ci-dessus) — jamais de seuil absolu
-  // inventé en son absence, ce conteneur n'affiche alors simplement aucune alerte mémoire.
-  const hasCpuAlert =
-    isContainer && node.status === "running" && typeof node.cpuPercent === "number" && node.cpuPercent > CPU_ALERT_THRESHOLD_PERCENT;
-  const hasMemoryAlert =
-    isContainer &&
-    node.status === "running" &&
-    typeof node.memBytes === "number" &&
-    typeof node.memoryLimitBytes === "number" &&
-    node.memoryLimitBytes > 0 &&
-    node.memBytes / node.memoryLimitBytes > MEMORY_ALERT_RATIO;
-  const resourceAlerts: { key: string; title: string; message: string }[] = [
-    ...(hasCpuAlert
-      ? [
-          {
-            key: "cpu",
-            title: "CPU élevé",
-            message: `« ${node.label} » utilise ${node.cpuPercent!.toFixed(0)}% de CPU — risque de ralentissement ou d'arrêt.`,
-          },
-        ]
-      : []),
-    ...(hasMemoryAlert
-      ? [
-          {
-            key: "memory",
-            title: "Mémoire élevée",
-            message: `« ${node.label} » utilise ${formatMem(node.memBytes!)} sur ${formatMem(node.memoryLimitBytes!)} configurés (${Math.round((node.memBytes! / node.memoryLimitBytes!) * 100)}%) — risque d'arrêt (OOM kill).`,
-          },
-        ]
-      : []),
-  ];
   return (
     <div
       className={`topology-node topology-node--${node.kind} topology-node--${node.status}${node.orphan ? " topology-node--orphan" : ""}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}`}
@@ -1147,49 +1218,14 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
           title="Relié depuis un déclencheur/une condition"
         />
       )}
-      {resourceAlerts.length > 0 && (
-        // ANCRÉ au-dessus de la carte du nœud (parent .topology-node en position: relative) : reste
-        // un enfant DOM du nœud React Flow, suit donc automatiquement le pan/zoom du canevas. `nodrag
-        // nopan` (classes React Flow) + stopPropagation sur les boutons : ne doit jamais faire glisser
-        // le nœud dessous ni le sélectionner/désélectionner au clic. Empilement (CPU + Mémoire toutes
-        // deux en alerte simultanément, possible) via .topology-node-alert-stack ci-dessous — chaque
-        // carte individuelle (.topology-node-cpu-alert) n'a plus sa propre position, seule la pile
-        // entière est ancrée. Pas de mini-graphique (aucune série historique disponible ici sans
-        // nouvelle infrastructure de polling) — message + valeur RÉELLE actuelle uniquement.
-        <div className="topology-node-alert-stack nodrag nopan" onClick={(event) => event.stopPropagation()}>
-          {resourceAlerts.map((alert) => (
-            <div key={alert.key} className="topology-node-cpu-alert">
-              <div className="topology-node-cpu-alert__head">
-                <IconBell className="topology-node-cpu-alert__icon" />
-                <span className="topology-node-cpu-alert__title">{alert.title}</span>
-              </div>
-              <p className="topology-node-cpu-alert__message">{alert.message}</p>
-              <div className="topology-node-cpu-alert__actions">
-                <button
-                  type="button"
-                  className="topology-node-cpu-alert__btn"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    node.onViewMetrics?.(node);
-                  }}
-                >
-                  Voir les métriques
-                </button>
-                <button
-                  type="button"
-                  className="topology-node-cpu-alert__btn topology-node-cpu-alert__btn--danger"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    node.onRestartFromAlert?.(node);
-                  }}
-                >
-                  Redémarrer
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
+      {/* Alertes de ressource "CPU élevé"/"Mémoire élevée" (voir CPU_ALERT_THRESHOLD_PERCENT/
+          MEMORY_ALERT_RATIO/computeNodeResourceAlerts ci-dessus) : plus rendues ICI, ancrées au
+          nœud — retour utilisateur du 17/08/2026 ("ce genre alert devrais aparaitre en haut a
+          droite", capture d'écran à l'appui) : une carte ancrée au nœud restait invisible dès que
+          l'utilisateur n'était pas en train de regarder/zoomer exactement sur ce nœud précis, dans
+          un graphe pouvant contenir des dizaines de nœuds éparpillés. Voir TopologyAlertStack
+          (ci-dessus, montée par TopologyGraph.tsx en pile FIXE haut-droite de l'écran, indépendante
+          du pan/zoom) — seul emplacement de rendu désormais, jamais les deux à la fois. */}
       <div className="topology-node__head">
         <span className="topology-node__icon">
           <Icon />
