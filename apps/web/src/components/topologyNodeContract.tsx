@@ -11,10 +11,11 @@ import {
   IconPlay,
   IconServer,
   IconStack,
+  IconTopology,
   IconVm,
   IconVolumes,
 } from "@/components/icons";
-import type { IacEngine, TopologyNode, TopologyNodeKind } from "@/types";
+import type { IacEngine, TopologyHostKind, TopologyNode, TopologyNodeKind } from "@/types";
 
 /**
  * CONTRAT GÉNÉRIQUE DES NŒUDS DU GRAPHE DE TOPOLOGIE — registre déclaratif UNIQUE (17/08/2026).
@@ -468,6 +469,9 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
         label: "Volume (lecture seule)",
         colorToken: "volume",
       },
+      // Cible de l'arête "hosts" Docker local -> conteneur (buildTopologyEdges ancre chaque arête
+      // sur le port dont la capacité correspond à son kind).
+      { id: "hosted-by", capability: "hosted-by", handleType: "target", position: Position.Left, label: "Hébergé par", colorToken: "host" },
     ],
     edgeHealth: containerEdgeHealth,
     automationStatusSeed: null,
@@ -603,8 +607,8 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
   // selon le hostKind réel (un cluster est toujours SOURCE vers ses hôtes physiques ; un hôte AHV
   // est TARGET depuis son cluster ET SOURCE vers ses VMs) : les deux Handles sont posés
   // INCONDITIONNELLEMENT sur tout nœud "host" (table indexée par `kind`, pas par `hostKind` —
-  // exactement comme un conteneur affiche toujours ses deux ports network/volume-mount même s'il
-  // n'utilise que l'un des deux). Un hôte Docker distant/LXD qui ne participe à aucune arête
+  // exactement comme un conteneur affiche toujours ses ports network/volume-mount/hosted-by même
+  // s'il n'utilise que l'un d'eux). Un hôte Docker distant/LXD qui ne participe à aucune arête
   // "hosts" affiche donc ces deux points de connexion sans jamais s'en servir — cosmétique, pas un
   // bug (même compromis assumé que pour tout autre kind du graphe).
   //
@@ -633,6 +637,7 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     // RemoteEnvironmentCreateModal (handler injecté par TopologyGraph.tsx, admin uniquement).
     menuItems: (node) => {
       const createVmSoon: NodeMenuActionSpec = { id: "host-create-vm", label: "Créer une VM ici — bientôt", disabled: true };
+      if (node.hostKind === "quai-master") return [{ id: "host-add-environment", label: "Ajouter un environnement…" }];
       if (node.hostKind === "nutanix-cluster") {
         return [{ id: "host-add-environment", label: "Ajouter un environnement…" }, createVmSoon];
       }
@@ -809,6 +814,34 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     menuItems: [{ id: "automation-node-remove", label: "Supprimer", danger: true }],
   },
 };
+
+// --- Déclinaison PAR hostKind du kind "host" (même principe que IAC_ENGINE_CONTRACT) ------------
+
+export interface HostKindContract {
+  /** Icône/couleur MiniMap qui remplacent celles du kind "host" — absentes = valeurs du kind. */
+  icon?: (props: { className?: string }) => JSX.Element;
+  minimapColor?: string;
+}
+
+export const HOST_KIND_CONTRACT: Record<TopologyHostKind, HostKindContract> = {
+  // Racine MASTER "QUAI" — indigo accentué, voir .topology-node--host-quai-master (topology.css).
+  "quai-master": { icon: IconTopology, minimapColor: "#6366f1" },
+  "docker-env": { icon: IconContainers },
+  "nutanix-cluster": {},
+  "nutanix-host": {},
+  "remote-docker": {},
+  lxc: {},
+};
+
+export function nodeIcon(node: TopologyNode): (props: { className?: string }) => JSX.Element {
+  if (node.kind === "host" && node.hostKind) return HOST_KIND_CONTRACT[node.hostKind].icon ?? NODE_CONTRACT.host.icon;
+  return NODE_CONTRACT[node.kind].icon;
+}
+
+export function nodeMinimapColor(node: TopologyNode): string {
+  if (node.kind === "host" && node.hostKind) return HOST_KIND_CONTRACT[node.hostKind].minimapColor ?? NODE_CONTRACT.host.minimapColor;
+  return NODE_CONTRACT[node.kind].minimapColor;
+}
 
 // --- Vues dérivées du registre (compatibilité + consommation générique) -------------------------
 

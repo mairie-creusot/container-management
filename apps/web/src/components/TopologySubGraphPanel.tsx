@@ -28,7 +28,6 @@ import { buildNodeMenuItems } from "@/components/topologyNodeContract";
 import {
   ACTION_LABEL,
   GroupLabelPopover,
-  MINIMAP_NODE_COLOR,
   attachmentToTopologyNode,
   buildTopologyEdges,
   deriveGroupPorts,
@@ -36,6 +35,7 @@ import {
   formatMem,
   idWithoutPrefix,
   layeredGroupPositions,
+  nodeMinimapColor,
   nodeTypes,
   radialPositions,
   resolveGroupMemberNodeIds,
@@ -1049,7 +1049,7 @@ export default function TopologySubGraphPanel({
             <MiniMap
               position="top-left"
               nodeColor={(n) =>
-                n.type === "topologyGroupNode" ? "#e879f9" : MINIMAP_NODE_COLOR[(n.data as unknown as TopologyNode).kind]
+                n.type === "topologyGroupNode" ? "#e879f9" : nodeMinimapColor(n.data as unknown as TopologyNode)
               }
               nodeStrokeWidth={0}
               nodeBorderRadius={4}

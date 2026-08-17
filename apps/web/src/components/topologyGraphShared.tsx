@@ -17,6 +17,7 @@ import {
   CAPABILITY_PORT_META,
   KIND_ICON,
   NODE_CONTRACT,
+  nodeIcon,
   type AutomationTriggerStatus,
   type CapabilityId,
   type EdgeHealthInfo,
@@ -40,11 +41,14 @@ import type { LifecycleAction } from "@/features/containers/containersSlice";
 export {
   CAPABILITY_DEFS,
   CPU_ALERT_THRESHOLD_PERCENT,
+  HOST_KIND_CONTRACT,
   KIND_ICON,
   MEMORY_ALERT_RATIO,
   MINIMAP_NODE_COLOR,
   NODE_CONTRACT,
   VOLUME_MOUNT_INFO,
+  nodeIcon,
+  nodeMinimapColor,
   nutanixVmHostEdgeState,
   type CapabilityDef,
   type CapabilityId,
@@ -312,6 +316,21 @@ export interface TopologyEdgeLike {
   target: string;
 }
 
+// Capacité attendue à chaque bout d'une arête selon son kind — permet d'ancrer chaque arête sur le
+// port EXACT du contrat (un nœud peut porter plusieurs Handles du même type, ex : conteneur
+// volume-mount + hosted-by, React Flow ne peut plus deviner seul).
+const EDGE_KIND_PORT_CAPABILITY: Record<TopologyEdge["kind"], { source: CapabilityId; target: CapabilityId }> = {
+  mount: { source: "provide", target: "volume-mount" },
+  network: { source: "network", target: "attach" },
+  hosts: { source: "hosts", target: "hosted-by" },
+  "automation-flow": { source: "automation-out", target: "automation-in" },
+};
+
+function portIdForCapability(node: TopologyNode | undefined, capability: CapabilityId): string | undefined {
+  if (!node) return undefined;
+  return NODE_CONTRACT[node.kind].ports.find((p) => p.capability === capability)?.id;
+}
+
 /**
  * Construit les arêtes React Flow (couleur/état/animation) depuis les TopologyEdge bruts — logique
  * partagée par le graphe principal ET le sous-graphe de dépendances, pour un rendu identique.
@@ -419,12 +438,16 @@ export function buildTopologyEdges(
           : hasPublishedPort
             ? undefined
             : "4 4";
+    // Ancrage sur le port du contrat dont la capacité correspond au kind de l'arête — un handle
+    // déjà fixé par l'appelant (arête redirigée vers un groupe) reste prioritaire.
+    const sourceHandle = e.sourceHandle ?? portIdForCapability(nodesById.get(e.source), EDGE_KIND_PORT_CAPABILITY[e.kind].source);
+    const targetHandle = e.targetHandle ?? portIdForCapability(nodesById.get(e.target), EDGE_KIND_PORT_CAPABILITY[e.kind].target);
     return {
       id: e.id,
       source: e.source,
       target: e.target,
-      ...(e.sourceHandle ? { sourceHandle: e.sourceHandle } : {}),
-      ...(e.targetHandle ? { targetHandle: e.targetHandle } : {}),
+      ...(sourceHandle ? { sourceHandle } : {}),
+      ...(targetHandle ? { targetHandle } : {}),
       type: isMount ? "mountFlow" : "networkEdge",
       animated: !isMount && !isHostsEdge,
       className: `topology-edge topology-edge--${e.kind} topology-edge--${state}`,
@@ -807,7 +830,7 @@ function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
 
 function GraphNodeImpl({ data, selected }: NodeProps) {
   const node = data as unknown as TopologyNode & GraphNodeCallbacks;
-  const Icon = KIND_ICON[node.kind];
+  const Icon = nodeIcon(node);
   const isContainer = node.kind === "container";
   // Retour utilisateur du 17/08/2026 : "le meme logique que pour els container na pas ete
   // appliquer verifie tout" — une carte "nutanix-vm" n'affichait jusqu'ici QUE icône/libellé/
@@ -843,7 +866,7 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   const isCompact = zoom < ZOOM_DETAIL_THRESHOLD;
   return (
     <div
-      className={`topology-node topology-node--${node.kind} topology-node--${node.status}${node.orphan ? " topology-node--orphan" : ""}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}`}
+      className={`topology-node topology-node--${node.kind}${node.kind === "host" && node.hostKind ? ` topology-node--host-${node.hostKind}` : ""} topology-node--${node.status}${node.orphan ? " topology-node--orphan" : ""}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}`}
       title={isCompact ? node.label : undefined}
     >
       {ports.map((port) => (

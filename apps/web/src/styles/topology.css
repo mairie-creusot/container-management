@@ -240,6 +240,18 @@
   color: #14b8a6;
 }
 
+/* Racine MASTER "QUAI" (hostKind "quai-master") — indigo accentué, cohérent avec
+   HOST_KIND_CONTRACT["quai-master"] dans topologyNodeContract.tsx. */
+.topology-node--host-quai-master {
+  border-color: #6366f1;
+  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18), 0 8px 20px rgba(0, 0, 0, 0.25);
+}
+
+.topology-node--host-quai-master .topology-node__icon {
+  background: rgba(99, 102, 241, 0.18);
+  color: #6366f1;
+}
+
 /* Cron job (services/cronJobsStore.ts) — jaune, cohérent avec MINIMAP_NODE_COLOR["cron-job"] dans
    topologyGraphShared.tsx. */
 .topology-node--cron-job .topology-node__icon {

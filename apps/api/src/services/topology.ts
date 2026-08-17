@@ -461,6 +461,24 @@ async function getLxcHostNodes(): Promise<TopologyNode[]> {
   ];
 }
 
+const QUAI_MASTER_NODE_ID = "host:quai-master";
+const LOCAL_DOCKER_NODE_ID = "host:docker-local";
+
+/** Nœud "Docker local" (hostKind "docker-env") : le démon local, toujours présent — status/hostInfo
+ * honnêtes selon la joignabilité réelle (mêmes règles que "remote-docker" ci-dessus). */
+async function getLocalDockerEnvNode(): Promise<TopologyNode> {
+  const hostInfo = await getDockerHostInfo();
+  return {
+    id: LOCAL_DOCKER_NODE_ID,
+    kind: "host",
+    hostKind: "docker-env",
+    label: "Docker local",
+    subtitle: hostInfo ? hostInfo.endpoint : "Démon Docker local",
+    status: hostInfo ? "running" : "stopped",
+    ...(hostInfo ? { hostInfo } : {}),
+  };
+}
+
 /**
  * Nœud "ad-server" (voir services/adDns.ts, types.ts#AdDnsConfig) : le contrôleur de domaine/DNS
  * AD que QUAI synchronise pour les routes de reverse proxy — indépendant de Docker (comme les VMs
@@ -728,6 +746,30 @@ export async function getTopology(): Promise<Topology> {
   // Nutanix/ad-server ci-dessus.
   const remoteDockerHostNodes = await getRemoteDockerHostNodes();
   const lxcHostNodes = await getLxcHostNodes();
+  const localDockerNode = await getLocalDockerEnvNode();
+  // Racine MASTER "QUAI" : chaque ENVIRONNEMENT (Docker local/distant, cluster Nutanix, LXD) s'y
+  // rattache par une arête "hosts" — jamais les nœuds hors-infra (ad-server, cron, backup, iac,
+  // gitops, automation), qui ne sont pas des environnements.
+  const environmentNodeIds = [
+    localDockerNode.id,
+    ...remoteDockerHostNodes.map((n) => n.id),
+    ...nutanixHostNodes.filter((n) => n.hostKind === "nutanix-cluster").map((n) => n.id),
+    ...lxcHostNodes.map((n) => n.id),
+  ];
+  const masterNode: TopologyNode = {
+    id: QUAI_MASTER_NODE_ID,
+    kind: "host",
+    hostKind: "quai-master",
+    label: "QUAI",
+    subtitle: `${environmentNodeIds.length} environnement${environmentNodeIds.length > 1 ? "s" : ""}`,
+    status: "running",
+  };
+  const masterEdges: TopologyEdge[] = environmentNodeIds.map((id) => ({
+    id: `hosts:quai-master:${id}`,
+    source: QUAI_MASTER_NODE_ID,
+    target: id,
+    kind: "hosts",
+  }));
   // Cron jobs/sauvegardes (voir getCronJobNodes/getBackupNodes ci-dessus) : indépendants eux
   // aussi de la joignabilité Docker locale — leurs DÉFINITIONS sont de simples lectures JSON,
   // même principe que Nutanix/ad-server/host ci-dessus.
@@ -751,6 +793,8 @@ export async function getTopology(): Promise<Topology> {
   // toujours la même forme de réponse à traiter.
   const groups = await listGroups();
   const staticNodes: TopologyNode[] = [
+    masterNode,
+    localDockerNode,
     ...nutanixVmNodes,
     ...nutanixHostNodes,
     ...adServerNodes,
@@ -762,7 +806,7 @@ export async function getTopology(): Promise<Topology> {
     ...gitopsSourceNodes,
     ...automationParts.nodes,
   ];
-  const staticEdges: TopologyEdge[] = [...nutanixHostEdges, ...automationParts.edges];
+  const staticEdges: TopologyEdge[] = [...masterEdges, ...nutanixHostEdges, ...automationParts.edges];
   // Dernier essai RÉEL de rafraîchissement Nutanix (voir services/nutanix.ts#lastKnownNutanixPoll,
   // mis à jour PAR getNutanixTopologyParts ci-dessus via getNutanixVms) — lu APRÈS, jamais avant,
   // l'appel qui vient de le produire. `undefined` (jamais un objet vide fabriqué) tant que Nutanix
@@ -866,6 +910,9 @@ export async function getTopology(): Promise<Topology> {
         ...(healthAndLimits.nanoCpus ? { nanoCpus: healthAndLimits.nanoCpus } : {}),
         ...(domains && domains.length > 0 ? { domains } : {}),
       });
+      // Rattachement "Docker local" -> conteneur UNIQUEMENT (les volumes/networks ont déjà leurs
+      // arêtes mount/network — pas de surcharge visuelle).
+      edges.push({ id: `hosts:docker-local:${c.Id}`, source: LOCAL_DOCKER_NODE_ID, target: containerNodeId, kind: "hosts" });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const rawPorts: any[] = (c as any).Ports ?? [];

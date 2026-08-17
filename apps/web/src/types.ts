@@ -325,7 +325,8 @@ export type TopologyNodeKind =
 /** "nutanix-host" (14/08/2026) : hôte physique AHV réel — niveau intermédiaire entre "nutanix-
  * cluster" (le cluster tout entier) et les VMs qu'il héberge, voir apps/api/src/services/
  * topology.ts#getNutanixTopologyParts. */
-export type TopologyHostKind = "nutanix-cluster" | "nutanix-host" | "remote-docker" | "lxc";
+/** "quai-master" : nœud racine unique "QUAI" ; "docker-env" : le démon Docker local. */
+export type TopologyHostKind = "quai-master" | "docker-env" | "nutanix-cluster" | "nutanix-host" | "remote-docker" | "lxc";
 
 export interface TopologyNode {
   id: string;

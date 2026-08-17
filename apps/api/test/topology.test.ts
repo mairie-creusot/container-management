@@ -10,14 +10,26 @@ import type { EffectiveLxcConfig } from "../src/services/lxcStore.js";
  * topology.ts). getClient()/readContainerUsage() ne sont jamais atteints dans ce chemin, un stub
  * minimal suffit.
  */
-const getDockerHostInfoMock = vi.fn<[string], Promise<DockerHostInfo | null>>();
+const getDockerHostInfoMock = vi.fn<[string | undefined], Promise<DockerHostInfo | null>>();
+// Joignabilité/client pilotables par test — false/{} par défaut (chemin de repli, comme avant) ;
+// le describe "master QUAI" ci-dessous les bascule pour couvrir le rattachement des conteneurs.
+const isDockerReachableMock = vi.fn<[], Promise<boolean>>();
+const getClientMock = vi.fn<[], Promise<unknown>>();
 
 vi.mock("../src/services/docker.js", () => ({
-  getClient: vi.fn(async () => ({})),
-  isDockerReachable: vi.fn(async () => false),
+  getClient: () => getClientMock(),
+  isDockerReachable: () => isDockerReachableMock(),
   readContainerUsage: vi.fn(async () => ({ cpuPercent: 0, memBytes: 0 })),
-  getDockerHostInfo: (id: string) => getDockerHostInfoMock(id),
+  readContainerHealth: vi.fn(async () => ({ healthStatus: "none" })),
+  getDockerHostInfo: (id?: string) => getDockerHostInfoMock(id),
 }));
+
+// Dépendances du chemin "Docker joignable" (badges MàJ/dérive/vulnérabilités/domaines) — [] partout :
+// hors sujet ici, et jamais d'accès réel aux stores/au dépôt GitOps depuis un test.
+vi.mock("../src/services/images.js", () => ({ getImages: vi.fn(async () => []) }));
+vi.mock("../src/services/gitops.js", () => ({ listGitOpsFiles: vi.fn(async () => []) }));
+vi.mock("../src/services/scan.js", () => ({ listAllScans: vi.fn(async () => []) }));
+vi.mock("../src/services/reverseProxy.js", () => ({ listRoutes: vi.fn(async () => []), lastKnownDnsSync: vi.fn(() => null) }));
 
 const isNutanixConfiguredMock = vi.fn<[], Promise<boolean>>();
 const getNutanixVmsMock = vi.fn<[], Promise<NutanixVm[]>>();
@@ -67,7 +79,16 @@ beforeEach(() => {
   getLxcEnvironmentMock.mockResolvedValue(null);
   getEffectiveLxcConfigMock.mockResolvedValue(null);
   lastKnownNutanixPollMock.mockReturnValue(null);
+  getDockerHostInfoMock.mockResolvedValue(null);
+  isDockerReachableMock.mockResolvedValue(false);
+  getClientMock.mockResolvedValue({});
 });
+
+/** Arêtes "hosts" HORS rattachements du master QUAI — pour les assertions historiques sur la seule
+ * hiérarchie Nutanix. */
+function nonMasterHostEdges(edges: { kind: string; source: string }[]) {
+  return edges.filter((e) => e.kind === "hosts" && e.source !== "host:quai-master");
+}
 
 afterEach(() => {
   vi.clearAllMocks();
@@ -227,7 +248,7 @@ describe("getTopology — nœuds host cluster Nutanix (kind \"host\", hostKind \
     // bien un clusterUuid réel (voir subtitle "2 VMs" ci-dessus, dérivé indépendamment de
     // vmCountByClusterUuid) mais AUCUN hostUuid déterminable ici (aucun hôte physique mocké dans ce
     // bloc de test) — se rattachent donc au cluster plutôt que de rester flottantes.
-    const hostEdges = topology.edges.filter((e) => e.kind === "hosts");
+    const hostEdges = nonMasterHostEdges(topology.edges);
     expect(hostEdges).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ source: "host:nutanix-cluster:cluster-uuid-1", target: "nutanix-vm:vm-uuid-1" }),
@@ -307,7 +328,7 @@ describe("getTopology — nœuds host physique Nutanix (kind \"host\", hostKind 
     });
     expect(host1?.subtitle).toContain("1 VM");
 
-    const hostEdges = topology.edges.filter((e) => e.kind === "hosts");
+    const hostEdges = nonMasterHostEdges(topology.edges);
     // cluster -> host-uuid-1, cluster -> host-uuid-2, host-uuid-1 -> vm-uuid-1 (placement réel),
     // cluster -> vm-uuid-2 (repli, VM éteinte sans hôte déterminable — voir commentaire ci-dessus).
     expect(hostEdges).toEqual(
@@ -510,5 +531,134 @@ describe("getTopology — Topology#nutanixLastPoll (fraîcheur du dernier poll N
 
     expect(topology.nutanixLastPoll).toEqual({ reachable: false, at: "2026-08-17T10:05:00.000Z" });
     expect(topology.nodes.some((n) => n.kind === "nutanix-vm")).toBe(false);
+  });
+});
+
+describe("getTopology — nœud master QUAI (hostKind \"quai-master\") et rattachement des environnements", () => {
+  it("master toujours présent et relié à \"Docker local\" — lui-même toujours présent, stopped sans hostInfo si le démon local est injoignable", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(false);
+    getNutanixVmsMock.mockResolvedValue([]);
+
+    const topology = await getTopology();
+
+    expect(topology.nodes.filter((n) => n.hostKind === "quai-master")).toHaveLength(1);
+    expect(topology.nodes.find((n) => n.id === "host:quai-master")).toMatchObject({
+      kind: "host",
+      hostKind: "quai-master",
+      label: "QUAI",
+      status: "running",
+      subtitle: "1 environnement",
+    });
+    const local = topology.nodes.find((n) => n.id === "host:docker-local");
+    expect(local).toMatchObject({ kind: "host", hostKind: "docker-env", label: "Docker local", status: "stopped" });
+    expect(local?.hostInfo).toBeUndefined();
+    expect(topology.edges).toContainEqual(
+      expect.objectContaining({ kind: "hosts", source: "host:quai-master", target: "host:docker-local" }),
+    );
+  });
+
+  it("Docker local joignable : status running + hostInfo réel (getDockerHostInfo appelé SANS id d'environnement distant)", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(false);
+    getNutanixVmsMock.mockResolvedValue([]);
+    const hostInfo: DockerHostInfo = {
+      serverVersion: "27.0.0",
+      apiVersion: "1.46",
+      os: "linux",
+      kernelVersion: "6.1.0",
+      architecture: "x86_64",
+      cpus: 8,
+      totalMemBytes: 16_000_000_000,
+      containersRunning: 2,
+      containersStopped: 0,
+      imagesCount: 5,
+      storageDriver: "overlay2",
+      dockerRootDir: "/var/lib/docker",
+      endpoint: "unix:///var/run/docker.sock",
+      swarmActive: false,
+      volumesCount: 1,
+    };
+    getDockerHostInfoMock.mockImplementation(async (id) => (id === undefined ? hostInfo : null));
+
+    const topology = await getTopology();
+
+    expect(topology.nodes.find((n) => n.id === "host:docker-local")).toMatchObject({
+      status: "running",
+      subtitle: "unix:///var/run/docker.sock",
+      hostInfo,
+    });
+  });
+
+  it("master relié à CHAQUE environnement (Docker local, Docker distant, cluster Nutanix, LXD) — jamais aux hôtes physiques/VMs ni aux nœuds hors-infra", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(true);
+    getNutanixClustersMock.mockResolvedValue([{ uuid: "cluster-uuid-1", name: "CLUSTER_AHV_HDV" }]);
+    getNutanixHostsMock.mockResolvedValue([{ id: "host-uuid-1", name: "HDVNUTA3", clusterUuid: "cluster-uuid-1" }]);
+    getNutanixVmsMock.mockResolvedValue([
+      { id: "vm-uuid-1", name: "vm-a", powerState: "on", numVcpus: 1, memoryMib: 1024, cluster: "CLUSTER_AHV_HDV", clusterUuid: "cluster-uuid-1", hostUuid: "host-uuid-1" },
+    ]);
+    listRemoteDockerEnvironmentsMock.mockResolvedValue([
+      {
+        id: "env-1",
+        name: "VPS",
+        host: "10.0.0.5",
+        port: 2376,
+        transport: "tcp-tls",
+        hasTls: true,
+        hasSshCredentials: false,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+    getEffectiveLxcConfigMock.mockResolvedValue({ endpoint: "https://lxd:8443", clientCert: "c", clientKey: "k" });
+    getLxcEnvironmentMock.mockResolvedValue({ id: "lxc", name: "LXC (LXD)", orchestrator: "lxc", status: "ok", nodes: [] });
+
+    const topology = await getTopology();
+    const masterEdges = topology.edges.filter((e) => e.kind === "hosts" && e.source === "host:quai-master");
+
+    expect(masterEdges.map((e) => e.target).sort()).toEqual(
+      ["host:docker-local", "host:lxc", "host:nutanix-cluster:cluster-uuid-1", "host:remote-docker:env-1"].sort(),
+    );
+    // Aucun doublon d'arête, aucun rattachement direct master -> hôte physique/VM.
+    expect(new Set(masterEdges.map((e) => e.id)).size).toBe(masterEdges.length);
+    expect(topology.nodes.find((n) => n.id === "host:quai-master")?.subtitle).toBe("4 environnements");
+  });
+
+  it("Docker local joignable : chaque conteneur se rattache à \"Docker local\" — jamais les volumes/networks (déjà couverts par mount/network)", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(false);
+    getNutanixVmsMock.mockResolvedValue([]);
+    isDockerReachableMock.mockResolvedValue(true);
+    getClientMock.mockResolvedValue({
+      listContainers: async () => [
+        {
+          Id: "c1",
+          Names: ["/web"],
+          Image: "nginx:latest",
+          State: "running",
+          Mounts: [{ Type: "volume", Name: "shared-data", Destination: "/data", RW: true }],
+          NetworkSettings: { Networks: { "app-net": { NetworkID: "n1" } } },
+          Ports: [],
+        },
+        {
+          Id: "c2",
+          Names: ["/worker"],
+          Image: "worker:latest",
+          State: "exited",
+          Mounts: [{ Type: "volume", Name: "shared-data", Destination: "/data", RW: true }],
+          NetworkSettings: { Networks: { "app-net": { NetworkID: "n1" } } },
+          Ports: [],
+        },
+      ],
+      listVolumes: async () => ({ Volumes: [{ Name: "shared-data", Driver: "local" }] }),
+      listNetworks: async () => [{ Id: "n1", Name: "app-net", Driver: "bridge" }],
+    });
+
+    const topology = await getTopology();
+    const localEdges = topology.edges.filter((e) => e.kind === "hosts" && e.source === "host:docker-local");
+
+    expect(localEdges.map((e) => e.target).sort()).toEqual(["container:c1", "container:c2"]);
+    // Les ressources partagées restent de vrais nœuds reliés par leurs arêtes mount/network — jamais
+    // rattachées en plus au nœud "Docker local".
+    expect(topology.edges.some((e) => e.kind === "hosts" && (e.target === "volume:shared-data" || e.target === "network:n1"))).toBe(false);
+    expect(topology.edges).toContainEqual(expect.objectContaining({ kind: "mount", source: "volume:shared-data", target: "container:c1" }));
+    expect(topology.edges).toContainEqual(expect.objectContaining({ kind: "network", source: "container:c1", target: "network:n1" }));
   });
 });

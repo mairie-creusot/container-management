@@ -2,13 +2,16 @@ import { describe, expect, it } from "vitest";
 import { Position } from "@xyflow/react";
 import {
   CAPABILITY_DEFS,
+  HOST_KIND_CONTRACT,
   IAC_ENGINE_CONTRACT,
   NODE_CONTRACT,
   NODE_KINDS,
   buildNodeMenuItems,
+  nodeIcon,
+  nodeMinimapColor,
 } from "./topologyNodeContract";
 import { buildTopologyEdges, computeNodeResourceAlerts } from "./topologyGraphShared";
-import type { IacEngine, TopologyEdge, TopologyNode, TopologyNodeKind } from "@/types";
+import type { IacEngine, TopologyEdge, TopologyHostKind, TopologyNode, TopologyNodeKind } from "@/types";
 
 /**
  * Verrouille le CONTRAT générique des nœuds (topologyNodeContract.tsx, migration du 17/08/2026) :
@@ -85,6 +88,82 @@ describe("NODE_CONTRACT — totalité et conventions transverses", () => {
   it("nutanix-vm garde son unique port cible \"hosted-by\" et host ses deux ports (bug réel du 14/08/2026 : ports absents = arêtes invisibles)", () => {
     expect(NODE_CONTRACT["nutanix-vm"].ports.map((p) => p.id)).toEqual(["hosted-by"]);
     expect(NODE_CONTRACT.host.ports.map((p) => p.id)).toEqual(["hosted-by", "hosts"]);
+  });
+
+  it("container porte un port cible \"hosted-by\" (arête \"Docker local\" -> conteneur) en plus de network/volume-mount", () => {
+    expect(NODE_CONTRACT.container.ports.map((p) => p.id)).toEqual(["network", "volume-mount", "hosted-by"]);
+  });
+});
+
+describe("HOST_KIND_CONTRACT — déclinaison par hostKind du kind \"host\"", () => {
+  const ALL_HOST_KINDS_RECORD: Record<TopologyHostKind, true> = {
+    "quai-master": true,
+    "docker-env": true,
+    "nutanix-cluster": true,
+    "nutanix-host": true,
+    "remote-docker": true,
+    lxc: true,
+  };
+
+  it("chaque hostKind a une entrée (totalité garantie par le compilateur, ancrée ici)", () => {
+    expect(Object.keys(HOST_KIND_CONTRACT).sort()).toEqual(Object.keys(ALL_HOST_KINDS_RECORD).sort());
+  });
+
+  it("le master QUAI a une icône et une couleur MiniMap DISTINCTES du kind host générique ; les hostKind sans déclinaison retombent sur celles du kind", () => {
+    const master = node("host", { hostKind: "quai-master" });
+    expect(nodeMinimapColor(master)).not.toBe(NODE_CONTRACT.host.minimapColor);
+    expect(nodeIcon(master)).not.toBe(NODE_CONTRACT.host.icon);
+    const cluster = node("host", { hostKind: "nutanix-cluster" });
+    expect(nodeMinimapColor(cluster)).toBe(NODE_CONTRACT.host.minimapColor);
+    expect(nodeIcon(cluster)).toBe(NODE_CONTRACT.host.icon);
+    expect(nodeMinimapColor(node("container"))).toBe(NODE_CONTRACT.container.minimapColor);
+  });
+
+  it("menu du master : \"Ajouter un environnement…\" uniquement ; \"docker-env\" n'a aucune action", () => {
+    const handlers = { "host-add-environment": () => {} };
+    expect(buildNodeMenuItems(node("host", { hostKind: "quai-master" }), handlers).map((i) => i.label)).toEqual([
+      "Ajouter un environnement…",
+    ]);
+    expect(buildNodeMenuItems(node("host", { hostKind: "docker-env" }), handlers)).toEqual([]);
+  });
+});
+
+describe("buildTopologyEdges — ancrage des arêtes sur le port du contrat correspondant à leur kind", () => {
+  it("arête \"hosts\" Docker local -> conteneur : sourceHandle \"hosts\", targetHandle \"hosted-by\" (jamais le port volume-mount)", () => {
+    const local = node("host", { id: "host:docker-local", hostKind: "docker-env" });
+    const container = node("container", { id: "container:c1" });
+    const nodesById = new Map([
+      [local.id, local],
+      [container.id, container],
+    ]);
+    const edges: TopologyEdge[] = [{ id: "hosts:docker-local:c1", source: local.id, target: container.id, kind: "hosts" }];
+    const [edge] = buildTopologyEdges(edges, nodesById);
+    expect(edge).toMatchObject({ sourceHandle: "hosts", targetHandle: "hosted-by" });
+  });
+
+  it("arête \"mount\" volume -> conteneur : reste ancrée sur provide/volume-mount malgré le nouveau port hosted-by", () => {
+    const volume = node("volume", { id: "volume:v1" });
+    const container = node("container", { id: "container:c1" });
+    const nodesById = new Map([
+      [volume.id, volume],
+      [container.id, container],
+    ]);
+    const edges: TopologyEdge[] = [{ id: "mount:c1:v1", source: volume.id, target: container.id, kind: "mount" }];
+    const [edge] = buildTopologyEdges(edges, nodesById);
+    expect(edge).toMatchObject({ sourceHandle: "provide", targetHandle: "volume-mount" });
+  });
+
+  it("un handle déjà fixé par l'appelant (arête redirigée vers un groupe) reste prioritaire ; une extrémité inconnue (id de groupe) reste sans handle", () => {
+    const container = node("container", { id: "container:c1" });
+    const nodesById = new Map([[container.id, container]]);
+    const edges: (TopologyEdge & { targetHandle?: string })[] = [
+      { id: "net:c1:g1", source: container.id, target: "group:g1", kind: "network", targetHandle: "attach" },
+      { id: "net:c1:g2", source: container.id, target: "group:g2", kind: "network" },
+    ];
+    const [redirected, unknownTarget] = buildTopologyEdges(edges, nodesById);
+    expect(redirected).toMatchObject({ sourceHandle: "network", targetHandle: "attach" });
+    expect(unknownTarget?.sourceHandle).toBe("network");
+    expect(unknownTarget?.targetHandle).toBeUndefined();
   });
 });
 

@@ -784,7 +784,9 @@ export type TopologyNodeKind =
  * sur l'instance 172.20.0.10:9440). Distinct de "nutanix-cluster" : un cluster peut avoir plusieurs
  * hôtes physiques, chacun devient son propre nœud "host" ici.
  */
-export type TopologyHostKind = "nutanix-cluster" | "nutanix-host" | "remote-docker" | "lxc";
+/** "quai-master" : nœud racine unique "QUAI" auquel chaque environnement se rattache ;
+ * "docker-env" : le démon Docker LOCAL (même résumé hostInfo que GET /api/environments). */
+export type TopologyHostKind = "quai-master" | "docker-env" | "nutanix-cluster" | "nutanix-host" | "remote-docker" | "lxc";
 
 export interface TopologyNode {
   // ex: "container:<id>", "volume:<name>", "network:<id>", "nutanix-vm:<uuid>",

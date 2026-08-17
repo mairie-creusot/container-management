@@ -140,6 +140,8 @@ const HEALTH_SEMANTIC: Record<string, "success" | "critical" | "warning" | "neut
 /** Libellé du sous-type d'un nœud "host" (voir TopologyNode#hostKind) — affiché en badge à côté du
  * statut, pour distinguer les trois sources possibles sans dépendre du libellé/sous-titre libre. */
 const HOST_KIND_LABEL: Record<TopologyHostKind, string> = {
+  "quai-master": "QUAI (racine)",
+  "docker-env": "Docker local",
   "nutanix-cluster": "Cluster Nutanix",
   "nutanix-host": "Hôte physique Nutanix",
   "remote-docker": "Docker distant",
@@ -2050,7 +2052,7 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
                 },
               ]}
             />
-            {node.hostKind === "remote-docker" && node.hostInfo && (
+            {(node.hostKind === "remote-docker" || node.hostKind === "docker-env") && node.hostInfo && (
               <>
                 <div className="inspector-section-title">Démon Docker (infos réelles)</div>
                 <KeyValueList
