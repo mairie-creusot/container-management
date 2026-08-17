@@ -25,6 +25,14 @@
  * POST   /api/containers/:id/stop      — arrête un conteneur en cours d'exécution.
  * POST   /api/containers/:id/restart   — redémarre un conteneur.
  * POST   /api/containers/:id/rename    — renomme un conteneur (équivalent `docker rename`).
+ * POST   /api/containers/:id/mounts    — monte un volume nommé sur un conteneur EXISTANT en le
+ *                                         RECRÉANT réellement (stop → rename → create avec la même
+ *                                         config + le nouveau montage → start → remove de l'ancien
+ *                                         — Docker n'a AUCUN endpoint de hot-mount, voir
+ *                                         services/docker.ts#mountVolumeOnContainer, rollback
+ *                                         compris). operator/admin (garde globale plugins/auth.ts),
+ *                                         audité automatiquement (plugins/audit.ts). Body :
+ *                                         { volumeName, mountPath (absolu), readOnly? }.
  * DELETE /api/containers/:id           — supprime un conteneur (?force=true pour un conteneur en cours d'exécution).
  * GET    /api/containers/:id/files/hexdump — hexdump en lecture seule d'une fenêtre d'octets d'un
  *                                         fichier ARBITRAIRE dans le conteneur (équivalent `docker
@@ -68,6 +76,7 @@ import {
   inspectContainerProcess,
   inspectDockerContainer,
   killContainerProcess,
+  mountVolumeOnContainer,
   readContainerFileHexdump,
   removeContainer,
   renameContainer,
@@ -148,6 +157,13 @@ function parseResourceLimits(body: CreateContainerBody): { memoryLimitBytes?: nu
 
 interface RenameContainerBody {
   name?: string;
+}
+
+/** Body de POST /api/containers/:id/mounts — voir en-tête de fichier. */
+interface MountVolumeBody {
+  volumeName?: string;
+  mountPath?: string;
+  readOnly?: boolean;
 }
 
 interface FileHexdumpQuery {
@@ -338,6 +354,50 @@ export default async function containersRoutes(fastify: FastifyInstance): Promis
       sendDockerActionError(reply, err);
     }
   });
+
+  // Monte un volume nommé sur un conteneur EXISTANT — action de RECRÉATION réelle du conteneur
+  // (voir en-tête de fichier et services/docker.ts#mountVolumeOnContainer) : validations complètes
+  // AVANT tout appel Docker, exactement comme parseResourceLimits/secretEnv sur POST /api/containers
+  // ci-dessus (un chemin invalide ne doit jamais arrêter un conteneur réel pour rien).
+  fastify.post<{ Params: { id: string }; Body: MountVolumeBody }>(
+    "/api/containers/:id/mounts",
+    async (request, reply) => {
+      const volumeName = request.body?.volumeName?.trim();
+      const mountPath = request.body?.mountPath?.trim();
+      if (!volumeName) {
+        return reply.code(400).send({ error: "volumeName is required" });
+      }
+      if (!mountPath || !mountPath.startsWith("/")) {
+        return reply.code(400).send({ error: "mountPath must be an absolute container path (ex: \"/data\")" });
+      }
+      // ":" est le séparateur de la syntaxe Binds "source:cible[:ro]" (voir rebuildBindsFromMounts,
+      // services/docker.ts) : un chemin qui en contient un fabriquerait un bind à 3+ segments
+      // inattendu — refusé net plutôt qu'interprété de travers. Même logique pour le nom de volume.
+      if (mountPath.includes(":") || volumeName.includes(":")) {
+        return reply.code(400).send({ error: "volumeName and mountPath must not contain \":\"" });
+      }
+      try {
+        const result = await mountVolumeOnContainer({
+          containerId: request.params.id,
+          volumeName,
+          mountPath,
+          readOnly: request.body?.readOnly === true,
+        });
+        return reply.send({ ok: true, id: result.id });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        // "already used by an existing mount" (rebuildBindsFromMounts) : conflit d'état, 409 —
+        // même convention que sendDockerActionError pour "is not running".
+        if (/already used by an existing mount/i.test(message)) {
+          return reply.code(409).send({ error: message });
+        }
+        if (/^Volume ".*" not found$/i.test(message)) {
+          return reply.code(404).send({ error: message });
+        }
+        return sendDockerActionError(reply, err);
+      }
+    },
+  );
 
   fastify.get<{ Params: { id: string } }>("/api/containers/:id", async (request, reply) => {
     const detail = await inspectDockerContainer(request.params.id);

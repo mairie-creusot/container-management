@@ -210,6 +210,7 @@ describe("buildNodeMenuItems — la liste vit dans le contrat, les callbacks che
       "nutanix-vm-stop",
       "nutanix-vm-restart",
       "nutanix-vm-start",
+      "volume-mount-on-container",
       "volume-remove",
       "network-remove",
       "automation-node-remove",
@@ -246,6 +247,21 @@ describe("buildNodeMenuItems — la liste vit dans le contrat, les callbacks che
     expect(buildNodeMenuItems(node("nutanix-vm"), handlers).map((i) => i.label)).toEqual(["Arrêter", "Redémarrer"]);
     expect(buildNodeMenuItems(node("nutanix-vm", { status: "stopped" }), handlers).map((i) => i.label)).toEqual(["Démarrer"]);
     expect(buildNodeMenuItems(node("nutanix-vm", { status: "neutral" }), handlers)).toEqual([]);
+  });
+
+  it("volume : Monter sur un conteneur… (Phase 2) puis Supprimer (danger) — le montage n'est jamais marqué danger ici, l'avertissement/la confirmation vivent dans le popover (MountVolumePopover)", () => {
+    const { handlers } = allHandlers();
+    const items = buildNodeMenuItems(node("volume"), handlers);
+    expect(items.map((i) => i.label)).toEqual(["Monter sur un conteneur…", "Supprimer"]);
+    expect(items.find((i) => i.label === "Supprimer")?.danger).toBe(true);
+    expect(items.find((i) => i.label === "Monter sur un conteneur…")?.danger).toBeUndefined();
+  });
+
+  it("volume dans le sous-graphe (handler de montage volontairement absent) : seule Supprimer reste — jamais un item mort", () => {
+    const { handlers } = allHandlers();
+    delete handlers["volume-mount-on-container"];
+    const items = buildNodeMenuItems(node("volume"), handlers);
+    expect(items.map((i) => i.label)).toEqual(["Supprimer"]);
   });
 
   it("network : Supprimer masqué pour les networks Docker par défaut (bridge/host/none), présent sinon", () => {

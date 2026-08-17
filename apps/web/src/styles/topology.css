@@ -673,6 +673,129 @@
   text-transform: uppercase;
 }
 
+/* --- "Tiroirs" : volumes montés par CE conteneur (Phase 2, 17/08/2026 — capture Railway de
+   référence validée par l'utilisateur : le volume attaché est une SOUS-CARTE glissée SOUS la carte
+   du service, dépassant du bord inférieur, ton assourdi ; seul le STOCKAGE devient tiroir, les
+   networks restent des briques inline ci-dessus). Positionné en absolu sous la carte avec un
+   z-index négatif : .topology-node (position: relative, aucun z-index/transform propre) ne crée
+   pas de stacking context, le tiroir se place donc visuellement DERRIÈRE le fond de la carte —
+   l'effet "glissé dessous" sans dupliquer la géométrie de la carte. Mêmes données réelles/mêmes
+   callbacks que les anciennes briques volume (voir GraphNodeImpl, topologyGraphShared.tsx). ---- */
+.topology-node__drawers {
+  position: absolute;
+  top: 100%;
+  left: 14px;
+  right: 14px;
+  /* Remonte le 1er tiroir SOUS le bord inférieur de la carte — sa partie haute est masquée par le
+     fond de la carte (z-index négatif), seule la "poignée" du tiroir dépasse, façon Railway. */
+  margin-top: -12px;
+  display: flex;
+  flex-direction: column;
+  z-index: -1;
+  /* Le conteneur lui-même ne capte aucun clic (il chevauche la zone sous la carte) — seuls les
+     tiroirs redeviennent cliquables individuellement. */
+  pointer-events: none;
+}
+
+.topology-drawer {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  /* padding-top généreux : c'est la partie qui reste cachée sous la carte (ou sous le tiroir
+     précédent) — le contenu visible vit dans la moitié basse. */
+  padding: 16px 10px 6px;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  border: 1px solid var(--color-border);
+  border-top: none;
+  /* Ton ASSOURDI (surface sous la carte + texte muted) — un tiroir est une dépendance du service,
+     jamais au même niveau visuel que la carte elle-même (référence Railway). */
+  background: var(--color-surface-2);
+  color: var(--color-text-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  /* Animation d'apparition "le tiroir se déplie depuis sous la carte" — jouée au montage
+     (apparition d'un nouveau volume au prochain poll comprise), coupée sous
+     prefers-reduced-motion ci-dessous. */
+  animation: topology-drawer-slide 0.25s ease;
+}
+
+/* Chaque tiroir supplémentaire se glisse sous le précédent — l'empilement décale chaque niveau
+   vers le bas de sa seule partie visible (le z-index inline décroissant posé par GraphNodeImpl
+   garde le 1er tiroir devant le 2e, etc.). */
+.topology-drawer + .topology-drawer {
+  margin-top: -10px;
+}
+
+.topology-drawer:hover {
+  background: var(--color-surface-3);
+  color: var(--color-text);
+  border-color: rgba(245, 165, 36, 0.45);
+}
+
+.topology-drawer__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  flex: none;
+  color: var(--color-warning);
+}
+
+.topology-drawer__icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.topology-drawer__label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Chemin de montage réel (Mounts Docker) — l'information la plus utile d'un tiroir de stockage,
+   affichée en mono discret à droite du nom. */
+.topology-drawer__destination {
+  min-width: 0;
+  margin-left: auto;
+  font-family: var(--font-mono, monospace);
+  font-weight: 400;
+  font-size: 9.5px;
+  color: var(--color-text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topology-drawer__ro {
+  flex: none;
+  font-size: 9px;
+  color: var(--color-text-faint);
+  text-transform: uppercase;
+}
+
+@keyframes topology-drawer-slide {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topology-drawer {
+    animation: none;
+  }
+}
+
 .topology-node--compact .topology-node__attachments {
   opacity: 0;
   max-height: 0;

@@ -69,6 +69,40 @@ export const removeVolume = createAsyncThunk<string, { name: string; silent?: bo
   },
 );
 
+/**
+ * Monte un volume nommé sur un conteneur EXISTANT — POST /api/containers/:id/mounts (Phase 2,
+ * 17/08/2026) : action de RECRÉATION réelle du conteneur côté serveur (stop → recreate avec la même
+ * config + le nouveau montage → start — Docker n'a aucun hot-mount, voir
+ * apps/api/src/services/docker.ts#mountVolumeOnContainer, rollback compris). L'appelant
+ * (TopologyGraph.tsx#MountVolumePopover) affiche l'avertissement + la confirmation danger AVANT de
+ * dispatcher — ce thunk ne fait qu'exécuter. Le toast de succès mentionne explicitement la
+ * recréation (l'id du conteneur CHANGE — le nouvel id est retourné pour information, le
+ * rafraîchissement de la topologie fait foi côté graphe).
+ */
+export const mountVolumeOnContainer = createAsyncThunk<
+  { id: string },
+  { volumeName: string; containerId: string; containerName: string; mountPath: string; readOnly: boolean },
+  { rejectValue: string }
+>("volumes/mountOnContainer", async ({ volumeName, containerId, containerName, mountPath, readOnly }, { rejectWithValue, dispatch }) => {
+  try {
+    const result = await apiPost<{ ok: boolean; id: string }>(`/containers/${encodeURIComponent(containerId)}/mounts`, {
+      volumeName,
+      mountPath,
+      readOnly,
+    });
+    dispatch(
+      pushNotification({
+        level: "success",
+        message: `Volume "${volumeName}" monté sur "${containerName}" (${mountPath}) — conteneur recréé.`,
+      }),
+    );
+    return { id: result.id };
+  } catch (error) {
+    const message = error instanceof ApiError ? error.message : "Échec du montage du volume.";
+    return rejectWithValue(message);
+  }
+});
+
 /** Explorateur de fichiers en lecture seule — voir GET /api/volumes/:name/files. */
 export const fetchVolumeFiles = createAsyncThunk<
   { volumeName: string; path: string; entries: VolumeFileEntry[] },

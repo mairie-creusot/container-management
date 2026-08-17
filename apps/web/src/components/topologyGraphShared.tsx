@@ -821,6 +821,13 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   // volontairement inchangée : son sous-titre porte déjà CPU/RAM (voir services/topology.ts,
   // formatHostMemorySubtitle) — un résumé identique en double sur la carte n'ajouterait rien.
   const isNutanixVm = node.kind === "nutanix-vm";
+  // Répartition des attachments (TopologyNode#attachments — VRAIES données Docker, jamais un
+  // nouveau stockage) entre les deux rendus (Phase 2, 17/08/2026, maquette Railway validée par
+  // l'utilisateur) : un VOLUME attaché devient un "tiroir" (sous-carte glissée SOUS la carte du
+  // service, dépassant du bord inférieur, ton assourdi — voir .topology-node__drawers plus bas),
+  // un NETWORK reste une "brique" inline comme avant (chez Railway, le tiroir est le stockage).
+  const volumeAttachments = (node.attachments ?? []).filter((a) => a.kind === "volume");
+  const networkAttachments = (node.attachments ?? []).filter((a) => a.kind === "network");
   // TOUS les Handles du nœud viennent du contrat (NODE_CONTRACT[kind].ports,
   // topologyNodeContract.tsx) — y compris ceux des nœuds d'automatisation, autrefois posés par un
   // JSX conditionnel par-kind juste en dessous (comportement implicite rendu explicite par la
@@ -983,24 +990,23 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
           <div className="topology-node__metric-mem">{formatMem(node.memBytes ?? 0)}</div>
         </div>
       )}
-      {isContainer && !!node.attachments?.length && (
-        // "Briques" (volumes/networks montés par CE seul conteneur, voir TopologyNode#attachments)
-        // — façon Railway : une ressource attachée à un service s'affiche comme une propriété du
-        // service, pas comme un nœud séparé relié par une arête. `nodrag`/`nopan` (classes React
-        // Flow) évitent qu'un clic ici ne fasse glisser le nœud entier ou ne panne le canevas ;
-        // `stopPropagation` évite en plus de sélectionner/désélectionner le nœud conteneur en même
-        // temps qu'on ouvre le détail de la brique.
+      {isContainer && networkAttachments.length > 0 && (
+        // "Briques" — désormais les NETWORKS mono-conteneur uniquement (voir
+        // TopologyNode#attachments) : les volumes attachés sont passés en "tiroirs" sous la carte
+        // (voir le bloc .topology-node__drawers plus bas — Phase 2 du 17/08/2026, maquette Railway
+        // validée : le tiroir y est réservé au STOCKAGE, un network reste une propriété inline du
+        // service). `nodrag`/`nopan` (classes React Flow) évitent qu'un clic ici ne fasse glisser
+        // le nœud entier ou ne panne le canevas ; `stopPropagation` évite en plus de sélectionner/
+        // désélectionner le nœud conteneur en même temps qu'on ouvre le détail de la brique.
         <div className="topology-node__attachments">
-          {node.attachments.map((attachment) => {
+          {networkAttachments.map((attachment) => {
             const AttachmentIcon = ATTACHMENT_ICON[attachment.kind];
             return (
               <button
                 key={attachment.id}
                 type="button"
                 className={`topology-brick topology-brick--${attachment.kind} nodrag nopan`}
-                title={`${attachment.kind === "volume" ? "Volume" : "Network"} ${attachment.label}${
-                  attachment.destination ? ` — monté sur ${attachment.destination}` : ""
-                }${attachment.readOnly ? " (lecture seule)" : ""}`}
+                title={`Network ${attachment.label}`}
                 onClick={(event) => {
                   event.stopPropagation();
                   node.onOpenAttachment?.(attachment);
@@ -1035,6 +1041,50 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
                 : node.status}
         </span>
       </div>
+      {isContainer && !isCompact && volumeAttachments.length > 0 && (
+        // "Tiroirs" des VOLUMES attachés (Phase 2, 17/08/2026 — capture Railway de référence
+        // validée par l'utilisateur) : chaque volume monté par CE seul conteneur est une SOUS-CARTE
+        // glissée SOUS la carte du service (position absolue sous le bord inférieur, ton assourdi,
+        // z-index négatif pour paraître passer DERRIÈRE la carte — .topology-node ne crée pas de
+        // stacking context, le wrapper React Flow oui, donc le tiroir se place bien entre le fond
+        // du canevas et la carte). Ce sont les MÊMES données réelles (TopologyNode#attachments,
+        // Mounts Docker) et les MÊMES callbacks (détail/menu contextuel) que les briques d'avant —
+        // seul le rendu change. Masqués en zoom compact (comme badges/briques/métriques : sous le
+        // seuil, la carte se réduit à icône + statut). Animation d'apparition : voir
+        // .topology-drawer dans topology.css (désactivée sous prefers-reduced-motion).
+        <div className="topology-node__drawers">
+          {volumeAttachments.map((attachment, drawerIndex) => (
+            <button
+              key={attachment.id}
+              type="button"
+              className="topology-drawer nodrag nopan"
+              // Empilement : chaque tiroir supplémentaire glisse un cran plus bas ET un cran plus
+              // "derrière" — l'index pilote le z-index négatif (le 1er tiroir devant le 2e, etc.),
+              // le décalage vertical est porté par le flux normal du conteneur flex.
+              style={{ zIndex: -1 - drawerIndex }}
+              title={`Volume ${attachment.label}${
+                attachment.destination ? ` — monté sur ${attachment.destination}` : ""
+              }${attachment.readOnly ? " (lecture seule)" : ""}`}
+              onClick={(event) => {
+                event.stopPropagation();
+                node.onOpenAttachment?.(attachment);
+              }}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                node.onAttachmentContextMenu?.(event, attachment);
+              }}
+            >
+              <span className="topology-drawer__icon">
+                <IconVolumes />
+              </span>
+              <span className="topology-drawer__label">{attachment.label}</span>
+              {attachment.destination && <span className="topology-drawer__destination">{attachment.destination}</span>}
+              {attachment.readOnly && <span className="topology-drawer__ro">ro</span>}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

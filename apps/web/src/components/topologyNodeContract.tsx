@@ -98,8 +98,13 @@ export interface CapabilityDef {
   infoMessage?: string;
 }
 
+// Mis à jour le 17/08/2026 (Phase 2, action "Monter sur un conteneur…") : le glisser-connecter
+// volume -> conteneur reste NON interactif (le drop d'une arête n'est pas le bon geste pour une
+// action qui recrée réellement un conteneur — trop lourd de conséquences pour un glissé sans
+// formulaire), mais le message pointe désormais vers le VRAI chemin qui existe : l'action de menu
+// contextuel du volume, qui recrée honnêtement le conteneur (POST /api/containers/:id/mounts).
 export const VOLUME_MOUNT_INFO =
-  "Impossible d'attacher un volume à un conteneur existant : Docker ne permet pas de modifier les montages sans recréer le conteneur.";
+  "Docker ne permet pas de modifier les montages d'un conteneur existant sans le recréer — utilisez « Monter sur un conteneur… » (clic droit sur le volume), qui recrée le conteneur avec sa configuration actuelle plus le nouveau montage.";
 
 export const CAPABILITY_DEFS: Record<CapabilityId, CapabilityDef> = {
   network: { linksTo: "attach", interactive: true },
@@ -287,6 +292,7 @@ export type NodeMenuActionId =
   | "nutanix-vm-stop"
   | "nutanix-vm-restart"
   | "nutanix-vm-start"
+  | "volume-mount-on-container"
   | "volume-remove"
   | "network-remove"
   | "automation-node-remove";
@@ -483,7 +489,17 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     edgeHealth: null, // l'arête "mount" lit la santé du CONTENEUR à l'autre bout, jamais le volume
     automationStatusSeed: null,
     resourceAlerts: null,
-    menuItems: [{ id: "volume-remove", label: "Supprimer", danger: true }],
+    menuItems: [
+      // "Monter sur un conteneur…" (Phase 2, 17/08/2026) : monte ce volume sur un conteneur
+      // EXISTANT en le RECRÉANT réellement (Docker n'a aucun hot-mount — POST
+      // /api/containers/:id/mounts, voir apps/api/src/services/docker.ts#mountVolumeOnContainer,
+      // rollback compris). Le handler (TopologyGraph.tsx#MountVolumePopover) affiche
+      // l'avertissement explicite + confirmation danger AVANT tout appel — jamais un montage
+      // présenté comme anodin. Volontairement absent du sous-graphe (TopologySubGraphPanel ne
+      // fournit pas ce handler — buildNodeMenuItems omet alors l'entrée, jamais un item mort).
+      { id: "volume-mount-on-container", label: "Monter sur un conteneur…" },
+      { id: "volume-remove", label: "Supprimer", danger: true },
+    ],
   },
   network: {
     icon: IconNetworks,

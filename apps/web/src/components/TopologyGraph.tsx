@@ -29,7 +29,7 @@ import {
   type CreateContainerInput,
   type LifecycleAction,
 } from "@/features/containers/containersSlice";
-import { createVolume, removeVolume } from "@/features/volumes/volumesSlice";
+import { createVolume, mountVolumeOnContainer, removeVolume } from "@/features/volumes/volumesSlice";
 import {
   connectContainerToNetwork,
   createNetwork,
@@ -38,7 +38,17 @@ import {
   removeNetwork,
 } from "@/features/networks/networksSlice";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
-import { canOperate } from "@/features/auth/authSlice";
+import { canAdminister, canOperate } from "@/features/auth/authSlice";
+// "Ajouter un environnement…" (menu du canevas, Phase 2 du 17/08/2026) : la VRAIE modale de
+// création d'environnement Docker distant (TCP+TLS/SSH, identifiants/IP complets), extraite
+// d'EnvironmentsPage.tsx en composant réutilisable — jamais un formulaire simplifié dupliqué ici,
+// une seule source de vérité (exigence utilisateur explicite de la maquette validée).
+import RemoteEnvironmentCreateModal from "@/features/remoteEnvironments/RemoteEnvironmentCreateModal";
+// "Ajouter Nutanix…" (même menu) : Nutanix se configure via la section dédiée de la page
+// Environnements (EnvironmentsPage.tsx#NutanixConfigSection, seul flux réel existant — test de
+// connexion Prism Central avant persistance) — l'entrée du spotlight NAVIGUE vers cette page
+// plutôt que de dupliquer son formulaire ici.
+import { setCurrentView } from "@/features/ui/uiSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import Modal from "@/components/Modal";
@@ -129,7 +139,13 @@ const REFRESH_INTERVAL_MS = 15_000;
 // part, après network — nœuds isolés ou reliés entre eux uniquement (jamais d'arête vers Docker),
 // des colonnes dédiées les gardent lisibles plutôt que de les mélanger aux conteneurs.
 const COLUMN_X: Record<TopologyNode["kind"], number> = mapNodeContract((c) => c.defaultColumnX);
-const ROW_HEIGHT = 130;
+// 130 -> 200 (Phase 2, 17/08/2026, changement minime documenté) : les volumes attachés d'un
+// conteneur sont désormais rendus en "tiroirs" qui DÉPASSENT sous le bord inférieur de la carte
+// (voir .topology-node__drawers, topology.css) — l'ancien pas de 130px, déjà serré pour une carte
+// riche (badges/métriques/briques, ~170px réels), aurait fait chevaucher un tiroir sur la carte du
+// dessous dans les positions PAR DÉFAUT (uniquement elles : toute position déplacée à la main/
+// sauvegardée reste souveraine, comme avant).
+const ROW_HEIGHT = 200;
 
 /**
  * Ancre horizontale de l'arbre "host" auto-disposé (voir hostHierarchyPositions,
@@ -387,6 +403,16 @@ function CreatePopover({ kind, x, y, onClose }: CreatePopoverProps) {
                 disabled={busy}
               />
             </div>
+            {/* Limite RÉELLE vérifiée le 17/08/2026 (Phase 2) : POST /api/containers ne supporte
+                AUCUN environnement cible (routes/containers.ts#CreateContainerBody sans
+                targetEnvironmentId, services/docker.ts#createAndStartContainer -> getClient()
+                local) — seul le déploiement GitHub sait cibler un environnement distant
+                (POST /api/github/.../deploy#targetEnvironmentId). Mention explicite plutôt qu'un
+                sélecteur d'environnement inventé qui ne serait branché sur rien. */}
+            <p className="create-container-hint">
+              Créé sur le démon Docker local. La création directe sur un environnement distant n'est pas encore
+              supportée par l'API — seul « Déployer depuis GitHub » sait cibler un environnement distant.
+            </p>
           </>
         )}
         {kind === "volume" && (
@@ -453,6 +479,9 @@ interface SpotlightAction {
   description: string;
   icon: (props: { className?: string }) => JSX.Element;
   onSelect: () => void;
+  /** Entrée visible mais NON cliquable (ex : "Ajouter Proxmox / VMware" — aucune intégration
+   * réelle n'existe, voir infrastructureActions) — même rendu grisé que `busy`, sans le "…". */
+  disabled?: boolean;
 }
 
 interface CreateSpotlightProps {
@@ -570,12 +599,23 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
   const [automationActionError, setAutomationActionError] = useState<string | null>(null);
   const cronJobs = useAppSelector((s) => s.cronJobs.items);
   const notificationChannels = useAppSelector((s) => s.notificationChannels.items);
-  // useDismiss ferme sur clic hors de `ref`/Échap — mais une fois la modal GitHub ouverte, son
-  // contenu vit dans un portail document.body (Modal.tsx), donc HORS de `ref` : sans ce garde-fou,
-  // le premier clic à l'intérieur de la modal (un repo, un champ...) la refermerait aussitôt.
-  // Modal.tsx gère alors seule Échap/clic-extérieur pour son propre contenu.
+  // "Ajouter un environnement…"/"Ajouter Nutanix…" (Phase 2, 17/08/2026) — la création d'un
+  // environnement Docker distant et la configuration Nutanix sont réservées admin (mêmes gardes
+  // que la page Environnements : bouton "Nouvel environnement"/formulaire Nutanix masqués pour un
+  // non-admin, l'API refuse de toute façon) : entrées masquées ici pour un operator plutôt que
+  // proposées puis refusées au clic.
+  const session = useAppSelector((s) => s.auth.session);
+  const admin = canAdminister(session);
+  // "Ajouter un environnement Docker distant…" : monte la VRAIE modale extraite
+  // (RemoteEnvironmentCreateModal.tsx) — même bascule interne que showGithubDeploy ci-dessus.
+  const [showRemoteEnvCreate, setShowRemoteEnvCreate] = useState(false);
+  // useDismiss ferme sur clic hors de `ref`/Échap — mais une fois la modal GitHub (ou celle de
+  // création d'environnement) ouverte, son contenu vit dans un portail document.body (Modal.tsx),
+  // donc HORS de `ref` : sans ce garde-fou, le premier clic à l'intérieur de la modal (un repo, un
+  // champ...) la refermerait aussitôt. Modal.tsx gère alors seule Échap/clic-extérieur pour son
+  // propre contenu.
   const { ref, style } = useDismiss(() => {
-    if (!showGithubDeploy) onClose();
+    if (!showGithubDeploy && !showRemoteEnvCreate) onClose();
   }, x, y);
 
   // Conteneurs "running" pour le sélecteur du formulaire "Nouveau Cron Job" — chargés seulement une
@@ -1277,6 +1317,13 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
     );
   }
 
+  // La VRAIE modale de création d'environnement Docker distant (TCP+TLS/SSH, identifiants/IP
+  // complets — RemoteEnvironmentCreateModal.tsx, extraite d'EnvironmentsPage.tsx, une seule source
+  // de vérité) : montée par-dessus le canevas, exactement comme la modal GitHub ci-dessous.
+  if (showRemoteEnvCreate) {
+    return <RemoteEnvironmentCreateModal open onClose={onClose} />;
+  }
+
   if (showGithubDeploy) {
     return (
       <Modal open onClose={onClose} labelledBy="graph-github-deploy-title">
@@ -1403,6 +1450,48 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
     onSelect: () => setShowActionCreate(true),
   };
 
+  // --- "Infrastructure" (Phase 2, 17/08/2026 — "tout ce qu'il y a en graphique dans le menu doit
+  // être possible dans le graphe") : rattacher un NOUVEL HÉBERGEUR depuis le canevas. ------------
+  // "Ajouter un environnement Docker distant…" ouvre la VRAIE modale (identifiants/IP complets,
+  // TCP+TLS/SSH — RemoteEnvironmentCreateModal.tsx, extraite d'EnvironmentsPage.tsx, jamais un
+  // formulaire simplifié : exigence utilisateur explicite de la maquette validée). "Ajouter
+  // Nutanix…" NAVIGUE vers le seul flux réel existant (section Nutanix de la page Environnements —
+  // test de connexion Prism Central avant persistance) plutôt que d'en dupliquer le formulaire.
+  // Les deux réservées admin (voir `admin` ci-dessus). Proxmox/VMware : AUCUNE infrastructure
+  // réelle de ce type chez l'utilisateur et AUCUNE intégration côté API — entrée volontairement
+  // DÉSACTIVÉE "bientôt" (jamais une fausse intégration), visible par tous les rôles.
+  const infrastructureActions: SpotlightAction[] = [
+    ...(admin
+      ? [
+          {
+            id: "add-remote-environment",
+            title: "Ajouter un environnement Docker distant…",
+            description: "Démon Docker distant via TCP+TLS ou tunnel SSH — connexion réellement testée avant enregistrement.",
+            icon: KIND_ICON.host,
+            onSelect: () => setShowRemoteEnvCreate(true),
+          },
+          {
+            id: "configure-nutanix",
+            title: "Ajouter Nutanix (Prism Central)…",
+            description: "Ouvre la page Environnements — configuration réelle de Prism Central (URL, identifiants).",
+            icon: KIND_ICON["nutanix-vm"],
+            onSelect: () => {
+              dispatch(setCurrentView("clusters"));
+              onClose();
+            },
+          },
+        ]
+      : []),
+    {
+      id: "add-proxmox-vmware",
+      title: "Ajouter Proxmox / VMware",
+      description: "Bientôt — aucune intégration réelle n'existe encore pour ces hyperviseurs.",
+      icon: KIND_ICON.host,
+      onSelect: () => {},
+      disabled: true,
+    },
+  ];
+
   const normalizedQuery = query.trim().toLowerCase();
   const filterActions = (actions: SpotlightAction[]) =>
     normalizedQuery
@@ -1415,6 +1504,7 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
   const filteredCronJobActions = filterActions([cronJobAction]);
   const filteredBackupActions = filterActions([backupAction]);
   const filteredAutomationActions = filterActions([triggerAction, conditionAction, automationActionSpotlightAction]);
+  const filteredInfrastructureActions = filterActions(infrastructureActions);
   const hasResults =
     filteredGithubActions.length > 0 ||
     filteredKindActions.length > 0 ||
@@ -1422,7 +1512,8 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
     filteredIacActions.length > 0 ||
     filteredCronJobActions.length > 0 ||
     filteredBackupActions.length > 0 ||
-    filteredAutomationActions.length > 0;
+    filteredAutomationActions.length > 0 ||
+    filteredInfrastructureActions.length > 0;
 
   return (
     <div className="graph-popover graph-spotlight" style={style} ref={ref}>
@@ -1489,6 +1580,14 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
             ))}
           </div>
         )}
+        {filteredInfrastructureActions.length > 0 && (
+          <div className="graph-spotlight__group">
+            <div className="graph-spotlight__group-title">Infrastructure</div>
+            {filteredInfrastructureActions.map((action) => (
+              <SpotlightRow key={action.id} action={action} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1497,7 +1596,7 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
 function SpotlightRow({ action, busy }: { action: SpotlightAction; busy?: boolean }) {
   const Icon = action.icon;
   return (
-    <button type="button" className="graph-spotlight__row" onClick={action.onSelect} disabled={busy}>
+    <button type="button" className="graph-spotlight__row" onClick={action.onSelect} disabled={busy || action.disabled}>
       <span className="graph-spotlight__row-icon">
         <Icon />
       </span>
@@ -1670,6 +1769,149 @@ function NetworkConnectPopover({ containerId, excludeNetworkIds, x, y, onClose }
   );
 }
 
+interface MountVolumePopoverProps {
+  /** Nom Docker brut du volume (id du nœud sans le préfixe "volume:"). */
+  volumeName: string;
+  /** Nœuds RÉELS du graphe (TopologyGraph#data.nodes) — seuls les kind "container" sont proposés
+   * comme cible, jamais une liste inventée/refetchée (le graphe est déjà la vérité rafraîchie). */
+  topologyNodes: TopologyNode[];
+  x: number;
+  y: number;
+  onClose: () => void;
+}
+
+/**
+ * Popover "Monter sur un conteneur…" (menu contextuel d'un nœud volume — action déclarée dans le
+ * contrat, NODE_CONTRACT.volume.menuItems, topologyNodeContract.tsx ; Phase 2 du 17/08/2026, flux
+ * Railway "volume non monté -> Monter"). Décision d'implémentation tranchée (option b de la
+ * mission) : Docker ne permet PAS d'ajouter un montage à un conteneur existant (aucun endpoint
+ * Engine de hot-mount) — l'action RECRÉE donc réellement le conteneur côté serveur
+ * (POST /api/containers/:id/mounts -> services/docker.ts#mountVolumeOnContainer : stop → rename →
+ * create avec la même config observée + le nouveau montage → start → remove de l'ancien, rollback
+ * si échec à mi-chemin). Le formulaire l'annonce EXPLICITEMENT (avertissement permanent) et une
+ * confirmation danger est exigée AVANT tout appel — jamais un bouton qui ment sur ce qu'il fait.
+ */
+function MountVolumePopover({ volumeName, topologyNodes, x, y, onClose }: MountVolumePopoverProps) {
+  const dispatch = useAppDispatch();
+  const confirm = useConfirm();
+  const { ref, style } = useDismiss(onClose, x, y);
+  const containers = topologyNodes.filter((n) => n.kind === "container");
+  const [containerNodeId, setContainerNodeId] = useState(containers[0]?.id ?? "");
+  const [mountPath, setMountPath] = useState("");
+  const [readOnly, setReadOnly] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const selectedContainer = containers.find((c) => c.id === containerNodeId) ?? null;
+  const trimmedPath = mountPath.trim();
+  // Mêmes règles que la validation serveur (routes/containers.ts#POST /:id/mounts) — vérifiées ici
+  // pour un retour immédiat, le serveur revalide de toute façon en dernier recours.
+  const pathValid = trimmedPath.startsWith("/") && !trimmedPath.includes(":");
+  const canSubmit = !!selectedContainer && trimmedPath.length > 0 && pathValid;
+
+  async function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (!selectedContainer || !canSubmit) return;
+    const ok = await confirm({
+      title: "Recréer le conteneur pour monter ce volume",
+      description: `Monter "${volumeName}" sur "${selectedContainer.label}" (${trimmedPath}) nécessite de RECRÉER ce conteneur : il sera arrêté puis recréé avec sa configuration actuelle plus ce montage (son id Docker change), et brièvement indisponible s'il est en cours d'exécution.`,
+      confirmLabel: "Recréer et monter",
+      variant: "danger",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    const result = await dispatch(
+      mountVolumeOnContainer({
+        volumeName,
+        containerId: idWithoutPrefix(selectedContainer.id),
+        containerName: selectedContainer.label,
+        mountPath: trimmedPath,
+        readOnly,
+      }),
+    );
+    setBusy(false);
+    if (mountVolumeOnContainer.fulfilled.match(result)) {
+      dispatch(fetchTopology());
+      onClose();
+    } else {
+      setError(result.payload ?? "Échec du montage du volume.");
+    }
+  }
+
+  return (
+    <div className="graph-popover" style={style} ref={ref}>
+      <div className="graph-popover__title">Monter « {volumeName} » sur un conteneur</div>
+      <form onSubmit={handleSubmit}>
+        {containers.length === 0 ? (
+          <p className="graph-popover__error" style={{ color: "var(--color-text-faint)" }}>
+            Aucun conteneur connu de QUAI sur lequel monter ce volume.
+          </p>
+        ) : (
+          <>
+            <div className="field">
+              <label htmlFor="graph-mount-container">Conteneur cible</label>
+              <select
+                id="graph-mount-container"
+                value={containerNodeId}
+                onChange={(e) => setContainerNodeId(e.target.value)}
+                disabled={busy}
+                required
+              >
+                {containers.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.label} ({c.subtitle})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="field">
+              <label htmlFor="graph-mount-path">Chemin de montage (dans le conteneur)</label>
+              <input
+                id="graph-mount-path"
+                type="text"
+                autoFocus
+                placeholder="ex : /data"
+                value={mountPath}
+                onChange={(e) => setMountPath(e.target.value)}
+                disabled={busy}
+                required
+              />
+              {trimmedPath.length > 0 && !pathValid && (
+                <span style={{ fontSize: 12, color: "var(--color-critical)" }}>
+                  Chemin absolu requis (commence par « / », sans « : »).
+                </span>
+              )}
+            </div>
+            <label className="filter-toggle">
+              <input type="checkbox" checked={readOnly} onChange={(e) => setReadOnly(e.target.checked)} disabled={busy} />
+              Lecture seule (ro)
+            </label>
+            {/* Avertissement PERMANENT (pas seulement dans la confirmation) — voir la JSDoc du
+                composant : l'action recrée réellement le conteneur, jamais présenté comme anodin. */}
+            <p className="create-container-hint">
+              Nécessite la recréation du conteneur : Docker ne permet pas d'ajouter un montage à un conteneur
+              existant. Le conteneur sera arrêté puis recréé avec sa configuration actuelle plus ce montage
+              (réseaux, ports, variables et montages existants conservés — son id Docker change).
+            </p>
+          </>
+        )}
+
+        {error && <p className="graph-popover__error">{error}</p>}
+
+        <div className="graph-popover__actions">
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={busy}>
+            Annuler
+          </button>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !canSubmit}>
+            {busy ? "Recréation…" : "Monter"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 interface TopologyGraphProps {
   height?: number;
   onSelectNode?: (node: TopologyNode | null) => void;
@@ -1766,6 +2008,10 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [networkConnectPopover, setNetworkConnectPopover] = useState<{ containerId: string; x: number; y: number } | null>(
     null,
   );
+  // Popover "Monter sur un conteneur…" (menu contextuel d'un volume, action déclarée dans le
+  // contrat — voir MountVolumePopover ci-dessus : recréation RÉELLE du conteneur, avertissement +
+  // confirmation danger).
+  const [mountVolumePopover, setMountVolumePopover] = useState<{ volumeName: string; x: number; y: number } | null>(null);
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
   // Panneau de détail complet, ancré en overlay sur le canevas (clic droit sur un nœud ou une
   // brique -> "Voir le détail") — voir TopologyNodeDetailPanel.tsx. Distincte de `selectedId`
@@ -2763,6 +3009,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       "nutanix-vm-stop": () => void handleNutanixVmAction(id, node.label, "stop"),
       "nutanix-vm-restart": () => void handleNutanixVmAction(id, node.label, "restart"),
       "nutanix-vm-start": () => void handleNutanixVmAction(id, node.label, "start"),
+      // Recréation réelle du conteneur cible (voir MountVolumePopover) — le popover porte
+      // l'avertissement et la confirmation danger, ce handler ne fait qu'ouvrir le formulaire.
+      "volume-mount-on-container": () => setMountVolumePopover({ volumeName: id, x, y }),
       "volume-remove": () => void handleRemoveVolume(id),
       "network-remove": () => void handleRemoveNetwork(id, node.label),
       "automation-node-remove": () => void handleDeleteAutomationNode(node),
@@ -3089,6 +3338,16 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           x={networkConnectPopover.x}
           y={networkConnectPopover.y}
           onClose={() => setNetworkConnectPopover(null)}
+        />
+      )}
+
+      {mountVolumePopover && (
+        <MountVolumePopover
+          volumeName={mountVolumePopover.volumeName}
+          topologyNodes={data?.nodes ?? []}
+          x={mountVolumePopover.x}
+          y={mountVolumePopover.y}
+          onClose={() => setMountVolumePopover(null)}
         />
       )}
 
