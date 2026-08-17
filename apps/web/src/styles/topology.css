@@ -402,6 +402,19 @@
 .topology-node__status--running .topology-node__status-dot {
   background: var(--color-success);
   box-shadow: 0 0 0 3px var(--color-success-bg);
+  /* Pulsation calme d'un nœud sain (vague 3) — variante lente/subtile de topology-pulse
+     (réservée, elle, à l'alerte unhealthy) : seul le halo respire, jamais l'opacité du point. */
+  animation: topology-dot-pulse 3s ease-in-out infinite;
+}
+
+@keyframes topology-dot-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px var(--color-success-bg);
+  }
+  50% {
+    box-shadow: 0 0 0 6px transparent;
+  }
 }
 
 .topology-node__status--stopped .topology-node__status-dot {
@@ -937,6 +950,15 @@
   stroke-width: 1.75;
 }
 
+/* Transition douce de la couleur quand l'état de santé change (vague 3) : le <path> React Flow
+   persiste entre deux rendus (id d'arête stable), seul son `stroke` inline change au poll suivant.
+   Limites assumées : la flèche (markerEnd, fill d'un <marker> SVG) et le motif de pointillé
+   (strokeDasharray) changent, eux, sans transition ; une arête dont l'id change (ex : redirection
+   vers un groupe, suffixe __grouped) est remontée par React et ne transitionne pas non plus. */
+.react-flow__edge.topology-edge .react-flow__edge-path {
+  transition: stroke 0.4s ease, opacity 0.3s ease;
+}
+
 /* Conteneur arrêté (status !== "running") : arrêt souvent volontaire, pas une panne — donc pas de
    rouge, mais visuellement clairement "injoignable" (tirets larges + légèrement estompée). Prime
    sur mount/network ci-dessus (règle plus spécifique via topology-edge--stopped, même poids CSS
@@ -996,13 +1018,34 @@
   }
 }
 
+/* Apparition scale-in d'un NOUVEAU nœud (classe posée par TopologyGraph.tsx au premier montage
+   d'un id inconnu du rendu précédent — jamais au chargement initial). Animée sur la carte INTERNE,
+   pas sur le wrapper .react-flow__node : son transform porte la position translate(x,y) posée par
+   React Flow, une animation transform dessus l'écraserait. */
+.topology-graph .react-flow__node.topology-node-new .topology-node {
+  animation: topology-node-enter 0.28s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+@keyframes topology-node-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.82);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .react-flow__edge.topology-edge--unhealthy .react-flow__edge-path,
-  .topology-badge--pulse {
+  .topology-badge--pulse,
+  .topology-node__status--running .topology-node__status-dot,
+  .topology-graph .react-flow__node.topology-node-new .topology-node {
     animation: none;
   }
 
-  /* Défense en profondeur : MountFlowEdge ne rend déjà plus ces particules sous
+  .react-flow__edge.topology-edge .react-flow__edge-path {
+    transition: none;
+  }
+
+  /* Défense en profondeur : MountFlowEdge/NetworkEdge ne rendent déjà plus ces particules sous
      prefers-reduced-motion (usePrefersReducedMotion), cette règle couvre le cas où le média query
      changerait sans re-render React (rare, mais gratuit à couvrir en CSS pur). */
   .topology-edge-particle {

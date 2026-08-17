@@ -2,13 +2,17 @@ import { describe, expect, it } from "vitest";
 import { Position } from "@xyflow/react";
 import {
   CAPABILITY_DEFS,
+  CAPABILITY_PORT_META,
+  CONNECTION_ACTIONS,
   HOST_KIND_CONTRACT,
   IAC_ENGINE_CONTRACT,
   NODE_CONTRACT,
   NODE_KINDS,
   buildNodeMenuItems,
+  capabilityPairKey,
   nodeIcon,
   nodeMinimapColor,
+  type CapabilityId,
 } from "./topologyNodeContract";
 import { buildTopologyEdges, computeNodeResourceAlerts } from "./topologyGraphShared";
 import type { IacEngine, TopologyEdge, TopologyHostKind, TopologyNode, TopologyNodeKind } from "@/types";
@@ -92,6 +96,48 @@ describe("NODE_CONTRACT — totalité et conventions transverses", () => {
 
   it("container porte un port cible \"hosted-by\" (arête \"Docker local\" -> conteneur) en plus de network/volume-mount", () => {
     expect(NODE_CONTRACT.container.ports.map((p) => p.id)).toEqual(["network", "volume-mount", "hosted-by"]);
+  });
+});
+
+describe("CONNECTION_ACTIONS — câblage manuel au fil (vague 3)", () => {
+  it("chaque paire déclarée relie deux capacités réellement compatibles (linksTo) et toutes deux interactives", () => {
+    const entries = Object.entries(CONNECTION_ACTIONS);
+    expect(entries.length).toBeGreaterThan(0);
+    for (const [key, action] of entries) {
+      const [source, target] = key.split("->") as [CapabilityId, CapabilityId];
+      expect(CAPABILITY_DEFS[source].linksTo, key).toBe(target);
+      expect(CAPABILITY_DEFS[source].interactive, key).toBe(true);
+      expect(CAPABILITY_DEFS[target].interactive, key).toBe(true);
+      expect(action, key).toBeTruthy();
+    }
+  });
+
+  it("table complète : toute capacité SOURCE interactive non-automation a son action ; automation (chemin dédié) et paires non interactives jamais dans la table", () => {
+    for (const [capability, def] of Object.entries(CAPABILITY_DEFS) as [CapabilityId, (typeof CAPABILITY_DEFS)[CapabilityId]][]) {
+      const isSourceSide = CAPABILITY_PORT_META[capability].handleType === "source";
+      const isAutomation = capability === "automation-out" || capability === "automation-in";
+      const key = capabilityPairKey(capability, def.linksTo);
+      if (isSourceSide && def.interactive && !isAutomation) {
+        expect(CONNECTION_ACTIONS[key], capability).toBeDefined();
+      } else {
+        expect(CONNECTION_ACTIONS[key], capability).toBeUndefined();
+      }
+    }
+  });
+
+  it("paires réelles verrouillées : volume->conteneur ouvre le montage confirmé, conteneur->network la connexion réseau", () => {
+    expect(CONNECTION_ACTIONS["provide->volume-mount"]).toBe("mount-volume-on-container");
+    expect(CONNECTION_ACTIONS["network->attach"]).toBe("connect-container-to-network");
+    expect(Object.keys(CONNECTION_ACTIONS)).toHaveLength(2);
+  });
+
+  it("provide/volume-mount désormais interactives (fil -> popover), hosts/hosted-by restent non interactives avec message d'info", () => {
+    expect(CAPABILITY_DEFS.provide.interactive).toBe(true);
+    expect(CAPABILITY_DEFS["volume-mount"].interactive).toBe(true);
+    expect(CAPABILITY_DEFS.hosts.interactive).toBe(false);
+    expect(CAPABILITY_DEFS.hosts.infoMessage).toBeTruthy();
+    expect(CAPABILITY_DEFS["hosted-by"].interactive).toBe(false);
+    expect(CAPABILITY_DEFS["hosted-by"].infoMessage).toBeTruthy();
   });
 });
 

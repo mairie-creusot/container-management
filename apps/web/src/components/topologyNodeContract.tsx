@@ -94,24 +94,18 @@ export interface PortSpec {
 export interface CapabilityDef {
   /** Capacité compatible attendue à l'autre bout de la connexion. */
   linksTo: CapabilityId;
-  /** true = action réelle déclenchée au drop (docker network connect) ; false = message d'info. */
+  /** true = action réelle déclenchée au drop (voir CONNECTION_ACTIONS) ; false = message d'info. */
   interactive: boolean;
   infoMessage?: string;
 }
 
-// Mis à jour le 17/08/2026 (Phase 2, action "Monter sur un conteneur…") : le glisser-connecter
-// volume -> conteneur reste NON interactif (le drop d'une arête n'est pas le bon geste pour une
-// action qui recrée réellement un conteneur — trop lourd de conséquences pour un glissé sans
-// formulaire), mais le message pointe désormais vers le VRAI chemin qui existe : l'action de menu
-// contextuel du volume, qui recrée honnêtement le conteneur (POST /api/containers/:id/mounts).
-export const VOLUME_MOUNT_INFO =
-  "Docker ne permet pas de modifier les montages d'un conteneur existant sans le recréer — utilisez « Monter sur un conteneur… » (clic droit sur le volume), qui recrée le conteneur avec sa configuration actuelle plus le nouveau montage.";
-
 export const CAPABILITY_DEFS: Record<CapabilityId, CapabilityDef> = {
   network: { linksTo: "attach", interactive: true },
   attach: { linksTo: "network", interactive: true },
-  "volume-mount": { linksTo: "provide", interactive: false, infoMessage: VOLUME_MOUNT_INFO },
-  provide: { linksTo: "volume-mount", interactive: false, infoMessage: VOLUME_MOUNT_INFO },
+  // Vague 3 (câblage au fil) : le fil ouvre MountVolumePopover pré-rempli — la recréation du
+  // conteneur reste confirmée par l'utilisateur, jamais déclenchée par le seul geste.
+  "volume-mount": { linksTo: "provide", interactive: true },
+  provide: { linksTo: "volume-mount", interactive: true },
   // Posé À LA FOIS sur les ports synthétiques d'un groupe replié (deriveGroupPorts,
   // topologyGraphShared.tsx) ET, depuis le correctif du 14/08/2026, sur tout vrai nœud
   // "nutanix-vm"/"host" — toujours le bout TARGET d'une arête "hosts" (jamais l'origine d'une
@@ -162,6 +156,33 @@ export const CAPABILITY_PORT_META: Record<CapabilityId, Pick<PortSpec, "handleTy
   // valeurs alignées sur les vrais ports des nœuds d'automatisation ci-dessous.
   "automation-out": { handleType: "source", position: Position.Right, colorToken: "automation", label: "Relier vers une condition/action" },
   "automation-in": { handleType: "target", position: Position.Left, colorToken: "automation", label: "Relié depuis un déclencheur/une condition" },
+};
+
+// --- Câblage manuel au fil (React Flow onConnect) ------------------------------------------------
+
+/** Action réelle déclenchée au drop d'un fil — l'implémentation (popovers pré-remplis) reste chez
+ * l'appelant (TopologyGraph.tsx#connectionWireHandlers), même principe que buildNodeMenuItems. */
+export type ConnectionActionId = "mount-volume-on-container" | "connect-container-to-network";
+
+export type CapabilityPairKey = `${CapabilityId}->${CapabilityId}`;
+
+export function capabilityPairKey(source: CapabilityId, target: CapabilityId): CapabilityPairKey {
+  return `${source}->${target}`;
+}
+
+/**
+ * Paire de capacités (bout SOURCE du fil -> bout TARGET, toujours normalisée dans ce sens par
+ * React Flow quel que soit le bout où le geste a commencé) -> action réelle. Seules les paires avec
+ * un vrai backend y figurent ; une paire interactive absente de cette table retombe sur un message
+ * d'info non bloquant (TopologyGraph.tsx#handleConnect). Les paires automation-* passent par le
+ * chemin dédié de handleConnect (jamais par cette table), les paires non interactives (hosts)
+ * gardent leur infoMessage.
+ */
+export const CONNECTION_ACTIONS: Partial<Record<CapabilityPairKey, ConnectionActionId>> = {
+  // volume -> conteneur : MountVolumePopover pré-rempli (recréation confirmée par l'utilisateur).
+  "provide->volume-mount": "mount-volume-on-container",
+  // conteneur -> network : NetworkConnectPopover pré-rempli (POST /api/networks/:id/connect).
+  "network->attach": "connect-container-to-network",
 };
 
 // --- Santé des arêtes (couleur/pointillé) --------------------------------------------------------

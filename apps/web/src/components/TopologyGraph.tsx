@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import {
   ReactFlow,
   Background,
@@ -91,9 +91,12 @@ import type { IacEngine } from "@/types";
 // injecte les callbacks réels (dispatch/confirm/popovers) par id d'action.
 import {
   CAPABILITY_DEFS,
+  CONNECTION_ACTIONS,
   NODE_CONTRACT,
   buildNodeMenuItems,
+  capabilityPairKey,
   mapNodeContract,
+  type ConnectionActionId,
   type NodeMenuActionId,
 } from "@/components/topologyNodeContract";
 import {
@@ -114,6 +117,7 @@ import {
   useDismiss,
   usePrefersReducedMotion,
   type CapabilityDef,
+  type CapabilityId,
   type GraphNodeCallbacks,
   type GroupFrameNodeData,
   type GroupNodeData,
@@ -157,6 +161,9 @@ const ROW_HEIGHT = 200;
  */
 const HOST_TREE_ANCHOR_X = -2200;
 const NETWORK_DRIVERS = ["bridge", "overlay", "host", "none"];
+
+// Fil rendu nativement par React Flow pendant le drag — pointillé accent (maquette validée).
+const CONNECTION_LINE_STYLE: CSSProperties = { stroke: "var(--accent-end)", strokeWidth: 1.5, strokeDasharray: "6 4" };
 
 // --- Regroupement de nœuds ("encapsulation façon Railway/Logisim", voir topologyGraphShared.tsx
 // et TopologyGroup) — largeur/hauteur APPROXIMATIVES d'une carte .topology-node (voir topology.css,
@@ -1673,6 +1680,8 @@ interface NetworkConnectPopoverProps {
   /** Ids Docker bruts (pas "network:<id>") des networks déjà connectés à ce conteneur — retirés du
    * choix, qu'ils soient restés un vrai nœud (partagé/par défaut) ou devenus une brique. */
   excludeNetworkIds: Set<string>;
+  /** Network présélectionné (id Docker brut) — câblage au fil (vague 3), le fil vise déjà un network précis. */
+  initialNetworkId?: string;
   x: number;
   y: number;
   onClose: () => void;
@@ -1687,11 +1696,11 @@ interface NetworkConnectPopoverProps {
  * cas sans exiger de point de connexion dédié sur chaque brique — POST /api/networks/:id/connect
  * comme le glisser-connecter, résultat strictement identique.
  */
-function NetworkConnectPopover({ containerId, excludeNetworkIds, x, y, onClose }: NetworkConnectPopoverProps) {
+function NetworkConnectPopover({ containerId, excludeNetworkIds, initialNetworkId, x, y, onClose }: NetworkConnectPopoverProps) {
   const dispatch = useAppDispatch();
   const { ref, style } = useDismiss(onClose, x, y);
   const networks = useAppSelector((s) => s.networks.items);
-  const [networkId, setNetworkId] = useState("");
+  const [networkId, setNetworkId] = useState(initialNetworkId ?? "");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1702,7 +1711,8 @@ function NetworkConnectPopover({ containerId, excludeNetworkIds, x, y, onClose }
   const options = networks.filter((n) => !excludeNetworkIds.has(n.id));
 
   useEffect(() => {
-    if (!networkId && options.length > 0) setNetworkId(options[0]!.id);
+    // Présélection absente des options (ex : déjà connecté entre-temps) : repli sur la première.
+    if ((!networkId || !options.some((n) => n.id === networkId)) && options.length > 0) setNetworkId(options[0]!.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [options.length]);
 
@@ -1763,9 +1773,12 @@ function NetworkConnectPopover({ containerId, excludeNetworkIds, x, y, onClose }
   );
 }
 
-/** Cible du popover de montage : volume existant (choisir le conteneur — menu du nœud volume) ou
- * conteneur fixé (créer un volume neuf puis le monter — bouton ＋ / "Attacher"). */
-type MountPopoverTarget = { kind: "existing-volume"; volumeName: string } | { kind: "new-volume"; containerNode: TopologyNode };
+/** Cible du popover de montage : volume existant (choisir le conteneur — menu du nœud volume, ou
+ * conteneur présélectionné par un fil volume -> conteneur) ou conteneur fixé (créer un volume neuf
+ * puis le monter — bouton ＋ / "Attacher"). */
+type MountPopoverTarget =
+  | { kind: "existing-volume"; volumeName: string; initialContainerNodeId?: string }
+  | { kind: "new-volume"; containerNode: TopologyNode };
 
 interface MountVolumePopoverProps {
   target: MountPopoverTarget;
@@ -1786,7 +1799,9 @@ function MountVolumePopover({ target, topologyNodes, x, y, onClose }: MountVolum
   const { ref, style } = useDismiss(onClose, x, y);
   const containers = topologyNodes.filter((n) => n.kind === "container");
   const fixedContainer = target.kind === "new-volume" ? target.containerNode : null;
-  const [containerNodeId, setContainerNodeId] = useState(fixedContainer?.id ?? containers[0]?.id ?? "");
+  const [containerNodeId, setContainerNodeId] = useState(
+    fixedContainer?.id ?? (target.kind === "existing-volume" ? target.initialContainerNodeId : undefined) ?? containers[0]?.id ?? "",
+  );
   const [newVolumeName, setNewVolumeName] = useState(() =>
     target.kind === "new-volume" ? `${target.containerNode.label}-data-${shortId()}` : "",
   );
@@ -2181,12 +2196,15 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     containerNodeId: string;
     attachment: TopologyNodeAttachment;
   } | null>(null);
-  // Popover "Connecter à un network…" (menu contextuel d'un conteneur) — voir NetworkConnectPopover
-  // ci-dessus : chemin de connexion qui fonctionne même quand le network visé est une brique (donc
-  // sans nœud à glisser-déposer dessus).
-  const [networkConnectPopover, setNetworkConnectPopover] = useState<{ containerId: string; x: number; y: number } | null>(
-    null,
-  );
+  // Popover "Connecter à un network…" (menu contextuel d'un conteneur, ou fil conteneur -> network
+  // avec `initialNetworkId` pré-rempli) — voir NetworkConnectPopover ci-dessus : chemin de connexion
+  // qui fonctionne même quand le network visé est une brique (donc sans nœud à glisser-déposer dessus).
+  const [networkConnectPopover, setNetworkConnectPopover] = useState<{
+    containerId: string;
+    initialNetworkId?: string;
+    x: number;
+    y: number;
+  } | null>(null);
   // Popover de montage (voir MountVolumePopover : deux cibles, volume existant ou volume neuf).
   const [mountVolumePopover, setMountVolumePopover] = useState<{ target: MountPopoverTarget; x: number; y: number } | null>(null);
   // Picker "Attacher" (bouton ＋ au survol d'une carte conteneur, ou entrée du clic droit).
@@ -2221,6 +2239,8 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [subGraphOrigin, setSubGraphOrigin] = useState<{ x: number; y: number }>({ x: 50, y: 50 });
   const graphContainerRef = useRef<HTMLDivElement>(null);
   const reducedMotion = usePrefersReducedMotion();
+  // Action de fil différée entre onConnect (pas de coordonnées) et onConnectEnd (position réelle).
+  const pendingWireActionRef = useRef<((x: number, y: number) => void) | null>(null);
 
   // --- Regroupement de nœuds ("encapsulation façon Railway/Logisim", voir TopologyGroup) --------
   // Sélection multiple (Maj+clic sur des nœuds OU rectangle de sélection glissé sur le canevas
@@ -2332,6 +2352,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     const collapsedMemberIds = new Set(data.nodes.filter((n) => isHiddenAtRoot(n.id, parentGroupByMemberId)).map((n) => n.id));
     setFlowNodes((prev) => {
       const prevById = new Map(prev.map((n) => [n.id, n]));
+      // Scale-in d'un nœud dont l'id est inconnu du rendu précédent — jamais au premier chargement
+      // (le graphe entier apparaîtrait en pluie de pop-ins), voir .topology-node-new (topology.css).
+      const animateNew = prev.length > 0;
       const nodes: Node[] = data.nodes
         .filter((n) => !collapsedMemberIds.has(n.id))
         .map((n) => {
@@ -2387,6 +2410,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
             id: n.id,
             type: "graphNode",
             position,
+            ...(animateNew && !prevNode ? { className: "topology-node-new" } : {}),
             data: { ...n, ...callbacks } as unknown as Record<string, unknown>,
           };
         });
@@ -2417,7 +2441,13 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           onToggleCollapse: () => handleToggleGroupCollapse(group),
           realNodeCount: resolveGroupMemberNodeIds(group.nodeIds, data.groups).length,
         };
-        nodes.push({ id: group.id, type: "topologyGroupNode", position, data: groupData as unknown as Record<string, unknown> });
+        nodes.push({
+          id: group.id,
+          type: "topologyGroupNode",
+          position,
+          ...(animateNew && !prevGroupNode ? { className: "topology-node-new" } : {}),
+          data: groupData as unknown as Record<string, unknown>,
+        });
       }
       return nodes;
     });
@@ -2668,16 +2698,18 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   }
 
   /** Classe une tentative de connexion glissée en comparant les capacités des deux ports visés
-   * (table déclarative NODE_CONTRACT[kind].ports/CAPABILITY_DEFS, topologyNodeContract.tsx) — remplace l'ancienne logique
-   * à deux paires de kinds codées en dur, sans changer le comportement fonctionnel : container<->
-   * network reste la seule connexion réelle, container<->volume reste un message d'information. */
-  function classifyConnection(connection: Edge | Connection): CapabilityDef | null {
+   * (table déclarative NODE_CONTRACT[kind].ports/CAPABILITY_DEFS, topologyNodeContract.tsx) —
+   * l'action réelle d'une paire interactive vit dans CONNECTION_ACTIONS (contrat), jamais un if en
+   * cascade ici. La paire retournée sert à interroger cette table dans handleConnect. */
+  function classifyConnection(
+    connection: Edge | Connection,
+  ): { def: CapabilityDef; sourceCapability: CapabilityId; targetCapability: CapabilityId } | null {
     if (!connection.source || !connection.target || connection.source === connection.target) return null;
     const sourcePort = findPort(connection.source, connection.sourceHandle);
     const targetPort = findPort(connection.target, connection.targetHandle);
     if (!sourcePort || !targetPort) return null;
     if (CAPABILITY_DEFS[sourcePort.capability].linksTo !== targetPort.capability) return null;
-    return CAPABILITY_DEFS[sourcePort.capability];
+    return { def: CAPABILITY_DEFS[sourcePort.capability], sourceCapability: sourcePort.capability, targetCapability: targetPort.capability };
   }
 
   /** true si ce kind est l'un des 3 nœuds du moteur d'automatisation (voir
@@ -2739,20 +2771,50 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       return;
     }
 
-    const def = classifyConnection(connection);
-    if (!def) return;
-    if (!def.interactive) {
-      if (def.infoMessage) dispatch(pushNotification({ level: "info", message: def.infoMessage }));
+    const classified = classifyConnection(connection);
+    if (!classified) return;
+    if (!classified.def.interactive) {
+      if (classified.def.infoMessage) dispatch(pushNotification({ level: "info", message: classified.def.infoMessage }));
       return;
     }
-    // Seule capacité interactive à ce jour : container <-> network (docker network connect réel).
-    const containerNodeId = sourceNode?.kind === "container" ? connection.source! : connection.target!;
-    const networkNodeId = containerNodeId === connection.source ? connection.target! : connection.source!;
-    const containerId = idWithoutPrefix(containerNodeId);
-    const networkId = idWithoutPrefix(networkNodeId);
-    dispatch(connectContainerToNetwork({ networkId, containerId })).then((result) => {
-      if (connectContainerToNetwork.fulfilled.match(result)) dispatch(fetchTopology());
-    });
+    if (!sourceNode || !targetNode) return;
+    // Paire -> action réelle : table déclarative du contrat (CONNECTION_ACTIONS), jamais un if par paire.
+    const actionId = CONNECTION_ACTIONS[capabilityPairKey(classified.sourceCapability, classified.targetCapability)];
+    if (!actionId) {
+      dispatch(pushNotification({ level: "info", message: "Cette connexion n'a pas d'action réelle associée." }));
+      return;
+    }
+    // onConnect ne porte aucune coordonnée : l'ouverture du popover est différée jusqu'à
+    // handleConnectEnd (même geste, position réelle du relâchement).
+    pendingWireActionRef.current = (x, y) => connectionWireHandlers[actionId](sourceNode, targetNode, x, y);
+  }
+
+  /** Implémentations par action de fil (CONNECTION_ACTIONS) — source/target déjà normalisés par
+   * React Flow (Handle source -> Handle target), quel que soit le bout où le geste a commencé. */
+  const connectionWireHandlers: Record<ConnectionActionId, (sourceNode: TopologyNode, targetNode: TopologyNode, x: number, y: number) => void> = {
+    // source = volume (provide), target = conteneur (volume-mount) : popover pré-rempli, la
+    // recréation reste confirmée par l'utilisateur — jamais déclenchée par le seul geste.
+    "mount-volume-on-container": (volumeNode, containerNode, x, y) =>
+      setMountVolumePopover({
+        target: { kind: "existing-volume", volumeName: idWithoutPrefix(volumeNode.id), initialContainerNodeId: containerNode.id },
+        x,
+        y,
+      }),
+    // source = conteneur (network), target = network (attach) : même POST réel que l'action de menu
+    // "container-connect-network" (connectContainerToNetwork), network présélectionné.
+    "connect-container-to-network": (containerNode, networkNode, x, y) =>
+      setNetworkConnectPopover({ containerId: idWithoutPrefix(containerNode.id), initialNetworkId: idWithoutPrefix(networkNode.id), x, y }),
+  };
+
+  /** Fin du geste de connexion — seule étape qui connaît la position du pointeur : joue l'action
+   * différée posée par handleConnect (le cas échéant), au point de relâchement du fil. */
+  function handleConnectEnd(event: MouseEvent | TouchEvent) {
+    const pending = pendingWireActionRef.current;
+    pendingWireActionRef.current = null;
+    if (!pending) return;
+    const point = "clientX" in event ? event : event.changedTouches[0];
+    const rect = graphContainerRef.current?.getBoundingClientRect();
+    pending(point?.clientX ?? (rect ? rect.left + rect.width / 2 : 0), point?.clientY ?? (rect ? rect.top + rect.height / 2 : 0));
   }
 
   /** Maj+clic accumule/retire de la sélection multiple (voir multiSelectedIds, uniquement pour
@@ -3276,6 +3338,8 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           onNodeContextMenu={handleNodeContextMenu}
           onEdgeContextMenu={handleEdgeContextMenu}
           onConnect={handleConnect}
+          onConnectEnd={handleConnectEnd}
+          connectionLineStyle={CONNECTION_LINE_STYLE}
           isValidConnection={isValidConnection}
           nodesConnectable={operate}
           // La disposition est persistée par compte (PUT /api/topology/positions, réservé
@@ -3530,6 +3594,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         <NetworkConnectPopover
           containerId={networkConnectPopover.containerId}
           excludeNetworkIds={connectedNetworkIds(`container:${networkConnectPopover.containerId}`)}
+          {...(networkConnectPopover.initialNetworkId ? { initialNetworkId: networkConnectPopover.initialNetworkId } : {})}
           x={networkConnectPopover.x}
           y={networkConnectPopover.y}
           onClose={() => setNetworkConnectPopover(null)}

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTopologyEdges, nutanixVmHostEdgeState } from "./topologyGraphShared";
+import { buildTopologyEdges, isActiveEdgeState, nutanixVmHostEdgeState } from "./topologyGraphShared";
 import type { TopologyEdge, TopologyNode } from "@/types";
 
 /**
@@ -71,6 +71,17 @@ describe("nutanixVmHostEdgeState", () => {
 
   it("power_state \"unknown\" (status neutral) -> none, plein : aucun signal exploitable, jamais un état inventé", () => {
     expect(nutanixVmHostEdgeState(vmNode({ status: "neutral" }))).toEqual({ state: "none", strokeDasharray: undefined });
+  });
+});
+
+describe("isActiveEdgeState — particules de flux réservées aux arêtes actives (vague 3)", () => {
+  it("healthy/starting sont actifs ; stopped/none/unhealthy (et l'absence d'état) jamais", () => {
+    expect(isActiveEdgeState("healthy")).toBe(true);
+    expect(isActiveEdgeState("starting")).toBe(true);
+    expect(isActiveEdgeState("stopped")).toBe(false);
+    expect(isActiveEdgeState("none")).toBe(false);
+    expect(isActiveEdgeState("unhealthy")).toBe(false);
+    expect(isActiveEdgeState(undefined)).toBe(false);
   });
 });
 

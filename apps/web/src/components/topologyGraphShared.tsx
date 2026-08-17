@@ -46,7 +46,6 @@ export {
   MEMORY_ALERT_RATIO,
   MINIMAP_NODE_COLOR,
   NODE_CONTRACT,
-  VOLUME_MOUNT_INFO,
   nodeIcon,
   nodeMinimapColor,
   nutanixVmHostEdgeState,
@@ -488,11 +487,36 @@ export function usePrefersReducedMotion(): boolean {
   return reduced;
 }
 
-/** Nombre de particules simultanées par arête "mount" — impression de flux continu sans arête
+/** Nombre de particules simultanées par arête — impression de flux continu sans arête
  * trop "vide" entre deux particules, tout en restant un petit nombre fixe d'éléments SVG par
  * arête (coût de rendu borné même avec des dizaines d'arêtes affichées en même temps). */
-const MOUNT_PARTICLE_COUNT = 3;
-const MOUNT_PARTICLE_DURATION_S = 2.2;
+const FLOW_PARTICLE_COUNT = 3;
+const FLOW_PARTICLE_DURATION_S = 2.2;
+
+/** Arête ACTIVE = seule porteuse de particules (vague 3) : healthy/starting uniquement, jamais
+ * stopped/none/unhealthy — rien ne "coule" sans signal réel de bonne santé. */
+export function isActiveEdgeState(state: EdgeHealthState | undefined): boolean {
+  return state === "healthy" || state === "starting";
+}
+
+/** Particules le long du tracé (offset-path CSS natif, aucun recalcul JS par frame) — partagées
+ * par MountFlowEdge et NetworkEdge ci-dessous. */
+function EdgeFlowParticles({ edgePath, color }: { edgePath: string; color: string }) {
+  return (
+    <>
+      {Array.from({ length: FLOW_PARTICLE_COUNT }).map((_, particleIndex) => {
+        const particleStyle: CSSProperties = {
+          offsetPath: `path('${edgePath}')`,
+          animationDuration: `${FLOW_PARTICLE_DURATION_S}s`,
+          animationDelay: `${(particleIndex * FLOW_PARTICLE_DURATION_S) / FLOW_PARTICLE_COUNT}s`,
+          fill: color,
+          color, // lu par le filtre drop-shadow (currentColor) en CSS, voir topology.css
+        };
+        return <circle key={particleIndex} r={2.6} className="topology-edge-particle" style={particleStyle} />;
+      })}
+    </>
+  );
+}
 
 // --- Badge flottant sur l'arête (façon Railway : "TCP:5432 · Private · Encrypted") -------------
 // Toutes les données affichées ici viennent RÉELLEMENT de Docker (voir TopologyEdge#ports/private/
@@ -572,30 +596,19 @@ function EdgeBadge({ x, y, data }: { x: number; y: number; data: EdgeBadgeData }
  * de l'animation générique "tirets qui défilent" des arêtes "network" — trait plein + particules
  * qui voyagent réellement le long du tracé de l'arête via la propriété CSS `offset-path` (animation
  * native du navigateur sur la propriété `offset-distance`, donc aucun recalcul JS par frame, coût
- * quasi nul même avec beaucoup d'arêtes à l'écran). Rien ne "coule" si le conteneur est arrêté
- * (aucune donnée ne transite réellement) ou si l'utilisateur préfère moins d'animations — dans les
- * deux cas on retombe sur le simple trait coloré, sans les particules.
+ * quasi nul même avec beaucoup d'arêtes à l'écran). Vague 3 : particules réservées aux arêtes
+ * ACTIVES (isActiveEdgeState — healthy/starting), plus jamais pour none/unhealthy ; coupées aussi
+ * si l'utilisateur préfère moins d'animations — on retombe alors sur le simple trait coloré.
  */
 function MountFlowEdge({ id, sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, style, markerEnd, data }: EdgeProps) {
   const [edgePath, labelX, labelY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
   const reducedMotion = usePrefersReducedMotion();
   const edgeData = data as (EdgeBadgeData & { state?: EdgeHealthState; color?: string }) | undefined;
-  const flowing = edgeData?.state !== "stopped" && !reducedMotion;
+  const flowing = isActiveEdgeState(edgeData?.state) && !reducedMotion;
   return (
     <>
       <BaseEdge id={id} path={edgePath} {...(markerEnd ? { markerEnd } : {})} {...(style ? { style } : {})} />
-      {flowing &&
-        Array.from({ length: MOUNT_PARTICLE_COUNT }).map((_, particleIndex) => {
-          const particleColor = edgeData?.color ?? "var(--color-warning)";
-          const particleStyle: CSSProperties = {
-            offsetPath: `path('${edgePath}')`,
-            animationDuration: `${MOUNT_PARTICLE_DURATION_S}s`,
-            animationDelay: `${(particleIndex * MOUNT_PARTICLE_DURATION_S) / MOUNT_PARTICLE_COUNT}s`,
-            fill: particleColor,
-            color: particleColor, // lu par le filtre drop-shadow (currentColor) en CSS, voir topology.css
-          };
-          return <circle key={particleIndex} r={2.6} className="topology-edge-particle" style={particleStyle} />;
-        })}
+      {flowing && <EdgeFlowParticles edgePath={edgePath} color={edgeData?.color ?? "var(--color-warning)"} />}
       {edgeData && <EdgeBadge x={labelX} y={labelY} data={edgeData} />}
     </>
   );
@@ -603,13 +616,18 @@ function MountFlowEdge({ id, sourceX, sourceY, sourcePosition, targetX, targetY,
 
 /** Arête "network" (conteneur <-> network) : même tracé/rendu que le type "default" de React Flow
  * (bezier), réimplémenté ici uniquement pour pouvoir y accrocher le badge flottant ci-dessus — le
- * type "default" ne permet pas d'injecter un enfant supplémentaire. */
+ * type "default" ne permet pas d'injecter un enfant supplémentaire. Vague 3 : mêmes particules de
+ * flux que "mount" sur les arêtes ACTIVES, réservées au kind "network" (trafic réel) — jamais
+ * "hosts" (structurel) ni "automation-flow" (son motif pointillé fixe reste son identité). */
 function NetworkEdge({ id, sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, style, markerEnd, data }: EdgeProps) {
   const [edgePath, labelX, labelY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
-  const edgeData = data as EdgeBadgeData | undefined;
+  const reducedMotion = usePrefersReducedMotion();
+  const edgeData = data as (EdgeBadgeData & { kind?: string; state?: EdgeHealthState; color?: string }) | undefined;
+  const flowing = edgeData?.kind === "network" && isActiveEdgeState(edgeData?.state) && !reducedMotion;
   return (
     <>
       <BaseEdge id={id} path={edgePath} {...(markerEnd ? { markerEnd } : {})} {...(style ? { style } : {})} />
+      {flowing && <EdgeFlowParticles edgePath={edgePath} color={edgeData?.color ?? "var(--accent-end)"} />}
       {edgeData && <EdgeBadge x={labelX} y={labelY} data={edgeData} />}
     </>
   );
