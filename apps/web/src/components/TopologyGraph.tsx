@@ -178,21 +178,25 @@ function TopologyLoader() {
 // part, après network — nœuds isolés ou reliés entre eux uniquement (jamais d'arête vers Docker),
 // des colonnes dédiées les gardent lisibles plutôt que de les mélanger aux conteneurs.
 const COLUMN_X: Record<TopologyNode["kind"], number> = mapNodeContract((c) => c.defaultColumnX);
-// 130 -> 200 (Phase 2, 17/08/2026, changement minime documenté) : les volumes attachés d'un
-// conteneur sont désormais rendus en "tiroirs" qui DÉPASSENT sous le bord inférieur de la carte
-// (voir .topology-node__drawers, topology.css) — l'ancien pas de 130px, déjà serré pour une carte
-// riche (badges/métriques/briques, ~170px réels), aurait fait chevaucher un tiroir sur la carte du
-// dessous dans les positions PAR DÉFAUT (uniquement elles : toute position déplacée à la main/
-// sauvegardée reste souveraine, comme avant).
-const ROW_HEIGHT = 200;
+// 130 -> 200 (Phase 2, 17/08/2026) : les volumes attachés d'un conteneur sont rendus en "tiroirs"
+// qui DÉPASSENT sous le bord inférieur de la carte (voir .topology-node__drawers, topology.css) —
+// l'ancien pas de 130px aurait fait chevaucher un tiroir sur la carte du dessous dans les positions
+// PAR DÉFAUT (uniquement elles : toute position déplacée à la main/sauvegardée reste souveraine).
+// 200 -> 260 (18/08/2026) : même élargissement ~30% que l'arbre "host" (AUTO_LAYOUT_*, retour
+// utilisateur "un padding entre les node un peut plus important") — une carte riche + tiroirs
+// approche 300px, 200px restait juste.
+const ROW_HEIGHT = 260;
 
 /**
  * Ancre horizontale de l'arbre "host" auto-disposé (hostHierarchyPositions) — le master "QUAI" est
  * désormais la racine unique de cet arbre, placé à GAUCHE de toutes les colonnes fixes (maquette
  * validée : master -> environnements -> hiérarchie), assez loin pour que le niveau le plus profond
- * (VMs en grille repliée) ne chevauche jamais la colonne des volumes (x = 0).
+ * (VMs en grille repliée) ne chevauche jamais la colonne des volumes (x = 0). Reculée de -2300 à
+ * -3000 le 18/08/2026 avec l'élargissement des espacements (AUTO_LAYOUT_LEVEL_SPACING 300 -> 380,
+ * HOST_TREE_GRID_LINE_SPACING 270 -> 340) : au pire réel (profondeur 3 + grille de ~29 VMs sur 5
+ * colonnes), le bord droit reste à x < -200.
  */
-const HOST_TREE_ANCHOR_X = -2300;
+const HOST_TREE_ANCHOR_X = -3000;
 const NETWORK_DRIVERS = ["bridge", "overlay", "host", "none"];
 
 // Fil rendu nativement par React Flow pendant le drag — pointillé accent (maquette validée).

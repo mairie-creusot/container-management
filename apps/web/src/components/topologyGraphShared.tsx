@@ -1457,26 +1457,34 @@ export function layeredGroupPositions(
 // repli. L'algorithme lui-même (largeur de sous-arbre bornée, grille compacte au-delà de
 // HOST_TREE_MAX_LINE_CHILDREN feuilles) reste IDENTIQUE à celui qui a réglé "29 VMs empilées en une
 // colonne géante" le 17/08/2026 — seul l'axe (x <-> y) est inversé, jamais réinventé.
-/** Espacements PARTAGÉS des dispositions automatiques du graphe ET du sous-graphe (maquette
- * validée : arbre horizontal compact, ~280-320px entre niveaux, fratrie serrée et centrée sur le
- * parent) — une carte .topology-node fait 260px de large. */
-export const AUTO_LAYOUT_LEVEL_SPACING = 300;
-export const AUTO_LAYOUT_SIBLING_SPACING = 220;
+/** Espacements PARTAGÉS des dispositions automatiques du graphe ET du sous-graphe — une carte
+ * .topology-node fait 260px de large. Élargis d'environ 30% le 18/08/2026 (300/220 -> 380/280,
+ * retour utilisateur : "ajouter un padding entre les node un peut plus important") : les tiroirs
+ * d'attachements dépassent SOUS les cartes (.topology-node__drawers, topology.css) et une carte
+ * conteneur riche approche 300px de haut — l'ancienne fratrie à 220px pouvait faire affleurer un
+ * tiroir sur la carte du dessous. */
+export const AUTO_LAYOUT_LEVEL_SPACING = 380;
+export const AUTO_LAYOUT_SIBLING_SPACING = 280;
 
 /** Distance (px) entre deux NŒUDS D'UNE MÊME FRATRIE le long de l'axe perpendiculaire à l'arbre
  * (axe Y). */
 const HOST_TREE_SIBLING_SPACING = AUTO_LAYOUT_SIBLING_SPACING;
 /** Distance (px) SUPPLÉMENTAIRE le long de l'axe des niveaux (X) entre deux "lignes" d'une grille
- * d'enfants repliée (voir HOST_TREE_MAX_LINE_CHILDREN ci-dessous) — juste au-dessus des 260px de
- * large d'une carte pour une grille compacte sans chevauchement. */
-const HOST_TREE_GRID_LINE_SPACING = 270;
+ * d'enfants repliée (voir HOST_TREE_MAX_LINE_CHILDREN ci-dessous) — au-dessus des 260px de large
+ * d'une carte, avec la même marge élargie du 18/08/2026 que le reste du layout (270 -> 340). */
+const HOST_TREE_GRID_LINE_SPACING = 340;
 /** Distance (px) entre deux NIVEAUX de la hiérarchie (cluster -> hôte -> VM), le long de l'axe X. */
 const HOST_TREE_LEVEL_SPACING = AUTO_LAYOUT_LEVEL_SPACING;
 /** Au-delà de ce nombre d'enfants DIRECTS et tous eux-mêmes sans enfant propre (des feuilles, ex :
  * des VMs — jamais un hôte, qui a lui-même des VMs dessous), on arrête de les aligner sur une seule
  * ligne (c'était exactement le bug du 17/08/2026 : jusqu'à 29 VMs en une colonne géante) — ils sont
- * repliés en grille compacte plutôt qu'empilés à l'infini dans une seule direction. */
-const HOST_TREE_MAX_LINE_CHILDREN = 5;
+ * repliés en grille compacte plutôt qu'empilés à l'infini dans une seule direction. Relevé de 5 à
+ * 10 le 18/08/2026 ("aucun cable ne se croise") : une colonne unique garantit ZÉRO croisement entre
+ * arêtes de l'arbre, alors qu'en grille les arêtes vers les colonnes 2+ passent visuellement
+ * par-dessus les cartes de la colonne 1 — on préfère donc la colonne unique tant qu'elle reste
+ * raisonnable (10 x 280px), la grille ne servant plus qu'aux très grandes fratries où une colonne
+ * de 3000px+ serait pire que ce compromis documenté. */
+const HOST_TREE_MAX_LINE_CHILDREN = 10;
 /** Nombre de "lignes" MAXIMUM (le long de l'axe des fratries, Y) d'une grille repliée (voir
  * ci-dessus) — le nombre réel utilisé est `min(HOST_TREE_MAX_GRID_LINES, ceil(sqrt(nombre
  * d'enfants)))`, une grille aussi proche que possible d'un carré ("circuit imprimé" plutôt qu'une
@@ -1505,10 +1513,21 @@ function allChildrenAreLeaves(childIds: string[], childrenOf: Map<string, string
  * les unes sous les autres (jamais de collision, chaque sous-arbre réserve sa propre plage sur
  * l'axe des fratries, voir `place` ci-dessous).
  *
- * Algorithme classique en deux passes (garanti sans chevauchement, PAS de minimisation de
- * croisements au-delà de ce que le centrage parent/enfant apporte déjà — largement suffisant pour
- * la profondeur réelle de ce graphe, 2-3 niveaux) — IDENTIQUE dans son principe à la version
- * verticale d'origine (17/08/2026, "29 VMs empilées en une colonne géante"), seul l'axe change :
+ * CROISEMENTS (retour utilisateur du 18/08/2026 : "aucun cable ne se croise") — garanties réelles :
+ * chaque sous-arbre réserve un intervalle Y CONTIGU et disjoint de ses frères, le parent est centré
+ * sur son propre intervalle — sur un arbre strict (un seul parent par nœud, cas de "hosts"), cette
+ * seule propriété garantit ZÉRO croisement entre les arêtes de l'arbre pour toute fratrie en
+ * colonne unique ; le tri barycentre (étape Sugiyama, voir `barycenter` ci-dessous) ordonne en plus
+ * les frères selon l'ordre global d'apparition de leurs descendants (éventail court et
+ * déterministe, jamais un sous-arbre "croisé" loin de ses voisins naturels). Deux limites HONNÊTES,
+ * hors de portée d'un layout : en grille repliée (fratrie > HOST_TREE_MAX_LINE_CHILDREN), les
+ * arêtes vers les colonnes 2+ passent visuellement par-dessus les cartes de la colonne 1 ; et les
+ * arêtes NON-arbre (network/mount vers les colonnes fixes de droite) peuvent toujours croiser —
+ * aucune promesse là-dessus.
+ *
+ * Algorithme classique en deux passes (garanti sans chevauchement) — IDENTIQUE dans son principe à
+ * la version verticale d'origine (17/08/2026, "29 VMs empilées en une colonne géante"), seul l'axe
+ * change :
  *  1) `subtreeWidthUnits` (post-ordre, mémoïsé) : "largeur" du sous-arbre de chaque nœud le long de
  *     l'axe des fratries (Y), en unités — 1 pour une feuille ; somme des largeurs des enfants pour
  *     un nœud à peu d'enfants (alignés sur une même ligne verticale, cas normal : un cluster avec 3
@@ -1536,6 +1555,26 @@ export function hostHierarchyPositions(
     (childrenOf.get(e.source) ?? childrenOf.set(e.source, []).get(e.source)!).push(e.target);
   }
   const roots = nodeIds.filter((id) => !parentOf.has(id));
+
+  // Tri barycentre (Sugiyama) : clé d'une feuille = son rang dans `nodeIds`, clé d'un nœud interne
+  // = moyenne des clés de ses enfants — les fratries (et les racines entre elles) sont triées par
+  // cette clé, en préservant la contiguïté des sous-arbres (donc la garantie zéro croisement).
+  const entryIndex = new Map(nodeIds.map((id, index) => [id, index]));
+  const baryCache = new Map<string, number>();
+  function barycenter(id: string): number {
+    const cached = baryCache.get(id);
+    if (cached !== undefined) return cached;
+    baryCache.set(id, entryIndex.get(id) ?? 0); // garde anti-cycle corrompu, même esprit que parentOf.has
+    const children = childrenOf.get(id) ?? [];
+    const value =
+      children.length === 0
+        ? entryIndex.get(id) ?? 0
+        : children.reduce((sum, c) => sum + barycenter(c), 0) / children.length;
+    baryCache.set(id, value);
+    return value;
+  }
+  for (const children of childrenOf.values()) children.sort((a, b) => barycenter(a) - barycenter(b));
+  roots.sort((a, b) => barycenter(a) - barycenter(b));
 
   const positions: Record<string, { x: number; y: number }> = {};
   const widthCache = new Map<string, number>();

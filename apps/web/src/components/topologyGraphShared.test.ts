@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { EDGE_KIND_LABEL, buildTopologyEdges, edgeBadgeItems, isActiveEdgeState, nutanixVmHostEdgeState } from "./topologyGraphShared";
+import {
+  AUTO_LAYOUT_LEVEL_SPACING,
+  AUTO_LAYOUT_SIBLING_SPACING,
+  EDGE_KIND_LABEL,
+  buildTopologyEdges,
+  edgeBadgeItems,
+  hostHierarchyPositions,
+  isActiveEdgeState,
+  nutanixVmHostEdgeState,
+} from "./topologyGraphShared";
 import type { TopologyEdge, TopologyNode } from "@/types";
 
 /**
@@ -328,5 +337,83 @@ describe("EDGE_KIND_LABEL / edgeBadgeItems — pastille de nature du lien (maque
 
     expect(networkEdge?.data).toMatchObject({ kindLabel: "réseau app-net" });
     expect(hostsEdge?.data).toMatchObject({ kindLabel: "hôte physique" });
+  });
+});
+
+// --- hostHierarchyPositions (mission du 18/08/2026 : "aucun cable ne se croise" + padding) ------
+
+const hostsEdge = (source: string, target: string) => ({ source, target });
+
+describe("hostHierarchyPositions — ordonnancement et croisements", () => {
+  it("padding : les espacements élargis du 18/08/2026 sont bien ceux appliqués entre niveaux et frères", () => {
+    const pos = hostHierarchyPositions(["root", "a", "b"], [hostsEdge("root", "a"), hostsEdge("root", "b")]);
+    expect(pos.a!.x - pos.root!.x).toBe(AUTO_LAYOUT_LEVEL_SPACING);
+    expect(Math.abs(pos.b!.y - pos.a!.y)).toBe(AUTO_LAYOUT_SIBLING_SPACING);
+    expect(AUTO_LAYOUT_LEVEL_SPACING).toBeGreaterThanOrEqual(380);
+    expect(AUTO_LAYOUT_SIBLING_SPACING).toBeGreaterThanOrEqual(280);
+  });
+
+  it("zéro croisement entre arêtes de l'arbre : les sous-arbres frères occupent des plages Y disjointes, parent centré dans la sienne", () => {
+    // Cluster -> 3 hôtes -> VMs de tailles différentes (1/3/2) — le cas réel Nutanix.
+    const nodeIds = ["cluster", "h1", "h2", "h3", "v1", "v2a", "v2b", "v2c", "v3a", "v3b"];
+    const edges = [
+      hostsEdge("cluster", "h1"),
+      hostsEdge("cluster", "h2"),
+      hostsEdge("cluster", "h3"),
+      hostsEdge("h1", "v1"),
+      hostsEdge("h2", "v2a"),
+      hostsEdge("h2", "v2b"),
+      hostsEdge("h2", "v2c"),
+      hostsEdge("h3", "v3a"),
+      hostsEdge("h3", "v3b"),
+    ];
+    const pos = hostHierarchyPositions(nodeIds, edges);
+    const subtree = (root: string): string[] => [root, ...edges.filter((e) => e.source === root).flatMap((e) => subtree(e.target))];
+    const range = (ids: string[]) => ({ min: Math.min(...ids.map((id) => pos[id]!.y)), max: Math.max(...ids.map((id) => pos[id]!.y)) });
+    const r1 = range(subtree("h1"));
+    const r2 = range(subtree("h2"));
+    const r3 = range(subtree("h3"));
+    // Plages disjointes entre frères = aucune arête d'un sous-arbre ne peut couper celles d'un autre.
+    expect(r1.max).toBeLessThan(r2.min);
+    expect(r2.max).toBeLessThan(r3.min);
+    // Chaque parent est centré DANS la plage de son propre sous-arbre.
+    for (const h of ["h1", "h2", "h3"]) {
+      const r = range(subtree(h));
+      expect(pos[h]!.y).toBeGreaterThanOrEqual(r.min);
+      expect(pos[h]!.y).toBeLessThanOrEqual(r.max);
+    }
+    // Vérification géométrique directe : aucune paire d'arêtes parent->enfant ne se croise (deux
+    // segments entre les mêmes colonnes X se croisent ssi leurs ordres Y s'inversent d'un bout à l'autre).
+    const segments = edges.map((e) => ({ p: pos[e.source]!, c: pos[e.target]! }));
+    for (const s1 of segments) {
+      for (const s2 of segments) {
+        if (s1 === s2 || s1.p.x !== s2.p.x || s1.c.x !== s2.c.x) continue;
+        expect((s1.p.y - s2.p.y) * (s1.c.y - s2.c.y)).toBeGreaterThanOrEqual(0);
+      }
+    }
+  });
+
+  it("tri barycentre : l'ordre des frères suit l'ordre d'apparition de leurs descendants, pas l'ordre des arêtes", () => {
+    // Arêtes déclarées A avant B, mais les VMs de B apparaissent AVANT celles de A dans nodeIds.
+    const nodeIds = ["root", "hostA", "hostB", "vmB1", "vmB2", "vmA1"];
+    const pos = hostHierarchyPositions(nodeIds, [
+      hostsEdge("root", "hostA"),
+      hostsEdge("root", "hostB"),
+      hostsEdge("hostA", "vmA1"),
+      hostsEdge("hostB", "vmB1"),
+      hostsEdge("hostB", "vmB2"),
+    ]);
+    expect(pos.hostB!.y).toBeLessThan(pos.hostA!.y);
+    expect(pos.vmB1!.y).toBeLessThan(pos.vmA1!.y);
+  });
+
+  it("fratrie raisonnable (<= 10 feuilles) : colonne unique (zéro croisement), grille réservée aux très grandes fratries", () => {
+    const tenKids = Array.from({ length: 10 }, (_, i) => `vm${i}`);
+    const linePos = hostHierarchyPositions(["h", ...tenKids], tenKids.map((id) => hostsEdge("h", id)));
+    expect(new Set(tenKids.map((id) => linePos[id]!.x)).size).toBe(1);
+
+    const manyKids = Array.from({ length: 29 }, (_, i) => `vm${i}`);
+    const gridPos = hostHierarchyPositions(["h", ...manyKids], manyKids.map((id) => hostsEdge("h", id)));
+    expect(new Set(manyKids.map((id) => gridPos[id]!.x)).size).toBeGreaterThan(1);
   });
 });
