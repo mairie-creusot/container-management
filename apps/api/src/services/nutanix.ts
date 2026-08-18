@@ -17,7 +17,16 @@ import { URL } from "node:url";
 import { config } from "../config.js";
 import { getEffectiveNutanixConfig } from "./setupStore.js";
 import type { SetupNutanixConfig } from "./setupStore.js";
-import type { ClusterNode, Environment, NutanixHost, NutanixVm, NutanixVmDisk, NutanixVmNetwork } from "../types.js";
+import type {
+  ClusterNode,
+  Environment,
+  NutanixHost,
+  NutanixImageSummary,
+  NutanixTaskStatus,
+  NutanixVm,
+  NutanixVmDisk,
+  NutanixVmNetwork,
+} from "../types.js";
 
 /**
  * Config Nutanix effective si complète (URL + identifiants), sinon `null` — sert à la fois de
@@ -1312,4 +1321,328 @@ export async function getNutanixVmConsoleTarget(uuid: string): Promise<{ effecti
     throw new NutanixActionError(`VM "${vmName}" is powered off — no console video output is available (start the VM first)`, 409);
   }
   return { effective, wsPath: `/vnc/vm/${uuid}/proxy`, vmName };
+}
+
+// ============================================================================================
+// Étage "déploiement" du pipeline de templates (18/08/2026) : images du catalogue, ingestion d'une
+// image cloud depuis une URL, création de VM avec cloud-init, suivi de tâche. Formes vérifiées en
+// LECTURE SEULE contre l'instance réelle 172.20.0.10:9440 le 18/08/2026 : POST /images/list (25
+// images réelles, entités metadata/spec/status avec image_type "ISO_IMAGE" et size_bytes) et
+// GET /tasks/{uuid} (réponse PLATE : uuid/status/percentage_complete, PAS d'enveloppe
+// metadata/spec/status). Les MUTATIONS (POST /images, POST /vms) n'ont JAMAIS été exercées contre
+// l'instance réelle (interdiction absolue) : formes construites depuis la doc v3 + les entités
+// réelles observées, exercées uniquement contre le mock des tests (test/nutanixDeploy.test.ts).
+// Repli PE v2.0 : DÉLIBÉRÉMENT ABSENT ici — la création d'image/VM existe en v2.0 sous une forme
+// très différente (vm_disks/vm_customization_config) jamais vérifiée sur cette instance : un 405
+// REQUEST_NOT_SUPPORTED remonte tel quel avec un message explicite plutôt qu'un repli inventé.
+// ============================================================================================
+
+/** Entité image v3 (champs utilisés seulement) — forme réelle vérifiée le 18/08/2026. */
+interface NutanixImageEntity {
+  metadata?: { uuid?: string };
+  spec?: { name?: string; resources?: { image_type?: string } };
+  status?: { name?: string; resources?: { image_type?: string; size_bytes?: number } };
+}
+
+interface NutanixImagesListResponse {
+  entities?: NutanixImageEntity[];
+}
+
+/** Liste les images du catalogue — [] si jamais configuré ou injoignable, même garde que getNutanixHosts. */
+export async function getNutanixImages(): Promise<NutanixImageSummary[]> {
+  const effective = await loadNutanixConfig();
+  if (!effective) return [];
+  try {
+    const data = await nutanixPost<NutanixImagesListResponse>(
+      effective.prismCentralUrl,
+      "/api/nutanix/v3/images/list",
+      effective.username,
+      effective.password,
+      { kind: "image", length: 500, offset: 0 },
+    );
+    return (data.entities ?? [])
+      .filter((e): e is NutanixImageEntity & { metadata: { uuid: string } } => Boolean(e.metadata?.uuid))
+      .map((e) => {
+        const imageType = e.status?.resources?.image_type ?? e.spec?.resources?.image_type;
+        const sizeBytes = e.status?.resources?.size_bytes;
+        return {
+          uuid: e.metadata.uuid,
+          name: e.status?.name ?? e.spec?.name ?? e.metadata.uuid,
+          ...(typeof sizeBytes === "number" ? { sizeBytes } : {}),
+          ...(imageType ? { imageType } : {}),
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
+/** Réponse d'une création v3 (image ou VM) — seuls uuid + task_uuid sont consommés. */
+interface NutanixCreateResponse {
+  metadata?: { uuid?: string };
+  status?: { execution_context?: { task_uuid?: string } };
+}
+
+/** Message Prism sans JAMAIS inclure le corps brut (qui peut échoïser la spec envoyée, user_data
+ * cloud-init compris — un secret) : seuls message_list[].message/reason sont extraits, puis chaque
+ * chaîne de `secrets` est masquée par défense en profondeur. */
+function sanitizedPrismErrorMessage(raw: string, secrets: string[]): string {
+  let message = "no parseable error detail (response body withheld — it may echo the submitted spec)";
+  try {
+    const parsed = JSON.parse(raw) as { message_list?: { message?: string; reason?: string }[]; message?: string };
+    const parts = (parsed.message_list ?? [])
+      .map((m) => [m.reason, m.message].filter(Boolean).join(": "))
+      .filter((s) => s.length > 0);
+    if (parts.length > 0) message = parts.join("; ");
+    else if (typeof parsed.message === "string" && parsed.message) message = parsed.message;
+  } catch {
+    // corps non-JSON : jamais inclus tel quel.
+  }
+  for (const secret of secrets) {
+    if (secret) message = message.split(secret).join("[REDACTED]");
+  }
+  return message.slice(0, 300);
+}
+
+/**
+ * Crée une image DISK_IMAGE depuis une URL (POST /api/nutanix/v3/images, asynchrone — Prism
+ * télécharge lui-même source_uri ; suivre l'avancement via getNutanixTask). Aucun repli v2.0 : un
+ * 405 REQUEST_NOT_SUPPORTED remonte avec un message explicite (voir en-tête de section).
+ */
+export async function createNutanixImage(opts: { name: string; sourceUri: string }): Promise<{ ok: true; name: string; taskUuid?: string }> {
+  const effective = await loadNutanixConfig();
+  if (!effective) {
+    throw new NutanixActionError("Nutanix is not configured — configure Prism Central before creating an image", 400);
+  }
+  const body = {
+    api_version: "3.1",
+    metadata: { kind: "image" },
+    spec: { name: opts.name, resources: { image_type: "DISK_IMAGE", source_uri: opts.sourceUri } },
+  };
+  const result = await nutanixRequest<NutanixCreateResponse>(
+    effective.prismCentralUrl,
+    "POST",
+    "/api/nutanix/v3/images",
+    effective.username,
+    effective.password,
+    body,
+  );
+  if (result.status === 405 && result.raw.includes("REQUEST_NOT_SUPPORTED")) {
+    throw new NutanixActionError(
+      `Prism Central refused v3 image creation for "${opts.name}" (405 REQUEST_NOT_SUPPORTED — Prism Element managed). No v2.0 fallback is implemented: the v2.0 image creation form was never verified on this instance, deliberately not guessed.`,
+      502,
+    );
+  }
+  if (result.status < 200 || result.status >= 300) {
+    throw new NutanixActionError(
+      `Prism Central refused image creation for "${opts.name}" (status ${result.status}): ${sanitizedPrismErrorMessage(result.raw, [])}`,
+      502,
+    );
+  }
+  const taskUuid = result.data?.status?.execution_context?.task_uuid;
+  return { ok: true, name: opts.name, ...(taskUuid ? { taskUuid } : {}) };
+}
+
+export interface NutanixGuestCustomizationInput {
+  hostname?: string;
+  username: string;
+  password?: string;
+  sshAuthorizedKey?: string;
+}
+
+export interface NutanixCreateVmInput {
+  name: string;
+  imageUuid: string;
+  subnetUuid: string;
+  numVcpus: number;
+  numCoresPerVcpu?: number;
+  memoryMib: number;
+  diskSizeMib?: number;
+  guestCustomization?: NutanixGuestCustomizationInput;
+}
+
+/** Scalaire YAML entre quotes simples — sûr pour tout caractère hors contrôle (validés en amont). */
+function yamlQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/;
+
+/** Valide guestCustomization SANS jamais échoïser mot de passe/clé dans un message d'erreur. */
+function validateGuestCustomization(gc: NutanixGuestCustomizationInput): void {
+  if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(gc.username)) {
+    throw new NutanixActionError("guestCustomization.username must match ^[a-z_][a-z0-9_-]{0,31}$", 400);
+  }
+  if (!gc.password && !gc.sshAuthorizedKey) {
+    throw new NutanixActionError("guestCustomization requires at least one of password or sshAuthorizedKey", 400);
+  }
+  if (gc.hostname !== undefined && !/^[a-zA-Z0-9][a-zA-Z0-9.-]{0,62}$/.test(gc.hostname)) {
+    throw new NutanixActionError("guestCustomization.hostname must be a valid hostname (letters, digits, dots, dashes, max 63 chars)", 400);
+  }
+  if (gc.password !== undefined && (gc.password.length === 0 || CONTROL_CHARS.test(gc.password))) {
+    throw new NutanixActionError("guestCustomization.password must be non-empty and free of control characters", 400);
+  }
+  if (gc.sshAuthorizedKey !== undefined && (gc.sshAuthorizedKey.trim().length === 0 || CONTROL_CHARS.test(gc.sshAuthorizedKey))) {
+    throw new NutanixActionError("guestCustomization.sshAuthorizedKey must be a single line without control characters", 400);
+  }
+}
+
+/** #cloud-config complet — SECRET (contient mot de passe/clé) : jamais loggé, jamais dans une
+ * erreur/réponse/audit, uniquement base64 dans guest_customization.cloud_init.user_data. */
+function buildCloudInitUserData(gc: NutanixGuestCustomizationInput): string {
+  const lines = ["#cloud-config"];
+  if (gc.hostname) lines.push(`hostname: ${yamlQuote(gc.hostname)}`);
+  lines.push("users:", `  - name: ${yamlQuote(gc.username)}`, "    groups: sudo", "    shell: /bin/bash");
+  lines.push(`    sudo: ${yamlQuote("ALL=(ALL) NOPASSWD:ALL")}`, "    lock_passwd: false");
+  if (gc.sshAuthorizedKey) lines.push("    ssh_authorized_keys:", `      - ${yamlQuote(gc.sshAuthorizedKey.trim())}`);
+  if (gc.password) {
+    lines.push("ssh_pwauth: true", "chpasswd:", "  expire: false", "  users:");
+    lines.push(`    - name: ${yamlQuote(gc.username)}`, `      password: ${yamlQuote(gc.password)}`, "      type: text");
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Crée une VM depuis une image disque (clone du disque image via data_source_reference) sur le
+ * cluster UNIQUE existant, avec cloud-init optionnel, et la démarre — power_state "ON" est posé
+ * directement dans la spec de création (comportement v3 documenté, utilisé par le provider
+ * Terraform Nutanix ; PAS vérifié par mutation sur cette instance — un PUT séparé juste après le
+ * POST risquerait une course avec la tâche de création, jamais tenté ici). Refuse (409) si
+ * PLUSIEURS clusters existent (le choix de cluster n'est pas dans le contrat de cette mission).
+ */
+export async function createNutanixVm(input: NutanixCreateVmInput): Promise<{ ok: true; name: string; vmUuid?: string; taskUuid?: string }> {
+  const { name, imageUuid, subnetUuid, numVcpus, memoryMib, diskSizeMib } = input;
+  const numCoresPerVcpu = input.numCoresPerVcpu ?? 1;
+  if (!name.trim() || name.length > 80 || CONTROL_CHARS.test(name)) {
+    throw new NutanixActionError("name must be a non-empty string of at most 80 characters without control characters", 400);
+  }
+  if (!Number.isInteger(numVcpus) || numVcpus < 1 || numVcpus > NUTANIX_MAX_VCPUS) {
+    throw new NutanixActionError(`Invalid numVcpus ${numVcpus} — must be an integer between 1 and ${NUTANIX_MAX_VCPUS}`, 400);
+  }
+  if (!Number.isInteger(numCoresPerVcpu) || numCoresPerVcpu < 1 || numCoresPerVcpu > NUTANIX_MAX_CORES_PER_VCPU) {
+    throw new NutanixActionError(`Invalid numCoresPerVcpu ${numCoresPerVcpu} — must be an integer between 1 and ${NUTANIX_MAX_CORES_PER_VCPU}`, 400);
+  }
+  if (!Number.isInteger(memoryMib) || memoryMib < NUTANIX_MIN_MEMORY_MIB || memoryMib > NUTANIX_MAX_MEMORY_MIB) {
+    throw new NutanixActionError(
+      `Invalid memoryMib ${memoryMib} — must be an integer between ${NUTANIX_MIN_MEMORY_MIB} and ${NUTANIX_MAX_MEMORY_MIB}`,
+      400,
+    );
+  }
+  if (diskSizeMib !== undefined && (!Number.isInteger(diskSizeMib) || diskSizeMib < NUTANIX_DISK_MIN_SIZE_MIB || diskSizeMib > NUTANIX_DISK_MAX_SIZE_MIB)) {
+    throw new NutanixActionError(
+      `Invalid diskSizeMib ${diskSizeMib} — must be an integer between ${NUTANIX_DISK_MIN_SIZE_MIB} and ${NUTANIX_DISK_MAX_SIZE_MIB} MiB (QUAI safety bounds)`,
+      400,
+    );
+  }
+  if (input.guestCustomization) validateGuestCustomization(input.guestCustomization);
+
+  const effective = await loadNutanixConfig();
+  if (!effective) {
+    throw new NutanixActionError("Nutanix is not configured — configure Prism Central before creating a VM", 400);
+  }
+
+  const [subnets, images, clusters] = await Promise.all([fetchNutanixSubnets(effective), getNutanixImages(), getNutanixClusters()]);
+  if (!subnets.get(subnetUuid)) {
+    throw new NutanixActionError(`Subnet "${subnetUuid}" not found on Prism Central (or subnets list temporarily unavailable)`, 404);
+  }
+  if (!images.some((i) => i.uuid === imageUuid)) {
+    throw new NutanixActionError(`Image "${imageUuid}" not found on Prism Central (or images list temporarily unavailable)`, 404);
+  }
+  if (clusters.length > 1) {
+    throw new NutanixActionError(
+      `Refusing to create VM "${name}": ${clusters.length} clusters exist on this Prism Central and cluster selection is not supported yet`,
+      409,
+    );
+  }
+  const cluster = clusters[0];
+  if (!cluster) {
+    throw new NutanixActionError("No Nutanix cluster could be listed from Prism Central — cannot pick a cluster_reference for the new VM", 502);
+  }
+
+  const userData = input.guestCustomization ? buildCloudInitUserData(input.guestCustomization) : undefined;
+  const userDataB64 = userData !== undefined ? Buffer.from(userData, "utf-8").toString("base64") : undefined;
+  const body = {
+    api_version: "3.1",
+    metadata: { kind: "vm" },
+    spec: {
+      name,
+      cluster_reference: { kind: "cluster", uuid: cluster.uuid, name: cluster.name },
+      resources: {
+        power_state: "ON",
+        num_sockets: numVcpus,
+        num_vcpus_per_socket: numCoresPerVcpu,
+        memory_size_mib: memoryMib,
+        disk_list: [
+          {
+            device_properties: { device_type: "DISK", disk_address: { adapter_type: "SCSI", device_index: 0 } },
+            data_source_reference: { kind: "image", uuid: imageUuid },
+            ...(diskSizeMib !== undefined ? { disk_size_mib: diskSizeMib } : {}),
+          },
+        ],
+        nic_list: [{ nic_type: "NORMAL_NIC", vlan_mode: "ACCESS", subnet_reference: { kind: "subnet", uuid: subnetUuid }, is_connected: true }],
+        ...(userDataB64 !== undefined ? { guest_customization: { cloud_init: { user_data: userDataB64 } } } : {}),
+      },
+    },
+  };
+
+  const result = await nutanixRequest<NutanixCreateResponse>(
+    effective.prismCentralUrl,
+    "POST",
+    "/api/nutanix/v3/vms",
+    effective.username,
+    effective.password,
+    body,
+  );
+  // Secrets à masquer par défense en profondeur si Prism échoïsait la spec dans son erreur.
+  const secrets = [userDataB64, input.guestCustomization?.password, input.guestCustomization?.sshAuthorizedKey].filter(
+    (s): s is string => Boolean(s),
+  );
+  if (result.status === 405 && result.raw.includes("REQUEST_NOT_SUPPORTED")) {
+    throw new NutanixActionError(
+      `Prism Central refused v3 VM creation for "${name}" (405 REQUEST_NOT_SUPPORTED — Prism Element managed). No v2.0 fallback is implemented: the v2.0 VM creation form (vm_disks/vm_customization_config) was never verified on this instance, deliberately not guessed.`,
+      502,
+    );
+  }
+  if (result.status < 200 || result.status >= 300) {
+    throw new NutanixActionError(
+      `Prism Central refused VM creation for "${name}" (status ${result.status}): ${sanitizedPrismErrorMessage(result.raw, secrets)}`,
+      502,
+    );
+  }
+  const vmUuid = result.data?.metadata?.uuid;
+  const taskUuid = result.data?.status?.execution_context?.task_uuid;
+  return { ok: true, name, ...(vmUuid ? { vmUuid } : {}), ...(taskUuid ? { taskUuid } : {}) };
+}
+
+/** Réponse PLATE de GET /tasks/{uuid} — forme réelle vérifiée le 18/08/2026 (voir en-tête de section). */
+interface NutanixTaskResponse {
+  uuid?: string;
+  status?: string;
+  percentage_complete?: number;
+}
+
+/** État d'une tâche asynchrone (création d'image/VM) — 404 si inconnue, 400 si jamais configuré. */
+export async function getNutanixTask(uuid: string): Promise<NutanixTaskStatus> {
+  const effective = await loadNutanixConfig();
+  if (!effective) {
+    throw new NutanixActionError("Nutanix is not configured — configure Prism Central before polling a task", 400);
+  }
+  const result = await nutanixRequest<NutanixTaskResponse>(
+    effective.prismCentralUrl,
+    "GET",
+    `/api/nutanix/v3/tasks/${uuid}`,
+    effective.username,
+    effective.password,
+  );
+  if (result.status === 404) {
+    throw new NutanixActionError(`Task "${uuid}" not found on Prism Central`, 404);
+  }
+  if (result.status < 200 || result.status >= 300 || !result.data) {
+    throw new NutanixActionError(`Prism Central returned an error reading task "${uuid}" (status ${result.status}): ${result.raw.slice(0, 300)}`, 502);
+  }
+  return {
+    uuid: result.data.uuid ?? uuid,
+    status: result.data.status ?? "UNKNOWN",
+    ...(typeof result.data.percentage_complete === "number" ? { percentageComplete: result.data.percentage_complete } : {}),
+  };
 }

@@ -173,6 +173,39 @@ export interface NutanixVm {
   apiErrorMessage?: string;
 }
 
+/** Une image disque/ISO réelle du catalogue Prism Central — GET /api/nutanix/images. */
+export interface NutanixImageSummary {
+  uuid: string;
+  name: string;
+  sizeBytes?: number;
+  imageType?: string;
+}
+
+/** POST /api/nutanix/vms — `guestCustomization.password`/`sshAuthorizedKey` sont write-only. */
+export interface NutanixVmCreateInput {
+  name: string;
+  imageUuid: string;
+  subnetUuid: string;
+  numVcpus: number;
+  numCoresPerVcpu?: number;
+  memoryMib: number;
+  diskSizeMib?: number;
+  guestCustomization?: {
+    hostname?: string;
+    username: string;
+    password?: string;
+    sshAuthorizedKey?: string;
+  };
+}
+
+/** GET /api/nutanix/tasks/:uuid — `status` brut Prism Central (RUNNING/SUCCEEDED/FAILED...),
+ * projeté côté client par templateCatalog.ts#nutanixTaskOutcome, jamais traduit ici. */
+export interface NutanixTaskStatus {
+  uuid: string;
+  status: string;
+  percentageComplete?: number;
+}
+
 export interface ContainerPortMapping {
   containerPort: string;
   hostPort: string | null;
@@ -326,7 +359,8 @@ export type TopologyNodeKind =
   | "gitops-source"
   | "automation-trigger"
   | "automation-condition"
-  | "automation-action";
+  | "automation-action"
+  | "image-template";
 
 /** Sous-type d'un nœud "host" — voir TopologyNode#hostKind ci-dessous et
  * apps/api/src/services/topology.ts. Champ explicite plutôt qu'une convention dans `subtitle`. */
@@ -483,6 +517,17 @@ export interface TopologyNode {
    * détail complet. Absentes si aucune limite n'a été fixée à la création. */
   memoryLimitBytes?: number;
   nanoCpus?: number;
+  /** Nœuds "image-template" uniquement (fabrique de templates) : projection du ImageTemplate réel
+   * posée par le backend topologie À VENIR — absents tant qu'il ne fournit pas ce nœud, le kind
+   * reste alors simplement invisible (aucune donnée inventée côté client). */
+  templateKind?: ImageTemplateKind;
+  templateStatus?: ImageTemplateStatus;
+  /** Workspace IaC (Packer) du template — permet de réutiliser IacWorkspacePanel pour ses
+   * fichiers/logs de build. */
+  templateWorkspaceId?: string;
+  /** Artifact du dernier build réussi — absent tant qu'aucun build n'a produit d'artifact. */
+  templateArtifactType?: ImageTemplateArtifactType;
+  templateArtifactReference?: string;
 }
 
 // --- Moteur d'automatisation (trigger -> condition -> action) — voir
@@ -626,6 +671,54 @@ export interface IacRun {
 
 export interface IacRunDetail extends IacRun {
   log: string;
+}
+
+// --- Fabrique de templates d'images (builder + catalogue + déploiement en VM) ------------------
+// Contrat FIGÉ : les deux backends (templates + topologie) sont développés EN PARALLÈLE contre ces
+// formes exactes — un 404 signifie "backend pas encore là", jamais masqué par de fausses données.
+
+export type ImageTemplateKind = "vm-ubuntu" | "container-scratch" | "container-alpine";
+
+export type ImageTemplateStatus = "draft" | "building" | "ready" | "error";
+
+export type ImageTemplateArtifactType = "nutanix-image" | "docker-image";
+
+export interface ImageTemplateArtifact {
+  type: ImageTemplateArtifactType;
+  reference: string;
+}
+
+/** Statut d'un build — même grille que IacRunStatus (les builds VM passent par Packer). */
+export type ImageTemplateBuildStatus = "running" | "success" | "failed";
+
+/** Un build réel d'un template — GET /api/templates/:id/builds, et `ImageTemplate#lastBuild`. */
+export interface ImageTemplateBuild {
+  runId: string;
+  status: ImageTemplateBuildStatus;
+  finishedAt?: string;
+  artifact?: ImageTemplateArtifact;
+}
+
+/** GET/POST /api/templates, GET/DELETE /api/templates/:id, POST /api/templates/:id/build. */
+export interface ImageTemplate {
+  id: string;
+  name: string;
+  kind: ImageTemplateKind;
+  baseVersion: string;
+  components: string[];
+  status: ImageTemplateStatus;
+  workspaceId: string;
+  createdAt: string;
+  updatedAt: string;
+  lastBuild?: ImageTemplateBuild;
+}
+
+/** Corps de POST /api/templates. */
+export interface ImageTemplateCreateInput {
+  name: string;
+  kind: ImageTemplateKind;
+  baseVersion: string;
+  components: string[];
 }
 
 export interface DockerNetwork {

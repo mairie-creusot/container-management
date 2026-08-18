@@ -42,6 +42,7 @@ import reverseProxyRoutes from "./routes/reverseProxy.js";
 import scanRoutes from "./routes/scan.js";
 import secretsRoutes from "./routes/secrets.js";
 import setupRoutes from "./routes/setup.js";
+import templatesRoutes from "./routes/templates.js";
 import topologyRoutes from "./routes/topology.js";
 import volumesRoutes from "./routes/volumes.js";
 import { startAutomationEngine } from "./services/automationEngine.js";
@@ -89,6 +90,7 @@ export function buildServer() {
   void fastify.register(gitopsRoutes);
   void fastify.register(auditRoutes);
   void fastify.register(iacRoutes);
+  void fastify.register(templatesRoutes);
   void fastify.register(topologyRoutes);
   void fastify.register(notificationsRoutes);
   void fastify.register(nutanixRoutes);

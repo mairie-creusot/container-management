@@ -233,6 +233,8 @@ export interface EntriesSummary {
   hasAnsible: boolean;
   /** Nom du fichier playbook trouvé (voir ANSIBLE_PLAYBOOK_NAMES) — absent si hasAnsible est false. */
   ansiblePlaybook?: string;
+  /** Fichiers *.pkr.hcl trouvés (templates Packer) — [] si aucun. */
+  packerFiles: string[];
 }
 
 /** Résume ce qui est déployable dans UN dossier (racine ou sous-dossier) — utilisé aussi bien
@@ -245,6 +247,7 @@ export function summarizeEntries(entries: Array<{ name: string; type: string }>)
   const composeFileName = COMPOSE_FILE_NAMES.find((name) => fileNames.has(name));
   const terraformFiles = files.filter((f) => f.name.toLowerCase().endsWith(".tf")).map((f) => f.name);
   const ansiblePlaybook = ANSIBLE_PLAYBOOK_NAMES.find((name) => fileNames.has(name));
+  const packerFiles = files.filter((f) => f.name.toLowerCase().endsWith(".pkr.hcl")).map((f) => f.name);
   return {
     hasDockerfile,
     hasCompose: Boolean(composeFileName),
@@ -252,15 +255,16 @@ export function summarizeEntries(entries: Array<{ name: string; type: string }>)
     terraformFiles,
     hasAnsible: Boolean(ansiblePlaybook),
     ...(ansiblePlaybook ? { ansiblePlaybook } : {}),
+    packerFiles,
   };
 }
 
 /** true si ce résumé décrit un emplacement effectivement déployable (au moins un mécanisme reconnu). */
 function summaryIsCandidate(s: EntriesSummary): boolean {
-  return s.hasDockerfile || s.hasCompose || s.terraformFiles.length > 0 || s.hasAnsible;
+  return s.hasDockerfile || s.hasCompose || s.terraformFiles.length > 0 || s.hasAnsible || s.packerFiles.length > 0;
 }
 
-export type GithubDeploymentEngineChoice = "compose" | "dockerfile" | "terraform" | "ansible" | "none";
+export type GithubDeploymentEngineChoice = "compose" | "dockerfile" | "terraform" | "ansible" | "packer" | "none";
 
 /**
  * Décide QUEL mécanisme utiliser pour déployer un emplacement donné (racine ou sous-dossier) —
@@ -274,6 +278,7 @@ export function chooseDeploymentEngine(summary: EntriesSummary): GithubDeploymen
   if (summary.hasDockerfile) return "dockerfile";
   if (summary.terraformFiles.length > 0) return "terraform";
   if (summary.hasAnsible) return "ansible";
+  if (summary.packerFiles.length > 0) return "packer";
   return "none";
 }
 
@@ -365,7 +370,15 @@ async function fetchFileContent(owner: string, repo: string, filePath: string, r
   }
 }
 
-const EMPTY_DETECTION_FLAGS = { hasDockerfile: false, hasCompose: false, hasTerraform: false, terraformFiles: [] as string[], hasAnsible: false };
+const EMPTY_DETECTION_FLAGS = {
+  hasDockerfile: false,
+  hasCompose: false,
+  hasTerraform: false,
+  terraformFiles: [] as string[],
+  hasAnsible: false,
+  hasPacker: false,
+  packerFiles: [] as string[],
+};
 
 /** Segmente et encode un chemin relatif ("apps/api") pour l'API Contents GitHub (.../contents/apps/api). */
 function contentsApiPath(owner: string, repo: string, dirPath: string): string {
@@ -440,6 +453,8 @@ async function scanSubfoldersForCandidates(
         hasTerraform: summary.terraformFiles.length > 0,
         terraformFiles: summary.terraformFiles,
         hasAnsible: summary.hasAnsible,
+        hasPacker: summary.packerFiles.length > 0,
+        packerFiles: summary.packerFiles,
       });
       continue;
     }
@@ -480,6 +495,8 @@ async function buildResolvedDetection(
     terraformFiles: summary.terraformFiles,
     hasAnsible: summary.hasAnsible,
     ...(summary.ansiblePlaybook ? { ansiblePlaybook: summary.ansiblePlaybook } : {}),
+    hasPacker: summary.packerFiles.length > 0,
+    packerFiles: summary.packerFiles,
     ...(exposedPort ? { exposedPort } : {}),
     ...(composeServicesRaw.length > 0 ? { composeServices: composeServicesRaw } : {}),
     ...(dirPath ? { detectedPath: dirPath } : {}),
@@ -1545,6 +1562,41 @@ async function deployViaAnsibleWorkspace(
   await updateDeploymentRecord(deploymentId, { kind: "iac-workspace", iacWorkspaceId: workspace.id });
 }
 
+/** Même mécanisme que deployViaIacWorkspace (Terraform) / deployViaAnsibleWorkspace, pour des
+ * templates Packer (*.pkr.hcl) détectés sans Dockerfile/compose/Terraform/Ansible — même kind
+ * "iac-workspace", moteur "packer" distingué via IacWorkspace#engine. Copie des fichiers RÉELS
+ * du dépôt dans le workspace, JAMAIS de `packer build` automatique. */
+async function deployViaPackerWorkspace(
+  deploymentId: string,
+  packerDir: string,
+  owner: string,
+  repo: string,
+  packerFiles: string[],
+  startedBy: string,
+): Promise<void> {
+  const workspace = await createWorkspace({
+    name: `github-${owner}-${repo}-${new Date().toISOString().slice(0, 10)}`,
+    engine: "packer",
+    createdBy: startedBy,
+  });
+  // Scaffold de démo Packer (template.pkr.hcl, voir iac/workspaces.ts#SCAFFOLD) retiré avant de
+  // copier les vrais fichiers du dépôt — même principe que "main.tf" pour tofu.
+  await deleteWorkspaceFile(workspace.id, "template.pkr.hcl");
+
+  for (const fileName of packerFiles) {
+    const content = await fs.readFile(path.join(packerDir, fileName), "utf-8");
+    await writeWorkspaceFile(workspace.id, fileName, content);
+  }
+
+  await appendDeploymentLog(
+    deploymentId,
+    `Workspace IaC créé : ${workspace.id} (${packerFiles.length} fichier(s) Packer copiés depuis le dépôt : ${packerFiles.join(", ")}).\n` +
+      `Aucun "packer build" (ni même "init") n'a été lancé automatiquement — ouvrez la page Infra-as-code pour l'exécuter explicitement.\n`,
+  );
+
+  await updateDeploymentRecord(deploymentId, { kind: "iac-workspace", iacWorkspaceId: workspace.id });
+}
+
 // --- Déploiement docker-compose réel ------------------------------------------------------------
 //
 // Contrairement à deployViaDockerBuild (un seul `docker run`), docker-compose peut démarrer
@@ -2412,7 +2464,8 @@ async function runDeployment(
       deploymentId,
       `Détection (${configPath ? `sous-dossier "${configPath}"` : "racine du clone"}) : Dockerfile=${detection.hasDockerfile} ` +
         `compose=${detection.hasCompose} terraform=${detection.terraformFiles.length > 0} ` +
-        `(${detection.terraformFiles.join(", ") || "aucun"}) ansible=${detection.hasAnsible}\n\n`,
+        `(${detection.terraformFiles.join(", ") || "aucun"}) ansible=${detection.hasAnsible} ` +
+        `packer=${detection.packerFiles.length > 0} (${detection.packerFiles.join(", ") || "aucun"})\n\n`,
     );
 
     // Priorité (voir chooseDeploymentEngine) : docker-compose > Dockerfile isolé > Terraform >
@@ -2464,9 +2517,12 @@ async function runDeployment(
       case "ansible":
         await deployViaAnsibleWorkspace(deploymentId, targetDir, owner, repo, detection.ansiblePlaybook!, startedBy);
         break;
+      case "packer":
+        await deployViaPackerWorkspace(deploymentId, targetDir, owner, repo, detection.packerFiles, startedBy);
+        break;
       case "none":
         throw new Error(
-          `Aucun Dockerfile, docker-compose, fichier Terraform ni playbook Ansible détecté ${configPath ? `dans "${configPath}"` : "à la racine du dépôt"} — rien à déployer automatiquement.`,
+          `Aucun Dockerfile, docker-compose, fichier Terraform, playbook Ansible ni template Packer détecté ${configPath ? `dans "${configPath}"` : "à la racine du dépôt"} — rien à déployer automatiquement.`,
         );
     }
 

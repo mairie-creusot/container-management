@@ -319,6 +319,13 @@
   color: #84cc16;
 }
 
+/* Template d'image (fabrique de templates) — cyan clair, distinct du bleu ciel de backup
+   (#0ea5e9), cohérent avec NODE_CONTRACT["image-template"].minimapColor. */
+.topology-node--image-template .topology-node__icon {
+  background: rgba(34, 211, 238, 0.16);
+  color: #22d3ee;
+}
+
 /* Handles génériques de connexion des nœuds d'automatisation (voir GraphNode,
    topologyGraphShared.tsx) — même mécanique visuelle que .topology-handle--network/--volume
    ci-dessus, couleur reprise de l'icône "automation-trigger" (rouge) : un seul token de couleur
@@ -1650,6 +1657,7 @@
 .topology-detail-panel__icon--automation-trigger { color: #dc2626; }
 .topology-detail-panel__icon--automation-condition { color: #64748b; }
 .topology-detail-panel__icon--automation-action { color: #84cc16; }
+.topology-detail-panel__icon--image-template { color: #22d3ee; }
 
 .topology-detail-panel__heading {
   flex: 1;
@@ -2938,6 +2946,176 @@
 .modal-card:has(.graph-github-modal) {
   width: 100%;
   max-width: min(1180px, calc(100vw - 40px));
+}
+
+/* --- Fabrique de templates : assistant "Créer un template" + modale "Déployer en VM" ---------- */
+
+.modal-card:has(.template-modal) {
+  width: 100%;
+  max-width: min(600px, calc(100vw - 40px));
+}
+
+.template-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px 18px;
+}
+
+.template-modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.template-modal__head h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 15px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.template-modal__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.template-modal__hint {
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.template-modal__field-error {
+  font-size: 12px;
+  color: var(--color-critical);
+}
+
+.template-modal__resolved {
+  margin: 0;
+  font-size: 13px;
+}
+
+.template-modal__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+/* Choix visuel de la base (Ubuntu/Alpine/scratch) — cartes radio façon presets du spotlight. */
+.template-base-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.template-base-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  text-align: left;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  color: var(--color-text);
+}
+
+.template-base-card:hover {
+  border-color: var(--accent-end);
+}
+
+.template-base-card.is-selected {
+  border-color: var(--accent-end);
+  box-shadow: 0 0 0 2px rgba(124, 92, 252, 0.25);
+}
+
+.template-base-card__title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.template-base-card__target {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-faint);
+}
+
+.template-base-card__desc {
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+  line-height: 1.4;
+}
+
+.template-components {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.template-components__required {
+  margin-left: 6px;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-faint);
+}
+
+/* "Ressources : 2 vCPU · 4096 Mio…" — bascule discrète, valeurs par défaut visibles d'un coup d'œil. */
+.template-modal__resources-toggle {
+  background: none;
+  border: none;
+  padding: 0;
+  text-align: left;
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.template-modal__resources {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.template-modal__resources label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+/* Suivi de la tâche Prism (création de VM) — barre de progression réelle, jamais indéterminée. */
+.template-deploy-progress {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  overflow: hidden;
+}
+
+.template-deploy-progress__bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent-start), var(--accent-end));
+  transition: width 0.4s ease;
+}
+
+.template-deploy-progress--failed .template-deploy-progress__bar {
+  background: var(--color-critical);
 }
 
 .graph-github-modal {

@@ -118,12 +118,14 @@ import { listCronJobRuns } from "./cronJobsScheduler.js";
 import { listBackupDefinitions, listBackupRuns } from "./backupsStore.js";
 import { listWorkspaces } from "./iac/workspaces.js";
 import { listRuns } from "./iac/runner.js";
+import { listTemplates } from "./templates.js";
 import { listAutomationEdges, listAutomationNodes } from "./automationStore.js";
 import type { AutomationNode } from "./automationStore.js";
 import type {
   AutomationActionConfig,
   AutomationTriggerSource,
   IacEngine,
+  ImageTemplate,
   NutanixHost,
   NutanixVm,
   ScanResult,
@@ -571,7 +573,7 @@ async function getBackupNodes(): Promise<TopologyNode[]> {
 
 /** Libellé humain d'un moteur IaC — même table que côté frontend (TopologyNodeDetailPanel.tsx),
  * gardée locale ici : un simple sous-titre de nœud, pas une donnée de contrat exposée par types.ts. */
-const IAC_ENGINE_LABEL: Record<IacEngine, string> = { tofu: "OpenTofu", ansible: "Ansible", packer: "Packer" };
+const IAC_ENGINE_LABEL: Record<IacEngine, string> = { tofu: "OpenTofu", ansible: "Ansible", packer: "Packer", docker: "Docker" };
 
 /**
  * Un nœud "iac-workspace" par workspace Infra-as-code RÉEL (services/iac/workspaces.ts) — TOUJOURS
@@ -608,6 +610,50 @@ async function getIacWorkspaceNodes(): Promise<TopologyNode[]> {
       } satisfies TopologyNode;
     }),
   );
+}
+
+/** Libellé humain d'un kind de template — simple sous-titre de nœud, même principe que
+ * IAC_ENGINE_LABEL ci-dessus (pas une donnée de contrat exposée par types.ts). */
+function imageTemplateSubtitle(template: ImageTemplate): string {
+  switch (template.kind) {
+    case "vm-ubuntu":
+      return `VM Ubuntu ${template.baseVersion}`;
+    case "container-alpine":
+      return `Conteneur Alpine ${template.baseVersion}`;
+    case "container-scratch":
+      return "Conteneur scratch";
+  }
+}
+
+/**
+ * Un nœud "image-template" par template d'images RÉEL (services/templates.ts, catalogue
+ * "builder") — même pattern que getIacWorkspaceNodes ci-dessus : indépendant de la joignabilité
+ * Docker/Nutanix (simple lecture JSON + réconciliation avec les runs déjà persistés), [] si aucun
+ * template n'a jamais été créé. `status` générique projeté depuis le statut précis du template
+ * (draft -> "neutral" ; building -> "restarting" ; ready -> "running" ; error -> "stopped"),
+ * porté exactement par `templateStatus` pour le panneau de détail. AUCUNE arête : QUAI n'a
+ * aucune donnée reliant réellement un template à une ressource Docker/Nutanix précise (même
+ * principe que "iac-workspace"/"ad-server").
+ */
+async function getImageTemplateNodes(): Promise<TopologyNode[]> {
+  const templates = await listTemplates().catch(() => []);
+  return templates.map((t) => {
+    const status: TopologyNode["status"] =
+      t.status === "building" ? "restarting" : t.status === "ready" ? "running" : t.status === "error" ? "stopped" : "neutral";
+    return {
+      id: `image-template:${t.id}`,
+      kind: "image-template",
+      label: t.name,
+      subtitle: imageTemplateSubtitle(t),
+      status,
+      templateKind: t.kind,
+      templateStatus: t.status,
+      templateWorkspaceId: t.workspaceId,
+      ...(t.lastBuild?.artifact
+        ? { templateArtifactType: t.lastBuild.artifact.type, templateArtifactReference: t.lastBuild.artifact.reference }
+        : {}),
+    } satisfies TopologyNode;
+  });
 }
 
 /**
@@ -788,6 +834,9 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
   // principe que cron jobs/sauvegardes ci-dessus (seule l'EXÉCUTION d'un run dépend d'un binaire
   // tofu/ansible-playbook/packer, jamais de Docker lui-même).
   const iacWorkspaceNodes = await getIacWorkspaceNodes();
+  // Templates d'images (voir getImageTemplateNodes ci-dessus) : mêmes propriétés d'indépendance
+  // que les workspaces IaC — une simple lecture JSON, jamais dépendant de Docker/Nutanix.
+  const imageTemplateNodes = await getImageTemplateNodes();
   // Dépôt Git source GitOps (voir getGitOpsSourceNode ci-dessus) : indépendant lui aussi de la
   // joignabilité Docker locale, [] tant que GITOPS_REPO_URL n'a jamais été configuré.
   const gitopsSourceNodes = await getGitOpsSourceNode();
@@ -811,6 +860,7 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
     ...cronJobNodes,
     ...backupNodes,
     ...iacWorkspaceNodes,
+    ...imageTemplateNodes,
     ...gitopsSourceNodes,
     ...automationParts.nodes,
   ];

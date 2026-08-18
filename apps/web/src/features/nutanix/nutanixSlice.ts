@@ -1,6 +1,6 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { apiDelete, apiGet, apiPatch, apiPost, ApiError } from "@/api/client";
-import type { NutanixSubnetSummary } from "@/types";
+import type { NutanixImageSummary, NutanixSubnetSummary } from "@/types";
 
 /**
  * Actions de cycle de vie + migration hôte-à-hôte d'une VM Nutanix (voir apps/api/src/routes/
@@ -37,9 +37,13 @@ interface NutanixState {
   convergence: Record<string, { expected: "running" | "stopped"; since: number }>;
   /** Subnets réels (GET /api/nutanix/subnets) — pour le sélecteur "Ajouter une carte réseau". */
   subnets: NutanixSubnetSummary[];
+  /** Images réelles du catalogue Prism (GET /api/nutanix/images) — pour "Déployer en VM" depuis un
+   * template. "unavailable" = 404 (backend pas encore là), distinct d'un catalogue vide légitime. */
+  images: NutanixImageSummary[];
+  imagesStatus: "idle" | "loading" | "ready" | "unavailable" | "error";
 }
 
-const initialState: NutanixState = { actionPendingUuid: null, convergence: {}, subnets: [] };
+const initialState: NutanixState = { actionPendingUuid: null, convergence: {}, subnets: [], images: [], imagesStatus: "idle" };
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : fallback;
@@ -102,6 +106,23 @@ export const fetchNutanixSubnets = createAsyncThunk<NutanixSubnetSummary[], void
     }
   },
 );
+
+type FetchNutanixImagesResult =
+  | { outcome: "ok"; items: NutanixImageSummary[] }
+  | { outcome: "unavailable" }
+  | { outcome: "error" };
+
+/** Images du catalogue Prism pour "Déployer en VM" — jamais rejeté (un 404 signifie que la route
+ * backend n'existe pas encore : état vide explicite côté modale, pas un toast d'erreur). */
+export const fetchNutanixImages = createAsyncThunk<FetchNutanixImagesResult, void>("nutanix/fetchImages", async () => {
+  try {
+    const items = await apiGet<NutanixImageSummary[]>("/nutanix/images");
+    return { outcome: "ok", items };
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return { outcome: "unavailable" };
+    return { outcome: "error" };
+  }
+});
 
 /** Ajout d'un disque SCSI — voir POST /api/nutanix/vms/:uuid/disks (services/nutanix.ts#
  * addNutanixVmDisk : storage container recopié d'un disque existant de la VM). Appelé UNIQUEMENT
@@ -190,6 +211,20 @@ const nutanixSlice = createSlice({
       })
       .addCase(fetchNutanixSubnets.fulfilled, (state, action) => {
         state.subnets = action.payload;
+      })
+      .addCase(fetchNutanixImages.pending, (state) => {
+        if (state.imagesStatus === "idle") state.imagesStatus = "loading";
+      })
+      .addCase(fetchNutanixImages.fulfilled, (state, action) => {
+        if (action.payload.outcome === "ok") {
+          state.imagesStatus = "ready";
+          state.images = action.payload.items;
+        } else if (action.payload.outcome === "unavailable") {
+          state.imagesStatus = "unavailable";
+          state.images = [];
+        } else {
+          state.imagesStatus = "error";
+        }
       })
       // Même verrou actionPendingUuid pour les 3 mutations matérielles que pour le cycle de vie.
       .addCase(addNutanixVmDisk.pending, (state, action) => {

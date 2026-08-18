@@ -450,6 +450,26 @@ export interface NutanixVm {
   apiErrorMessage?: string;
 }
 
+/** Image disque/ISO du catalogue Nutanix (POST /images/list v3, forme vérifiée en lecture seule le
+ * 18/08/2026 sur l'instance réelle) — voir services/nutanix.ts#getNutanixImages. */
+export interface NutanixImageSummary {
+  uuid: string;
+  name: string;
+  /** status.resources.size_bytes — absent si Prism Central ne l'a pas renvoyé, jamais 0 fabriqué. */
+  sizeBytes?: number;
+  /** "DISK_IMAGE" ou "ISO_IMAGE" (valeurs réelles observées), brut de Prism Central. */
+  imageType?: string;
+}
+
+/** Suivi d'une tâche asynchrone Prism Central (GET /tasks/{uuid} v3 — réponse PLATE, sans enveloppe
+ * metadata/spec/status, vérifié en conditions réelles le 18/08/2026) — voir services/nutanix.ts#getNutanixTask. */
+export interface NutanixTaskStatus {
+  uuid: string;
+  /** Brut de Prism Central ("RUNNING"/"SUCCEEDED"/"FAILED"... — valeur réelle observée : "RUNNING"). */
+  status: string;
+  percentageComplete?: number;
+}
+
 export interface GitOpsFile {
   path: string; // ex: "prod/nginx.yaml"
   desiredManifest: string; // YAML brut
@@ -791,7 +811,11 @@ export interface DiffResult {
 // template.pkr.hcl...), un "run" est une invocation réelle de ce binaire dont la sortie est
 // journalisée en direct.
 
-export type IacEngine = "tofu" | "ansible" | "packer";
+// "docker" (18/08/2026) : chemin de build réel `docker build` pour les templates d'images
+// conteneur (voir services/templates.ts) — jamais proposé par POST /api/iac/workspaces
+// (VALID_ENGINES, routes/iac.ts, inchangé) : réservé aux workspaces créés par le catalogue de
+// templates.
+export type IacEngine = "tofu" | "ansible" | "packer" | "docker";
 
 export interface IacEngineStatus {
   engine: IacEngine;
@@ -824,11 +848,61 @@ export interface IacRun {
   finishedAt: string | null;
   exitCode: number | null;
   startedBy: string; // username
+  /** Artefact RÉELLEMENT produit par un run réussi, quand le run a été lancé avec une capture
+   * d'artefact (voir services/iac/runner.ts#StartRunOptions#captureArtifact — builds de templates
+   * d'images uniquement pour ce lot) : manifest du post-processor Packer parsé après coup, ou tag
+   * de l'image `docker build`. Absent pour un run échoué, sans capture demandée, ou dont le
+   * manifest n'a pas pu être lu — jamais une référence inventée. */
+  artifact?: ImageTemplateArtifact;
 }
 
 /** IacRun + le log complet (stdout+stderr entrelacés) — chargé à la demande, pas dans la liste des runs. */
 export interface IacRunDetail extends IacRun {
   log: string;
+}
+
+// --- Catalogue de templates d'images (VM Nutanix via Packer, conteneurs via docker build) ---
+// Voir apps/api/src/services/templatesStore.ts (persistance JSON 0600) et
+// apps/api/src/services/templates.ts (génération des fichiers de build dans un workspace IaC
+// réel + lancement des builds via services/iac/runner.ts). Contrat consommé par les routes
+// /api/templates (routes/templates.ts) — frontend développé en parallèle contre ce contrat.
+
+export type ImageTemplateKind = "vm-ubuntu" | "container-scratch" | "container-alpine";
+
+export type ImageTemplateStatus = "draft" | "building" | "ready" | "error";
+
+/** Artefact réel d'un build réussi : image disque Nutanix créée par `packer build` (référence =
+ * nom/uuid lu dans le manifest du post-processor, jamais deviné) ou image Docker locale
+ * (référence = tag passé à `docker build -t`). */
+export interface ImageTemplateArtifact {
+  type: "nutanix-image" | "docker-image";
+  reference: string;
+}
+
+export interface ImageTemplateLastBuild {
+  runId: string;
+  status: IacRunStatus;
+  finishedAt?: string;
+  artifact?: ImageTemplateArtifact;
+}
+
+export interface ImageTemplate {
+  id: string; // uuid
+  name: string;
+  kind: ImageTemplateKind;
+  /** "24.04"/"26.04" pour vm-ubuntu (jamais résolue en nom de code inventé : l'URL cloud-images
+   * d'Ubuntu est indexée par numéro de version), tag alpine pour container-alpine, "" pour
+   * container-scratch. */
+  baseVersion: string;
+  /** Composants cochés (ex ["docker", "docker-compose"]) — validés contre le catalogue par kind
+   * (voir services/templates.ts#COMPONENT_CATALOG), jamais interpolés tels quels dans un shell. */
+  components: string[];
+  status: ImageTemplateStatus;
+  /** Workspace IaC réel (services/iac/workspaces.ts) contenant les fichiers de build générés. */
+  workspaceId: string;
+  createdAt: string; // ISO 8601
+  updatedAt: string; // ISO 8601
+  lastBuild?: ImageTemplateLastBuild;
 }
 
 // --- Topologie (graphe visuel type Railway — voir services/topology.ts) ---
@@ -856,6 +930,7 @@ export type TopologyNodeKind =
   | "cron-job"
   | "backup"
   | "iac-workspace"
+  | "image-template"
   | "gitops-source"
   | "automation-trigger"
   | "automation-condition"
@@ -1031,6 +1106,20 @@ export interface TopologyNode {
    * détail (topologyGraphShared.tsx ne peut pas la redériver depuis les 4 valeurs génériques).
    */
   iacLastRunStatus?: IacRunStatus | null;
+  /**
+   * Nœuds "image-template" UNIQUEMENT (voir services/templates.ts, getImageTemplateNodes côté
+   * topology.ts) : kind/statut PRÉCIS du template — `status` générique du graphe en est une
+   * projection (draft -> "neutral" ; building -> "restarting" ; ready -> "running" ; error ->
+   * "stopped"), ce champ porte la valeur exacte pour le panneau de détail.
+   */
+  templateKind?: ImageTemplateKind;
+  templateStatus?: ImageTemplateStatus;
+  /** Nœuds "image-template" UNIQUEMENT : workspace IaC lié (panneau de détail — fichiers/builds). */
+  templateWorkspaceId?: string;
+  /** Nœuds "image-template" UNIQUEMENT : artefact du dernier build réussi, aplati (contrat
+   * frontend topologyNodeContract.tsx) — absent tant qu'aucun build n'a produit d'artefact réel. */
+  templateArtifactType?: ImageTemplateArtifact["type"];
+  templateArtifactReference?: string;
   /**
    * Volumes/networks uniquement : `true` si cette ressource n'est actuellement rattachée à AUCUN
    * conteneur (voir services/topology.ts § "Volumes/networks ORPHELINS") — reste un vrai nœud
@@ -1468,6 +1557,8 @@ export interface GithubDetectionCandidate {
   hasTerraform: boolean;
   terraformFiles: string[];
   hasAnsible: boolean;
+  hasPacker: boolean;
+  packerFiles: string[];
 }
 
 /** Un service docker-compose candidat pour recevoir la route de sous-domaine — services qui ne
@@ -1497,6 +1588,9 @@ export interface GithubRepoDetection {
   hasAnsible: boolean;
   /** Nom du fichier playbook trouvé ("playbook.yml"/"site.yml"/variantes .yaml) — absent si hasAnsible est false. */
   ansiblePlaybook?: string;
+  /** Fichiers *.pkr.hcl trouvés à l'emplacement retenu (templates Packer) — [] si aucun. */
+  hasPacker: boolean;
+  packerFiles: string[];
   /** Dernière instruction EXPOSE trouvée dans le Dockerfile de l'emplacement retenu (lecture réelle du
    * contenu du fichier via l'API Contents GitHub) — absent si aucun Dockerfile ou aucune
    * instruction EXPOSE, jamais une valeur devinée par convention. Pré-remplit le champ "port"

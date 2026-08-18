@@ -25,7 +25,7 @@ afterEach(() => {
 });
 
 describe("chooseDeploymentEngine — priorité compose > Dockerfile > Terraform > Ansible > rien", () => {
-  const base = { hasDockerfile: false, hasCompose: false, terraformFiles: [] as string[], hasAnsible: false };
+  const base = { hasDockerfile: false, hasCompose: false, terraformFiles: [] as string[], hasAnsible: false, packerFiles: [] as string[] };
 
   it("docker-compose ET Dockerfile présents au même endroit -> compose l'emporte (sur-ensemble strict)", () => {
     expect(github.chooseDeploymentEngine({ ...base, hasDockerfile: true, hasCompose: true })).toBe("compose");
@@ -53,6 +53,14 @@ describe("chooseDeploymentEngine — priorité compose > Dockerfile > Terraform 
 
   it("Terraform ET Ansible -> terraform l'emporte", () => {
     expect(github.chooseDeploymentEngine({ ...base, terraformFiles: ["main.tf"], hasAnsible: true })).toBe("terraform");
+  });
+
+  it("Packer seul (aucun autre mécanisme) -> packer", () => {
+    expect(github.chooseDeploymentEngine({ ...base, packerFiles: ["ubuntu.pkr.hcl"] })).toBe("packer");
+  });
+
+  it("Ansible ET Packer -> ansible l'emporte (packer en dernier recours)", () => {
+    expect(github.chooseDeploymentEngine({ ...base, hasAnsible: true, packerFiles: ["ubuntu.pkr.hcl"] })).toBe("ansible");
   });
 
   it("rien du tout -> none", () => {
@@ -101,6 +109,20 @@ describe("summarizeEntries — détection Dockerfile/docker-compose/Terraform/An
   it("ignore les dossiers (type 'dir') — seuls les fichiers comptent", () => {
     const s = github.summarizeEntries([{ name: "Dockerfile", type: "dir" }]);
     expect(s.hasDockerfile).toBe(false);
+  });
+
+  it("détecte les templates Packer (*.pkr.hcl), jamais un .hcl quelconque", () => {
+    const s = github.summarizeEntries([
+      { name: "ubuntu.pkr.hcl", type: "file" },
+      { name: "variables.pkr.hcl", type: "file" },
+      { name: "terragrunt.hcl", type: "file" },
+    ]);
+    expect(s.packerFiles).toEqual(["ubuntu.pkr.hcl", "variables.pkr.hcl"]);
+  });
+
+  it("aucun fichier Packer -> packerFiles [] (jamais fabriqué)", () => {
+    const s = github.summarizeEntries([{ name: "README.md", type: "file" }]);
+    expect(s.packerFiles).toEqual([]);
   });
 });
 

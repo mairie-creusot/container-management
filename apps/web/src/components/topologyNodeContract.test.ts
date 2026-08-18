@@ -44,6 +44,7 @@ const ALL_KINDS_RECORD: Record<TopologyNodeKind, true> = {
   "automation-trigger": true,
   "automation-condition": true,
   "automation-action": true,
+  "image-template": true,
 };
 const ALL_KINDS = Object.keys(ALL_KINDS_RECORD).sort() as TopologyNodeKind[];
 
@@ -79,7 +80,7 @@ describe("NODE_CONTRACT — totalité et conventions transverses", () => {
   });
 
   it("un kind jamais connectable déclare EXPLICITEMENT ports: [] (jamais une absence implicite)", () => {
-    for (const kind of ["ad-server", "iac-workspace", "cron-job", "backup", "gitops-source"] as const) {
+    for (const kind of ["ad-server", "iac-workspace", "cron-job", "backup", "gitops-source", "image-template"] as const) {
       expect(NODE_CONTRACT[kind].ports).toEqual([]);
     }
   });
@@ -436,6 +437,48 @@ describe("buildNodeMenuItems — la liste vit dans le contrat, les callbacks che
     for (const kind of ["volume", "network", "host", "ad-server", "iac-workspace", "automation-trigger"] as const) {
       expect(quickLifecycleActions(node(kind)), kind).toEqual([]);
     }
+  });
+
+  it("image-template : actions conditionnées à l'état réel du template (artifact/statut), Supprimer en danger", () => {
+    const handlers: Record<string, () => void> = {};
+    for (const id of [
+      "image-template-build",
+      "image-template-view-builds",
+      "image-template-deploy-vm",
+      "image-template-create-container",
+      "image-template-remove",
+    ]) {
+      handlers[id] = () => {};
+    }
+    // Sans artifact : jamais de "Déployer en VM"/"Créer un conteneur" (rien de construit à déployer).
+    expect(buildNodeMenuItems(node("image-template", { templateStatus: "draft" }), handlers).map((i) => i.label)).toEqual([
+      "Construire",
+      "Voir les builds",
+      "Supprimer",
+    ]);
+    // Build en cours : "Construire" masqué (jamais deux builds concurrents proposés depuis le menu).
+    expect(buildNodeMenuItems(node("image-template", { templateStatus: "building" }), handlers).map((i) => i.label)).toEqual([
+      "Voir les builds",
+      "Supprimer",
+    ]);
+    // Artifact Nutanix -> Déployer en VM ; artifact Docker -> Créer un conteneur (jamais les deux).
+    const nutanixReady = node("image-template", { templateStatus: "ready", templateArtifactType: "nutanix-image" });
+    expect(buildNodeMenuItems(nutanixReady, handlers).map((i) => i.label)).toEqual([
+      "Construire",
+      "Voir les builds",
+      "Déployer en VM…",
+      "Supprimer",
+    ]);
+    const dockerReady = node("image-template", { templateStatus: "ready", templateArtifactType: "docker-image" });
+    expect(buildNodeMenuItems(dockerReady, handlers).map((i) => i.label)).toEqual([
+      "Construire",
+      "Voir les builds",
+      "Créer un conteneur…",
+      "Supprimer",
+    ]);
+    expect(buildNodeMenuItems(dockerReady, handlers).find((i) => i.label === "Supprimer")?.danger).toBe(true);
+    // Aucun bouton rapide de cycle de vie sur la carte (pas un conteneur/VM).
+    expect(quickLifecycleActions(node("image-template"))).toEqual([]);
   });
 
   it("nœuds d'automatisation : Supprimer (danger) pour les trois kinds", () => {

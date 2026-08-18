@@ -50,6 +50,12 @@
  *                                          Prism Central remonte TEL QUEL (502 + message réel),
  *                                          jamais masqué (services/nutanix.ts#
  *                                          updateNutanixVmCompute).
+ * GET    /api/nutanix/images             — images du catalogue (uuid/nom/taille/type), tout rôle authentifié.
+ * POST   /api/nutanix/images             — crée une image DISK_IMAGE depuis une URL ({ name, sourceUri }).
+ * POST   /api/nutanix/vms                — crée une VM depuis une image (+ cloud-init optionnel) et la démarre
+ *                                          (services/nutanix.ts#createNutanixVm — le body contient un SECRET,
+ *                                          jamais loggé/échoïsé).
+ * GET    /api/nutanix/tasks/:uuid        — suivi d'une tâche asynchrone ({ uuid, status, percentageComplete? }).
  * GET    /api/nutanix/vms/:uuid/console (WebSocket) — console VNC RÉELLE de la VM (clavier/souris,
  *                                          voir services/nutanix.ts#getNutanixVmConsoleTarget pour
  *                                          le mécanisme exact vérifié en conditions réelles) —
@@ -90,8 +96,12 @@ import { recordAuditEvent } from "../services/auditLog.js";
 import {
   addNutanixVmDisk,
   addNutanixVmNic,
+  createNutanixImage,
+  createNutanixVm,
   deleteNutanixVm,
+  getNutanixImages,
   getNutanixSubnets,
+  getNutanixTask,
   getNutanixVmConsoleTarget,
   getNutanixVms,
   migrateNutanixVm,
@@ -102,6 +112,7 @@ import {
   testNutanixConnection,
   updateNutanixVmCompute,
 } from "../services/nutanix.js";
+import type { NutanixGuestCustomizationInput } from "../services/nutanix.js";
 import { clearNutanixConfig, getEffectiveNutanixConfig, setNutanixConfig } from "../services/setupStore.js";
 import type { SetupNutanixConfig } from "../services/setupStore.js";
 import type { NutanixConfig, NutanixStatus } from "../types.js";
@@ -308,6 +319,114 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
       }
     },
   );
+
+  // --- Étage "déploiement" (images + création de VM cloud-init + suivi de tâche — voir
+  // services/nutanix.ts, section du 18/08/2026) : GET ouverts à tout rôle authentifié (garde
+  // globale plugins/auth.ts), mutations operator/admin + audit automatique. Le body de POST /vms
+  // contient un SECRET (guestCustomization.password/clé) : jamais loggé/audité (l'audit ne
+  // journalise que méthode+chemin, voir plugins/audit.ts), jamais échoïsé dans une erreur. -------
+
+  fastify.get("/api/nutanix/images", async (_request, reply) => {
+    return reply.send(await getNutanixImages());
+  });
+
+  fastify.post<{ Body: { name?: string; sourceUri?: string } }>("/api/nutanix/images", async (request, reply) => {
+    const name = request.body?.name?.trim();
+    const sourceUri = request.body?.sourceUri?.trim();
+    if (!name || !sourceUri) {
+      return reply.code(400).send({ error: "name and sourceUri are required" });
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(sourceUri);
+    } catch {
+      return reply.code(400).send({ error: "sourceUri must be a valid URL" });
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return reply.code(400).send({ error: "sourceUri must be an http(s) URL" });
+    }
+    try {
+      return reply.send(await createNutanixImage({ name, sourceUri }));
+    } catch (err) {
+      sendNutanixActionError(reply, err);
+    }
+  });
+
+  fastify.post<{
+    Body: {
+      name?: string;
+      imageUuid?: string;
+      subnetUuid?: string;
+      numVcpus?: number;
+      numCoresPerVcpu?: number;
+      memoryMib?: number;
+      diskSizeMib?: number;
+      guestCustomization?: { hostname?: string; username?: string; password?: string; sshAuthorizedKey?: string };
+    };
+  }>("/api/nutanix/vms", async (request, reply) => {
+    const body = request.body ?? {};
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    const imageUuid = typeof body.imageUuid === "string" ? body.imageUuid.trim() : "";
+    const subnetUuid = typeof body.subnetUuid === "string" ? body.subnetUuid.trim() : "";
+    if (!name || !imageUuid || !subnetUuid) {
+      return reply.code(400).send({ error: "name, imageUuid and subnetUuid are required" });
+    }
+    for (const [key, value] of Object.entries({
+      numVcpus: body.numVcpus,
+      numCoresPerVcpu: body.numCoresPerVcpu,
+      memoryMib: body.memoryMib,
+      diskSizeMib: body.diskSizeMib,
+    })) {
+      if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) {
+        return reply.code(400).send({ error: `${key} must be a number` });
+      }
+    }
+    if (body.numVcpus === undefined || body.memoryMib === undefined) {
+      return reply.code(400).send({ error: "numVcpus and memoryMib are required" });
+    }
+    let guestCustomization: NutanixGuestCustomizationInput | undefined;
+    if (body.guestCustomization !== undefined) {
+      const gc = body.guestCustomization;
+      if (typeof gc !== "object" || gc === null || typeof gc.username !== "string" || !gc.username) {
+        return reply.code(400).send({ error: "guestCustomization.username is required when guestCustomization is provided" });
+      }
+      for (const [key, value] of Object.entries({ hostname: gc.hostname, password: gc.password, sshAuthorizedKey: gc.sshAuthorizedKey })) {
+        if (value !== undefined && typeof value !== "string") {
+          return reply.code(400).send({ error: `guestCustomization.${key} must be a string` });
+        }
+      }
+      guestCustomization = {
+        username: gc.username,
+        ...(gc.hostname !== undefined ? { hostname: gc.hostname } : {}),
+        ...(gc.password !== undefined ? { password: gc.password } : {}),
+        ...(gc.sshAuthorizedKey !== undefined ? { sshAuthorizedKey: gc.sshAuthorizedKey } : {}),
+      };
+    }
+    try {
+      return reply.send(
+        await createNutanixVm({
+          name,
+          imageUuid,
+          subnetUuid,
+          numVcpus: body.numVcpus,
+          memoryMib: body.memoryMib,
+          ...(body.numCoresPerVcpu !== undefined ? { numCoresPerVcpu: body.numCoresPerVcpu } : {}),
+          ...(body.diskSizeMib !== undefined ? { diskSizeMib: body.diskSizeMib } : {}),
+          ...(guestCustomization !== undefined ? { guestCustomization } : {}),
+        }),
+      );
+    } catch (err) {
+      sendNutanixActionError(reply, err);
+    }
+  });
+
+  fastify.get<{ Params: { uuid: string } }>("/api/nutanix/tasks/:uuid", async (request, reply) => {
+    try {
+      return reply.send(await getNutanixTask(request.params.uuid));
+    } catch (err) {
+      sendNutanixActionError(reply, err);
+    }
+  });
 
   // --- Console VNC réelle d'une VM (voir en-tête de fichier + services/nutanix.ts#
   // getNutanixVmConsoleTarget pour le mécanisme). ADMIN UNIQUEMENT — restriction délibérément PLUS

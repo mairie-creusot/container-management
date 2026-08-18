@@ -94,6 +94,12 @@ import {
   updateNutanixVmCompute,
   type NutanixVmLifecycleAction,
 } from "@/features/nutanix/nutanixSlice";
+// Fabrique de templates (assistant de création, build + poll de suivi, déploiement en VM) — voir
+// features/templates/* : POST /api/templates réels, 404 = backend pas encore là (état vide explicite).
+import { buildTemplate, deleteTemplate, fetchTemplates } from "@/features/templates/templatesSlice";
+import TemplateCreateModal from "@/features/templates/TemplateCreateModal";
+import DeployVmModal from "@/features/templates/DeployVmModal";
+import TemplateBuildsPopover from "@/features/templates/TemplateBuildsPopover";
 import type { IacEngine } from "@/types";
 // Registre déclaratif des kinds (voir topologyNodeContract.tsx#NODE_CONTRACT) — ports, actions de
 // menu par kind, colonne par défaut : ce composant n'est plus qu'un consommateur générique qui
@@ -346,6 +352,9 @@ interface CreatePopoverProps {
   x: number;
   y: number;
   onClose: () => void;
+  /** Image pré-remplie (kind "container" uniquement) — ex : "Créer un conteneur" depuis l'artifact
+   * docker-image d'un nœud template. */
+  initialImage?: string;
 }
 
 const CREATE_TITLE: Record<CreatableKind, string> = {
@@ -356,10 +365,10 @@ const CREATE_TITLE: Record<CreatableKind, string> = {
 
 /** Popover de création rapide (clic droit sur le canevas) — réutilise les mêmes thunks Redux
  * que ContainersPage/VolumesPage/NetworksPage, en version minimale positionnée près du clic. */
-function CreatePopover({ kind, x, y, onClose }: CreatePopoverProps) {
+function CreatePopover({ kind, x, y, onClose, initialImage }: CreatePopoverProps) {
   const dispatch = useAppDispatch();
   const { ref, style } = useDismiss(onClose, x, y);
-  const [image, setImage] = useState("");
+  const [image, setImage] = useState(initialImage ?? "");
   const [name, setName] = useState("");
   const [ports, setPorts] = useState("");
   const [driver, setDriver] = useState("bridge");
@@ -655,13 +664,16 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
   // "Ajouter un environnement Docker distant…" : monte la VRAIE modale extraite
   // (RemoteEnvironmentCreateModal.tsx) — même bascule interne que showGithubDeploy ci-dessus.
   const [showRemoteEnvCreate, setShowRemoteEnvCreate] = useState(false);
+  // "Créer un template" (fabrique de templates) : modale portée document.body, même bascule/garde
+  // useDismiss que showGithubDeploy/showRemoteEnvCreate ci-dessus.
+  const [showTemplateCreate, setShowTemplateCreate] = useState(false);
   // useDismiss ferme sur clic hors de `ref`/Échap — mais une fois la modal GitHub (ou celle de
   // création d'environnement) ouverte, son contenu vit dans un portail document.body (Modal.tsx),
   // donc HORS de `ref` : sans ce garde-fou, le premier clic à l'intérieur de la modal (un repo, un
   // champ...) la refermerait aussitôt. Modal.tsx gère alors seule Échap/clic-extérieur pour son
   // propre contenu.
   const { ref, style } = useDismiss(() => {
-    if (!showGithubDeploy && !showRemoteEnvCreate) onClose();
+    if (!showGithubDeploy && !showRemoteEnvCreate && !showTemplateCreate) onClose();
   }, x, y);
 
   // Conteneurs "running" pour le sélecteur du formulaire "Nouveau Cron Job" — chargés seulement une
@@ -1370,6 +1382,11 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
     return <RemoteEnvironmentCreateModal open onClose={onClose} />;
   }
 
+  // Assistant "Créer un template" (fabrique de templates) — même montage par-dessus le canevas.
+  if (showTemplateCreate) {
+    return <TemplateCreateModal onClose={onClose} />;
+  }
+
   if (showGithubDeploy) {
     return (
       <Modal open onClose={onClose} labelledBy="graph-github-deploy-title">
@@ -1451,6 +1468,16 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
     description: "OpenTofu, Ansible ou Packer réels, pilotés directement depuis un workspace du graphe.",
     icon: KIND_ICON["iac-workspace"],
     onSelect: () => setShowIacCreate(true),
+  };
+
+  // "Créer un template" (fabrique de templates) : base Ubuntu/Alpine/scratch + composants + build
+  // suivi — POST /api/templates réel, 404 backend géré par un état vide explicite.
+  const templateAction: SpotlightAction = {
+    id: "create-image-template",
+    title: "Créer un template d'image",
+    description: "VM Ubuntu (Packer sur le cluster) ou conteneur Alpine/scratch, composants à cocher, build suivi jusqu'au bout.",
+    icon: KIND_ICON["image-template"],
+    onSelect: () => setShowTemplateCreate(true),
   };
 
   // "Nouveau Cron Job"/"Nouvelle sauvegarde" (mission A.4/B.4) — remplacent les anciennes pages
@@ -1547,6 +1574,7 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
   const filteredKindActions = filterActions(kindActions);
   const filteredPresetActions = filterActions(presetActions);
   const filteredIacActions = filterActions([iacWorkspaceAction]);
+  const filteredTemplateActions = filterActions([templateAction]);
   const filteredCronJobActions = filterActions([cronJobAction]);
   const filteredBackupActions = filterActions([backupAction]);
   const filteredAutomationActions = filterActions([triggerAction, conditionAction, automationActionSpotlightAction]);
@@ -1556,6 +1584,7 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
     filteredKindActions.length > 0 ||
     filteredPresetActions.length > 0 ||
     filteredIacActions.length > 0 ||
+    filteredTemplateActions.length > 0 ||
     filteredCronJobActions.length > 0 ||
     filteredBackupActions.length > 0 ||
     filteredAutomationActions.length > 0 ||
@@ -1593,6 +1622,13 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
         {filteredIacActions.length > 0 && (
           <div className="graph-spotlight__group">
             {filteredIacActions.map((action) => (
+              <SpotlightRow key={action.id} action={action} />
+            ))}
+          </div>
+        )}
+        {filteredTemplateActions.length > 0 && (
+          <div className="graph-spotlight__group">
+            {filteredTemplateActions.map((action) => (
               <SpotlightRow key={action.id} action={action} />
             ))}
           </div>
@@ -2526,7 +2562,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [edgeMenu, setEdgeMenu] = useState<{ x: number; y: number; id: string; source: string; target: string; kind: string } | null>(
     null,
   );
-  const [popover, setPopover] = useState<{ kind: CreatableKind; x: number; y: number } | null>(null);
+  const [popover, setPopover] = useState<{ kind: CreatableKind; x: number; y: number; initialImage?: string } | null>(null);
   const [renamePopover, setRenamePopover] = useState<{ containerId: string; initialName: string; x: number; y: number } | null>(
     null,
   );
@@ -2562,6 +2598,15 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [nutanixDiskPopover, setNutanixDiskPopover] = useState<{ node: TopologyNode; x: number; y: number } | null>(null);
   const [nutanixNicPopover, setNutanixNicPopover] = useState<{ node: TopologyNode; x: number; y: number } | null>(null);
   const [nutanixComputePopover, setNutanixComputePopover] = useState<{ node: TopologyNode; x: number; y: number } | null>(null);
+  // Fabrique de templates : popover "Voir les builds" + modale "Déployer en VM" d'un nœud template.
+  const [templateBuildsPopover, setTemplateBuildsPopover] = useState<{
+    templateId: string;
+    templateName: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [deployVmModal, setDeployVmModal] = useState<{ templateName: string; artifactReference: string } | null>(null);
+  const templates = useAppSelector((s) => s.templates.items);
   // Verrous "action en cours" (boutons rapides des cartes, 18/08/2026) — mêmes sources que le
   // panneau de détail (nutanix.actionPendingUuid) et la page Conteneurs (containers.actionPendingId).
   const nutanixActionPendingUuid = useAppSelector((s) => s.nutanix.actionPendingUuid);
@@ -2680,6 +2725,22 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   useEffect(() => {
     dispatch(fetchTopologyPositions());
   }, [dispatch]);
+
+  // Templates : liste chargée à l'ouverture (404 = backend absent, géré silencieusement par le
+  // slice) puis POLL de suivi UNIQUEMENT tant qu'un build tourne — même pattern que le poll des
+  // runs IaC (IacWorkspacePanel), les transitions building -> ready/error déclenchent le toast
+  // final + un rafraîchissement du graphe depuis fetchTemplates lui-même.
+  useEffect(() => {
+    dispatch(fetchTemplates());
+  }, [dispatch]);
+  const anyTemplateBuilding = templates.some((t) => t.status === "building");
+  useEffect(() => {
+    if (!anyTemplateBuilding) return;
+    const interval = setInterval(() => {
+      if (document.visibilityState === "visible") dispatch(fetchTemplates());
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [dispatch, anyTemplateBuilding]);
 
   /**
    * Disposition automatique en arbre de TOUTE la hiérarchie "host" du graphe (cluster Nutanix ->
@@ -3620,6 +3681,32 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     if (deleteAutomationNode.fulfilled.match(result)) dispatch(fetchTopology());
   }
 
+  /** "Construire" d'un nœud template — POST /api/templates/:id/build puis relance du fetch : le
+   * statut "building" démarre le poll de suivi (toast final à ready/error, voir fetchTemplates). */
+  async function handleTemplateBuild(templateId: string, templateName: string) {
+    const result = await dispatch(buildTemplate({ id: templateId }));
+    if (buildTemplate.fulfilled.match(result)) {
+      dispatch(pushNotification({ level: "info", message: `Build de « ${templateName} » lancé — suivi automatique jusqu'à la fin.` }));
+      dispatch(fetchTemplates());
+      dispatch(fetchTopology());
+    }
+  }
+
+  async function handleDeleteTemplate(templateId: string, templateName: string) {
+    const ok = await confirm({
+      title: "Supprimer le template",
+      description: `Confirmer la suppression du template « ${templateName} » ? Son workspace de build et son historique seront perdus.`,
+      confirmLabel: "Supprimer",
+      variant: "danger",
+    });
+    if (!ok) return;
+    const result = await dispatch(deleteTemplate({ id: templateId }));
+    if (deleteTemplate.fulfilled.match(result)) {
+      dispatch(pushNotification({ level: "success", message: `Template « ${templateName} » supprimé.` }));
+      dispatch(fetchTopology());
+    }
+  }
+
   function nodeMenuItems(node: TopologyNode, x: number, y: number): ContextMenuItem[] {
     const items: ContextMenuItem[] = [
       { label: "Voir le détail", onClick: () => openNodeDetail(node) },
@@ -3674,6 +3761,14 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       "container-attach": () => setAttachPicker({ x, y, node }),
       "host-add-environment": () => setRemoteEnvModalOpen(true),
       "host-create-vm": () => {}, // entrée désactivée "bientôt" — aucun backend de création de VM
+      // Fabrique de templates — visibilités déjà gardées par le contrat (artifact/statut réels).
+      "image-template-build": () => void handleTemplateBuild(id, node.label),
+      "image-template-view-builds": () => setTemplateBuildsPopover({ templateId: id, templateName: node.label, x, y }),
+      "image-template-deploy-vm": () =>
+        setDeployVmModal({ templateName: node.label, artifactReference: node.templateArtifactReference ?? "" }),
+      "image-template-create-container": () =>
+        setPopover({ kind: "container", x, y, ...(node.templateArtifactReference ? { initialImage: node.templateArtifactReference } : {}) }),
+      "image-template-remove": () => void handleDeleteTemplate(id, node.label),
     };
     items.push(...buildNodeMenuItems(node, actionHandlers));
     return items;
@@ -3980,7 +4075,33 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         />
       )}
 
-      {popover && <CreatePopover kind={popover.kind} x={popover.x} y={popover.y} onClose={() => setPopover(null)} />}
+      {popover && (
+        <CreatePopover
+          kind={popover.kind}
+          x={popover.x}
+          y={popover.y}
+          onClose={() => setPopover(null)}
+          {...(popover.initialImage ? { initialImage: popover.initialImage } : {})}
+        />
+      )}
+
+      {templateBuildsPopover && (
+        <TemplateBuildsPopover
+          templateId={templateBuildsPopover.templateId}
+          templateName={templateBuildsPopover.templateName}
+          x={templateBuildsPopover.x}
+          y={templateBuildsPopover.y}
+          onClose={() => setTemplateBuildsPopover(null)}
+        />
+      )}
+
+      {deployVmModal && (
+        <DeployVmModal
+          templateName={deployVmModal.templateName}
+          artifactReference={deployVmModal.artifactReference}
+          onClose={() => setDeployVmModal(null)}
+        />
+      )}
 
       {renamePopover && (
         <RenamePopover

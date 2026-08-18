@@ -7,6 +7,7 @@ import {
   IconContainers,
   IconGitOps,
   IconHostMachine,
+  IconImages,
   IconNetworks,
   IconPlay,
   IconServer,
@@ -323,7 +324,12 @@ export type NodeMenuActionId =
   | "network-remove"
   | "host-add-environment"
   | "host-create-vm"
-  | "automation-node-remove";
+  | "automation-node-remove"
+  | "image-template-build"
+  | "image-template-view-builds"
+  | "image-template-deploy-vm"
+  | "image-template-create-container"
+  | "image-template-remove";
 
 export interface NodeMenuActionSpec {
   id: NodeMenuActionId;
@@ -843,6 +849,30 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     automationStatusSeed: null,
     resourceAlerts: null,
     menuItems: [{ id: "automation-node-remove", label: "Supprimer", danger: true }],
+  },
+  // Template d'image (fabrique de templates, contrat types.ts#ImageTemplate) — le nœud topologie
+  // sera posé par le backend À VENIR : d'ici là ce kind compile et reste simplement invisible.
+  // ports: [] EXPLICITE (aucune arête serveur ne touche ce kind pour l'instant).
+  "image-template": {
+    icon: IconImages,
+    // Cyan clair — distinct du bleu ciel de backup (#0ea5e9), cohérent avec
+    // .topology-node--image-template dans topology.css.
+    minimapColor: "#22d3ee",
+    defaultColumnX: 4420,
+    ports: [],
+    edgeHealth: null,
+    automationStatusSeed: null,
+    resourceAlerts: null,
+    // Visibilités sur l'état RÉEL du template projeté sur le nœud (types.ts#TopologyNode#template*)
+    // — "Déployer en VM"/"Créer un conteneur" n'apparaissent qu'avec un artifact du bon type,
+    // jamais une action qui échouerait faute d'image construite.
+    menuItems: [
+      { id: "image-template-build", label: "Construire", visible: (n) => n.templateStatus !== "building" },
+      { id: "image-template-view-builds", label: "Voir les builds" },
+      { id: "image-template-deploy-vm", label: "Déployer en VM…", visible: (n) => n.templateArtifactType === "nutanix-image" },
+      { id: "image-template-create-container", label: "Créer un conteneur…", visible: (n) => n.templateArtifactType === "docker-image" },
+      { id: "image-template-remove", label: "Supprimer", danger: true },
+    ],
   },
 };
 

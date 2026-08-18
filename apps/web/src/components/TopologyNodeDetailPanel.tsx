@@ -77,6 +77,15 @@ import { deployGithubRepo, fetchGithubDeployments } from "@/features/github/gith
 // creer toute interface et la logique") — voir la section "VM Nutanix" plus bas dans ce fichier
 // pour le câblage complet (boutons + confirmation lourde "taper le nom de la VM" pour Supprimer).
 import { deleteNutanixVm, runNutanixVmAction, type NutanixVmLifecycleAction } from "@/features/nutanix/nutanixSlice";
+// Panneau "image-template" (fabrique de templates) — état réel du template + réutilisation du
+// panneau IaC ci-dessus pour son workspace de build (mission : "réutilise le panneau IaC existant").
+import { buildTemplate, fetchTemplates } from "@/features/templates/templatesSlice";
+import DeployVmModal from "@/features/templates/DeployVmModal";
+import {
+  TEMPLATE_KIND_LABEL,
+  TEMPLATE_STATUS_LABEL,
+  TEMPLATE_STATUS_SEMANTIC,
+} from "@/features/templates/templateCatalog";
 import TypeToConfirmDialog from "@/components/TypeToConfirmDialog";
 import type { ContainerMetricPoint, Topology, TopologyHostKind, TopologyNode, TopologyNodeKind } from "@/types";
 import type { AutomationRunLogEntry, BackupRun, CronJobRun } from "@/types";
@@ -264,7 +273,19 @@ function EnvVarRow({ entry }: { entry: string }) {
  * l'étend à "destroy" (détruit réellement l'infrastructure provisionnée, action au moins aussi
  * dangereuse qu'une suppression de workspace).
  */
-function IacWorkspacePanel({ node, operate, onClose }: { node: TopologyNode; operate: boolean; onClose: () => void }) {
+function IacWorkspacePanel({
+  node,
+  operate,
+  onClose,
+  showDelete = true,
+}: {
+  node: TopologyNode;
+  operate: boolean;
+  onClose: () => void;
+  /** false quand le workspace appartient à un template (ImageTemplatePanel) : sa suppression passe
+   * par la suppression du template lui-même, jamais par ce bouton. */
+  showDelete?: boolean;
+}) {
   const dispatch = useAppDispatch();
   const confirm = useConfirm();
   const workspaceId = idWithoutPrefix(node.id);
@@ -424,12 +445,141 @@ function IacWorkspacePanel({ node, operate, onClose }: { node: TopologyNode; ope
         </pre>
       )}
 
-      {operate && (
+      {operate && showDelete && (
         <div className="inspector-actions">
           <button type="button" className="btn btn-ghost btn-sm" onClick={() => void handleDeleteWorkspace()}>
             Supprimer le workspace
           </button>
         </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * Contenu du nœud "image-template" (fabrique de templates) — état réel du template (statut, base,
+ * composants, artifact du dernier build), action "Construire", "Déployer en VM" si un artifact
+ * nutanix-image existe, et RÉUTILISATION du panneau IaC ci-dessus (fichiers/logs du workspace de
+ * build, via ImageTemplate#workspaceId) — aucune logique de run dupliquée.
+ */
+function ImageTemplatePanel({ node, operate, onClose }: { node: TopologyNode; operate: boolean; onClose: () => void }) {
+  const dispatch = useAppDispatch();
+  const templateId = idWithoutPrefix(node.id);
+  const templates = useAppSelector((s) => s.templates.items);
+  const templatesAvailability = useAppSelector((s) => s.templates.availability);
+  const [deployOpen, setDeployOpen] = useState(false);
+  const [buildBusy, setBuildBusy] = useState(false);
+
+  useEffect(() => {
+    dispatch(fetchTemplates());
+  }, [dispatch, templateId]);
+
+  const template = templates.find((t) => t.id === templateId) ?? null;
+  // Le nœud (backend topologie) et la liste des templates portent la même vérité — le template
+  // liste prime quand il est là (plus riche : composants, lastBuild complet).
+  const status = template?.status ?? node.templateStatus ?? "draft";
+  const kind = template?.kind ?? node.templateKind;
+  const workspaceId = template?.workspaceId ?? node.templateWorkspaceId;
+  const artifact = template?.lastBuild?.artifact ?? null;
+  const artifactType = artifact?.type ?? node.templateArtifactType;
+  const artifactReference = artifact?.reference ?? node.templateArtifactReference;
+
+  async function handleBuild() {
+    setBuildBusy(true);
+    const result = await dispatch(buildTemplate({ id: templateId }));
+    setBuildBusy(false);
+    if (buildTemplate.fulfilled.match(result)) {
+      dispatch(fetchTemplates());
+      dispatch(fetchTopology());
+    }
+  }
+
+  return (
+    <>
+      <div className="chip-row topology-detail-panel__chips">
+        <span className={`status-pill status-pill--${TEMPLATE_STATUS_SEMANTIC[status]}`}>{TEMPLATE_STATUS_LABEL[status]}</span>
+        {kind && <span className="status-pill status-pill--neutral">{TEMPLATE_KIND_LABEL[kind]}</span>}
+        {template && <span className="status-pill status-pill--neutral">base {template.baseVersion}</span>}
+      </div>
+
+      {templatesAvailability === "unavailable" && (
+        <div className="empty-state">
+          Le backend de la fabrique de templates n'est pas encore disponible — ce nœud n'affiche que les données déjà connues du
+          graphe.
+        </div>
+      )}
+
+      {template && (
+        <>
+          <div className="inspector-section-title">Composants</div>
+          {template.components.length === 0 ? (
+            <div className="empty-state">Aucun composant sélectionné.</div>
+          ) : (
+            <div className="chip-row">
+              {template.components.map((c) => (
+                <span key={c} className="chip">
+                  {c}
+                </span>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {artifactType && artifactReference && (
+        <>
+          <div className="inspector-section-title">Artifact du dernier build</div>
+          <KeyValueList
+            rows={[
+              { key: "Type", value: artifactType === "nutanix-image" ? "Image Nutanix (AHV)" : "Image Docker" },
+              { key: "Référence", value: artifactReference },
+            ]}
+          />
+        </>
+      )}
+
+      {operate && (
+        <div className="iac-actions">
+          {status !== "building" && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => void handleBuild()} disabled={buildBusy}>
+              {buildBusy ? "…" : "Construire"}
+            </button>
+          )}
+          {artifactType === "nutanix-image" && artifactReference && (
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => setDeployOpen(true)}>
+              Déployer en VM…
+            </button>
+          )}
+        </div>
+      )}
+
+      {workspaceId ? (
+        <>
+          <div className="inspector-section-title">Workspace de build</div>
+          <IacWorkspacePanel
+            node={{
+              id: `iac-workspace:${workspaceId}`,
+              kind: "iac-workspace",
+              label: node.label,
+              subtitle: "Workspace de build du template",
+              status: node.status,
+              // Moteur réel non porté par le contrat template : Packer par défaut (builds VM), le
+              // serveur revalide de toute façon toute action lancée.
+              iacEngine: "packer",
+            }}
+            operate={operate}
+            onClose={onClose}
+            showDelete={false}
+          />
+        </>
+      ) : (
+        templatesAvailability === "available" && (
+          <div className="empty-state">Aucun workspace de build associé à ce template pour l'instant.</div>
+        )
+      )}
+
+      {deployOpen && artifactReference && (
+        <DeployVmModal templateName={node.label} artifactReference={artifactReference} onClose={() => setDeployOpen(false)} />
       )}
     </>
   );
@@ -2114,6 +2264,9 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
 
         {/* --- Workspace Infra-as-code (OpenTofu/Ansible/Packer réels, services/iac/*) ---------- */}
         {node.kind === "iac-workspace" && <IacWorkspacePanel node={node} operate={operate} onClose={onClose} />}
+
+        {/* --- Template d'image (fabrique de templates) --------------------------------- */}
+        {node.kind === "image-template" && <ImageTemplatePanel node={node} operate={operate} onClose={onClose} />}
 
         {/* --- Moteur d'automatisation (trigger -> condition -> action, services/automationStore.ts/
             services/automationEngine.ts) ------------------------------------------------------- */}
