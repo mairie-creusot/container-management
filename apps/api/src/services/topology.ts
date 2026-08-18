@@ -737,15 +737,23 @@ async function getAutomationNodes(): Promise<{ nodes: TopologyNode[]; edges: Top
   return { nodes: topologyNodes, edges: topologyEdges };
 }
 
-export async function getTopology(): Promise<Topology> {
+/** "local" (GET /api/topology?scope=local, premier rendu rapide) : saute les sources EXTERNES
+ * lentes (Nutanix, Docker distants, LXD, AD) — le frontend enchaîne aussitôt le fetch complet et
+ * remplace ce premier graphe partiel par le graphe entier dès qu'il est prêt. */
+export type TopologyScope = "full" | "local";
+
+export async function getTopology(scope: TopologyScope = "full"): Promise<Topology> {
   const docker = await getClient();
-  const { vmNodes: nutanixVmNodes, hostNodes: nutanixHostNodes, hostEdges: nutanixHostEdges } = await getNutanixTopologyParts();
-  const adServerNodes = await getAdServerNodes();
+  const external = scope === "full";
+  const { vmNodes: nutanixVmNodes, hostNodes: nutanixHostNodes, hostEdges: nutanixHostEdges } = external
+    ? await getNutanixTopologyParts()
+    : { vmNodes: [], hostNodes: [], hostEdges: [] };
+  const adServerNodes = external ? await getAdServerNodes() : [];
   // Nœuds "host" Docker distant/LXD : indépendants eux aussi de la joignabilité du démon LOCAL
   // (ce sont d'autres hôtes) — récupérés que Docker local soit joignable ou non, même principe que
   // Nutanix/ad-server ci-dessus.
-  const remoteDockerHostNodes = await getRemoteDockerHostNodes();
-  const lxcHostNodes = await getLxcHostNodes();
+  const remoteDockerHostNodes = external ? await getRemoteDockerHostNodes() : [];
+  const lxcHostNodes = external ? await getLxcHostNodes() : [];
   const localDockerNode = await getLocalDockerEnvNode();
   // Racine MASTER "QUAI" : chaque ENVIRONNEMENT (Docker local/distant, cluster Nutanix, LXD) s'y
   // rattache par une arête "hosts" — jamais les nœuds hors-infra (ad-server, cron, backup, iac,

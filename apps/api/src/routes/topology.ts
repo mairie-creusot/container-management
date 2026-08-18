@@ -73,8 +73,9 @@ interface UpdateGroupBody {
 }
 
 export default async function topologyRoutes(fastify: FastifyInstance): Promise<void> {
-  fastify.get("/api/topology", async (_request, reply) => {
-    return reply.send(await getTopology());
+  // ?scope=local : premier rendu rapide sans les sources externes lentes (voir getTopology).
+  fastify.get<{ Querystring: { scope?: string } }>("/api/topology", async (request, reply) => {
+    return reply.send(await getTopology(request.query.scope === "local" ? "local" : "full"));
   });
 
   fastify.get("/api/topology/positions", async (request, reply) => {

@@ -23,7 +23,12 @@ const initialState: TopologyState = {
   positionsStatus: "idle",
 };
 
-export const fetchTopology = createAsyncThunk<Topology>("topology/fetch", async () => apiGet<Topology>("/topology"));
+/** `scope: "local"` = premier rendu rapide sans les sources externes lentes (Nutanix, Docker
+ * distants, LXD, AD) — l'appelant enchaîne aussitôt le fetch complet, voir TopologyGraph.tsx. */
+export const fetchTopology = createAsyncThunk<Topology, { scope: "local" } | undefined>(
+  "topology/fetch",
+  async (arg) => apiGet<Topology>(arg?.scope === "local" ? "/topology?scope=local" : "/topology"),
+);
 
 export const fetchTopologyPositions = createAsyncThunk<NodePositions>(
   "topology/fetchPositions",
@@ -95,6 +100,9 @@ const topologySlice = createSlice({
         if (!state.data) state.status = "loading";
       })
       .addCase(fetchTopology.fulfilled, (state, action) => {
+        // Un graphe partiel "local" ne remplace jamais un graphe déjà affiché (complet ou non) :
+        // il ne sert qu'au premier paint, le fetch complet enchaîné apporte le reste.
+        if (action.meta.arg?.scope === "local" && state.data) return;
         state.status = "ready";
         state.data = action.payload;
       })
