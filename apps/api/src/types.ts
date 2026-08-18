@@ -553,6 +553,97 @@ export interface NutanixStatus {
   config?: NutanixConfig;
 }
 
+// --- HYCU (contrôleur de sauvegarde des VMs Nutanix, API REST /rest/v1.0 sur :8443) ----------
+// Intégration LECTURE SEULE (résumé/VMs protégées/policies/targets/jobs/events — voir
+// services/hycu.ts). Formes issues du wrapper CLI tusc/hycu (https://github.com/tusc/hycu) et
+// des codes de réponse observés sur l'appliance réelle — chaque champ non confirmé est optionnel,
+// jamais inventé. Config éditable en dehors de l'assistant, même pattern que NutanixConfig.
+
+/** Jamais le mot de passe (write-only, comme NutanixConfig ci-dessus). */
+export interface HycuConfig {
+  url: string;
+  username: string;
+}
+
+/** GET /api/hycu/config */
+export interface HycuConfigStatus {
+  configured: boolean;
+  config?: HycuConfig;
+}
+
+/** Une VM vue par HYCU (GET /rest/v1.0/vms). uuid/vmName/protectionGroupUuid confirmés par
+ * tusc/hycu (list_vm_backups_by_policy.sh, search_backups.py) ; les statuts de protection/
+ * conformité/dernière sauvegarde sont des champs supposés (dashboard HYCU réel les affiche),
+ * mappés UNIQUEMENT s'ils existent dans la réponse réelle — voir services/hycu.ts. */
+export interface HycuVm {
+  uuid: string;
+  vmName: string;
+  /** uuid de la policy assignée (protectionGroupUuid) — absent = VM non protégée. */
+  protectionGroupUuid?: string;
+  /** Nom de la policy, résolu par jointure avec /policies — jamais deviné. */
+  policyName?: string;
+  protectionStatus?: string;
+  complianceStatus?: string;
+  /** Epoch ms de la dernière sauvegarde (champ supposé, voir services/hycu.ts). */
+  lastBackupInMillis?: number;
+  status?: string;
+}
+
+/** Une policy HYCU (GET /rest/v1.0/policies) — uuid/name confirmés par tusc/hycu ;
+ * vmCount est calculé par QUAI (VMs dont protectionGroupUuid === uuid, même mécanisme que
+ * list_vm_backups_by_policy.sh), jamais lu d'un champ supposé. */
+export interface HycuPolicy {
+  uuid: string;
+  name: string;
+  vmCount: number;
+}
+
+/** Une target de sauvegarde (GET /rest/v1.0/targets) — name/totalSizeInBytes/freeSizeInBytes/
+ * totalUtilizationPct confirmés par tusc/hycu (get_target_pct.py/.sh) ; usedSizeInBytes est
+ * dérivé (total - free, même calcul que get_target_pct.py). */
+export interface HycuTarget {
+  uuid?: string;
+  name: string;
+  type?: string;
+  totalSizeInBytes?: number;
+  freeSizeInBytes?: number;
+  usedSizeInBytes?: number;
+  utilizationPct?: number;
+}
+
+/** Un job HYCU (GET /rest/v1.0/jobs) — `status` confirmé par tusc/hycu (get_error_warn.py :
+ * EXECUTING/OK/WARNING/ERROR) ; les autres champs sont supposés et mappés seulement si présents. */
+export interface HycuJob {
+  uuid?: string;
+  name?: string;
+  type?: string;
+  status: string;
+  startTimeInMillis?: number;
+  endTimeInMillis?: number;
+}
+
+/** Un événement HYCU (GET /rest/v1.0/events) — `severity` confirmé par tusc/hycu
+ * (get_error_warn.sh : ERROR/WARNING) ; les autres champs sont supposés. */
+export interface HycuEvent {
+  uuid?: string;
+  severity: string;
+  message?: string;
+  category?: string;
+  createdInMillis?: number;
+}
+
+/** GET /api/hycu/status — résumé calculé côté QUAI à partir des listes réelles (jamais un champ
+ * dashboard supposé : /rest/v1.0/dashboard n'existe PAS sur l'appliance, 404 observé). `null`
+ * pour chaque bloc si l'appel correspondant a échoué — jamais des zéros inventés. */
+export interface HycuStatusSummary {
+  configured: boolean;
+  reachable?: boolean;
+  vms?: { total: number; protectedCount: number };
+  policies?: { count: number };
+  targets?: { count: number; totalSizeInBytes: number; usedSizeInBytes: number };
+  jobs?: { total: number; byStatus: Record<string, number> };
+}
+
 // --- DNS Active Directory (mise à jour dynamique sécurisée, RFC 2136 + GSS-TSIG) --------------
 // QUAI ne réimplémente AUCUN client Kerberos/DNS : `kinit` (krb5-user) obtient un ticket pour le
 // compte de service configuré, `nsupdate -g` (bind9-dnsutils) l'utilise pour authentifier une

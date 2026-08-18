@@ -99,6 +99,13 @@ export const config = {
     tlsRejectUnauthorized: readBoolean("NUTANIX_TLS_REJECT_UNAUTHORIZED", false),
     requestTimeoutMs: readNumber("NUTANIX_REQUEST_TIMEOUT_MS", 8000),
   },
+  hycu: {
+    // L'appliance HYCU (contrôleur de sauvegarde, VM sur le cluster Nutanix) présente un
+    // certificat TLS auto-signé en déploiement on-prem — même principe et même périmètre limité
+    // que nutanix.tlsRejectUnauthorized ci-dessus, jamais NODE_TLS_REJECT_UNAUTHORIZED global.
+    tlsRejectUnauthorized: readBoolean("HYCU_TLS_REJECT_UNAUTHORIZED", false),
+    requestTimeoutMs: readNumber("HYCU_REQUEST_TIMEOUT_MS", 8000),
+  },
   registries: {
     requestTimeoutMs: readNumber("REGISTRY_REQUEST_TIMEOUT_MS", 5000),
     dockerhub: {

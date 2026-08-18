@@ -56,6 +56,21 @@ export interface SetupNutanixConfig {
 }
 
 /**
+ * HYCU (contrôleur de sauvegarde des VMs Nutanix, API REST /rest/v1.0 sur :8443) — stocké ICI,
+ * dans le même config.json que Nutanix, plutôt que dans un store dédié type remoteDockerStore :
+ * même nature exacte (une appliance interne unique, URL + identifiants, mot de passe chiffré au
+ * repos), même cycle de vie (configurable/retirable en dehors de l'assistant via
+ * /api/hycu/config). Cohérence d'abord — voir services/hycu.ts.
+ */
+export interface SetupHycuConfig {
+  // URL du contrôleur HYCU (ex: "https://172.20.0.100:8443").
+  url: string;
+  username: string;
+  // password : chiffré au repos (voir encryptSecrets ci-dessous), comme nutanix.password.
+  password: string;
+}
+
+/**
  * DNS Active Directory (RFC 2136 + GSS-TSIG, voir services/adDns.ts et types.ts#AdDnsConfig) —
  * config distincte de l'assistant de configuration au premier lancement (jamais requise pour
  * `completed`) : gérée en continu via GET/PUT/DELETE /api/ad-dns/config (routes/adDns.ts), même
@@ -106,6 +121,7 @@ export interface SetupConfig {
   docker?: SetupDockerConfig;
   kubernetes?: SetupKubernetesConfig;
   nutanix?: SetupNutanixConfig;
+  hycu?: SetupHycuConfig;
   registries?: SetupRegistryConfig[];
   adDns?: SetupAdDnsConfig;
 }
@@ -158,6 +174,9 @@ function encryptSecrets(cfg: SetupConfig): SetupConfig {
     ...(cfg.nutanix?.password
       ? { nutanix: { ...cfg.nutanix, password: encryptSecretIfNeeded(cfg.nutanix.password) } }
       : {}),
+    ...(cfg.hycu?.password
+      ? { hycu: { ...cfg.hycu, password: encryptSecretIfNeeded(cfg.hycu.password) } }
+      : {}),
     ...(cfg.adDns?.password
       ? { adDns: { ...cfg.adDns, password: encryptSecretIfNeeded(cfg.adDns.password) } }
       : {}),
@@ -178,6 +197,7 @@ function hasLegacyPlaintextSecret(cfg: SetupConfig): boolean {
   if (cfg.ldap && !isEncrypted(cfg.ldap.bindPassword)) return true;
   if (cfg.kubernetes?.kubeconfigYaml && !isEncrypted(cfg.kubernetes.kubeconfigYaml)) return true;
   if (cfg.nutanix?.password && !isEncrypted(cfg.nutanix.password)) return true;
+  if (cfg.hycu?.password && !isEncrypted(cfg.hycu.password)) return true;
   if (cfg.adDns?.password && !isEncrypted(cfg.adDns.password)) return true;
   if (cfg.registries?.some((r) => (r.password && !isEncrypted(r.password)) || (r.token && !isEncrypted(r.token)))) {
     return true;
@@ -436,6 +456,36 @@ export async function setNutanixConfig(input: SetupNutanixConfig): Promise<Setup
 export async function clearNutanixConfig(): Promise<SetupConfig> {
   const current = await getCurrent();
   const { nutanix: _removed, ...rest } = current;
+  const next: SetupConfig = rest;
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/** Config HYCU effective (mot de passe déchiffré), ou `null` si jamais configurée — même
+ * principe que getEffectiveNutanixConfig ci-dessus (aucun bootstrap par variable
+ * d'environnement : toujours une URL + des identifiants saisis explicitement). */
+export async function getEffectiveHycuConfig(): Promise<SetupHycuConfig | null> {
+  const current = await getCurrent();
+  if (!current.hycu) return null;
+  return { ...current.hycu, password: decryptSecret(current.hycu.password) };
+}
+
+/** PUT /api/hycu/config — configure/remplace HYCU (mot de passe chiffré avant écriture),
+ * n'affecte aucune autre section — même principe que setNutanixConfig ci-dessus. */
+export async function setHycuConfig(input: SetupHycuConfig): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const next: SetupConfig = encryptSecrets({ ...current, hycu: input });
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/** DELETE /api/hycu/config — retire la configuration HYCU (retour à "jamais configuré",
+ * toutes les routes GET /api/hycu/* redeviennent []/non configuré). */
+export async function clearHycuConfig(): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const { hycu: _removed, ...rest } = current;
   const next: SetupConfig = rest;
   await writeToDisk(next);
   cache = next;

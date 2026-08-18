@@ -27,6 +27,7 @@ import environmentsRoutes from "./routes/environments.js";
 import githubRoutes from "./routes/github.js";
 import githubWebhookRoutes from "./routes/githubWebhook.js";
 import gitopsRoutes from "./routes/gitops.js";
+import hycuRoutes from "./routes/hycu.js";
 import iacRoutes from "./routes/iac.js";
 import imagesRoutes from "./routes/images.js";
 import lxcRoutes from "./routes/lxc.js";
@@ -91,6 +92,7 @@ export function buildServer() {
   void fastify.register(topologyRoutes);
   void fastify.register(notificationsRoutes);
   void fastify.register(nutanixRoutes);
+  void fastify.register(hycuRoutes);
   void fastify.register(remoteEnvironmentsRoutes);
   void fastify.register(lxcRoutes);
   void fastify.register(reverseProxyRoutes);
