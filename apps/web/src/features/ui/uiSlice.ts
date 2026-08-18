@@ -12,7 +12,8 @@ export type ViewId =
   | "secrets"
   | "reverse-proxy"
   | "ad-dns"
-  | "notification-channels";
+  | "notification-channels"
+  | "hycu";
 
 interface UiState {
   currentView: ViewId;
@@ -65,6 +66,7 @@ export const NAV_ITEMS: { id: ViewId; label: string }[] = [
   { id: "containers", label: "Conteneurs" },
   { id: "reverse-proxy", label: "Reverse proxy" },
   { id: "clusters", label: "Environnements" },
+  { id: "hycu", label: "Sauvegardes" },
 ];
 
 const PAGE_TITLES: Partial<Record<ViewId, string>> = {

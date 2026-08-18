@@ -26,6 +26,7 @@ const NotificationChannelsPage = lazy(() => import("@/features/notificationChann
 const EnvironmentsPage = lazy(() => import("@/features/clusters/EnvironmentsPage"));
 const NotificationsPage = lazy(() => import("@/features/notifications/NotificationsPage"));
 const AuditPage = lazy(() => import("@/features/audit/AuditPage"));
+const HycuPage = lazy(() => import("@/features/hycu/HycuPage"));
 
 // Notifications système (watchdog proactif côté API — nouvelle version d'image, intégration
 // devenue injoignable/de nouveau joignable) : câblé ici plutôt que dans une page précise, pour
@@ -73,6 +74,8 @@ function renderView(view: string) {
       return <NotificationsPage />;
     case "audit":
       return <AuditPage />;
+    case "hycu":
+      return <HycuPage />;
     default:
       return <OverviewPage />;
   }

@@ -23,6 +23,7 @@ import backupsReducer from "@/features/backups/backupsSlice";
 import cronJobsReducer from "@/features/cronJobs/cronJobsSlice";
 import automationReducer from "@/features/automation/automationSlice";
 import nutanixReducer from "@/features/nutanix/nutanixSlice";
+import hycuReducer from "@/features/hycu/hycuSlice";
 import { errorNotificationMiddleware } from "@/features/notifications/errorNotificationMiddleware";
 
 export const store = configureStore({
@@ -51,6 +52,7 @@ export const store = configureStore({
     cronJobs: cronJobsReducer,
     automation: automationReducer,
     nutanix: nutanixReducer,
+    hycu: hycuReducer,
   },
   middleware: (getDefaultMiddleware) => getDefaultMiddleware().concat(errorNotificationMiddleware),
 });

@@ -23,6 +23,7 @@ import {
 } from "@/features/topology/topologySlice";
 import {
   addContainerEnv,
+  clearContainerConvergence,
   createContainer,
   fetchContainers,
   renameContainer,
@@ -86,6 +87,7 @@ import { fetchNotificationChannels } from "@/features/notificationChannels/notif
 import {
   addNutanixVmDisk,
   addNutanixVmNic,
+  clearNutanixVmConvergence,
   fetchNutanixSubnets,
   migrateNutanixVm,
   runNutanixVmAction,
@@ -198,6 +200,12 @@ const ROW_HEIGHT = 260;
  */
 const HOST_TREE_ANCHOR_X = -3000;
 const NETWORK_DRIVERS = ["bridge", "overlay", "host", "none"];
+
+/** Garde-fou : un arrêt ACPI ignoré par l'OS invité ne doit pas laisser une carte "pending" à vie. */
+const CONVERGENCE_TIMEOUT_MS = 5 * 60_000;
+function convergenceStillPending(entry: { expected: "running" | "stopped"; since: number } | undefined, status: string): boolean {
+  return entry !== undefined && status !== entry.expected && Date.now() - entry.since < CONVERGENCE_TIMEOUT_MS;
+}
 
 // Fil rendu nativement par React Flow pendant le drag — pointillé accent (maquette validée).
 const CONNECTION_LINE_STYLE: CSSProperties = { stroke: "var(--accent-end)", strokeWidth: 1.5, strokeDasharray: "6 4" };
@@ -2558,6 +2566,21 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   // panneau de détail (nutanix.actionPendingUuid) et la page Conteneurs (containers.actionPendingId).
   const nutanixActionPendingUuid = useAppSelector((s) => s.nutanix.actionPendingUuid);
   const containerActionPendingId = useAppSelector((s) => s.containers.actionPendingId);
+  // Convergence : la carte reste "pending" après un start/stop réussi jusqu'à ce que le poll
+  // constate l'état attendu (retour utilisateur du 18/08/2026 : "la transition doit rester jusqu'à
+  // arrêté ou le succès") — voir nutanixSlice/containersSlice#convergence.
+  const nutanixConvergence = useAppSelector((s) => s.nutanix.convergence);
+  const containerConvergence = useAppSelector((s) => s.containers.convergence);
+  // Purge des attentes de convergence satisfaites (état réel constaté au poll) ou expirées.
+  useEffect(() => {
+    for (const n of data?.nodes ?? []) {
+      const raw = idWithoutPrefix(n.id);
+      const entry = n.kind === "nutanix-vm" ? nutanixConvergence[raw] : n.kind === "container" ? containerConvergence[raw] : undefined;
+      if (entry && (n.status === entry.expected || Date.now() - entry.since >= CONVERGENCE_TIMEOUT_MS)) {
+        dispatch(n.kind === "nutanix-vm" ? clearNutanixVmConvergence(raw) : clearContainerConvergence(raw));
+      }
+    }
+  }, [data, nutanixConvergence, containerConvergence, dispatch]);
   // "Ajouter un environnement…" depuis un nœud cluster Nutanix — même modale réelle que le spotlight.
   const [remoteEnvModalOpen, setRemoteEnvModalOpen] = useState(false);
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
@@ -2700,12 +2723,13 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     const collapsedMemberIds = new Set(data.nodes.filter((n) => isHiddenAtRoot(n.id, parentGroupByMemberId)).map((n) => n.id));
     setFlowNodes((prev) => {
       const prevById = new Map(prev.map((n) => [n.id, n]));
-      // Scale-in d'un nœud dont l'id est inconnu du rendu précédent — jamais au premier chargement
-      // (le graphe entier apparaîtrait en pluie de pop-ins), voir .topology-node-new (topology.css).
-      const animateNew = prev.length > 0;
+      // Scale-in d'un nœud dont l'id est inconnu du rendu précédent — au premier chargement aussi
+      // (mission micro-interactions du 18/08/2026), mais en cascade douce via --enter-delay plutôt
+      // qu'une pluie de pop-ins simultanés, voir .topology-node-new (topology.css).
+      const isFirstRender = prev.length === 0;
       const nodes: Node[] = data.nodes
         .filter((n) => !collapsedMemberIds.has(n.id))
-        .map((n) => {
+        .map((n, nodeIndex) => {
           const row = columnCounters[n.kind]++;
           // Hiérarchie "host" (cluster/hôte/VM Nutanix, environnement Docker distant, hôte LXD) :
           // position par défaut calculée par l'arbre auto-disposé ci-dessus plutôt que la colonne
@@ -2756,7 +2780,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
                         onOpenAttachPicker: openAttachPicker,
                         // MÊMES handlers réels que le menu contextuel (confirmations comprises).
                         onQuickAction: (action: QuickLifecycleAction) => void handleContainerAction(rawActionId, n.label, action),
-                        actionPending: containerActionPendingId === rawActionId,
+                        actionPending:
+                          containerActionPendingId === rawActionId ||
+                          convergenceStillPending(containerConvergence[rawActionId], n.status),
                       }
                     : {}),
                 }
@@ -2764,14 +2790,23 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
                 ? {
                     onOpenAttachPicker: openAttachPicker,
                     onQuickAction: (action: QuickLifecycleAction) => void handleNutanixVmAction(rawActionId, n.label, action),
-                    actionPending: nutanixActionPendingUuid === rawActionId,
+                    actionPending:
+                      nutanixActionPendingUuid === rawActionId ||
+                      convergenceStillPending(nutanixConvergence[rawActionId], n.status),
                   }
                 : {};
           return {
             id: n.id,
             type: "graphNode",
             position,
-            ...(animateNew && !prevNode ? { className: "topology-node-new" } : {}),
+            ...(!prevNode
+              ? {
+                  className: "topology-node-new",
+                  ...(isFirstRender
+                    ? { style: { "--enter-delay": `${Math.min(nodeIndex * 30, 360)}ms` } as CSSProperties }
+                    : {}),
+                }
+              : {}),
             data: { ...n, ...callbacks } as unknown as Record<string, unknown>,
           };
         });
@@ -2806,7 +2841,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           id: group.id,
           type: "topologyGroupNode",
           position,
-          ...(animateNew && !prevGroupNode ? { className: "topology-node-new" } : {}),
+          ...(!prevGroupNode ? { className: "topology-node-new" } : {}),
           data: groupData as unknown as Record<string, unknown>,
         });
       }

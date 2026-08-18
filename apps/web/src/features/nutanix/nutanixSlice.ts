@@ -1,4 +1,4 @@
-import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
+import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { apiDelete, apiGet, apiPatch, apiPost, ApiError } from "@/api/client";
 import type { NutanixSubnetSummary } from "@/types";
 
@@ -31,11 +31,15 @@ interface NutanixState {
   /** uuid de la VM ayant une action de cycle de vie/suppression/migration en cours (désactive ses
    * boutons/le glisser-déposer) — un seul à la fois, même principe que ContainersState#actionPendingId. */
   actionPendingUuid: string | null;
+  /** Convergence attendue par uuid après un start/stop réussi (stop ACPI = l'OS invité met du
+   * temps à s'éteindre) : la carte du graphe reste en "pending" tant que le poll de topologie ne
+   * constate pas cet état réel — purgé par TopologyGraph une fois convergé ou expiré. */
+  convergence: Record<string, { expected: "running" | "stopped"; since: number }>;
   /** Subnets réels (GET /api/nutanix/subnets) — pour le sélecteur "Ajouter une carte réseau". */
   subnets: NutanixSubnetSummary[];
 }
 
-const initialState: NutanixState = { actionPendingUuid: null, subnets: [] };
+const initialState: NutanixState = { actionPendingUuid: null, convergence: {}, subnets: [] };
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : fallback;
@@ -147,14 +151,21 @@ export const updateNutanixVmCompute = createAsyncThunk<
 const nutanixSlice = createSlice({
   name: "nutanix",
   initialState,
-  reducers: {},
+  reducers: {
+    clearNutanixVmConvergence(state, action: PayloadAction<string>) {
+      delete state.convergence[action.payload];
+    },
+  },
   extraReducers: (builder) => {
     builder
       .addCase(runNutanixVmAction.pending, (state, action) => {
         state.actionPendingUuid = action.meta.arg.uuid;
       })
-      .addCase(runNutanixVmAction.fulfilled, (state) => {
+      .addCase(runNutanixVmAction.fulfilled, (state, action) => {
         state.actionPendingUuid = null;
+        // restart : power_state reste ON pendant l'ACPI reboot, aucune convergence observable.
+        if (action.payload.action === "start") state.convergence[action.payload.uuid] = { expected: "running", since: Date.now() };
+        if (action.payload.action === "stop") state.convergence[action.payload.uuid] = { expected: "stopped", since: Date.now() };
       })
       .addCase(runNutanixVmAction.rejected, (state) => {
         state.actionPendingUuid = null;
@@ -211,4 +222,5 @@ const nutanixSlice = createSlice({
   },
 });
 
+export const { clearNutanixVmConvergence } = nutanixSlice.actions;
 export default nutanixSlice.reducer;

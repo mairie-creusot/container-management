@@ -900,6 +900,23 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   const node = data as unknown as TopologyNode & GraphNodeCallbacks;
   const Icon = nodeIcon(node);
   const isContainer = node.kind === "container";
+  // Flash bref du point de statut quand le statut constaté change entre deux polls — le `key`
+  // remonte le <span> pour rejouer l'animation CSS (voir .topology-node__status-dot--flash).
+  const [statusFlashKey, setStatusFlashKey] = useState(0);
+  const prevStatusRef = useRef(node.status);
+  useEffect(() => {
+    if (prevStatusRef.current !== node.status) {
+      prevStatusRef.current = node.status;
+      setStatusFlashKey((k) => k + 1);
+    }
+  }, [node.status]);
+  // Bouton rapide précisément cliqué — seul lui affiche le spinner pendant actionPending.
+  const [clickedAction, setClickedAction] = useState<QuickLifecycleAction | null>(null);
+  const wasPendingRef = useRef(false);
+  useEffect(() => {
+    if (wasPendingRef.current && !node.actionPending) setClickedAction(null);
+    wasPendingRef.current = !!node.actionPending;
+  }, [node.actionPending]);
   // Retour utilisateur du 17/08/2026 : "le meme logique que pour els container na pas ete
   // appliquer verifie tout" — une carte "nutanix-vm" n'affichait jusqu'ici QUE icône/libellé/
   // sous-titre/statut, une fraction du niveau d'info déjà dense d'une carte conteneur (badges/
@@ -934,7 +951,7 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   const isCompact = zoom < ZOOM_DETAIL_THRESHOLD;
   return (
     <div
-      className={`topology-node topology-node--${node.kind}${node.kind === "host" && node.hostKind ? ` topology-node--host-${node.hostKind}` : ""} topology-node--${node.status}${node.orphan ? " topology-node--orphan" : ""}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}`}
+      className={`topology-node topology-node--${node.kind}${node.kind === "host" && node.hostKind ? ` topology-node--host-${node.hostKind}` : ""} topology-node--${node.status}${node.orphan ? " topology-node--orphan" : ""}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}${node.actionPending ? " topology-node--pending" : ""}`}
       title={isCompact ? node.label : undefined}
     >
       {ports.map((port) => (
@@ -1135,11 +1152,14 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
               <button
                 key={action}
                 type="button"
-                className={`topology-node__quick-btn topology-node__quick-btn--${action}`}
+                className={`topology-node__quick-btn topology-node__quick-btn--${action}${
+                  node.actionPending && clickedAction === action ? " topology-node__quick-btn--busy" : ""
+                }`}
                 title={node.actionPending ? "Action en cours…" : ACTION_LABEL[action]}
                 disabled={node.actionPending}
                 onClick={(event) => {
                   event.stopPropagation();
+                  setClickedAction(action);
                   node.onQuickAction?.(action, event);
                 }}
               >
@@ -1167,7 +1187,10 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
         </button>
       )}
       <div className={`topology-node__status topology-node__status--${node.status}`}>
-        <span className="topology-node__status-dot" />
+        <span
+          key={statusFlashKey}
+          className={`topology-node__status-dot${statusFlashKey > 0 ? " topology-node__status-dot--flash" : ""}`}
+        />
         <span className="topology-node__status-label">
           {node.status === "running"
             ? "En cours"

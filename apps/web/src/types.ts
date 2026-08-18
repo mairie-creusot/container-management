@@ -1403,3 +1403,87 @@ export interface BackupRestoreResult {
   ok: boolean;
   message: string;
 }
+
+// --- HYCU (contrôleur de sauvegarde des VMs Nutanix, LECTURE SEULE) — miroir de
+// apps/api/src/types.ts (routes/hycu.ts) ; les champs optionnels sont absents si HYCU ne les
+// expose pas, jamais fabriqués.
+
+/** Jamais le mot de passe (write-only). */
+export interface HycuConfig {
+  url: string;
+  username: string;
+}
+
+/** GET /api/hycu/config */
+export interface HycuConfigStatus {
+  configured: boolean;
+  config?: HycuConfig;
+}
+
+export interface HycuVm {
+  uuid: string;
+  vmName: string;
+  protectionGroupUuid?: string;
+  policyName?: string;
+  protectionStatus?: string;
+  complianceStatus?: string;
+  lastBackupInMillis?: number;
+  status?: string;
+}
+
+export interface HycuPolicy {
+  uuid: string;
+  name: string;
+  vmCount: number;
+}
+
+export interface HycuTarget {
+  uuid?: string;
+  name: string;
+  type?: string;
+  totalSizeInBytes?: number;
+  freeSizeInBytes?: number;
+  usedSizeInBytes?: number;
+  utilizationPct?: number;
+}
+
+export interface HycuJob {
+  uuid?: string;
+  name?: string;
+  type?: string;
+  status: string;
+  startTimeInMillis?: number;
+  endTimeInMillis?: number;
+}
+
+export interface HycuEvent {
+  uuid?: string;
+  severity: string;
+  message?: string;
+  category?: string;
+  createdInMillis?: number;
+}
+
+/** Dernier essai réel de poll HYCU — distingue "liste vide" d'"appliance injoignable". */
+export interface HycuPollOutcome {
+  reachable: boolean;
+  at: string; // ISO 8601
+}
+
+/** GET /api/hycu/status — blocs absents plutôt que des zéros inventés si l'appel a échoué. */
+export interface HycuStatusSummary {
+  configured: boolean;
+  reachable?: boolean;
+  vms?: { total: number; protectedCount: number };
+  policies?: { count: number };
+  targets?: { count: number; totalSizeInBytes: number; usedSizeInBytes: number };
+  jobs?: { total: number; byStatus: Record<string, number> };
+  lastPoll?: HycuPollOutcome;
+}
+
+/** POST /api/hycu/config/test */
+export interface HycuTestResult {
+  ok: boolean;
+  message: string;
+  vmCount?: number;
+}

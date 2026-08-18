@@ -77,7 +77,14 @@
   box-shadow: 0 6px 18px -8px rgba(0, 0, 0, 0.6);
   cursor: pointer;
   position: relative;
-  transition: width 0.15s ease, padding 0.15s ease;
+  transition: width 0.15s ease, padding 0.15s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+/* Élévation/glow léger au survol — box-shadow uniquement, jamais un transform : .topology-node ne
+   doit pas devenir un stacking context (les tiroirs à z-index négatif passeraient devant son fond). */
+.topology-node:hover {
+  border-color: rgba(124, 92, 252, 0.35);
+  box-shadow: 0 12px 28px -10px rgba(0, 0, 0, 0.75), 0 0 18px -6px rgba(124, 92, 252, 0.3);
 }
 
 /* Poignées de connexion (glisser-connecter conteneur <-> network/volume) — visibles et
@@ -405,6 +412,33 @@
   height: 6px;
   border-radius: 50%;
   background: var(--color-text-faint);
+  position: relative;
+  /* Le changement de couleur running<->stopped se fond au lieu de basculer sèchement. */
+  transition: background 0.35s ease, box-shadow 0.35s ease;
+}
+
+/* Onde ping jouée quand le statut constaté change entre deux polls (classe posée par
+   GraphNodeImpl, remontée via key) — pseudo-élément : aucune collision avec la pulsation
+   infinie du point "running" ci-dessous. */
+.topology-node__status-dot--flash::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: inherit;
+  opacity: 0;
+  animation: topology-status-ping 0.55s ease-out;
+}
+
+@keyframes topology-status-ping {
+  0% {
+    opacity: 0.9;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(3.4);
+  }
 }
 
 .topology-node__status--running .topology-node__status-dot {
@@ -431,6 +465,61 @@
 
 .topology-node__status--restarting .topology-node__status-dot {
   background: var(--color-warning);
+}
+
+/* --- Action de cycle de vie EN COURS sur cette carte (classe posée par GraphNodeImpl quand
+   actionPending est vrai — nutanix.actionPendingUuid / containers.actionPendingId) : bordure qui
+   respire en orange + shimmer discret, le temps que l'état réel converge au poll suivant. ------- */
+.topology-node--pending {
+  animation: topology-pending-border 1.4s ease-in-out infinite;
+}
+
+@keyframes topology-pending-border {
+  0%,
+  100% {
+    border-color: var(--color-border);
+  }
+  50% {
+    border-color: var(--color-warning);
+  }
+}
+
+/* Balayage lumineux très léger — pointer-events none, sous les boutons (z-index 2). */
+.topology-node--pending::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(105deg, transparent 42%, rgba(255, 255, 255, 0.05) 50%, transparent 58%);
+  background-size: 240% 100%;
+  animation: topology-pending-shimmer 1.6s linear infinite;
+}
+
+@keyframes topology-pending-shimmer {
+  from {
+    background-position: 120% 0;
+  }
+  to {
+    background-position: -120% 0;
+  }
+}
+
+/* Le point de statut passe en "travail en cours" (orange, pulsation plus rapide) quel que soit le
+   statut encore affiché — prime sur la pulsation calme "running" (sélecteur plus spécifique). */
+.topology-node--pending .topology-node__status .topology-node__status-dot {
+  background: var(--color-warning);
+  animation: topology-dot-working 0.9s ease-in-out infinite;
+}
+
+@keyframes topology-dot-working {
+  0%,
+  100% {
+    box-shadow: 0 0 0 3px var(--color-warning-bg);
+  }
+  50% {
+    box-shadow: 0 0 0 6px transparent;
+  }
 }
 
 /* Badges (mise à jour d'image disponible, dérive GitOps) — portés directement par le nœud
@@ -653,6 +742,10 @@
   color: var(--color-text);
 }
 
+.topology-brick:active {
+  transform: scale(0.96);
+}
+
 .topology-brick--volume {
   border-color: rgba(245, 165, 36, 0.35);
 }
@@ -749,7 +842,7 @@
   font-size: 10.5px;
   font-weight: 600;
   cursor: pointer;
-  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease, transform 0.15s ease;
   /* Animation d'apparition "le tiroir se déplie depuis sous la carte" — jouée au montage
      (apparition d'un nouveau volume au prochain poll comprise), coupée sous
      prefers-reduced-motion ci-dessous. */
@@ -767,6 +860,13 @@
   background: var(--color-surface-3);
   color: var(--color-text);
   border-color: rgba(245, 165, 36, 0.45);
+  /* Le tiroir "sort" légèrement de sous la carte au survol — translate vertical pur, il reste
+     derrière la carte (le stacking context est porté par le wrapper React Flow, pas par lui). */
+  transform: translateY(2px);
+}
+
+.topology-drawer:active {
+  transform: translateY(1px);
 }
 
 .topology-drawer__icon {
@@ -846,7 +946,7 @@
   cursor: pointer;
   opacity: 0;
   z-index: 2;
-  transition: opacity 0.12s ease, border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+  transition: opacity 0.12s ease, border-color 0.12s ease, background 0.12s ease, color 0.12s ease, transform 0.12s ease;
 }
 
 .topology-node:hover .topology-node__attach-btn,
@@ -858,6 +958,11 @@
   border-color: var(--accent-start);
   background: var(--color-surface-3);
   color: var(--color-text);
+  transform: scale(1.15);
+}
+
+.topology-node__attach-btn:active {
+  transform: scale(0.92);
 }
 
 .topology-node__attach-btn svg {
@@ -880,16 +985,19 @@
   display: flex;
   gap: 4px;
   opacity: 0;
+  transform: translateY(-3px);
   z-index: 2;
-  transition: opacity 0.12s ease;
+  transition: opacity 0.15s ease, transform 0.15s ease;
 }
 
 .topology-node:hover .topology-node__quick-actions,
 .topology-node__quick-actions:focus-within {
   opacity: 1;
+  transform: translateY(0);
 }
 
 .topology-node__quick-btn {
+  position: relative;
   width: 22px;
   height: 22px;
   display: flex;
@@ -900,7 +1008,7 @@
   background: var(--color-surface-2);
   color: var(--color-text-muted);
   cursor: pointer;
-  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease;
+  transition: border-color 0.12s ease, background 0.12s ease, color 0.12s ease, transform 0.12s ease;
 }
 
 .topology-node__quick-btn svg {
@@ -911,6 +1019,35 @@
 .topology-node__quick-btn:hover:not(:disabled) {
   background: var(--color-surface-3);
   color: var(--color-text);
+  transform: scale(1.12);
+}
+
+.topology-node__quick-btn:active:not(:disabled) {
+  transform: scale(0.9);
+}
+
+/* Spinner discret sur le bouton précisément cliqué, le temps de l'appel (icône estompée dessous). */
+.topology-node__quick-btn--busy svg {
+  opacity: 0.25;
+}
+
+.topology-node__quick-btn--busy::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  animation: topology-spin 0.7s linear infinite;
+}
+
+@keyframes topology-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .topology-node__quick-btn--start:hover:not(:disabled) {
@@ -1099,7 +1236,10 @@
    pas sur le wrapper .react-flow__node : son transform porte la position translate(x,y) posée par
    React Flow, une animation transform dessus l'écraserait. */
 .topology-graph .react-flow__node.topology-node-new .topology-node {
-  animation: topology-node-enter 0.28s cubic-bezier(0.22, 0.61, 0.36, 1);
+  /* --enter-delay (var posée par TopologyGraph.tsx au premier chargement uniquement) : cascade
+     douce nœud par nœud plutôt qu'une pluie de pop-ins simultanés ; backwards = invisible le
+     temps du délai. */
+  animation: topology-node-enter 0.28s cubic-bezier(0.22, 0.61, 0.36, 1) var(--enter-delay, 0s) backwards;
 }
 
 @keyframes topology-node-enter {
@@ -1113,8 +1253,21 @@
   .react-flow__edge.topology-edge--unhealthy .react-flow__edge-path,
   .topology-badge--pulse,
   .topology-node__status--running .topology-node__status-dot,
+  .topology-node--pending,
+  .topology-node--pending .topology-node__status .topology-node__status-dot,
   .topology-graph .react-flow__node.topology-node-new .topology-node {
     animation: none;
+  }
+
+  /* L'information "action en cours" reste visible sans animation : bordure orange statique. */
+  .topology-node--pending {
+    border-color: var(--color-warning);
+  }
+
+  .topology-node--pending::after,
+  .topology-node__status-dot--flash::after,
+  .topology-node__quick-btn--busy::after {
+    display: none;
   }
 
   .react-flow__edge.topology-edge .react-flow__edge-path {
@@ -1339,7 +1492,10 @@
   .topology-node__subtitle,
   .topology-node__badges,
   .topology-node__metrics,
-  .topology-node__status-label {
+  .topology-node__status-label,
+  .topology-node__status-dot,
+  .topology-brick,
+  .topology-drawer {
     transition: none;
   }
 }

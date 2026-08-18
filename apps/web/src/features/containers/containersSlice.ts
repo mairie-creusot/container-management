@@ -39,6 +39,9 @@ interface ContainersState {
   detailStatus: "idle" | "loading" | "ready" | "error";
   /** Id du conteneur ayant une action de cycle de vie en cours (désactive ses boutons). */
   actionPendingId: string | null;
+  /** Convergence attendue par id après un start/stop réussi — même principe que
+   * NutanixState#convergence : la carte du graphe reste "pending" jusqu'à l'état réel constaté. */
+  convergence: Record<string, { expected: "running" | "stopped"; since: number }>;
   actionError: string | null;
   /** Processus réels (`docker top`) du conteneur consulté dans la vue "composition interne" du
    * sous-graphe (voir TopologySubGraphPanel.tsx) — un seul à la fois, `processesContainerId`
@@ -73,6 +76,7 @@ const initialState: ContainersState = {
   detail: null,
   detailStatus: "idle",
   actionPendingId: null,
+  convergence: {},
   actionError: null,
   processes: null,
   processesContainerId: null,
@@ -280,6 +284,9 @@ const containersSlice = createSlice({
       state.detail = null;
       state.detailStatus = "idle";
     },
+    clearContainerConvergence(state, action: PayloadAction<string>) {
+      delete state.convergence[action.payload];
+    },
   },
   extraReducers: (builder) => {
     builder
@@ -379,6 +386,8 @@ const containersSlice = createSlice({
       })
       .addCase(runContainerAction.fulfilled, (state, action) => {
         state.actionPendingId = null;
+        if (action.payload.action === "start") state.convergence[action.payload.id] = { expected: "running", since: Date.now() };
+        if (action.payload.action === "stop") state.convergence[action.payload.id] = { expected: "stopped", since: Date.now() };
         state.items = action.payload.containers;
         if (action.payload.action === "remove" && state.selectedId === action.payload.id) {
           state.selectedId = null;
@@ -404,5 +413,5 @@ const containersSlice = createSlice({
   },
 });
 
-export const { selectContainer } = containersSlice.actions;
+export const { selectContainer, clearContainerConvergence } = containersSlice.actions;
 export default containersSlice.reducer;
