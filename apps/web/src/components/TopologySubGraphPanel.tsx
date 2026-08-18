@@ -17,6 +17,8 @@ import { removeNetwork } from "@/features/networks/networksSlice";
 // Recette de template éditable dans le sous-graphe (18/08/2026) — thunks réels + logique pure du
 // studio réutilisée telle quelle (libellés/validation/réordonnancement, jamais dupliqués).
 import { fetchArtifactSources, fetchTemplates, updateTemplate, type StudioListStatus } from "@/features/templates/templatesSlice";
+import { packageSearchDistro, type PackageSearchDistro } from "@/features/templates/packagesApi";
+import PackageSearch from "@/features/templates/PackageSearch";
 import {
   ISO_STEPS_DISABLED_MESSAGE,
   STEP_TYPES,
@@ -1856,6 +1858,7 @@ export default function TopologySubGraphPanel({
           x={recipeStepPopover.x}
           y={recipeStepPopover.y}
           currentTemplateId={template.id}
+          packagesDistro={packageSearchDistro(template.base)}
           artifactSources={artifactSources}
           artifactSourcesStatus={artifactSourcesStatus}
           onSubmit={async (step) => {
@@ -1905,6 +1908,7 @@ interface TemplateStepPopoverProps {
   x: number;
   y: number;
   currentTemplateId: string;
+  packagesDistro: PackageSearchDistro | null;
   artifactSources: TemplateArtifactSource[];
   artifactSourcesStatus: StudioListStatus;
   onSubmit: (step: TemplateStep) => Promise<{ ok: boolean; error?: string }>;
@@ -1923,6 +1927,7 @@ function TemplateStepPopover({
   x,
   y,
   currentTemplateId,
+  packagesDistro,
   artifactSources,
   artifactSourcesStatus,
   onSubmit,
@@ -1958,18 +1963,34 @@ function TemplateStepPopover({
       <div className="graph-popover__title">{title}</div>
       <form onSubmit={handleSubmit}>
         {step.type === "packages" && (
-          <div className="field">
-            <label htmlFor="recipe-step-packages">Paquets (séparés par espaces ou virgules)</label>
-            <input
-              id="recipe-step-packages"
-              type="text"
-              autoFocus
-              placeholder="nginx curl ca-certificates"
-              value={packagesText}
-              onChange={(e) => setPackagesText(e.target.value)}
-              disabled={busy}
-            />
-          </div>
+          <>
+            {packagesDistro !== null && (
+              <PackageSearch
+                id="recipe-pkg-search"
+                distro={packagesDistro}
+                added={parsePackagesInput(packagesText)}
+                busy={busy}
+                onPick={(item) =>
+                  setPackagesText((prev) => {
+                    if (parsePackagesInput(prev).includes(item.name)) return prev;
+                    return prev.trim() === "" ? item.name : `${prev.trim()} ${item.name}`;
+                  })
+                }
+              />
+            )}
+            <div className="field">
+              <label htmlFor="recipe-step-packages">Saisie libre (séparés par espaces ou virgules)</label>
+              <input
+                id="recipe-step-packages"
+                type="text"
+                autoFocus
+                placeholder="nginx curl ca-certificates"
+                value={packagesText}
+                onChange={(e) => setPackagesText(e.target.value)}
+                disabled={busy}
+              />
+            </div>
+          </>
         )}
 
         {step.type === "script" && (

@@ -38,6 +38,9 @@ import {
 import { KIND_ICON } from "@/components/topologyGraphShared";
 import CodeEditor, { languageForPath } from "@/components/CodeEditor";
 import { LINT_UNAVAILABLE_MESSAGE, lintShell, type ShellLintResult } from "@/features/templates/lintApi";
+import { packageSearchDistro, type PackageSearchDistro, type PackageSearchItem } from "@/features/templates/packagesApi";
+import PackageSearch from "@/features/templates/PackageSearch";
+import DockerImageSearch from "@/features/templates/DockerImageSearch";
 import RecipeVerification from "@/features/templates/RecipeVerification";
 import type { ImageTemplate, TemplateArtifactSource, TemplateBase, TemplatePreset, TemplateStep } from "@/types";
 
@@ -338,6 +341,7 @@ export default function TemplateStudioModal({ onClose }: TemplateStudioModalProp
                     artifactSources={artifactSources}
                     artifactSourcesStatus={artifactSourcesStatus}
                     lint={shellLint}
+                    packagesDistro={packageSearchDistro(base)}
                     onChange={(next) => updateStep(selection, next)}
                   />
                 ) : null}
@@ -494,24 +498,27 @@ function BaseEditor({
       )}
 
       {base.type === "container" && (
-        <div className="field">
-          <label htmlFor="studio-image">Image de base (saisie libre)</label>
-          <input
-            id="studio-image"
-            type="text"
-            className="cell-mono"
-            list="studio-image-suggestions"
-            value={base.image}
-            onChange={(e) => onChange({ ...base, image: e.target.value })}
-            placeholder="ex : scratch, debian:bookworm, alpine:3.20"
-            disabled={busy}
-          />
-          <datalist id="studio-image-suggestions">
-            {CONTAINER_IMAGE_SUGGESTIONS.map((i) => (
-              <option key={i} value={i} />
-            ))}
-          </datalist>
-        </div>
+        <>
+          <DockerImageSearch busy={busy} onPick={(image) => onChange({ ...base, image })} />
+          <div className="field">
+            <label htmlFor="studio-image">Image de base (saisie libre)</label>
+            <input
+              id="studio-image"
+              type="text"
+              className="cell-mono"
+              list="studio-image-suggestions"
+              value={base.image}
+              onChange={(e) => onChange({ ...base, image: e.target.value })}
+              placeholder="ex : scratch, debian:bookworm, alpine:3.20"
+              disabled={busy}
+            />
+            <datalist id="studio-image-suggestions">
+              {CONTAINER_IMAGE_SUGGESTIONS.map((i) => (
+                <option key={i} value={i} />
+              ))}
+            </datalist>
+          </div>
+        </>
       )}
 
       {base.type === "mkosi" && (
@@ -699,6 +706,7 @@ function StepEditor({
   artifactSources,
   artifactSourcesStatus,
   lint,
+  packagesDistro,
   onChange,
 }: {
   step: TemplateStep;
@@ -707,13 +715,14 @@ function StepEditor({
   artifactSources: TemplateArtifactSource[];
   artifactSourcesStatus: "idle" | "loading" | "ready" | "unavailable" | "error";
   lint: ShellLintController;
+  packagesDistro: PackageSearchDistro | null;
   onChange: (next: TemplateStep) => void;
 }) {
   return (
     <>
       <div className="inspector-section-title">Étape — {STEP_TYPE_LABEL[step.type]}</div>
 
-      {step.type === "packages" && <PackagesEditor step={step} busy={busy} onChange={onChange} />}
+      {step.type === "packages" && <PackagesEditor step={step} busy={busy} distro={packagesDistro} onChange={onChange} />}
 
       {step.type === "script" && <ScriptStepEditor step={step} busy={busy} lint={lint} onChange={onChange} />}
 
@@ -961,61 +970,86 @@ function ScriptStepEditor({
   );
 }
 
+/** Étape paquets : recherche dans la vraie liste de la distro (déduite de la base) + saisie libre
+ * TOUJOURS disponible (Repology peut être down/incomplet — jamais de fausse liste). */
 function PackagesEditor({
   step,
   busy,
+  distro,
   onChange,
 }: {
   step: Extract<TemplateStep, { type: "packages" }>;
   busy: boolean;
+  distro: PackageSearchDistro | null;
   onChange: (next: TemplateStep) => void;
 }) {
   const [draft, setDraft] = useState("");
+  const [versions, setVersions] = useState<Record<string, string>>({});
+
+  function addPackages(names: string[]) {
+    if (names.length === 0) return;
+    onChange({ ...step, packages: [...new Set([...step.packages, ...names])] });
+  }
 
   function commitDraft() {
     const parsed = parsePackagesInput(draft);
     if (parsed.length === 0) return;
-    onChange({ ...step, packages: [...new Set([...step.packages, ...parsed])] });
+    addPackages(parsed);
     setDraft("");
   }
 
+  function handlePick(item: PackageSearchItem) {
+    addPackages([item.name]);
+    if (item.version !== undefined) setVersions((prev) => ({ ...prev, [item.name]: item.version ?? "" }));
+  }
+
   return (
-    <div className="field">
-      <label htmlFor="studio-packages">Paquets (Entrée ou virgule pour ajouter)</label>
-      {step.packages.length > 0 && (
-        <div className="chip-row">
-          {step.packages.map((p) => (
-            <span key={p} className="chip">
-              {p}
-              <button
-                type="button"
-                className="template-studio__chip-remove"
-                onClick={() => onChange({ ...step, packages: step.packages.filter((x) => x !== p) })}
-                aria-label={`Retirer ${p}`}
-                disabled={busy}
-              >
-                ×
-              </button>
-            </span>
-          ))}
-        </div>
+    <>
+      {distro !== null ? (
+        <PackageSearch distro={distro} added={step.packages} busy={busy} onPick={handlePick} />
+      ) : (
+        <p className="template-modal__hint">
+          Recherche de paquets indisponible pour cette base (distribution non reconnue) — saisie libre ci-dessous.
+        </p>
       )}
-      <input
-        id="studio-packages"
-        type="text"
-        className="cell-mono"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === ",") {
-            e.preventDefault();
-            commitDraft();
-          }
-        }}
-        onBlur={commitDraft}
-        placeholder="ex : python3, ca-certificates"
-        disabled={busy}
-      />
-    </div>
+
+      <div className="field">
+        <label htmlFor="studio-packages">Saisie libre (Entrée ou virgule pour ajouter)</label>
+        {step.packages.length > 0 && (
+          <div className="chip-row">
+            {step.packages.map((p) => (
+              <span key={p} className="chip" title={versions[p] ? `version ${versions[p]}` : undefined}>
+                {p}
+                <button
+                  type="button"
+                  className="template-studio__chip-remove"
+                  onClick={() => onChange({ ...step, packages: step.packages.filter((x) => x !== p) })}
+                  aria-label={`Retirer ${p}`}
+                  disabled={busy}
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+        <input
+          id="studio-packages"
+          type="text"
+          className="cell-mono"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === ",") {
+              e.preventDefault();
+              commitDraft();
+            }
+          }}
+          onBlur={commitDraft}
+          placeholder="ex : python3, ca-certificates"
+          disabled={busy}
+        />
+      </div>
+    </>
   );
 }

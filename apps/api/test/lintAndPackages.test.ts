@@ -162,3 +162,42 @@ describe("GET /api/packages/search", () => {
     expect(upstream.statusCode).toBe(502);
   });
 });
+
+describe("GET /api/dockerhub/search + /tags", () => {
+  const HUB_SEARCH_PAYLOAD = {
+    results: [
+      { repo_name: "debian", short_description: "Debian is a Linux distribution", star_count: 5321, is_official: true },
+      { repo_name: "bitnami/debian-base", short_description: "Base image", star_count: 12, is_official: false },
+    ],
+  };
+  const HUB_TAGS_PAYLOAD = { results: [{ name: "bookworm" }, { name: "12" }, { name: "latest" }] };
+
+  it("search : résultats mappés (officiel, étoiles, description)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(HUB_SEARCH_PAYLOAD), { status: 200 })));
+    app = buildServer();
+    const response = await app.inject({ method: "GET", url: "/api/dockerhub/search?q=debian", cookies: adminCookie() });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().results).toEqual([
+      { name: "debian", description: "Debian is a Linux distribution", stars: 5321, official: true },
+      { name: "bitnami/debian-base", description: "Base image", stars: 12, official: false },
+    ]);
+  });
+
+  it("tags : dépôt officiel préfixé library/, liste des noms", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(HUB_TAGS_PAYLOAD), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    app = buildServer();
+    const response = await app.inject({ method: "GET", url: "/api/dockerhub/tags?repo=debian", cookies: adminCookie() });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ tags: ["bookworm", "12", "latest"] });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/repositories/library/debian/tags/");
+  });
+
+  it("400 requête trop courte / repo invalide ; 502 honnête si le Hub échoue", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("down", { status: 503 })));
+    app = buildServer();
+    expect((await app.inject({ method: "GET", url: "/api/dockerhub/search?q=d", cookies: adminCookie() })).statusCode).toBe(400);
+    expect((await app.inject({ method: "GET", url: "/api/dockerhub/tags?repo=..//bad", cookies: adminCookie() })).statusCode).toBe(400);
+    expect((await app.inject({ method: "GET", url: "/api/dockerhub/search?q=zzznocachehub", cookies: adminCookie() })).statusCode).toBe(502);
+  });
+});
