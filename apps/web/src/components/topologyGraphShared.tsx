@@ -307,7 +307,9 @@ export const EDGE_STATE_COLOR: Record<EdgeHealthState, string> = {
   unhealthy: "var(--color-critical)",
   starting: "var(--color-warning)",
   none: "var(--color-text-faint)",
-  stopped: "var(--color-text-faint)",
+  // Rouge (choix utilisateur explicite : "une machine éteinte doit être rouge, pas grise") — le
+  // pointillé large 2 8 distingue toujours "éteinte" (rouge pointillé) de "en panne" (rouge plein).
+  stopped: "var(--color-critical)",
 };
 
 export interface TopologyEdgeLike {
@@ -576,7 +578,7 @@ interface EdgeBadgeItem {
 function edgeStateTone(state: EdgeHealthState | undefined): EdgeBadgeItem["tone"] {
   if (state === "healthy") return "good";
   if (state === "starting") return "warn";
-  if (state === "unhealthy") return "critical";
+  if (state === "unhealthy" || state === "stopped") return "critical";
   return "neutral";
 }
 

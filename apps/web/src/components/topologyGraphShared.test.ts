@@ -297,18 +297,19 @@ describe("EDGE_KIND_LABEL / edgeBadgeItems — pastille de nature du lien (maque
       { text: "réseau app-net", tone: "good" },
       { text: "Public", tone: "neutral" },
     ]);
+    // stopped -> critical : choix utilisateur explicite ("une machine éteinte doit être rouge").
     expect(edgeBadgeItems({ kindLabel: "montage", readOnly: false, state: "stopped" })).toEqual([
-      { text: "montage", tone: "neutral" },
+      { text: "montage", tone: "critical" },
       { text: "rw", tone: "neutral" },
     ]);
   });
 
-  it("couleur héritée de l'état de l'arête : healthy -> good, starting -> warn, unhealthy -> critical, sinon neutre", () => {
+  it("couleur héritée de l'état de l'arête : healthy -> good, starting -> warn, unhealthy/stopped -> critical, sinon neutre", () => {
     expect(edgeBadgeItems({ kindLabel: "hébergement", state: "healthy" })[0]).toMatchObject({ tone: "good" });
     expect(edgeBadgeItems({ kindLabel: "hébergement", state: "starting" })[0]).toMatchObject({ tone: "warn" });
     expect(edgeBadgeItems({ kindLabel: "hébergement", state: "unhealthy" })[0]).toMatchObject({ tone: "critical" });
     expect(edgeBadgeItems({ kindLabel: "hébergement", state: "none" })[0]).toMatchObject({ tone: "neutral" });
-    expect(edgeBadgeItems({ kindLabel: "hébergement", state: "stopped" })[0]).toMatchObject({ tone: "neutral" });
+    expect(edgeBadgeItems({ kindLabel: "hébergement", state: "stopped" })[0]).toMatchObject({ tone: "critical" });
   });
 
   it("buildTopologyEdges pose le libellé dans edge.data pour chaque kind", () => {

@@ -3486,6 +3486,19 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
             <IconTrash />
             {cleaningOrphans ? "Nettoyage…" : `Nettoyer les orphelins (${orphanCount})`}
           </button>
+          {/* Efface les positions manuelles sauvegardées : le placement automatique reprend la main. */}
+          <button
+            type="button"
+            className="topology-glass-btn"
+            onClick={() => {
+              void dispatch(saveTopologyPositions({}));
+              setFlowNodes([]);
+            }}
+            title="Effacer les positions déplacées à la main et revenir au placement automatique"
+          >
+            <IconTopology />
+            Replacer
+          </button>
         </div>
       )}
 
