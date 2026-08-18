@@ -54,10 +54,9 @@ import { setCurrentView } from "@/features/ui/uiSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import Modal from "@/components/Modal";
-import Skeleton from "@/components/Skeleton";
 import TopologyNodeDetailPanel, { type TabId } from "@/components/TopologyNodeDetailPanel";
 import TopologySubGraphPanel from "@/components/TopologySubGraphPanel";
-import { IconGithub, IconInfo, IconKey, IconSearch, IconSettings, IconTopology, IconTrash, IconVolumes } from "@/components/icons";
+import { IconGithub, IconInfo, IconKey, IconSearch, IconTopology, IconTrash, IconVolumes } from "@/components/icons";
 // Réutilise TEL QUEL le flux de déploiement GitHub existant (détection Dockerfile/compose/
 // Terraform, build, déploiement, déploiement auto sur push — voir ARCHITECTURE.md § "Intégration
 // GitHub") : CreateSpotlight ne fait que le monter dans une modal par-dessus le canevas, aucune
@@ -133,11 +132,36 @@ import type {
   TopologyNodeAttachment,
 } from "@/types";
 
-/** Nombre de nœuds squelettes par colonne (volumes / conteneurs / networks) pendant le premier
- * chargement — silhouette approximative, pas besoin de coller exactement au nombre réel. */
-const SKELETON_COLUMN_ROWS = [2, 3, 2];
-
 const REFRESH_INTERVAL_MS = 15_000;
+
+// Phrases du loader initial — reflètent les vraies étapes de GET /api/topology, dans l'ordre.
+const LOADER_PHRASES = [
+  "Interrogation du démon Docker…",
+  "Découverte des VMs Nutanix…",
+  "Lecture des environnements distants…",
+  "Résolution des réseaux et volumes…",
+  "Assemblage du graphe…",
+];
+
+function TopologyLoader() {
+  const [phraseIndex, setPhraseIndex] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setPhraseIndex((i) => (i + 1) % LOADER_PHRASES.length), 1800);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <div className="topology-loader__inner" role="status" aria-live="polite">
+      <div className="topology-loader__orbit">
+        <span className="topology-loader__dot" />
+        <span className="topology-loader__dot" />
+        <span className="topology-loader__dot" />
+      </div>
+      <p className="topology-loader__phrase" key={phraseIndex}>
+        {LOADER_PHRASES[phraseIndex]}
+      </p>
+    </div>
+  );
+}
 // Colonnes par défaut PAR KIND — valeurs désormais déclarées dans le contrat
 // (NODE_CONTRACT[kind].defaultColumnX, topologyNodeContract.tsx : mêmes abscisses qu'avant la
 // migration, le pourquoi de chaque colonne est documenté sur l'entrée du kind), projetées ici en
@@ -159,7 +183,7 @@ const ROW_HEIGHT = 200;
  * validée : master -> environnements -> hiérarchie), assez loin pour que le niveau le plus profond
  * (VMs en grille repliée) ne chevauche jamais la colonne des volumes (x = 0).
  */
-const HOST_TREE_ANCHOR_X = -2200;
+const HOST_TREE_ANCHOR_X = -2300;
 const NETWORK_DRIVERS = ["bridge", "overlay", "host", "none"];
 
 // Fil rendu nativement par React Flow pendant le drag — pointillé accent (maquette validée).
@@ -1955,39 +1979,37 @@ function MountVolumePopover({ target, topologyNodes, x, y, onClose }: MountVolum
 
 interface AttachEnvPopoverProps {
   containerNode: TopologyNode;
-  /** "env" = NOM/VALEUR saisis ; "secret" = NOM + secret existant (valeur résolue côté serveur). */
-  variant: "env" | "secret";
   x: number;
   y: number;
   onClose: () => void;
 }
 
-/** Popover "Variable d'environnement" / "Secret" du picker ＋ — POST /api/containers/:id/env,
- * recréation réelle du conteneur (avertissement permanent + confirmation danger). */
-function AttachEnvPopover({ containerNode, variant, x, y, onClose }: AttachEnvPopoverProps) {
+/** Popover "Variable d'environnement" du picker ＋ — NOM + secret de la plateforme (la page Secrets
+ * est LA source des variables, valeur résolue côté serveur, jamais saisie en clair ici). POST
+ * /api/containers/:id/env, recréation réelle du conteneur (avertissement + confirmation danger). */
+function AttachEnvPopover({ containerNode, x, y, onClose }: AttachEnvPopoverProps) {
   const dispatch = useAppDispatch();
   const confirm = useConfirm();
   const { ref, style } = useDismiss(onClose, x, y);
   const secrets = useAppSelector((s) => s.secrets.items);
   const [envName, setEnvName] = useState("");
-  const [envValue, setEnvValue] = useState("");
   const [secretId, setSecretId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (variant === "secret") dispatch(fetchSecrets());
-  }, [dispatch, variant]);
+    dispatch(fetchSecrets());
+  }, [dispatch]);
 
   useEffect(() => {
-    if (variant === "secret" && !secretId && secrets.length > 0) setSecretId(secrets[0]!.id);
+    if (!secretId && secrets.length > 0) setSecretId(secrets[0]!.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [secrets.length]);
 
   const trimmedName = envName.trim();
   // Même règle que la route (ENV_NAME_PATTERN côté API).
   const nameValid = /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmedName);
-  const canSubmit = nameValid && (variant === "env" || !!secretId);
+  const canSubmit = nameValid && !!secretId;
   const selectedSecret = secrets.find((s) => s.id === secretId) ?? null;
 
   // Navigue vers la vraie page Secrets (création/gestion) — ferme le popover en partant.
@@ -2000,7 +2022,7 @@ function AttachEnvPopover({ containerNode, variant, x, y, onClose }: AttachEnvPo
     event.preventDefault();
     if (!canSubmit) return;
     const ok = await confirm({
-      title: variant === "env" ? "Recréer le conteneur pour ajouter la variable" : "Recréer le conteneur pour attacher le secret",
+      title: "Recréer le conteneur pour ajouter la variable",
       description: `Ajouter la variable ${trimmedName} à "${containerNode.label}" nécessite de RECRÉER ce conteneur : il sera arrêté puis recréé avec sa configuration actuelle plus cette variable (son id Docker change), et brièvement indisponible s'il est en cours d'exécution.`,
       confirmLabel: "Recréer et ajouter",
       variant: "danger",
@@ -2012,7 +2034,7 @@ function AttachEnvPopover({ containerNode, variant, x, y, onClose }: AttachEnvPo
       addContainerEnv({
         containerId: idWithoutPrefix(containerNode.id),
         containerName: containerNode.label,
-        ...(variant === "env" ? { env: [{ name: trimmedName, value: envValue }] } : { secretEnv: [{ envName: trimmedName, secretId }] }),
+        secretEnv: [{ envName: trimmedName, secretId }],
       }),
     );
     setBusy(false);
@@ -2026,15 +2048,9 @@ function AttachEnvPopover({ containerNode, variant, x, y, onClose }: AttachEnvPo
 
   return (
     <div className="graph-popover" style={style} ref={ref}>
-      <div className="graph-popover__title">
-        {variant === "env"
-          ? `Variable d'environnement pour « ${containerNode.label} »`
-          : `Attacher un secret à « ${containerNode.label} »`}
-      </div>
+      <div className="graph-popover__title">{`Variable d'environnement pour « ${containerNode.label} »`}</div>
       <p className="graph-popover__desc">
-        {variant === "env"
-          ? "Valeur saisie ici, en clair. Pour une valeur sensible, préférez un secret."
-          : "La valeur vient du gestionnaire de secrets — résolue côté serveur, jamais retapée ici."}
+        La valeur vient du gestionnaire de secrets — résolue côté serveur, jamais retapée ici.
       </p>
       <form onSubmit={handleSubmit}>
         <div className="field">
@@ -2056,52 +2072,34 @@ function AttachEnvPopover({ containerNode, variant, x, y, onClose }: AttachEnvPo
             </span>
           )}
         </div>
-        {variant === "env" ? (
-          <div className="field">
-            <label htmlFor="graph-env-value">Valeur</label>
-            <input
-              id="graph-env-value"
-              type="text"
-              className="cell-mono"
-              value={envValue}
-              onChange={(e) => setEnvValue(e.target.value)}
-              disabled={busy}
-            />
-          </div>
-        ) : (
-          <div className="field">
-            <label htmlFor="graph-env-secret">Secret</label>
-            <select id="graph-env-secret" value={secretId} onChange={(e) => setSecretId(e.target.value)} disabled={busy} required>
-              {secrets.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-            </select>
-            {secrets.length === 0 && (
-              <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
-                Aucun secret dans le gestionnaire — créez-en un d'abord depuis la page Secrets.
-              </span>
-            )}
-            {selectedSecret?.description && (
-              <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>{selectedSecret.description}</span>
-            )}
-            <button type="button" className="graph-popover__nav-link" onClick={goToSecrets} disabled={busy}>
-              <IconKey /> {secrets.length === 0 ? "Créer un secret — ouvrir la page Secrets" : "Gérer les secrets"}
-            </button>
-          </div>
-        )}
+        <div className="field">
+          <label htmlFor="graph-env-secret">Secret</label>
+          <select id="graph-env-secret" value={secretId} onChange={(e) => setSecretId(e.target.value)} disabled={busy} required>
+            {secrets.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </select>
+          {secrets.length === 0 && (
+            <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+              Aucun secret dans le gestionnaire — créez-en un d'abord depuis la page Secrets.
+            </span>
+          )}
+          {selectedSecret?.description && (
+            <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>{selectedSecret.description}</span>
+          )}
+          <button type="button" className="graph-popover__nav-link" onClick={goToSecrets} disabled={busy}>
+            <IconKey /> {secrets.length === 0 ? "Créer un secret — ouvrir la page Secrets" : "Gérer les secrets"}
+          </button>
+        </div>
         <p className="create-container-hint">
           Nécessite la recréation du conteneur : Docker ne permet pas de modifier l'environnement d'un conteneur
           existant. Le conteneur sera arrêté puis recréé avec sa configuration actuelle plus cette variable
-          (réseaux, ports, variables et montages existants conservés — son id Docker change).
-          {variant === "secret" && (
-            <>
-              {" "}La valeur du secret est résolue côté serveur et devient une variable d'environnement Docker
-              ordinaire : elle sera visible dans l'inspect Docker du conteneur sur l'hôte (QUAI la masque dans
-              son propre panneau de détail).
-            </>
-          )}
+          (réseaux, ports, variables et montages existants conservés — son id Docker change). La valeur du
+          secret est résolue côté serveur et devient une variable d'environnement Docker ordinaire : elle sera
+          visible dans l'inspect Docker du conteneur sur l'hôte (QUAI la masque dans son propre panneau de
+          détail).
         </p>
 
         {error && <p className="graph-popover__error">{error}</p>}
@@ -2223,8 +2221,8 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [mountVolumePopover, setMountVolumePopover] = useState<{ target: MountPopoverTarget; x: number; y: number } | null>(null);
   // Picker "Attacher" (bouton ＋ au survol d'une carte conteneur, ou entrée du clic droit).
   const [attachPicker, setAttachPicker] = useState<{ x: number; y: number; node: TopologyNode } | null>(null);
-  // Popover Variable/Secret du picker (voir AttachEnvPopover).
-  const [attachEnvPopover, setAttachEnvPopover] = useState<{ node: TopologyNode; variant: "env" | "secret"; x: number; y: number } | null>(
+  // Popover "Variable d'environnement" du picker (voir AttachEnvPopover — adossé aux secrets).
+  const [attachEnvPopover, setAttachEnvPopover] = useState<{ node: TopologyNode; x: number; y: number } | null>(
     null,
   );
   // "Ajouter un environnement…" depuis un nœud cluster Nutanix — même modale réelle que le spotlight.
@@ -2310,6 +2308,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [showLegend, setShowLegend] = useState(false);
 
   useEffect(() => {
+    // Premier paint rapide (sources locales seules) + fetch complet enchaîné aussitôt — le graphe
+    // partiel n'écrase jamais un graphe déjà affiché (voir topologySlice#fetchTopology.fulfilled).
+    dispatch(fetchTopology({ scope: "local" }));
     dispatch(fetchTopology());
     const interval = setInterval(() => {
       if (document.visibilityState === "visible") dispatch(fetchTopology());
@@ -3293,21 +3294,8 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
 
   if (status === "loading" && !data) {
     return (
-      <div className="topology-graph topology-graph--skeleton" style={{ height }}>
-        {SKELETON_COLUMN_ROWS.map((rowCount, columnIndex) => (
-          <div className="topology-skeleton-column" key={columnIndex}>
-            {Array.from({ length: rowCount }).map((_, rowIndex) => (
-              <div className="topology-skeleton-node" key={rowIndex}>
-                <div className="skeleton-card__row">
-                  <Skeleton variant="circle" width={22} height={22} />
-                  <Skeleton variant="text" height={12} width="60%" />
-                </div>
-                <Skeleton variant="text" height={10} width="80%" />
-                <Skeleton variant="text" height={8} width="100%" />
-              </div>
-            ))}
-          </div>
-        ))}
+      <div className="topology-graph topology-loader" style={{ height }}>
+        <TopologyLoader />
       </div>
     );
   }
@@ -3625,7 +3613,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         />
       )}
 
-      {/* Picker du bouton ＋ (ou "Attacher…" du menu) : 3 flux réels, tous par recréation. */}
+      {/* Picker du bouton ＋ (ou "Attacher…" du menu) : 2 flux réels, tous par recréation — les
+          variables d'un conteneur SONT les secrets de la plateforme (icône clé), jamais un second
+          flux à valeur saisie en clair. */}
       {attachPicker && (
         <ContextMenu
           x={attachPicker.x}
@@ -3640,14 +3630,8 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
             },
             {
               label: "Variable d'environnement…",
-              icon: IconSettings,
-              onClick: () => setAttachEnvPopover({ node: attachPicker.node, variant: "env", x: attachPicker.x, y: attachPicker.y }),
-            },
-            // Clé (vs engrenage) : la valeur vient du gestionnaire de secrets, jamais retapée.
-            {
-              label: "Secret (du gestionnaire)…",
               icon: IconKey,
-              onClick: () => setAttachEnvPopover({ node: attachPicker.node, variant: "secret", x: attachPicker.x, y: attachPicker.y }),
+              onClick: () => setAttachEnvPopover({ node: attachPicker.node, x: attachPicker.x, y: attachPicker.y }),
             },
           ]}
         />
@@ -3656,7 +3640,6 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       {attachEnvPopover && (
         <AttachEnvPopover
           containerNode={attachEnvPopover.node}
-          variant={attachEnvPopover.variant}
           x={attachEnvPopover.x}
           y={attachEnvPopover.y}
           onClose={() => setAttachEnvPopover(null)}

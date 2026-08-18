@@ -650,14 +650,14 @@ function MountFlowEdge({ id, sourceX, sourceY, sourcePosition, targetX, targetY,
 
 /** Arête "network" (conteneur <-> network) : même tracé/rendu que le type "default" de React Flow
  * (bezier), réimplémenté ici uniquement pour pouvoir y accrocher le badge flottant ci-dessus — le
- * type "default" ne permet pas d'injecter un enfant supplémentaire. Vague 3 : mêmes particules de
- * flux que "mount" sur les arêtes ACTIVES, réservées au kind "network" (trafic réel) — jamais
- * "hosts" (structurel) ni "automation-flow" (son motif pointillé fixe reste son identité). */
+ * type "default" ne permet pas d'injecter un enfant supplémentaire. Particules de flux sur TOUTE
+ * arête ACTIVE quel que soit son kind (network/hosts/automation-flow — maquette validée), jamais
+ * sur stopped/none/unhealthy ni sous prefers-reduced-motion. */
 function NetworkEdge({ id, sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, style, markerEnd, data }: EdgeProps) {
   const [edgePath, labelX, labelY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
   const reducedMotion = usePrefersReducedMotion();
   const edgeData = data as (EdgeBadgeData & { kind?: string; state?: EdgeHealthState; color?: string }) | undefined;
-  const flowing = edgeData?.kind === "network" && isActiveEdgeState(edgeData?.state) && !reducedMotion;
+  const flowing = isActiveEdgeState(edgeData?.state) && !reducedMotion;
   return (
     <>
       <BaseEdge id={id} path={edgePath} {...(markerEnd ? { markerEnd } : {})} {...(style ? { style } : {})} />
@@ -1362,14 +1362,10 @@ export function layeredGroupPositions(
     const layer = layerById.get(id) ?? 0;
     (membersByLayer.get(layer) ?? membersByLayer.set(layer, []).get(layer)!).push(id);
   }
-  // Espacement TRÈS généreux (retour utilisateur du 13/08/2026, deux fois confirmé : les cartes se
-  // touchaient encore avec un espacement plus timide) — une carte conteneur avec plusieurs badges
-  // ET plusieurs attachements volumes (ex : quai-dev-ldap-1, 2 badges + 2 volumes) peut dépasser
-  // 300px de hauteur réelle. Mieux vaut trop d'espace par défaut que des cartes qui se chevauchent :
-  // l'utilisateur peut de toute façon resserrer lui-même et mémoriser sa propre disposition ensuite
-  // (voir persistance côté TopologySubGraphPanel.tsx).
-  const LAYER_WIDTH = 420;
-  const ROW_HEIGHT = 320;
+  // Mêmes constantes de base que l'arbre "host" (maquette : espacement serré et régulier), élargies
+  // ici car une carte conteneur (badges + attachements volumes) peut dépasser 300px de hauteur.
+  const LAYER_WIDTH = AUTO_LAYOUT_LEVEL_SPACING + 40;
+  const ROW_HEIGHT = AUTO_LAYOUT_SIBLING_SPACING + 100;
   const positions: Record<string, { x: number; y: number }> = {};
   for (const [layer, ids] of membersByLayer) {
     ids.forEach((id, row) => {
@@ -1416,19 +1412,21 @@ export function layeredGroupPositions(
 // repli. L'algorithme lui-même (largeur de sous-arbre bornée, grille compacte au-delà de
 // HOST_TREE_MAX_LINE_CHILDREN feuilles) reste IDENTIQUE à celui qui a réglé "29 VMs empilées en une
 // colonne géante" le 17/08/2026 — seul l'axe (x <-> y) est inversé, jamais réinventé.
+/** Espacements PARTAGÉS des dispositions automatiques du graphe ET du sous-graphe (maquette
+ * validée : arbre horizontal compact, ~280-320px entre niveaux, fratrie serrée et centrée sur le
+ * parent) — une carte .topology-node fait 260px de large. */
+export const AUTO_LAYOUT_LEVEL_SPACING = 300;
+export const AUTO_LAYOUT_SIBLING_SPACING = 220;
+
 /** Distance (px) entre deux NŒUDS D'UNE MÊME FRATRIE le long de l'axe perpendiculaire à l'arbre
- * (axe Y) — même largeur de référence que LAYER_WIDTH ci-dessus (layeredGroupPositions), une carte
- * .topology-node fait 260px de large/haut. */
-const HOST_TREE_SIBLING_SPACING = 300;
+ * (axe Y). */
+const HOST_TREE_SIBLING_SPACING = AUTO_LAYOUT_SIBLING_SPACING;
 /** Distance (px) SUPPLÉMENTAIRE le long de l'axe des niveaux (X) entre deux "lignes" d'une grille
- * d'enfants repliée (voir HOST_TREE_MAX_LINE_CHILDREN ci-dessous) — une carte "nutanix-vm" reste
- * compacte (un seul port, peu de badges), suffisant pour ne jamais chevaucher la colonne suivante
- * de la même grille. */
-const HOST_TREE_GRID_LINE_SPACING = 210;
-/** Distance (px) entre deux NIVEAUX de la hiérarchie (cluster -> hôte -> VM), le long de l'axe X —
- * plus généreuse que HOST_TREE_GRID_LINE_SPACING seul : une carte "host" (CPU/mémoire/hyperviseur
- * réels) affiche souvent plus de contenu qu'une carte "nutanix-vm". */
-const HOST_TREE_LEVEL_SPACING = 260;
+ * d'enfants repliée (voir HOST_TREE_MAX_LINE_CHILDREN ci-dessous) — juste au-dessus des 260px de
+ * large d'une carte pour une grille compacte sans chevauchement. */
+const HOST_TREE_GRID_LINE_SPACING = 270;
+/** Distance (px) entre deux NIVEAUX de la hiérarchie (cluster -> hôte -> VM), le long de l'axe X. */
+const HOST_TREE_LEVEL_SPACING = AUTO_LAYOUT_LEVEL_SPACING;
 /** Au-delà de ce nombre d'enfants DIRECTS et tous eux-mêmes sans enfant propre (des feuilles, ex :
  * des VMs — jamais un hôte, qui a lui-même des VMs dessous), on arrête de les aligner sur une seule
  * ligne (c'était exactement le bug du 17/08/2026 : jusqu'à 29 VMs en une colonne géante) — ils sont

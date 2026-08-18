@@ -61,32 +61,3 @@
   gap: 10px;
 }
 
-/* Silhouette du graphe de topologie pendant le premier chargement (voir TopologyGraph.tsx) —
-   reprend grossièrement les 3 colonnes (volumes / conteneurs / networks) et la forme d'un
-   `.topology-node` sans les données réelles. */
-.topology-graph--skeleton {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-  padding: 24px;
-  overflow: hidden;
-}
-
-.topology-skeleton-column {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  flex: 1;
-  max-width: 260px;
-}
-
-.topology-skeleton-node {
-  border: 1.5px solid var(--color-border);
-  border-radius: var(--radius-md);
-  background: var(--color-surface-1);
-  padding: 12px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}

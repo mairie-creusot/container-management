@@ -74,7 +74,7 @@
   border-radius: var(--radius-md);
   border: 1.5px solid var(--color-border);
   background: var(--color-surface-1);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
+  box-shadow: 0 6px 18px -8px rgba(0, 0, 0, 0.6);
   cursor: pointer;
   position: relative;
   transition: width 0.15s ease, padding 0.15s ease;
@@ -240,16 +240,24 @@
   color: #14b8a6;
 }
 
-/* Racine MASTER "QUAI" (hostKind "quai-master") — indigo accentué, cohérent avec
-   HOST_KIND_CONTRACT["quai-master"] dans topologyNodeContract.tsx. */
+/* Racine MASTER "QUAI" (hostKind "quai-master") — dégradé accent subtil + bordure violette
+   (maquette validée), cohérent avec HOST_KIND_CONTRACT["quai-master"] dans topologyNodeContract.tsx. */
 .topology-node--host-quai-master {
-  border-color: #6366f1;
-  box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.18), 0 8px 20px rgba(0, 0, 0, 0.25);
+  border-color: #8b7cf666;
+  background: linear-gradient(150deg, #8b7cf62a, var(--color-surface-1));
+  box-shadow: 0 0 0 3px rgba(139, 124, 246, 0.14), 0 6px 18px -8px rgba(0, 0, 0, 0.6);
 }
 
 .topology-node--host-quai-master .topology-node__icon {
-  background: rgba(99, 102, 241, 0.18);
-  color: #6366f1;
+  background: rgba(139, 124, 246, 0.18);
+  color: #8b7cf6;
+}
+
+/* Environnements rattachés au master (Docker local/distant, LXC) — bordure bleue maquette. */
+.topology-node--host-docker-env,
+.topology-node--host-remote-docker,
+.topology-node--host-lxc {
+  border-color: #5b8cff44;
 }
 
 /* Cron job (services/cronJobsStore.ts) — jaune, cohérent avec MINIMAP_NODE_COLOR["cron-job"] dans
@@ -339,8 +347,8 @@
 }
 
 .topology-node__subtitle {
-  font-size: 11.5px;
-  color: var(--color-text-faint);
+  font-size: 10.5px;
+  color: var(--color-text-muted);
   font-family: var(--font-mono);
   white-space: nowrap;
   overflow: hidden;
@@ -369,7 +377,7 @@
   border: 1px solid var(--color-border);
   background: var(--color-surface-2);
   color: var(--color-text-muted);
-  font-size: 10.5px;
+  font-size: 9.5px;
   font-weight: 600;
   font-family: var(--font-mono);
   white-space: nowrap;
@@ -927,19 +935,18 @@
    `.react-flow__edge-path` (le <path> réel) à l'intérieur du groupe `<g>` qui porte les classes
    `topology-edge--*` posées via la prop `className` de chaque arête. */
 .react-flow__edge.topology-edge--mount .react-flow__edge-path {
-  stroke-width: 2;
+  stroke-width: 2.2;
 }
 
 .react-flow__edge.topology-edge--network .react-flow__edge-path {
-  stroke-width: 1.5;
+  stroke-width: 2.2;
 }
 
 /* "hosts" (cluster Nutanix -> VM qu'il héberge, voir services/topology.ts) : relation structurelle
-   statique, plus fine que "network" et volontairement non animée (buildTopologyEdges,
-   topologyGraphShared.tsx) — pas un flux de trafic, juste une hiérarchie physique. */
+   volontairement non animée en tirets (buildTopologyEdges, topologyGraphShared.tsx) — trait plein
+   et net, même largeur maquette que les autres kinds. */
 .react-flow__edge.topology-edge--hosts .react-flow__edge-path {
-  stroke-width: 1.25;
-  opacity: 0.85;
+  stroke-width: 2.2;
 }
 
 /* "automation-flow" (trigger -> condition -> action, voir AUTOMATION_FLOW_EDGE_COLOR dans
@@ -947,7 +954,7 @@
    gère que l'épaisseur du trait — un peu plus marquée que "network" pour rester lisible malgré son
    dasharray plus serré ("2 4", voir buildTopologyEdges). */
 .react-flow__edge.topology-edge--automation-flow .react-flow__edge-path {
-  stroke-width: 1.75;
+  stroke-width: 2.2;
 }
 
 /* Transition douce de la couleur quand l'état de santé change (vague 3) : le <path> React Flow
@@ -1063,42 +1070,113 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 4px;
-  border-radius: 999px;
-  border: 1px solid var(--color-border);
-  background: color-mix(in srgb, var(--color-surface-2) 85%, transparent);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
   pointer-events: auto;
   font-family: var(--font-mono);
 }
 
+/* Pilule maquette : fond sombre translucide + bordure/texte de la couleur d'état de l'arête. */
 .topology-edge-badge__item {
-  font-size: 9.5px;
+  font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.02em;
-  padding: 2px 7px;
+  padding: 2px 8px;
   border-radius: 999px;
+  border: 1px solid var(--color-border);
   white-space: nowrap;
   color: var(--color-text-muted);
-  background: var(--color-surface-3);
+  background: #0a0b0fdd;
 }
 
 .topology-edge-badge__item--good {
   color: var(--color-success);
-  background: var(--color-success-bg);
+  border-color: var(--color-success);
 }
 
 .topology-edge-badge__item--warn {
   color: var(--color-warning);
-  background: var(--color-warning-bg);
+  border-color: var(--color-warning);
 }
 
 /* Pastille de nature du lien sur une arête en panne réelle (edgeStateTone, topologyGraphShared.tsx). */
 .topology-edge-badge__item--critical {
   color: var(--color-critical);
-  background: var(--color-critical-bg);
+  border-color: var(--color-critical);
+}
+
+/* --- Loader du premier chargement (remplace l'ancien skeleton — voir TopologyLoader,
+   TopologyGraph.tsx) : trois points en orbite + petites phrases qui tournent. -------------------- */
+.topology-loader {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.topology-loader__inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.topology-loader__orbit {
+  position: relative;
+  width: 44px;
+  height: 44px;
+  animation: topology-loader-spin 1.6s linear infinite;
+}
+
+.topology-loader__dot {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent-end, #7c5cfc);
+}
+
+.topology-loader__dot:nth-child(1) {
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.topology-loader__dot:nth-child(2) {
+  bottom: 2px;
+  left: 4px;
+  background: var(--accent-start, #3b6fef);
+}
+
+.topology-loader__dot:nth-child(3) {
+  bottom: 2px;
+  right: 4px;
+  background: #14b8a6;
+}
+
+@keyframes topology-loader-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.topology-loader__phrase {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+  animation: topology-loader-phrase-in 0.3s ease;
+}
+
+@keyframes topology-loader-phrase-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .topology-loader__orbit,
+  .topology-loader__phrase {
+    animation: none;
+  }
 }
 
 /* Menu contextuel (clic droit sur le canevas, un nœud ou une arête) — même pattern visuel que
@@ -2886,3 +2964,48 @@
   padding: 6px;
 }
 
+
+/* Loader initial du graphe — remplace l'ancien skeleton. */
+.topology-loader {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.topology-loader__inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+}
+.topology-loader__orbit {
+  display: flex;
+  gap: 10px;
+}
+.topology-loader__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent-end);
+  animation: topology-loader-bounce 1.2s ease-in-out infinite;
+}
+.topology-loader__dot:nth-child(2) { animation-delay: 0.15s; }
+.topology-loader__dot:nth-child(3) { animation-delay: 0.3s; }
+@keyframes topology-loader-bounce {
+  0%, 100% { transform: translateY(0); opacity: 0.5; }
+  50% { transform: translateY(-9px); opacity: 1; }
+}
+.topology-loader__phrase {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+  animation: topology-loader-phrase-in 0.35s ease;
+}
+@keyframes topology-loader-phrase-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .topology-loader__dot { animation: none; opacity: 0.8; }
+  .topology-loader__phrase { animation: none; }
+}
