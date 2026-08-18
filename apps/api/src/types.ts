@@ -811,11 +811,9 @@ export interface DiffResult {
 // template.pkr.hcl...), un "run" est une invocation réelle de ce binaire dont la sortie est
 // journalisée en direct.
 
-// "docker" (18/08/2026) : chemin de build réel `docker build` pour les templates d'images
-// conteneur (voir services/templates.ts) — jamais proposé par POST /api/iac/workspaces
-// (VALID_ENGINES, routes/iac.ts, inchangé) : réservé aux workspaces créés par le catalogue de
-// templates.
-export type IacEngine = "tofu" | "ansible" | "packer" | "docker";
+// "docker"/"mkosi" : moteurs de build réservés aux templates d'images (services/templates.ts) —
+// jamais proposés par POST /api/iac/workspaces (VALID_ENGINES, routes/iac.ts).
+export type IacEngine = "tofu" | "ansible" | "packer" | "docker" | "mkosi";
 
 export interface IacEngineStatus {
   engine: IacEngine;
@@ -861,21 +859,38 @@ export interface IacRunDetail extends IacRun {
   log: string;
 }
 
-// --- Catalogue de templates d'images (VM Nutanix via Packer, conteneurs via docker build) ---
-// Voir apps/api/src/services/templatesStore.ts (persistance JSON 0600) et
+// --- Moteur de recettes de templates d'images (base + étapes libres) ---
+// Voir apps/api/src/services/templatesStore.ts (persistance JSON 0600 + migration v1) et
 // apps/api/src/services/templates.ts (génération des fichiers de build dans un workspace IaC
 // réel + lancement des builds via services/iac/runner.ts). Contrat consommé par les routes
 // /api/templates (routes/templates.ts) — frontend développé en parallèle contre ce contrat.
 
-export type ImageTemplateKind = "vm-ubuntu" | "container-scratch" | "container-alpine";
+/** Base d'une recette : image cloud (build Packer SUR le cluster Nutanix), image conteneur
+ * (docker build, "scratch" accepté) ou OS minimal from-scratch via mkosi (rootfs + noyau). */
+export type TemplateBase =
+  | { type: "cloud-image"; distro: string; version: string; imageUrl?: string }
+  | { type: "container"; image: string }
+  | { type: "mkosi"; distro: "debian" | "ubuntu" | "fedora" | "arch"; release: string };
+
+/** Étape d'une recette — validée par services/templates.ts, jamais interprétée par un shell QUAI
+ * (les scripts libres ne s'exécutent QUE dans la VM/l'image de build). */
+export type TemplateStep =
+  | { type: "packages"; packages: string[] }
+  | { type: "script"; content: string }
+  | { type: "file"; path: string; content: string; mode?: string }
+  | { type: "artifact"; templateId: string; destPath: string; dockerLoad?: boolean }
+  | { type: "user"; username: string; sudo?: boolean; sshAuthorizedKey?: string }
+  | { type: "service"; name: string; enable: boolean };
+
+/** Sous-type d'un template = type de sa base (nœud "image-template" du graphe de topologie). */
+export type ImageTemplateKind = TemplateBase["type"];
 
 export type ImageTemplateStatus = "draft" | "building" | "ready" | "error";
 
-/** Artefact réel d'un build réussi : image disque Nutanix créée par `packer build` (référence =
- * nom/uuid lu dans le manifest du post-processor, jamais deviné) ou image Docker locale
- * (référence = tag passé à `docker build -t`). */
+/** Artefact réel d'un build réussi : image disque Nutanix (manifest Packer), image Docker locale
+ * (tag `docker build -t`) ou image disque produite par mkosi (chemin relatif au workspace). */
 export interface ImageTemplateArtifact {
-  type: "nutanix-image" | "docker-image";
+  type: "nutanix-image" | "docker-image" | "raw-image";
   reference: string;
 }
 
@@ -889,20 +904,34 @@ export interface ImageTemplateLastBuild {
 export interface ImageTemplate {
   id: string; // uuid
   name: string;
-  kind: ImageTemplateKind;
-  /** "24.04"/"26.04" pour vm-ubuntu (jamais résolue en nom de code inventé : l'URL cloud-images
-   * d'Ubuntu est indexée par numéro de version), tag alpine pour container-alpine, "" pour
-   * container-scratch. */
-  baseVersion: string;
-  /** Composants cochés (ex ["docker", "docker-compose"]) — validés contre le catalogue par kind
-   * (voir services/templates.ts#COMPONENT_CATALOG), jamais interpolés tels quels dans un shell. */
-  components: string[];
+  base: TemplateBase;
+  steps: TemplateStep[];
   status: ImageTemplateStatus;
   /** Workspace IaC réel (services/iac/workspaces.ts) contenant les fichiers de build générés. */
   workspaceId: string;
   createdAt: string; // ISO 8601
   updatedAt: string; // ISO 8601
   lastBuild?: ImageTemplateLastBuild;
+}
+
+/** Recette pré-remplie (GET /api/templates/presets) — de simples valeurs de départ, jamais un
+ * catalogue fermé : le frontend peut tout modifier avant POST /api/templates. */
+export interface TemplatePreset {
+  id: string;
+  label: string;
+  description: string;
+  base: TemplateBase;
+  steps: TemplateStep[];
+}
+
+/** Template dont l'artefact du dernier build est exploitable comme étape "artifact" d'une autre
+ * recette (GET /api/templates/artifact-sources) — docker-image/raw-image uniquement (une image
+ * disque Nutanix vit sur le cluster, pas transférable comme fichier). */
+export interface TemplateArtifactSource {
+  templateId: string;
+  name: string;
+  artifactType: ImageTemplateArtifact["type"];
+  reference: string;
 }
 
 // --- Topologie (graphe visuel type Railway — voir services/topology.ts) ---
@@ -1258,7 +1287,10 @@ export interface TopologyEdge {
    * services/automationEngine.ts) : simple lien de flux, sans port/badge (même sobriété que
    * "hosts" ci-dessus).
    */
-  kind: "mount" | "network" | "hosts" | "automation-flow";
+  /** "uses-artifact" : template B consomme l'artefact du template A (étape "artifact" réelle de sa
+   * recette) — source = template producteur, target = consommateur. Jamais construite si le
+   * template source n'existe plus. */
+  kind: "mount" | "network" | "hosts" | "automation-flow" | "uses-artifact";
   /**
    * "network" uniquement : ports RÉELLEMENT publiés par le conteneur à l'une des deux extrémités
    * (docker.listContainers()[].Ports, dédupliqués) — affiché façon Railway comme un badge flottant

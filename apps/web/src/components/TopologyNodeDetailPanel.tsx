@@ -82,9 +82,13 @@ import { deleteNutanixVm, runNutanixVmAction, type NutanixVmLifecycleAction } fr
 import { buildTemplate, fetchTemplates } from "@/features/templates/templatesSlice";
 import DeployVmModal from "@/features/templates/DeployVmModal";
 import {
-  TEMPLATE_KIND_LABEL,
+  ARTIFACT_TYPE_LABEL,
+  STEP_TYPE_LABEL,
   TEMPLATE_STATUS_LABEL,
   TEMPLATE_STATUS_SEMANTIC,
+  recipeSummary,
+  stepSummary,
+  templateBaseLabel,
 } from "@/features/templates/templateCatalog";
 import TypeToConfirmDialog from "@/components/TypeToConfirmDialog";
 import type { ContainerMetricPoint, Topology, TopologyHostKind, TopologyNode, TopologyNodeKind } from "@/types";
@@ -458,7 +462,7 @@ function IacWorkspacePanel({
 
 /**
  * Contenu du nœud "image-template" (fabrique de templates) — état réel du template (statut, base,
- * composants, artifact du dernier build), action "Construire", "Déployer en VM" si un artifact
+ * résumé de la recette, artifact du dernier build), action "Construire", "Déployer en VM" si un artifact
  * nutanix-image existe, et RÉUTILISATION du panneau IaC ci-dessus (fichiers/logs du workspace de
  * build, via ImageTemplate#workspaceId) — aucune logique de run dupliquée.
  */
@@ -476,9 +480,11 @@ function ImageTemplatePanel({ node, operate, onClose }: { node: TopologyNode; op
 
   const template = templates.find((t) => t.id === templateId) ?? null;
   // Le nœud (backend topologie) et la liste des templates portent la même vérité — le template
-  // liste prime quand il est là (plus riche : composants, lastBuild complet).
+  // liste prime quand il est là (plus riche : base + recette, lastBuild complet).
   const status = template?.status ?? node.templateStatus ?? "draft";
-  const kind = template?.kind ?? node.templateKind;
+  // templateKind du nœud : chaîne libre déduite de base.type côté backend — affichée telle quelle
+  // en repli quand la liste n'est pas (encore) chargée, jamais interprétée.
+  const baseChip = template ? templateBaseLabel(template.base) : node.templateKind;
   const workspaceId = template?.workspaceId ?? node.templateWorkspaceId;
   const artifact = template?.lastBuild?.artifact ?? null;
   const artifactType = artifact?.type ?? node.templateArtifactType;
@@ -498,8 +504,7 @@ function ImageTemplatePanel({ node, operate, onClose }: { node: TopologyNode; op
     <>
       <div className="chip-row topology-detail-panel__chips">
         <span className={`status-pill status-pill--${TEMPLATE_STATUS_SEMANTIC[status]}`}>{TEMPLATE_STATUS_LABEL[status]}</span>
-        {kind && <span className="status-pill status-pill--neutral">{TEMPLATE_KIND_LABEL[kind]}</span>}
-        {template && <span className="status-pill status-pill--neutral">base {template.baseVersion}</span>}
+        {baseChip && <span className="status-pill status-pill--neutral">{baseChip}</span>}
       </div>
 
       {templatesAvailability === "unavailable" && (
@@ -511,15 +516,15 @@ function ImageTemplatePanel({ node, operate, onClose }: { node: TopologyNode; op
 
       {template && (
         <>
-          <div className="inspector-section-title">Composants</div>
-          {template.components.length === 0 ? (
-            <div className="empty-state">Aucun composant sélectionné.</div>
-          ) : (
-            <div className="chip-row">
-              {template.components.map((c) => (
-                <span key={c} className="chip">
-                  {c}
-                </span>
+          <div className="inspector-section-title">Recette</div>
+          <p className="template-modal__hint">{recipeSummary(template.steps)}</p>
+          {template.steps.length > 0 && (
+            <div className="template-recipe-summary">
+              {template.steps.map((s, i) => (
+                <div key={i} className="template-recipe-summary__row">
+                  <span className="template-recipe-summary__type">{STEP_TYPE_LABEL[s.type]}</span>
+                  <span className="template-recipe-summary__detail">{stepSummary(s)}</span>
+                </div>
               ))}
             </div>
           )}
@@ -531,7 +536,7 @@ function ImageTemplatePanel({ node, operate, onClose }: { node: TopologyNode; op
           <div className="inspector-section-title">Artifact du dernier build</div>
           <KeyValueList
             rows={[
-              { key: "Type", value: artifactType === "nutanix-image" ? "Image Nutanix (AHV)" : "Image Docker" },
+              { key: "Type", value: ARTIFACT_TYPE_LABEL[artifactType] },
               { key: "Référence", value: artifactReference },
             ]}
           />

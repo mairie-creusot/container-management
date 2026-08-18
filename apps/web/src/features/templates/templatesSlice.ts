@@ -2,7 +2,7 @@ import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
 import { apiDelete, apiGet, apiPost, ApiError } from "@/api/client";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
 import { fetchTopology } from "@/features/topology/topologySlice";
-import type { ImageTemplate, ImageTemplateCreateInput } from "@/types";
+import type { ImageTemplate, ImageTemplateCreateInput, TemplateArtifactSource, TemplatePreset } from "@/types";
 
 // Fabrique de templates (GET/POST /api/templates...) — backend développé EN PARALLÈLE contre le
 // contrat de types.ts : un 404 est traité PARTOUT comme "backend pas encore disponible" (état vide
@@ -11,13 +11,28 @@ import type { ImageTemplate, ImageTemplateCreateInput } from "@/types";
 /** "unavailable" = 404 réel constaté (backend absent) — distinct d'une liste vide légitime. */
 export type TemplatesAvailability = "unknown" | "available" | "unavailable";
 
+/** États d'une liste annexe du studio (presets, sources d'artefacts) — "unavailable" = 404 réel. */
+export type StudioListStatus = "idle" | "loading" | "ready" | "unavailable" | "error";
+
 interface TemplatesState {
   items: ImageTemplate[];
   status: "idle" | "loading" | "ready" | "error";
   availability: TemplatesAvailability;
+  presets: TemplatePreset[];
+  presetsStatus: StudioListStatus;
+  artifactSources: TemplateArtifactSource[];
+  artifactSourcesStatus: StudioListStatus;
 }
 
-const initialState: TemplatesState = { items: [], status: "idle", availability: "unknown" };
+const initialState: TemplatesState = {
+  items: [],
+  status: "idle",
+  availability: "unknown",
+  presets: [],
+  presetsStatus: "idle",
+  artifactSources: [],
+  artifactSourcesStatus: "idle",
+};
 
 const BACKEND_MISSING_MESSAGE = "Le backend de la fabrique de templates n'est pas encore disponible.";
 
@@ -58,6 +73,29 @@ export const fetchTemplates = createAsyncThunk<FetchTemplatesResult, void>(
       return { outcome: "error" };
     }
   },
+);
+
+type StudioListResult<T> = { outcome: "ok"; items: T[] } | { outcome: "unavailable" } | { outcome: "error" };
+
+async function studioList<T>(path: string): Promise<StudioListResult<T>> {
+  try {
+    return { outcome: "ok", items: await apiGet<T[]>(path) };
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) return { outcome: "unavailable" };
+    return { outcome: "error" };
+  }
+}
+
+/** Jamais rejeté (aucun toast) — un 404 devient un état "indisponible" explicite dans le studio. */
+export const fetchTemplatePresets = createAsyncThunk<StudioListResult<TemplatePreset>, void>(
+  "templates/fetchPresets",
+  () => studioList<TemplatePreset>("/templates/presets"),
+);
+
+/** Jamais rejeté (aucun toast) — même contrat que fetchTemplatePresets. */
+export const fetchArtifactSources = createAsyncThunk<StudioListResult<TemplateArtifactSource>, void>(
+  "templates/fetchArtifactSources",
+  () => studioList<TemplateArtifactSource>("/templates/artifact-sources"),
 );
 
 export const createTemplate = createAsyncThunk<ImageTemplate, ImageTemplateCreateInput, { rejectValue: string }>(
@@ -121,6 +159,28 @@ const templatesSlice = createSlice({
         }
         // Erreur réseau/serveur : on garde la dernière liste connue, sans conclure sur la dispo.
         state.status = "error";
+      })
+      .addCase(fetchTemplatePresets.pending, (state) => {
+        if (state.presetsStatus === "idle") state.presetsStatus = "loading";
+      })
+      .addCase(fetchTemplatePresets.fulfilled, (state, action) => {
+        if (action.payload.outcome === "ok") {
+          state.presetsStatus = "ready";
+          state.presets = action.payload.items;
+        } else {
+          state.presetsStatus = action.payload.outcome;
+        }
+      })
+      .addCase(fetchArtifactSources.pending, (state) => {
+        if (state.artifactSourcesStatus === "idle") state.artifactSourcesStatus = "loading";
+      })
+      .addCase(fetchArtifactSources.fulfilled, (state, action) => {
+        if (action.payload.outcome === "ok") {
+          state.artifactSourcesStatus = "ready";
+          state.artifactSources = action.payload.items;
+        } else {
+          state.artifactSourcesStatus = action.payload.outcome;
+        }
       })
       .addCase(createTemplate.fulfilled, (state, action) => {
         state.availability = "available";

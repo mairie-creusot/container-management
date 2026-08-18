@@ -1,71 +1,155 @@
 import { describe, expect, it } from "vitest";
 import {
-  TEMPLATE_BASE_OPTIONS,
-  TEMPLATE_COMPONENTS,
-  TEMPLATE_KIND_LABEL,
+  ARTIFACT_TYPE_LABEL,
+  MKOSI_DEFAULT_RELEASE,
+  MKOSI_DISTROS,
+  STEP_TYPES,
+  STEP_TYPE_LABEL,
+  TEMPLATE_BASE_TYPE_LABEL,
   TEMPLATE_STATUS_LABEL,
   VM_DEPLOY_DEFAULTS,
-  defaultComponents,
+  baseError,
+  createStep,
+  defaultBase,
+  isAbsolutePosixPath,
+  isValidFileMode,
   isValidGuestAccount,
+  isValidPackageName,
   isValidVmName,
-  normalizeComponents,
+  moveStep,
   nutanixTaskOutcome,
   nutanixTaskPercent,
-  templateBaseOption,
+  parsePackagesInput,
+  recipeSummary,
+  stepError,
+  stepSummary,
+  templateBaseLabel,
 } from "./templateCatalog";
-import type { ImageTemplateKind } from "@/types";
+import type { TemplateStep } from "@/types";
 
-// Verrouille la logique PURE de la fabrique de templates (catalogue, validation, statut de tâche
-// Prism) — le contrat de types (ImageTemplate...) est figé, les deux backends codent contre lui.
+// Verrouille la logique PURE du studio de templates (bases, étapes, validations, statut de tâche
+// Prism) — le contrat de types v2 (TemplateBase/TemplateStep...) est figé, le backend code contre lui.
 
-describe("catalogue des bases", () => {
-  it("les 3 kinds du contrat sont proposés, chacun une seule fois", () => {
-    const kinds = TEMPLATE_BASE_OPTIONS.map((o) => o.kind).sort();
-    expect(kinds).toEqual(["container-alpine", "container-scratch", "vm-ubuntu"]);
-  });
-
-  it("vm-ubuntu : versions figées 24.04/26.04 (jamais de saisie libre), défaut 24.04", () => {
-    const option = templateBaseOption("vm-ubuntu");
-    expect(option.baseVersions).toEqual(["24.04", "26.04"]);
-    expect(option.defaultBaseVersion).toBe("24.04");
-    expect(option.baseVersionEditable).toBe(false);
-    expect(option.target).toBe("vm");
-  });
-
-  it("container-alpine : tag libre (défaut 3.20) ; container-scratch : version figée", () => {
-    const alpine = templateBaseOption("container-alpine");
-    expect(alpine.baseVersionEditable).toBe(true);
-    expect(alpine.defaultBaseVersion).toBe("3.20");
-    const scratch = templateBaseOption("container-scratch");
-    expect(scratch.baseVersionEditable).toBe(false);
-    expect(scratch.target).toBe("container");
-  });
-
-  it("chaque kind a des libellés de statut/kind complets (records totaux, ancrés ici)", () => {
-    for (const kind of Object.keys(TEMPLATE_COMPONENTS) as ImageTemplateKind[]) {
-      expect(TEMPLATE_KIND_LABEL[kind]).toBeTruthy();
+describe("bases de recette", () => {
+  it("les 3 types de base du contrat ont un libellé et un défaut valides", () => {
+    for (const type of ["cloud-image", "container", "mkosi"] as const) {
+      expect(TEMPLATE_BASE_TYPE_LABEL[type]).toBeTruthy();
+      const base = defaultBase(type);
+      expect(base.type).toBe(type);
+      expect(baseError(base)).toBeNull();
     }
-    expect(Object.keys(TEMPLATE_STATUS_LABEL).sort()).toEqual(["building", "draft", "error", "ready"]);
+  });
+
+  it("templateBaseLabel : résumé lisible pour chaque type", () => {
+    expect(templateBaseLabel({ type: "cloud-image", distro: "debian", version: "12" })).toBe("VM cloud-image debian 12");
+    expect(templateBaseLabel({ type: "container", image: "scratch" })).toBe("Conteneur scratch");
+    expect(templateBaseLabel({ type: "mkosi", distro: "arch", release: "rolling" })).toBe("mkosi arch rolling");
+  });
+
+  it("baseError : distro/version/image/release exigées, imageUrl http(s) si renseignée", () => {
+    expect(baseError({ type: "cloud-image", distro: "", version: "12" })).not.toBeNull();
+    expect(baseError({ type: "cloud-image", distro: "debian", version: " " })).not.toBeNull();
+    expect(baseError({ type: "cloud-image", distro: "debian", version: "12", imageUrl: "ftp://x" })).not.toBeNull();
+    expect(baseError({ type: "cloud-image", distro: "debian", version: "12", imageUrl: "https://cloud.debian.org/x.qcow2" })).toBeNull();
+    expect(baseError({ type: "container", image: "" })).not.toBeNull();
+    expect(baseError({ type: "container", image: "scratch" })).toBeNull();
+    expect(baseError({ type: "mkosi", distro: "debian", release: "" })).not.toBeNull();
+  });
+
+  it("mkosi : chaque distro du contrat a une release par défaut", () => {
+    expect([...MKOSI_DISTROS]).toEqual(["debian", "ubuntu", "fedora", "arch"]);
+    for (const d of MKOSI_DISTROS) expect(MKOSI_DEFAULT_RELEASE[d]).toBeTruthy();
   });
 });
 
-describe("composants", () => {
-  it("vm-ubuntu : Docker + Compose REQUIS (contrat mission), toujours inclus même décochés", () => {
-    const required = TEMPLATE_COMPONENTS["vm-ubuntu"].filter((c) => c.required).map((c) => c.id);
-    expect(required).toEqual(["docker", "docker-compose"]);
-    expect(normalizeComponents("vm-ubuntu", [])).toContain("docker");
-    expect(normalizeComponents("vm-ubuntu", [])).toContain("docker-compose");
+describe("étapes de recette", () => {
+  it("les 6 types d'étape du contrat sont proposés, chacun avec un libellé et une étape vierge du bon type", () => {
+    expect(STEP_TYPES).toEqual(["packages", "script", "file", "artifact", "user", "service"]);
+    for (const t of STEP_TYPES) {
+      expect(STEP_TYPE_LABEL[t]).toBeTruthy();
+      expect(createStep(t).type).toBe(t);
+    }
   });
 
-  it("normalizeComponents : ids inconnus écartés, ordre stable = ordre du catalogue", () => {
-    expect(normalizeComponents("container-alpine", ["curl", "inconnu", "ca-certificates"])).toEqual(["ca-certificates", "curl"]);
-    expect(normalizeComponents("container-scratch", ["inconnu"])).toEqual([]);
+  it("une étape vierge est signalée invalide (rien n'est envoyé à moitié rempli)", () => {
+    for (const t of STEP_TYPES) expect(stepError(createStep(t))).not.toBeNull();
   });
 
-  it("defaultComponents : cases cochées par défaut + requis", () => {
-    expect(defaultComponents("vm-ubuntu")).toEqual(["docker", "docker-compose", "qemu-guest-agent", "openssh-server"]);
-    expect(defaultComponents("container-alpine")).toEqual(["ca-certificates"]);
-    expect(defaultComponents("container-scratch")).toEqual([]);
+  it("stepError : étapes complètes valides", () => {
+    expect(stepError({ type: "packages", packages: ["python3", "ca-certificates"] })).toBeNull();
+    expect(stepError({ type: "script", content: "#!/bin/sh\necho ok" })).toBeNull();
+    expect(stepError({ type: "file", path: "/etc/motd", content: "hello", mode: "644" })).toBeNull();
+    expect(stepError({ type: "artifact", templateId: "t1", destPath: "/opt/app.tar" })).toBeNull();
+    expect(stepError({ type: "user", username: "deploy", sudo: true })).toBeNull();
+    expect(stepError({ type: "service", name: "nginx", enable: true })).toBeNull();
+  });
+
+  it("stepError : chemins absolus exigés pour file.path et artifact.destPath", () => {
+    expect(stepError({ type: "file", path: "etc/motd", content: "x" })).not.toBeNull();
+    expect(stepError({ type: "artifact", templateId: "t1", destPath: "opt/app" })).not.toBeNull();
+  });
+
+  it("moveStep : échange deux étapes, retourne le tableau intact hors bornes", () => {
+    const steps: TemplateStep[] = [
+      { type: "script", content: "a" },
+      { type: "script", content: "b" },
+    ];
+    expect(moveStep(steps, 0, 1).map((s) => (s.type === "script" ? s.content : ""))).toEqual(["b", "a"]);
+    expect(moveStep(steps, 0, -1)).toBe(steps);
+    expect(moveStep(steps, 1, 1)).toBe(steps);
+  });
+
+  it("stepSummary/recipeSummary : résumés courts, jamais de contenu inventé", () => {
+    expect(stepSummary({ type: "packages", packages: ["python3"] })).toBe("python3");
+    expect(stepSummary({ type: "script", content: "#!/bin/sh\napt-get update" })).toBe("#!/bin/sh");
+    expect(stepSummary({ type: "user", username: "deploy", sudo: true })).toBe("deploy (sudo)");
+    expect(recipeSummary([])).toBe("Recette vide (base nue)");
+    expect(recipeSummary([{ type: "script", content: "x" }])).toBe("1 étape : script");
+    expect(
+      recipeSummary([
+        { type: "packages", packages: ["python3"] },
+        { type: "packages", packages: ["curl"] },
+        { type: "script", content: "x" },
+      ]),
+    ).toBe("3 étapes : paquets, script");
+  });
+});
+
+describe("validations élémentaires", () => {
+  it("isValidPackageName : noms plausibles acceptés, espaces/vides refusés", () => {
+    expect(isValidPackageName("python3")).toBe(true);
+    expect(isValidPackageName("libssl-dev")).toBe(true);
+    expect(isValidPackageName("g++")).toBe(true);
+    expect(isValidPackageName("pkg avec espace")).toBe(false);
+    expect(isValidPackageName("")).toBe(false);
+    expect(isValidPackageName("-lead")).toBe(false);
+  });
+
+  it("isAbsolutePosixPath : / en tête exigé, backslash/espaces en bord refusés", () => {
+    expect(isAbsolutePosixPath("/etc/motd")).toBe(true);
+    expect(isAbsolutePosixPath("etc/motd")).toBe(false);
+    expect(isAbsolutePosixPath("/")).toBe(false);
+    expect(isAbsolutePosixPath("C:\\temp")).toBe(false);
+    expect(isAbsolutePosixPath(" /etc/motd")).toBe(false);
+  });
+
+  it("isValidFileMode : octal 3-4 chiffres", () => {
+    expect(isValidFileMode("644")).toBe(true);
+    expect(isValidFileMode("0755")).toBe(true);
+    expect(isValidFileMode("999")).toBe(false);
+    expect(isValidFileMode("rw-")).toBe(false);
+  });
+
+  it("parsePackagesInput : découpe espaces/virgules/retours ligne, sans doublons ni vides", () => {
+    expect(parsePackagesInput("python3, curl\n ca-certificates python3")).toEqual(["python3", "curl", "ca-certificates"]);
+    expect(parsePackagesInput("  ,, ")).toEqual([]);
+  });
+});
+
+describe("libellés partagés", () => {
+  it("statuts et types d'artifact complets (raw-image mkosi compris)", () => {
+    expect(Object.keys(TEMPLATE_STATUS_LABEL).sort()).toEqual(["building", "draft", "error", "ready"]);
+    expect(Object.keys(ARTIFACT_TYPE_LABEL).sort()).toEqual(["docker-image", "nutanix-image", "raw-image"]);
   });
 });
 

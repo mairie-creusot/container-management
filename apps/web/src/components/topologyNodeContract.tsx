@@ -77,7 +77,9 @@ export type CapabilityId =
   | "hosted-by"
   | "hosts"
   | "automation-out"
-  | "automation-in";
+  | "automation-in"
+  | "artifact-out"
+  | "artifact-in";
 
 export interface PortSpec {
   /** Id du Handle React Flow — unique au sein d'un même type de nœud. */
@@ -89,7 +91,7 @@ export interface PortSpec {
   label: string;
   /** Suffixe de classe .topology-handle--<token> — couleur reprise de celle de l'icône du même
    * type de nœud (variables.css), pas de couleur arbitraire ajoutée. */
-  colorToken: "network" | "volume" | "host" | "automation";
+  colorToken: "network" | "volume" | "host" | "automation" | "template";
 }
 
 export interface CapabilityDef {
@@ -127,6 +129,10 @@ export const CAPABILITY_DEFS: Record<CapabilityId, CapabilityDef> = {
   // routes/automation.ts#isValidConnection). `linksTo` déclaré par cohérence documentaire.
   "automation-out": { linksTo: "automation-in", interactive: true },
   "automation-in": { linksTo: "automation-out", interactive: true },
+  // Dépendance d'artefact template->template : vérité issue de la RECETTE (étape "artifact"),
+  // recalculée à chaque poll — se modifie dans le studio, pas au fil (phase sous-graphe à venir).
+  "artifact-out": { linksTo: "artifact-in", interactive: false, infoMessage: "Dépendance d'artefact définie par la recette du template — modifiable dans le studio." },
+  "artifact-in": { linksTo: "artifact-out", interactive: false, infoMessage: "Dépendance d'artefact définie par la recette du template — modifiable dans le studio." },
 };
 
 /**
@@ -157,6 +163,8 @@ export const CAPABILITY_PORT_META: Record<CapabilityId, Pick<PortSpec, "handleTy
   // valeurs alignées sur les vrais ports des nœuds d'automatisation ci-dessous.
   "automation-out": { handleType: "source", position: Position.Right, colorToken: "automation", label: "Relier vers une condition/action" },
   "automation-in": { handleType: "target", position: Position.Left, colorToken: "automation", label: "Relié depuis un déclencheur/une condition" },
+  "artifact-out": { handleType: "source", position: Position.Right, colorToken: "template", label: "Artefact fourni" },
+  "artifact-in": { handleType: "target", position: Position.Left, colorToken: "template", label: "Artefact consommé" },
 };
 
 // --- Câblage manuel au fil (React Flow onConnect) ------------------------------------------------
@@ -214,8 +222,8 @@ export interface EdgeHealthInfo {
 /** Contexte fourni par buildTopologyEdges au `edgeHealth` d'un contrat — tout ce qu'un kind peut
  * légitimement vouloir consulter SANS que le moteur ait à connaître sa plateforme. */
 export interface EdgeHealthContext {
-  /** Kind de l'arête interrogée (mount/network/hosts/automation-flow). */
-  edgeKind: "mount" | "network" | "hosts" | "automation-flow";
+  /** Kind de l'arête interrogée — même union que TopologyEdge["kind"]. */
+  edgeKind: "mount" | "network" | "hosts" | "automation-flow" | "uses-artifact";
   /** Rôle de CE nœud sur l'arête — permet à un contrat de ne répondre que pour le bout où son
    * signal a un sens (ex : une VM Nutanix n'est porteuse que comme CIBLE d'une arête "hosts"). */
   role: "source" | "target";
@@ -859,7 +867,10 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     // .topology-node--image-template dans topology.css.
     minimapColor: "#22d3ee",
     defaultColumnX: 4420,
-    ports: [],
+    ports: [
+      { id: "artifact-in", capability: "artifact-in", handleType: "target", position: Position.Left, label: "Artefact consommé", colorToken: "template" },
+      { id: "artifact-out", capability: "artifact-out", handleType: "source", position: Position.Right, label: "Artefact fourni", colorToken: "template" },
+    ],
     edgeHealth: null,
     automationStatusSeed: null,
     resourceAlerts: null,

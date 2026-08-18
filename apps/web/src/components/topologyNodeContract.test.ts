@@ -80,9 +80,16 @@ describe("NODE_CONTRACT — totalité et conventions transverses", () => {
   });
 
   it("un kind jamais connectable déclare EXPLICITEMENT ports: [] (jamais une absence implicite)", () => {
-    for (const kind of ["ad-server", "iac-workspace", "cron-job", "backup", "gitops-source", "image-template"] as const) {
+    for (const kind of ["ad-server", "iac-workspace", "cron-job", "backup", "gitops-source"] as const) {
       expect(NODE_CONTRACT[kind].ports).toEqual([]);
     }
+  });
+
+  it("image-template : ports d'artefact (entrée cible à gauche, sortie source à droite — arêtes uses-artifact)", () => {
+    expect(NODE_CONTRACT["image-template"].ports.map((p) => ({ id: p.id, handleType: p.handleType }))).toEqual([
+      { id: "artifact-in", handleType: "target" },
+      { id: "artifact-out", handleType: "source" },
+    ]);
   });
 
   it("nœuds d'automatisation : ports désormais déclarés (trigger = sortie seule, action = entrée seule, condition = les deux)", () => {

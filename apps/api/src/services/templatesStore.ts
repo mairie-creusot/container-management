@@ -1,26 +1,102 @@
-/**
- * Persistance du catalogue de templates d'images (data/templates.json, 0600) — même pattern
- * fichier JSON simple que services/iac/workspaces.ts (index à côté de config.json, pas de base
- * de données). Aucun secret ici : un template ne porte que des métadonnées de build ; les
- * identifiants Prism ne sont jamais écrits sur disque par ce chantier (voir services/templates.ts
- * pour l'injection à l'exécution).
- */
+// Persistance du catalogue de templates (data/templates.json, 0600) — fichier JSON simple, même
+// pattern que services/iac/workspaces.ts. Aucun secret ici. Les templates v1 (kind/baseVersion/
+// components) sont migrés vers le modèle recette (base + steps) À LA LECTURE, réécrits une fois.
 
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { config } from "../config.js";
-import type { ImageTemplate } from "../types.js";
+import type { ImageTemplate, ImageTemplateLastBuild, ImageTemplateStatus, TemplateBase, TemplateStep } from "../types.js";
 
 function templatesIndexPath(): string {
   return path.join(path.dirname(path.resolve(config.setup.configPath)), "templates.json");
 }
 
+interface StoredTemplateV1 {
+  id: string;
+  name: string;
+  kind: "vm-ubuntu" | "container-scratch" | "container-alpine";
+  baseVersion: string;
+  components: string[];
+  status: ImageTemplateStatus;
+  workspaceId: string;
+  createdAt: string;
+  updatedAt: string;
+  lastBuild?: ImageTemplateLastBuild;
+}
+
+// Mêmes correspondances composant -> paquets réels que le catalogue fermé v1 (jamais un nom deviné).
+const V1_UBUNTU_APT: Record<string, string[]> = {
+  docker: ["docker.io"],
+  "docker-compose": ["docker-compose-v2"],
+  git: ["git"],
+  curl: ["curl"],
+  htop: ["htop"],
+  python3: ["python3"],
+  "build-essential": ["build-essential"],
+  "qemu-guest-agent": ["qemu-guest-agent"],
+};
+
+const V1_ALPINE_APK: Record<string, string[]> = {
+  "docker-cli": ["docker-cli"],
+  "docker-compose": ["docker-cli-compose"],
+  git: ["git"],
+  curl: ["curl"],
+  bash: ["bash"],
+  python3: ["python3"],
+  nodejs: ["nodejs"],
+  openssl: ["openssl"],
+};
+
+/** Conversion d'un template v1 vers le modèle recette — même sémantique de build, rien perdu. */
+export function migrateV1Template(v1: StoredTemplateV1): ImageTemplate {
+  let base: TemplateBase;
+  const steps: TemplateStep[] = [];
+  switch (v1.kind) {
+    case "vm-ubuntu": {
+      base = { type: "cloud-image", distro: "ubuntu", version: v1.baseVersion };
+      const packages = v1.components.flatMap((c) => V1_UBUNTU_APT[c] ?? []);
+      if (packages.length > 0) steps.push({ type: "packages", packages });
+      if (v1.components.includes("docker")) steps.push({ type: "service", name: "docker", enable: true });
+      break;
+    }
+    case "container-alpine": {
+      base = { type: "container", image: `alpine:${v1.baseVersion}` };
+      const packages = v1.components.flatMap((c) => V1_ALPINE_APK[c] ?? []);
+      if (packages.length > 0) steps.push({ type: "packages", packages });
+      break;
+    }
+    case "container-scratch":
+      base = { type: "container", image: "scratch" };
+      break;
+  }
+  return {
+    id: v1.id,
+    name: v1.name,
+    base,
+    steps,
+    status: v1.status,
+    workspaceId: v1.workspaceId,
+    createdAt: v1.createdAt,
+    updatedAt: v1.updatedAt,
+    ...(v1.lastBuild ? { lastBuild: v1.lastBuild } : {}),
+  };
+}
+
 async function readIndex(): Promise<ImageTemplate[]> {
+  let raw: Array<ImageTemplate | StoredTemplateV1>;
   try {
-    return JSON.parse(await fs.readFile(templatesIndexPath(), "utf-8")) as ImageTemplate[];
+    raw = JSON.parse(await fs.readFile(templatesIndexPath(), "utf-8")) as Array<ImageTemplate | StoredTemplateV1>;
   } catch {
     return [];
   }
+  let migrated = false;
+  const templates = raw.map((entry) => {
+    if ("base" in entry) return entry;
+    migrated = true;
+    return migrateV1Template(entry);
+  });
+  if (migrated) await writeIndex(templates);
+  return templates;
 }
 
 async function writeIndex(templates: ImageTemplate[]): Promise<void> {

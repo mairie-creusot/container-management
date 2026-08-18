@@ -151,12 +151,19 @@ build {
 }
 `,
   },
-  // Workspaces "docker" : créés UNIQUEMENT par le catalogue de templates (services/templates.ts),
+  // Workspaces "docker"/"mkosi" : créés UNIQUEMENT par le moteur de recettes (services/templates.ts),
   // qui remplace aussitôt ce scaffold par les fichiers générés — jamais via POST /api/iac/workspaces.
   docker: {
     Dockerfile: `# Scaffold minimal — remplacé par le Dockerfile généré du template (voir services/templates.ts).
 FROM alpine:3.20
 CMD ["sh"]
+`,
+  },
+  mkosi: {
+    "mkosi.conf": `# Scaffold minimal — remplacé par le mkosi.conf généré du template (voir services/templates.ts).
+[Distribution]
+Distribution=debian
+Release=bookworm
 `,
   },
 };

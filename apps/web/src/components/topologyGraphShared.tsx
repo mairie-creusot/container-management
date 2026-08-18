@@ -327,6 +327,7 @@ const EDGE_KIND_PORT_CAPABILITY: Record<TopologyEdge["kind"], { source: Capabili
   network: { source: "network", target: "attach" },
   hosts: { source: "hosts", target: "hosted-by" },
   "automation-flow": { source: "automation-out", target: "automation-in" },
+  "uses-artifact": { source: "artifact-out", target: "artifact-in" },
 };
 
 function portIdForCapability(node: TopologyNode | undefined, capability: CapabilityId): string | undefined {
@@ -553,6 +554,7 @@ export const EDGE_KIND_LABEL: Record<
   // Cluster -> hôte AHV = "hôte physique" ; hôte/environnement -> conteneur ou VM = "hébergement".
   hosts: (_source, target) => (target?.kind === "host" ? "hôte physique" : "hébergement"),
   "automation-flow": () => "automatisation",
+  "uses-artifact": (source) => (source ? `artefact ${source.label}` : "artefact"),
 };
 
 export interface EdgeBadgeData {

@@ -518,9 +518,10 @@ export interface TopologyNode {
   memoryLimitBytes?: number;
   nanoCpus?: number;
   /** Nœuds "image-template" uniquement (fabrique de templates) : projection du ImageTemplate réel
-   * posée par le backend topologie À VENIR — absents tant qu'il ne fournit pas ce nœud, le kind
-   * reste alors simplement invisible (aucune donnée inventée côté client). */
-  templateKind?: ImageTemplateKind;
+   * posée par le backend topologie — absents tant qu'il ne fournit pas ce nœud (aucune donnée
+   * inventée côté client). `templateKind` est optionnel et déduit de `base.type` côté backend
+   * (chaîne libre, tolérée telle quelle — anciens kinds v1 compris). */
+  templateKind?: string;
   templateStatus?: ImageTemplateStatus;
   /** Workspace IaC (Packer) du template — permet de réutiliser IacWorkspacePanel pour ses
    * fichiers/logs de build. */
@@ -587,7 +588,9 @@ export interface TopologyEdge {
    * jamais construite si non déterminable) — voir apps/api/src/types.ts pour le détail complet. */
   /** "automation-flow" : arête RÉELLE entre deux nœuds d'automatisation (trigger -> condition,
    * trigger -> action, condition -> action) — voir apps/api/src/types.ts pour le détail complet. */
-  kind: "mount" | "network" | "hosts" | "automation-flow";
+  /** "uses-artifact" : template producteur (source) -> template consommateur (target), issue d'une
+   * étape "artifact" réelle de la recette — voir apps/api/src/types.ts. */
+  kind: "mount" | "network" | "hosts" | "automation-flow" | "uses-artifact";
   /** "network" uniquement : ports réellement publiés par le conteneur à l'une des deux extrémités
    * (voir doc complète côté apps/api/src/types.ts). */
   ports?: TopologyEdgePort[];
@@ -673,15 +676,29 @@ export interface IacRunDetail extends IacRun {
   log: string;
 }
 
-// --- Fabrique de templates d'images (builder + catalogue + déploiement en VM) ------------------
-// Contrat FIGÉ : les deux backends (templates + topologie) sont développés EN PARALLÈLE contre ces
-// formes exactes — un 404 signifie "backend pas encore là", jamais masqué par de fausses données.
+// --- Fabrique de templates d'images (studio de recettes + déploiement en VM) -------------------
+// Contrat FIGÉ v2 : les deux backends (templates + topologie) sont développés EN PARALLÈLE contre
+// ces formes exactes — un 404 signifie "backend pas encore là", jamais masqué par de fausses données.
 
-export type ImageTemplateKind = "vm-ubuntu" | "container-scratch" | "container-alpine";
+/** Base d'une recette : VM cloud-image, image de conteneur (scratch compris) ou OS minimal mkosi. */
+export type TemplateBase =
+  | { type: "cloud-image"; distro: string; version: string; imageUrl?: string }
+  | { type: "container"; image: string }
+  | { type: "mkosi"; distro: "debian" | "ubuntu" | "fedora" | "arch"; release: string };
+
+/** Une étape ORDONNÉE de la recette — exécutée dans l'ordre du tableau `steps`. */
+export type TemplateStep =
+  | { type: "packages"; packages: string[] }
+  | { type: "script"; content: string }
+  | { type: "file"; path: string; content: string; mode?: string }
+  | { type: "artifact"; templateId: string; destPath: string; dockerLoad?: boolean }
+  | { type: "user"; username: string; sudo?: boolean; sshAuthorizedKey?: string }
+  | { type: "service"; name: string; enable: boolean };
 
 export type ImageTemplateStatus = "draft" | "building" | "ready" | "error";
 
-export type ImageTemplateArtifactType = "nutanix-image" | "docker-image";
+/** "raw-image" : image disque brute produite par un build mkosi. */
+export type ImageTemplateArtifactType = "nutanix-image" | "docker-image" | "raw-image";
 
 export interface ImageTemplateArtifact {
   type: ImageTemplateArtifactType;
@@ -703,9 +720,8 @@ export interface ImageTemplateBuild {
 export interface ImageTemplate {
   id: string;
   name: string;
-  kind: ImageTemplateKind;
-  baseVersion: string;
-  components: string[];
+  base: TemplateBase;
+  steps: TemplateStep[];
   status: ImageTemplateStatus;
   workspaceId: string;
   createdAt: string;
@@ -716,9 +732,25 @@ export interface ImageTemplate {
 /** Corps de POST /api/templates. */
 export interface ImageTemplateCreateInput {
   name: string;
-  kind: ImageTemplateKind;
-  baseVersion: string;
-  components: string[];
+  base: TemplateBase;
+  steps: TemplateStep[];
+}
+
+/** GET /api/templates/presets — recettes de départ servies par le backend (dont les 3 anciennes). */
+export interface TemplatePreset {
+  id: string;
+  label: string;
+  description: string;
+  base: TemplateBase;
+  steps: TemplateStep[];
+}
+
+/** GET /api/templates/artifact-sources — artefacts d'autres templates injectables dans une recette. */
+export interface TemplateArtifactSource {
+  templateId: string;
+  name: string;
+  artifactType: ImageTemplateArtifactType;
+  reference: string;
 }
 
 export interface DockerNetwork {

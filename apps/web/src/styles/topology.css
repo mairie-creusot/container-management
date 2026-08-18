@@ -339,6 +339,15 @@
   background: #dc2626;
 }
 
+/* Ports d'artefact d'un template d'image — même cyan que le nœud (minimapColor #22d3ee). */
+.topology-handle--template.react-flow__handle {
+  border-color: #22d3ee;
+}
+
+.topology-handle--template.react-flow__handle:hover {
+  background: #22d3ee;
+}
+
 /* Volume/network orphelin (rattaché à AUCUN conteneur, voir TopologyNode#orphan) — atténué +
    bordure pointillée plutôt que caché : reste un vrai nœud du graphe (décision produit du
    13/08/2026), juste visuellement mis en retrait par rapport aux ressources réellement utilisées. */
@@ -3058,18 +3067,226 @@
   line-height: 1.4;
 }
 
-.template-components {
+/* --- Studio de recettes (TemplateStudioModal, étape d'édition) : modale large, deux colonnes. */
+.modal-card:has(.template-studio) {
+  width: 100%;
+  max-width: min(840px, calc(100vw - 40px));
+}
+
+.template-studio__presets {
+  grid-template-columns: repeat(2, 1fr);
+}
+
+.template-studio__columns {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.template-studio__recipe {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  min-width: 0;
 }
 
-.template-components__required {
-  margin-left: 6px;
-  font-size: 10.5px;
+.template-studio__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.template-studio__row.is-selected {
+  border-color: var(--accent-end);
+}
+
+.template-studio__row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.template-studio__row-type {
+  font-size: 11px;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--color-text-faint);
+  white-space: nowrap;
+}
+
+.template-studio__row-summary {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.template-studio__row-error {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-critical);
+  flex-shrink: 0;
+}
+
+.template-studio__row-tools {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.template-studio__row-tools .btn {
+  padding: 0 6px;
+}
+
+.template-studio__add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.template-studio__editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.template-studio__tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.template-studio__tab {
+  padding: 6px 10px;
+  font-size: 12.5px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.template-studio__tab.is-selected {
+  border-color: var(--accent-end);
+  color: var(--color-text);
+}
+
+.template-studio__textarea {
+  resize: vertical;
+  min-height: 120px;
+}
+
+.template-studio__sources {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.template-studio__source {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.template-studio__source.is-selected {
+  border-color: var(--accent-end);
+  box-shadow: 0 0 0 2px rgba(124, 92, 252, 0.25);
+}
+
+.template-studio__source-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.template-studio__source-meta {
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.template-studio__chip-remove {
+  margin-left: 4px;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.template-studio__chip-remove:hover {
+  color: var(--color-critical);
+}
+
+/* Résumé de recette dans le panneau de détail d'un nœud image-template. */
+.template-recipe-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.template-recipe-summary__row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+
+.template-recipe-summary__type {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-faint);
+  white-space: nowrap;
+}
+
+.template-recipe-summary__detail {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 /* "Ressources : 2 vCPU · 4096 Mio…" — bascule discrète, valeurs par défaut visibles d'un coup d'œil. */

@@ -1,96 +1,189 @@
-// Logique PURE de la fabrique de templates (choix de base, composants, défauts VM, statut de
-// tâche Prism) — testée par templateCatalog.test.ts, aucun accès réseau/Redux ici.
-import type { ImageTemplateKind, ImageTemplateStatus, NutanixTaskStatus } from "@/types";
+// Logique PURE du studio de templates (bases, étapes de recette, validations, statut de tâche
+// Prism) — testée par templateCatalog.test.ts, aucun accès réseau/Redux ici.
+import type {
+  ImageTemplateArtifactType,
+  ImageTemplateStatus,
+  NutanixTaskStatus,
+  TemplateBase,
+  TemplateStep,
+} from "@/types";
 
-export interface TemplateBaseOption {
-  kind: ImageTemplateKind;
-  title: string;
-  description: string;
-  target: "vm" | "container";
-  /** Versions proposées en select — [] = saisie libre (tag Alpine) ou version figée. */
-  baseVersions: string[];
-  defaultBaseVersion: string;
-  /** true = champ texte libre (tag), false = select (ou valeur figée si baseVersions est vide). */
-  baseVersionEditable: boolean;
-}
+// --- Bases -------------------------------------------------------------------------------------
 
-export const TEMPLATE_BASE_OPTIONS: TemplateBaseOption[] = [
-  {
-    kind: "vm-ubuntu",
-    title: "Ubuntu Server",
-    description: "VM construite via Packer sur le cluster Nutanix — image AHV prête à déployer.",
-    target: "vm",
-    baseVersions: ["24.04", "26.04"],
-    defaultBaseVersion: "24.04",
-    baseVersionEditable: false,
-  },
-  {
-    kind: "container-alpine",
-    title: "Alpine",
-    description: "Image de conteneur légère — choisissez le tag Alpine de base.",
-    target: "container",
-    baseVersions: [],
-    defaultBaseVersion: "3.20",
-    baseVersionEditable: true,
-  },
-  {
-    kind: "container-scratch",
-    title: "scratch",
-    description: "Conteneur ultra-minimal, sans distribution — pour binaires statiques.",
-    target: "container",
-    baseVersions: [],
-    defaultBaseVersion: "latest",
-    baseVersionEditable: false,
-  },
-];
-
-export function templateBaseOption(kind: ImageTemplateKind): TemplateBaseOption {
-  // Les 3 kinds du contrat sont tous déclarés ci-dessus — le repli n'arrive jamais en pratique.
-  return TEMPLATE_BASE_OPTIONS.find((o) => o.kind === kind) ?? TEMPLATE_BASE_OPTIONS[0]!;
-}
-
-export interface TemplateComponentOption {
-  id: string;
-  label: string;
-  /** Toujours inclus (case cochée non décochable) — ex : Docker + Compose pour vm-ubuntu. */
-  required: boolean;
-  defaultChecked: boolean;
-}
-
-export const TEMPLATE_COMPONENTS: Record<ImageTemplateKind, TemplateComponentOption[]> = {
-  "vm-ubuntu": [
-    { id: "docker", label: "Docker Engine", required: true, defaultChecked: true },
-    { id: "docker-compose", label: "Docker Compose (plugin)", required: true, defaultChecked: true },
-    { id: "qemu-guest-agent", label: "QEMU guest agent (recommandé sur AHV)", required: false, defaultChecked: true },
-    { id: "openssh-server", label: "Serveur SSH", required: false, defaultChecked: true },
-  ],
-  "container-alpine": [
-    { id: "ca-certificates", label: "Certificats racine (ca-certificates)", required: false, defaultChecked: true },
-    { id: "curl", label: "curl", required: false, defaultChecked: false },
-    { id: "tzdata", label: "Fuseaux horaires (tzdata)", required: false, defaultChecked: false },
-  ],
-  "container-scratch": [
-    { id: "ca-certificates", label: "Certificats racine (ca-certificates)", required: false, defaultChecked: false },
-  ],
+export const TEMPLATE_BASE_TYPE_LABEL: Record<TemplateBase["type"], string> = {
+  "cloud-image": "VM cloud-image",
+  container: "Conteneur",
+  mkosi: "OS minimal (mkosi)",
 };
 
-/** Composants cochés par défaut pour un kind. */
-export function defaultComponents(kind: ImageTemplateKind): string[] {
-  return TEMPLATE_COMPONENTS[kind].filter((c) => c.defaultChecked || c.required).map((c) => c.id);
-}
+/** Suggestions de saisie — la distro/l'image restent LIBRES (cœur de la demande utilisateur). */
+export const CLOUD_IMAGE_DISTRO_SUGGESTIONS = ["ubuntu", "debian"];
+export const CONTAINER_IMAGE_SUGGESTIONS = ["scratch", "debian:bookworm", "alpine:3.20"];
 
-/** Sélection nettoyée avant POST : composants requis toujours inclus, ids inconnus écartés,
- * ordre stable = celui du catalogue. */
-export function normalizeComponents(kind: ImageTemplateKind, selected: string[]): string[] {
-  const picked = new Set(selected);
-  return TEMPLATE_COMPONENTS[kind].filter((c) => c.required || picked.has(c.id)).map((c) => c.id);
-}
+export const MKOSI_DISTROS = ["debian", "ubuntu", "fedora", "arch"] as const;
+export type MkosiDistro = (typeof MKOSI_DISTROS)[number];
 
-export const TEMPLATE_KIND_LABEL: Record<ImageTemplateKind, string> = {
-  "vm-ubuntu": "VM Ubuntu Server",
-  "container-alpine": "Conteneur Alpine",
-  "container-scratch": "Conteneur scratch",
+/** Release mkosi proposée par défaut pour chaque distro — modifiable librement ensuite. */
+export const MKOSI_DEFAULT_RELEASE: Record<MkosiDistro, string> = {
+  debian: "bookworm",
+  ubuntu: "noble",
+  fedora: "40",
+  arch: "rolling",
 };
+
+/** Base par défaut d'un onglet du studio quand on bascule dessus sans recette pré-remplie. */
+export function defaultBase(type: TemplateBase["type"]): TemplateBase {
+  if (type === "cloud-image") return { type: "cloud-image", distro: "ubuntu", version: "24.04" };
+  if (type === "container") return { type: "container", image: "debian:bookworm" };
+  return { type: "mkosi", distro: "debian", release: MKOSI_DEFAULT_RELEASE.debian };
+}
+
+/** Libellé court d'une base pour les chips/résumés — ex: "VM cloud-image ubuntu 24.04". */
+export function templateBaseLabel(base: TemplateBase): string {
+  if (base.type === "cloud-image") return `VM cloud-image ${base.distro} ${base.version}`.trim();
+  if (base.type === "container") return `Conteneur ${base.image}`.trim();
+  return `mkosi ${base.distro} ${base.release}`.trim();
+}
+
+/** Cible produite par la base — pilote uniquement des textes d'aide côté studio. */
+export function templateBaseTarget(base: TemplateBase): "vm" | "container" | "raw-image" {
+  if (base.type === "cloud-image") return "vm";
+  if (base.type === "container") return "container";
+  return "raw-image";
+}
+
+// --- Étapes de recette -------------------------------------------------------------------------
+
+export const STEP_TYPE_LABEL: Record<TemplateStep["type"], string> = {
+  packages: "Paquets",
+  script: "Script",
+  file: "Fichier",
+  artifact: "Artefact plateforme",
+  user: "Utilisateur",
+  service: "Service",
+};
+
+export const STEP_TYPES: TemplateStep["type"][] = ["packages", "script", "file", "artifact", "user", "service"];
+
+/** Étape vierge d'un type donné — valeurs neutres, à compléter dans l'éditeur. */
+export function createStep(type: TemplateStep["type"]): TemplateStep {
+  switch (type) {
+    case "packages":
+      return { type: "packages", packages: [] };
+    case "script":
+      return { type: "script", content: "" };
+    case "file":
+      return { type: "file", path: "", content: "" };
+    case "artifact":
+      return { type: "artifact", templateId: "", destPath: "" };
+    case "user":
+      return { type: "user", username: "" };
+    case "service":
+      return { type: "service", name: "", enable: true };
+  }
+}
+
+/** Résumé d'une ligne de la liste de recette — jamais le contenu complet. */
+export function stepSummary(step: TemplateStep): string {
+  switch (step.type) {
+    case "packages":
+      return step.packages.length === 0 ? "aucun paquet" : step.packages.join(", ");
+    case "script": {
+      const firstLine = step.content.split("\n").find((l) => l.trim().length > 0)?.trim() ?? "";
+      return firstLine === "" ? "script vide" : firstLine;
+    }
+    case "file":
+      return step.path === "" ? "chemin à renseigner" : step.path;
+    case "artifact":
+      return step.templateId === "" ? "artefact à choisir" : `→ ${step.destPath || "destination à renseigner"}`;
+    case "user":
+      return step.username === "" ? "nom à renseigner" : `${step.username}${step.sudo ? " (sudo)" : ""}`;
+    case "service":
+      return step.name === "" ? "nom à renseigner" : `${step.name} — ${step.enable ? "activé" : "désactivé"}`;
+  }
+}
+
+/** Résumé de la recette pour le panneau de détail — ex: "3 étapes : paquets, script, fichier". */
+export function recipeSummary(steps: TemplateStep[]): string {
+  if (steps.length === 0) return "Recette vide (base nue)";
+  const types = [...new Set(steps.map((s) => STEP_TYPE_LABEL[s.type].toLowerCase()))].join(", ");
+  return `${steps.length} ${steps.length > 1 ? "étapes" : "étape"} : ${types}`;
+}
+
+/** Déplace l'étape `index` de `delta` (±1) — retourne le même tableau si le déplacement sort des bornes. */
+export function moveStep(steps: TemplateStep[], index: number, delta: -1 | 1): TemplateStep[] {
+  const target = index + delta;
+  if (index < 0 || index >= steps.length || target < 0 || target >= steps.length) return steps;
+  const next = [...steps];
+  const moved = next[index]!;
+  next[index] = next[target]!;
+  next[target] = moved;
+  return next;
+}
+
+// --- Validation locale légère (le serveur reste juge en dernier ressort) -----------------------
+
+/** Nom de paquet plausible (apt/dnf/pacman/apk) : lettres/chiffres + .+-_:@ — jamais d'espace. */
+export function isValidPackageName(name: string): boolean {
+  return /^[a-zA-Z0-9][a-zA-Z0-9.+_:@-]*$/.test(name);
+}
+
+/** Chemin POSIX absolu exigé pour file.path et artifact.destPath. */
+export function isAbsolutePosixPath(path: string): boolean {
+  return path.startsWith("/") && !path.includes("\\") && path.trim() === path && path.length > 1;
+}
+
+/** Mode octal optionnel d'un fichier ("644", "0755"…) — vide = défaut serveur. */
+export function isValidFileMode(mode: string): boolean {
+  return /^0?[0-7]{3,4}$/.test(mode);
+}
+
+/** Erreur bloquante d'une étape, null si elle est valide — messages FR affichés tels quels. */
+export function stepError(step: TemplateStep): string | null {
+  switch (step.type) {
+    case "packages": {
+      if (step.packages.length === 0) return "Ajoutez au moins un paquet.";
+      const bad = step.packages.find((p) => !isValidPackageName(p));
+      return bad ? `Nom de paquet invalide : « ${bad} ».` : null;
+    }
+    case "script":
+      return step.content.trim() === "" ? "Le script est vide." : null;
+    case "file":
+      if (!isAbsolutePosixPath(step.path)) return "Chemin absolu requis (ex : /etc/motd).";
+      if (step.mode !== undefined && step.mode !== "" && !isValidFileMode(step.mode)) return "Mode invalide (ex : 644 ou 0755).";
+      return null;
+    case "artifact":
+      if (step.templateId === "") return "Choisissez un artefact source.";
+      if (!isAbsolutePosixPath(step.destPath)) return "Chemin de destination absolu requis (ex : /opt/app.tar).";
+      return null;
+    case "user":
+      return /^[a-z_][a-z0-9_-]{0,31}$/.test(step.username) ? null : "Nom d'utilisateur POSIX invalide (minuscules).";
+    case "service":
+      return /^[a-zA-Z0-9@._-]+$/.test(step.name) ? null : "Nom de service invalide (ex : nginx).";
+  }
+}
+
+/** Erreur bloquante de la base, null si valide. */
+export function baseError(base: TemplateBase): string | null {
+  if (base.type === "cloud-image") {
+    if (base.distro.trim() === "") return "Indiquez une distribution (ex : ubuntu, debian).";
+    if (base.version.trim() === "") return "Indiquez une version (ex : 24.04, 12).";
+    if (base.imageUrl !== undefined && base.imageUrl !== "" && !/^https?:\/\/.+/.test(base.imageUrl))
+      return "URL d'image invalide (http(s)://…).";
+    return null;
+  }
+  if (base.type === "container") {
+    return base.image.trim() === "" ? "Indiquez une image de base (ex : scratch, debian:bookworm)." : null;
+  }
+  return base.release.trim() === "" ? "Indiquez une release (ex : bookworm, noble)." : null;
+}
+
+/** Découpe une saisie de tags de paquets (espaces/virgules/retours à la ligne), sans doublons. */
+export function parsePackagesInput(raw: string): string[] {
+  return [...new Set(raw.split(/[\s,]+/).map((p) => p.trim()).filter((p) => p.length > 0))];
+}
+
+// --- Libellés partagés (panneau de détail, popovers) -------------------------------------------
 
 export const TEMPLATE_STATUS_LABEL: Record<ImageTemplateStatus, string> = {
   draft: "Brouillon (jamais construit)",
@@ -105,6 +198,12 @@ export const TEMPLATE_STATUS_SEMANTIC: Record<ImageTemplateStatus, "success" | "
   building: "warning",
   ready: "success",
   error: "critical",
+};
+
+export const ARTIFACT_TYPE_LABEL: Record<ImageTemplateArtifactType, string> = {
+  "nutanix-image": "Image Nutanix (AHV)",
+  "docker-image": "Image Docker",
+  "raw-image": "Image disque brute (mkosi)",
 };
 
 // --- Déploiement en VM ---------------------------------------------------------------------------

@@ -97,7 +97,7 @@ import {
 // Fabrique de templates (assistant de création, build + poll de suivi, déploiement en VM) — voir
 // features/templates/* : POST /api/templates réels, 404 = backend pas encore là (état vide explicite).
 import { buildTemplate, deleteTemplate, fetchTemplates } from "@/features/templates/templatesSlice";
-import TemplateCreateModal from "@/features/templates/TemplateCreateModal";
+import TemplateStudioModal from "@/features/templates/TemplateStudioModal";
 import DeployVmModal from "@/features/templates/DeployVmModal";
 import TemplateBuildsPopover from "@/features/templates/TemplateBuildsPopover";
 import type { IacEngine } from "@/types";
@@ -1382,9 +1382,9 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
     return <RemoteEnvironmentCreateModal open onClose={onClose} />;
   }
 
-  // Assistant "Créer un template" (fabrique de templates) — même montage par-dessus le canevas.
+  // Studio de templates (fabrique de templates) — même montage par-dessus le canevas.
   if (showTemplateCreate) {
-    return <TemplateCreateModal onClose={onClose} />;
+    return <TemplateStudioModal onClose={onClose} />;
   }
 
   if (showGithubDeploy) {
@@ -1470,12 +1470,12 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
     onSelect: () => setShowIacCreate(true),
   };
 
-  // "Créer un template" (fabrique de templates) : base Ubuntu/Alpine/scratch + composants + build
-  // suivi — POST /api/templates réel, 404 backend géré par un état vide explicite.
+  // Studio de templates : presets ou recette vierge, base libre (cloud-image/conteneur/mkosi),
+  // étapes ordonnées — POST /api/templates réel, 404 backend géré par un état vide explicite.
   const templateAction: SpotlightAction = {
     id: "create-image-template",
     title: "Créer un template d'image",
-    description: "VM Ubuntu (Packer sur le cluster) ou conteneur Alpine/scratch, composants à cocher, build suivi jusqu'au bout.",
+    description: "Studio de recettes : n'importe quelle distro, étapes libres (paquets, scripts, artefacts…), build suivi jusqu'au bout.",
     icon: KIND_ICON["image-template"],
     onSelect: () => setShowTemplateCreate(true),
   };

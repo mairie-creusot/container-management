@@ -573,7 +573,7 @@ async function getBackupNodes(): Promise<TopologyNode[]> {
 
 /** Libellé humain d'un moteur IaC — même table que côté frontend (TopologyNodeDetailPanel.tsx),
  * gardée locale ici : un simple sous-titre de nœud, pas une donnée de contrat exposée par types.ts. */
-const IAC_ENGINE_LABEL: Record<IacEngine, string> = { tofu: "OpenTofu", ansible: "Ansible", packer: "Packer", docker: "Docker" };
+const IAC_ENGINE_LABEL: Record<IacEngine, string> = { tofu: "OpenTofu", ansible: "Ansible", packer: "Packer", docker: "Docker", mkosi: "mkosi" };
 
 /**
  * Un nœud "iac-workspace" par workspace Infra-as-code RÉEL (services/iac/workspaces.ts) — TOUJOURS
@@ -612,16 +612,16 @@ async function getIacWorkspaceNodes(): Promise<TopologyNode[]> {
   );
 }
 
-/** Libellé humain d'un kind de template — simple sous-titre de nœud, même principe que
+/** Libellé humain de la base d'une recette — simple sous-titre de nœud, même principe que
  * IAC_ENGINE_LABEL ci-dessus (pas une donnée de contrat exposée par types.ts). */
 function imageTemplateSubtitle(template: ImageTemplate): string {
-  switch (template.kind) {
-    case "vm-ubuntu":
-      return `VM Ubuntu ${template.baseVersion}`;
-    case "container-alpine":
-      return `Conteneur Alpine ${template.baseVersion}`;
-    case "container-scratch":
-      return "Conteneur scratch";
+  switch (template.base.type) {
+    case "cloud-image":
+      return `VM ${template.base.distro} ${template.base.version}`;
+    case "container":
+      return `Conteneur ${template.base.image}`;
+    case "mkosi":
+      return `OS mkosi ${template.base.distro} ${template.base.release}`;
   }
 }
 
@@ -631,13 +631,14 @@ function imageTemplateSubtitle(template: ImageTemplate): string {
  * Docker/Nutanix (simple lecture JSON + réconciliation avec les runs déjà persistés), [] si aucun
  * template n'a jamais été créé. `status` générique projeté depuis le statut précis du template
  * (draft -> "neutral" ; building -> "restarting" ; ready -> "running" ; error -> "stopped"),
- * porté exactement par `templateStatus` pour le panneau de détail. AUCUNE arête : QUAI n'a
- * aucune donnée reliant réellement un template à une ressource Docker/Nutanix précise (même
- * principe que "iac-workspace"/"ad-server").
+ * porté exactement par `templateStatus` pour le panneau de détail. Arêtes : UNIQUEMENT les
+ * dépendances d'artefact réelles entre templates (étape "artifact" de la recette) — toujours
+ * aucune arête inventée vers Docker/Nutanix.
  */
-async function getImageTemplateNodes(): Promise<TopologyNode[]> {
+async function getImageTemplateParts(): Promise<{ nodes: TopologyNode[]; edges: TopologyEdge[] }> {
   const templates = await listTemplates().catch(() => []);
-  return templates.map((t) => {
+  const knownIds = new Set(templates.map((t) => t.id));
+  const nodes = templates.map((t) => {
     const status: TopologyNode["status"] =
       t.status === "building" ? "restarting" : t.status === "ready" ? "running" : t.status === "error" ? "stopped" : "neutral";
     return {
@@ -646,7 +647,7 @@ async function getImageTemplateNodes(): Promise<TopologyNode[]> {
       label: t.name,
       subtitle: imageTemplateSubtitle(t),
       status,
-      templateKind: t.kind,
+      templateKind: t.base.type,
       templateStatus: t.status,
       templateWorkspaceId: t.workspaceId,
       ...(t.lastBuild?.artifact
@@ -654,6 +655,20 @@ async function getImageTemplateNodes(): Promise<TopologyNode[]> {
         : {}),
     } satisfies TopologyNode;
   });
+  // Interconnexion réelle : une étape "artifact" de la recette de B crée l'arête A -> B (une seule
+  // par paire, jamais vers un template supprimé ni vers soi-même).
+  const edges: TopologyEdge[] = [];
+  const seenPairs = new Set<string>();
+  for (const t of templates) {
+    for (const step of t.steps) {
+      if (step.type !== "artifact" || !knownIds.has(step.templateId) || step.templateId === t.id) continue;
+      const pair = `${step.templateId}:${t.id}`;
+      if (seenPairs.has(pair)) continue;
+      seenPairs.add(pair);
+      edges.push({ id: `uses-artifact:${pair}`, source: `image-template:${step.templateId}`, target: `image-template:${t.id}`, kind: "uses-artifact" });
+    }
+  }
+  return { nodes, edges };
 }
 
 /**
@@ -834,9 +849,9 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
   // principe que cron jobs/sauvegardes ci-dessus (seule l'EXÉCUTION d'un run dépend d'un binaire
   // tofu/ansible-playbook/packer, jamais de Docker lui-même).
   const iacWorkspaceNodes = await getIacWorkspaceNodes();
-  // Templates d'images (voir getImageTemplateNodes ci-dessus) : mêmes propriétés d'indépendance
+  // Templates d'images (voir getImageTemplateParts ci-dessus) : mêmes propriétés d'indépendance
   // que les workspaces IaC — une simple lecture JSON, jamais dépendant de Docker/Nutanix.
-  const imageTemplateNodes = await getImageTemplateNodes();
+  const imageTemplateParts = await getImageTemplateParts();
   // Dépôt Git source GitOps (voir getGitOpsSourceNode ci-dessus) : indépendant lui aussi de la
   // joignabilité Docker locale, [] tant que GITOPS_REPO_URL n'a jamais été configuré.
   const gitopsSourceNodes = await getGitOpsSourceNode();
@@ -860,11 +875,11 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
     ...cronJobNodes,
     ...backupNodes,
     ...iacWorkspaceNodes,
-    ...imageTemplateNodes,
+    ...imageTemplateParts.nodes,
     ...gitopsSourceNodes,
     ...automationParts.nodes,
   ];
-  const staticEdges: TopologyEdge[] = [...masterEdges, ...nutanixHostEdges, ...automationParts.edges];
+  const staticEdges: TopologyEdge[] = [...masterEdges, ...nutanixHostEdges, ...automationParts.edges, ...imageTemplateParts.edges];
   // Dernier essai RÉEL de rafraîchissement Nutanix (voir services/nutanix.ts#lastKnownNutanixPoll,
   // mis à jour PAR getNutanixTopologyParts ci-dessus via getNutanixVms) — lu APRÈS, jamais avant,
   // l'appel qui vient de le produire. `undefined` (jamais un objet vide fabriqué) tant que Nutanix

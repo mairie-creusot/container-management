@@ -56,9 +56,10 @@ export const ENGINE_ACTIONS: Record<IacEngine, string[]> = {
   tofu: ["init", "plan", "apply", "destroy"],
   ansible: ["run"],
   packer: ["init", "build"],
-  // "docker" : réservé aux builds de templates d'images conteneur (services/templates.ts) —
-  // jamais proposé par POST /api/iac/workspaces (VALID_ENGINES, routes/iac.ts).
+  // "docker"/"mkosi" : réservés aux builds de templates d'images (services/templates.ts) —
+  // jamais proposés par POST /api/iac/workspaces (VALID_ENGINES, routes/iac.ts).
   docker: ["build"],
+  mkosi: ["build"],
 };
 
 /** Format strict d'un tag `docker build -t` construit par services/templates.ts — validé ici en
@@ -76,8 +77,11 @@ export interface StartRunOptions {
    * (plugins requis téléchargés à la première exécution). */
   packerInitFirst?: boolean;
   /** Capture d'artefact après un run réussi (voir IacRun#artifact) : "packer-manifest" lit le
-   * packer-manifest.json écrit par le post-processor manifest ; "docker-image" reprend le tag. */
-  captureArtifact?: "packer-manifest" | "docker-image";
+   * packer-manifest.json écrit par le post-processor manifest ; "docker-image" reprend le tag ;
+   * "mkosi-image" vérifie l'existence réelle du fichier `mkosiOutputPath` dans le workspace. */
+  captureArtifact?: "packer-manifest" | "docker-image" | "mkosi-image";
+  /** engine "mkosi" uniquement : chemin relatif (workspace) de l'image disque attendue. */
+  mkosiOutputPath?: string;
 }
 
 /** Construit la ou les commandes réelles à exécuter — des binaires déjà installés (voir
@@ -136,6 +140,11 @@ async function buildCommands(
       }
       break;
     }
+    case "mkosi": {
+      // --force : reconstruit même si une image de sortie existe déjà (re-build d'un template).
+      if (action === "build") return [{ bin: "mkosi", args: ["--force", "build"] }];
+      break;
+    }
   }
   throw new Error(`Unsupported action "${action}" for engine "${engine}"`);
 }
@@ -176,6 +185,15 @@ async function captureRunArtifact(
   if (options.captureArtifact === "packer-manifest") {
     const manifestJson = await fs.readFile(path.join(workspaceDir, "packer-manifest.json"), "utf-8").catch(() => undefined);
     return manifestJson ? parsePackerManifestArtifact(manifestJson) : undefined;
+  }
+  if (options.captureArtifact === "mkosi-image") {
+    // Référence = chemin relatif RÉELLEMENT présent après le build — jamais un chemin inventé.
+    if (!options.mkosiOutputPath) return undefined;
+    const exists = await fs
+      .access(path.join(workspaceDir, options.mkosiOutputPath))
+      .then(() => true)
+      .catch(() => false);
+    return exists ? { type: "raw-image", reference: options.mkosiOutputPath } : undefined;
   }
   return undefined;
 }

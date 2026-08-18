@@ -12,9 +12,10 @@ const VERSION_COMMAND: Record<IacEngine, { bin: string; args: string[] }> = {
   tofu: { bin: "tofu", args: ["version"] },
   ansible: { bin: "ansible-playbook", args: ["--version"] },
   packer: { bin: "packer", args: ["version"] },
-  // "docker" : moteur de build des templates d'images conteneur (services/templates.ts) — pas
-  // listé par listEngineStatuses (la page Infra-as-code n'expose que les 3 outils IaC).
+  // "docker"/"mkosi" : moteurs de build des templates d'images (services/templates.ts) — pas
+  // listés par listEngineStatuses (la page Infra-as-code n'expose que les 3 outils IaC).
   docker: { bin: "docker", args: ["--version"] },
+  mkosi: { bin: "mkosi", args: ["--version"] },
 };
 
 function runVersionCheck(bin: string, args: string[]): Promise<string | null> {

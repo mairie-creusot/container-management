@@ -38,6 +38,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # système par défaut ; sans risque ici, l'image ne sert qu'au conteneur dev).
 RUN pip3 install --no-cache-dir --break-system-packages ansible-core
 
+# mkosi (systemd/mkosi) : moteur "OS minimal from-scratch" des templates d'images — paquet Debian
+# bookworm trop ancien (v14, config incompatible), donc pip comme ansible-core ci-dessus ; bubblewrap
+# fournit le sandboxing requis par un vrai `mkosi build`. Détection : apps/api/src/services/iac/engines.ts.
+RUN pip3 install --no-cache-dir --break-system-packages mkosi \
+    && apt-get update && apt-get install -y --no-install-recommends bubblewrap \
+    && rm -rf /var/lib/apt/lists/*
+
 # OpenTofu : script d'installation officiel (gère l'architecture cible automatiquement).
 RUN curl -fsSL https://get.opentofu.org/install-opentofu.sh -o /tmp/install-opentofu.sh \
     && chmod +x /tmp/install-opentofu.sh \

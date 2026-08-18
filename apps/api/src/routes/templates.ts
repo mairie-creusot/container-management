@@ -1,14 +1,13 @@
-/**
- * Catalogue de templates d'images (voir services/templates.ts).
- *
- * GET    /api/templates             — liste (statuts réconciliés avec les runs réels).
- * POST   /api/templates             — { name, kind, baseVersion, components } (operator/admin,
- *                                     garanti par le plugin auth comme toute mutation).
- * GET    /api/templates/:id         — détail.
- * DELETE /api/templates/:id         — supprime le template ET son workspace IaC.
- * POST   /api/templates/:id/build   — lance le build réel via services/iac/runner.ts.
- * GET    /api/templates/:id/builds  — historique des runs du workspace du template.
- */
+// Moteur de recettes de templates d'images (voir services/templates.ts).
+//
+// GET    /api/templates                  — liste (statuts réconciliés avec les runs réels).
+// POST   /api/templates                  — { name, base, steps } (operator/admin via plugin auth).
+// GET    /api/templates/presets          — recettes pré-remplies (simples valeurs de départ).
+// GET    /api/templates/artifact-sources — templates à artefact exploitable (picker frontend).
+// GET    /api/templates/:id              — détail.
+// DELETE /api/templates/:id              — supprime le template ET son workspace IaC.
+// POST   /api/templates/:id/build        — lance le build réel via services/iac/runner.ts.
+// GET    /api/templates/:id/builds       — historique des runs du workspace du template.
 
 import type { FastifyInstance } from "fastify";
 import {
@@ -16,19 +15,25 @@ import {
   createTemplate,
   deleteTemplate,
   getTemplate,
+  listArtifactSources,
   listTemplateBuilds,
   listTemplates,
+  MkosiUnavailableError,
   NutanixNotConfiguredError,
+  TEMPLATE_PRESETS,
   TemplateNotFoundError,
   TemplateValidationError,
 } from "../services/templates.js";
-import type { ImageTemplateKind } from "../types.js";
+import type { TemplateBase, TemplateStep } from "../types.js";
 
 interface CreateTemplateBody {
   name?: string;
-  kind?: string;
-  baseVersion?: string;
-  components?: unknown;
+  base?: unknown;
+  steps?: unknown;
+}
+
+function isRecordArray(value: unknown): value is Record<string, unknown>[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "object" && item !== null);
 }
 
 export default async function templatesRoutes(fastify: FastifyInstance): Promise<void> {
@@ -36,29 +41,36 @@ export default async function templatesRoutes(fastify: FastifyInstance): Promise
     return reply.send(await listTemplates());
   });
 
+  fastify.get("/api/templates/presets", async (_request, reply) => {
+    return reply.send(TEMPLATE_PRESETS);
+  });
+
+  fastify.get("/api/templates/artifact-sources", async (_request, reply) => {
+    return reply.send(await listArtifactSources());
+  });
+
   fastify.post<{ Body: CreateTemplateBody }>("/api/templates", async (request, reply) => {
-    const { name, kind, baseVersion, components } = request.body ?? {};
+    const { name, base, steps } = request.body ?? {};
     if (typeof name !== "string" || !name.trim()) return reply.code(400).send({ error: "name is required" });
-    if (typeof kind !== "string") return reply.code(400).send({ error: "kind is required" });
-    if (baseVersion !== undefined && typeof baseVersion !== "string") {
-      return reply.code(400).send({ error: "baseVersion must be a string" });
+    if (typeof base !== "object" || base === null || typeof (base as { type?: unknown }).type !== "string") {
+      return reply.code(400).send({ error: "base is required ({ type, ... })" });
     }
-    if (components !== undefined && !(Array.isArray(components) && components.every((c) => typeof c === "string"))) {
-      return reply.code(400).send({ error: "components must be an array of strings" });
+    if (steps !== undefined && !isRecordArray(steps)) {
+      return reply.code(400).send({ error: "steps must be an array of step objects" });
     }
     try {
       const template = await createTemplate(
         {
           name,
-          kind: kind as ImageTemplateKind,
-          baseVersion: baseVersion ?? "",
-          components: (components as string[] | undefined) ?? [],
+          base: base as TemplateBase,
+          steps: (steps as TemplateStep[] | undefined) ?? [],
         },
         request.authSession!.username,
       );
       return reply.code(201).send(template);
     } catch (err) {
       if (err instanceof TemplateValidationError) return reply.code(400).send({ error: err.message });
+      if (err instanceof MkosiUnavailableError) return reply.code(409).send({ error: err.message });
       throw err;
     }
   });
@@ -85,6 +97,7 @@ export default async function templatesRoutes(fastify: FastifyInstance): Promise
       return reply.code(201).send(template);
     } catch (err) {
       if (err instanceof TemplateNotFoundError) return reply.code(404).send({ error: err.message });
+      if (err instanceof MkosiUnavailableError) return reply.code(409).send({ error: err.message });
       if (err instanceof NutanixNotConfiguredError) return reply.code(400).send({ error: err.message });
       const message = err instanceof Error ? err.message : String(err);
       return reply.code(400).send({ error: message });
