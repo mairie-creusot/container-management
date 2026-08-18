@@ -407,3 +407,123 @@ describe("POST /api/nutanix/vms/:uuid/migrate", () => {
     expect(body.spec.resources.host_reference.uuid).toBe(HOST_B);
   });
 });
+
+/** Corps 405 RÉEL observé le 18/08/2026 (notification QUAI en production, VM gérée côté Prism
+ * Element) — déclenche le repli v2.0 (services/nutanix.ts#nutanixV2Mutation). */
+const PE_405_BODY = {
+  api_version: "3.1",
+  code: 405,
+  message_list: [{ message: "PE VM Put request not supported.", reason: "REQUEST_NOT_SUPPORTED" }],
+  state: "ERROR",
+};
+
+describe("Repli API v2.0 quand la VM est gérée côté Prism Element (405 REQUEST_NOT_SUPPORTED)", () => {
+  const GET_KEY = `GET /api/nutanix/v3/vms/${VM_UUID}`;
+  const PUT_KEY = `PUT /api/nutanix/v3/vms/${VM_UUID}`;
+  const V2_POWER_KEY = `POST /PrismGateway/services/rest/v2.0/vms/${VM_UUID}/set_power_state`;
+
+  it("stop : bascule sur set_power_state ACPI_SHUTDOWN (gracieux, jamais un OFF brutal)", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    queueResponse(GET_KEY, vmEntity({ powerState: "ON", hostUuid: HOST_A }));
+    queueResponse(PUT_KEY, PE_405_BODY, 405);
+    queueResponse(V2_POWER_KEY, { task_uuid: "t-stop" });
+
+    const response = await app.inject({ method: "POST", url: `/api/nutanix/vms/${VM_UUID}/stop`, cookies: adminCookie() });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ok: true, vmName: "HDVAPPLI" });
+    expect(lastRequestBodyByKey.get(V2_POWER_KEY)).toEqual({ transition: "ACPI_SHUTDOWN" });
+  });
+
+  it("start : bascule sur set_power_state ON", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    queueResponse(GET_KEY, vmEntity({ powerState: "OFF" }));
+    queueResponse(PUT_KEY, PE_405_BODY, 405);
+    queueResponse(V2_POWER_KEY, { task_uuid: "t-start" });
+
+    const response = await app.inject({ method: "POST", url: `/api/nutanix/vms/${VM_UUID}/start`, cookies: adminCookie() });
+
+    expect(response.statusCode).toBe(200);
+    expect(lastRequestBodyByKey.get(V2_POWER_KEY)).toEqual({ transition: "ON" });
+  });
+
+  it("restart : un SEUL appel ACPI_REBOOT (action gracieuse dédiée v2.0), jamais la séquence off/attente/on", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    queueResponse(GET_KEY, vmEntity({ powerState: "ON", hostUuid: HOST_A }));
+    queueResponse(PUT_KEY, PE_405_BODY, 405);
+    queueResponse(V2_POWER_KEY, { task_uuid: "t-reboot" });
+
+    const response = await app.inject({ method: "POST", url: `/api/nutanix/vms/${VM_UUID}/restart`, cookies: adminCookie() });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ok: true, vmName: "HDVAPPLI" });
+    expect(lastRequestBodyByKey.get(V2_POWER_KEY)).toEqual({ transition: "ACPI_REBOOT" });
+  });
+
+  it("delete : bascule sur DELETE v2.0", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    queueResponse(GET_KEY, vmEntity({ powerState: "OFF" }));
+    queueResponse(`DELETE /api/nutanix/v3/vms/${VM_UUID}`, PE_405_BODY, 405);
+    queueResponse(`DELETE /PrismGateway/services/rest/v2.0/vms/${VM_UUID}`, { task_uuid: "t-del" });
+
+    const response = await app.inject({ method: "DELETE", url: `/api/nutanix/vms/${VM_UUID}`, cookies: adminCookie() });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ok: true, vmName: "HDVAPPLI" });
+  });
+
+  it("migrate : bascule sur POST /migrate v2.0 avec host_uuid", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    queueResponse(GET_KEY, vmEntity({ powerState: "ON", hostUuid: HOST_A }));
+    queueResponse("POST /api/nutanix/v3/hosts/list", {
+      entities: [
+        { metadata: { uuid: HOST_A }, status: { name: "HDVNUTA1", cluster_reference: { kind: "cluster", uuid: CLUSTER_UUID } } },
+        { metadata: { uuid: HOST_B }, status: { name: "HDVNUTA2", cluster_reference: { kind: "cluster", uuid: CLUSTER_UUID } } },
+      ],
+    });
+    queueResponse(PUT_KEY, PE_405_BODY, 405);
+    const v2MigrateKey = `POST /PrismGateway/services/rest/v2.0/vms/${VM_UUID}/migrate`;
+    queueResponse(v2MigrateKey, { task_uuid: "t-mig" });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/nutanix/vms/${VM_UUID}/migrate`,
+      cookies: adminCookie(),
+      payload: { targetHostUuid: HOST_B },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ok: true, vmName: "HDVAPPLI", targetHostName: "HDVNUTA2" });
+    expect(lastRequestBodyByKey.get(v2MigrateKey)).toEqual({ host_uuid: HOST_B });
+  });
+
+  it("un 405 SANS REQUEST_NOT_SUPPORTED reste un 502 v3, AUCUN repli tenté", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    queueResponse(GET_KEY, vmEntity({ powerState: "ON", hostUuid: HOST_A }));
+    queueResponse(PUT_KEY, { code: 405, message_list: [{ message: "Method Not Allowed" }] }, 405);
+
+    const response = await app.inject({ method: "POST", url: `/api/nutanix/vms/${VM_UUID}/stop`, cookies: adminCookie() });
+
+    expect(response.statusCode).toBe(502);
+    expect(lastRequestBodyByKey.get(V2_POWER_KEY)).toBeUndefined();
+  });
+
+  it("un refus v2.0 remonte tel quel en 502 (message 'API v2.0'), jamais masqué", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    queueResponse(GET_KEY, vmEntity({ powerState: "ON", hostUuid: HOST_A }));
+    queueResponse(PUT_KEY, PE_405_BODY, 405);
+    queueResponse(V2_POWER_KEY, { message: "kInvalidState: cannot shutdown" }, 500);
+
+    const response = await app.inject({ method: "POST", url: `/api/nutanix/vms/${VM_UUID}/stop`, cookies: adminCookie() });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json().error).toMatch(/v2\.0/);
+  });
+});

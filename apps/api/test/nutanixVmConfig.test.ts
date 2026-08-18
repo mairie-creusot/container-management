@@ -469,3 +469,95 @@ describe("PATCH /api/nutanix/vms/:uuid/compute", () => {
     expect(response.json().error).toContain("Cannot decrease memory on a powered on VM");
   });
 });
+
+/** Corps 405 RÉEL observé le 18/08/2026 (VM gérée côté Prism Element) — déclenche le repli v2.0. */
+const PE_405_BODY = {
+  api_version: "3.1",
+  code: 405,
+  message_list: [{ message: "PE VM Put request not supported.", reason: "REQUEST_NOT_SUPPORTED" }],
+  state: "ERROR",
+};
+
+describe("Repli API v2.0 (VM gérée côté Prism Element) — configuration matérielle", () => {
+  it("ajout de disque : POST /disks/attach v2.0, taille en OCTETS, container recopié du disque existant", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    queueResponse(GET_KEY, vmEntity());
+    queueResponse(PUT_KEY, PE_405_BODY, 405);
+    const v2Key = `POST /PrismGateway/services/rest/v2.0/vms/${VM_UUID}/disks/attach`;
+    queueResponse(v2Key, { task_uuid: "t-disk" });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/nutanix/vms/${VM_UUID}/disks`,
+      cookies: adminCookie(),
+      payload: { sizeMib: 51200 },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(lastRequestBodyByKey.get(v2Key)).toEqual({
+      vm_disks: [
+        {
+          disk_address: { device_bus: "scsi" },
+          vm_disk_create: { size: 51200 * 1024 * 1024, storage_container_uuid: STORAGE_CONTAINER_UUID },
+        },
+      ],
+    });
+  });
+
+  it("ajout de disque sur VM sans disque DISK : erreur explicite, AUCUN container inventé pour le repli v2.0", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    queueResponse(GET_KEY, vmEntity({ diskList: [realCdromEntry] }));
+    queueResponse(PUT_KEY, PE_405_BODY, 405);
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/nutanix/vms/${VM_UUID}/disks`,
+      cookies: adminCookie(),
+      payload: { sizeMib: 10240 },
+    });
+
+    expect(response.statusCode).toBe(502);
+    expect(response.json().error).toMatch(/storage container/i);
+  });
+
+  it("ajout de NIC : POST /nics v2.0 avec network_uuid + is_connected", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    queueResponse(GET_KEY, vmEntity());
+    seedSubnets();
+    queueResponse(PUT_KEY, PE_405_BODY, 405);
+    const v2Key = `POST /PrismGateway/services/rest/v2.0/vms/${VM_UUID}/nics`;
+    queueResponse(v2Key, { task_uuid: "t-nic" });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/nutanix/vms/${VM_UUID}/nics`,
+      cookies: adminCookie(),
+      payload: { subnetUuid: SUBNET_VLAN10 },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(lastRequestBodyByKey.get(v2Key)).toEqual({ spec_list: [{ network_uuid: SUBNET_VLAN10, is_connected: true }] });
+  });
+
+  it("compute : PUT /vms/{uuid} v2.0 — num_sockets->num_vcpus, memory_size_mib->memory_mb, champs fournis uniquement", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    queueResponse(GET_KEY, vmEntity());
+    queueResponse(PUT_KEY, PE_405_BODY, 405);
+    const v2Key = `PUT /PrismGateway/services/rest/v2.0/vms/${VM_UUID}`;
+    queueResponse(v2Key, { task_uuid: "t-compute" });
+
+    const response = await app.inject({
+      method: "PATCH",
+      url: `/api/nutanix/vms/${VM_UUID}/compute`,
+      cookies: adminCookie(),
+      payload: { numVcpus: 4, memoryMib: 16384 },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(lastRequestBodyByKey.get(v2Key)).toEqual({ num_vcpus: 4, memory_mb: 16384 });
+  });
+});

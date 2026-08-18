@@ -101,7 +101,7 @@ async function nutanixPost<T>(prismCentralUrl: string, path: string, username: s
  */
 async function nutanixRequest<T>(
   prismCentralUrl: string,
-  method: "GET" | "PUT" | "DELETE",
+  method: "GET" | "PUT" | "DELETE" | "POST",
   path: string,
   username: string,
   password: string,
@@ -720,6 +720,10 @@ export async function getNutanixEnvironment(): Promise<Environment | null> {
  * un choix qui n'a plus de sens pour une action qui doit soit réussir soit échouer clairement). */
 export class NutanixActionError extends Error {
   httpStatus: number;
+  /** Vrai si Prism a répondu 405 REQUEST_NOT_SUPPORTED ("PE VM Put request not supported", forme
+   * réelle observée le 18/08/2026) : la VM est gérée côté Prism Element, où v3 est en lecture
+   * seule — les actions basculent alors sur l'API v2.0 (voir nutanixV2Mutation). */
+  peV3Unsupported = false;
   constructor(message: string, httpStatus: number) {
     super(message);
     this.name = "NutanixActionError";
@@ -806,7 +810,35 @@ async function putNutanixVmEntity(
     body,
   );
   if (result.status < 200 || result.status >= 300 || !result.data) {
-    throw new NutanixActionError(`Prism Central refused ${raison} for VM "${uuid}" (status ${result.status}): ${result.raw.slice(0, 300)}`, 502);
+    const err = new NutanixActionError(`Prism Central refused ${raison} for VM "${uuid}" (status ${result.status}): ${result.raw.slice(0, 300)}`, 502);
+    if (result.status === 405 && result.raw.includes("REQUEST_NOT_SUPPORTED")) err.peV3Unsupported = true;
+    throw err;
+  }
+  return result.data;
+}
+
+const NUTANIX_V2_BASE = "/PrismGateway/services/rest/v2.0";
+
+/** Vrai si l'échec v3 vient d'une VM gérée côté Prism Element — l'appelant doit rejouer l'action
+ * via l'API v2.0 plutôt que de remonter l'erreur telle quelle. */
+function needsPeV2Fallback(err: unknown): err is NutanixActionError {
+  return err instanceof NutanixActionError && err.peV3Unsupported;
+}
+
+/** Mutation via l'API v2.0 de Prism (celle que Prism Element supporte pleinement) — repli utilisé
+ * UNIQUEMENT après un 405 REQUEST_NOT_SUPPORTED du PUT v3 (needsPeV2Fallback), jamais en premier
+ * choix. Un refus v2.0 remonte tel quel (502 + message réel), jamais masqué. */
+async function nutanixV2Mutation<T>(
+  effective: SetupNutanixConfig,
+  method: "POST" | "PUT" | "DELETE",
+  path: string,
+  raison: string,
+  vmName: string,
+  body?: unknown,
+): Promise<T | null> {
+  const result = await nutanixRequest<T>(effective.prismCentralUrl, method, `${NUTANIX_V2_BASE}${path}`, effective.username, effective.password, body);
+  if (result.status < 200 || result.status >= 300) {
+    throw new NutanixActionError(`Prism (API v2.0) refused ${raison} for VM "${vmName}" (status ${result.status}): ${result.raw.slice(0, 300)}`, 502);
   }
   return result.data;
 }
@@ -860,7 +892,12 @@ export async function startNutanixVm(uuid: string): Promise<{ ok: true; vmName: 
     throw new NutanixActionError(`VM "${vmName}" is already powered on`, 409);
   }
   const newSpec = { ...entity.spec, resources: { ...entity.spec.resources, power_state: "ON" } };
-  await putNutanixVmEntity(effective, uuid, entity, newSpec, "power on");
+  try {
+    await putNutanixVmEntity(effective, uuid, entity, newSpec, "power on");
+  } catch (err) {
+    if (!needsPeV2Fallback(err)) throw err;
+    await nutanixV2Mutation(effective, "POST", `/vms/${uuid}/set_power_state`, "power on", vmName, { transition: "ON" });
+  }
   return { ok: true, vmName };
 }
 
@@ -886,7 +923,13 @@ export async function stopNutanixVm(uuid: string): Promise<{ ok: true; vmName: s
       power_state_mechanism: { ...(entity.spec.resources.power_state_mechanism ?? {}), mechanism: "ACPI" },
     },
   };
-  await putNutanixVmEntity(effective, uuid, entity, newSpec, "graceful power off");
+  try {
+    await putNutanixVmEntity(effective, uuid, entity, newSpec, "graceful power off");
+  } catch (err) {
+    if (!needsPeV2Fallback(err)) throw err;
+    // ACPI_SHUTDOWN = même sémantique gracieuse que mechanism "ACPI" en v3, jamais un OFF brutal.
+    await nutanixV2Mutation(effective, "POST", `/vms/${uuid}/set_power_state`, "graceful power off", vmName, { transition: "ACPI_SHUTDOWN" });
+  }
   return { ok: true, vmName };
 }
 
@@ -917,7 +960,14 @@ export async function restartNutanixVm(uuid: string): Promise<{ ok: true; vmName
       power_state_mechanism: { ...(entity.spec.resources.power_state_mechanism ?? {}), mechanism: "ACPI" },
     },
   };
-  await putNutanixVmEntity(effective, uuid, entity, offSpec, "graceful power off (restart step 1/2)");
+  try {
+    await putNutanixVmEntity(effective, uuid, entity, offSpec, "graceful power off (restart step 1/2)");
+  } catch (err) {
+    if (!needsPeV2Fallback(err)) throw err;
+    // v2.0 a une action de redémarrage gracieux DÉDIÉE — un seul appel, pas de séquence off/wait/on.
+    await nutanixV2Mutation(effective, "POST", `/vms/${uuid}/set_power_state`, "graceful reboot", vmName, { transition: "ACPI_REBOOT" });
+    return { ok: true, vmName };
+  }
 
   // Attend la CONVERGENCE réelle (status.resources.power_state === "OFF") avant de rallumer —
   // jamais un second PUT immédiat qui pourrait arriver avant que Prism Central n'ait fini de
@@ -954,6 +1004,10 @@ export async function deleteNutanixVm(uuid: string): Promise<{ ok: true; vmName:
     );
   }
   const result = await nutanixRequest<unknown>(effective.prismCentralUrl, "DELETE", `/api/nutanix/v3/vms/${uuid}`, effective.username, effective.password);
+  if (result.status === 405 && result.raw.includes("REQUEST_NOT_SUPPORTED")) {
+    await nutanixV2Mutation(effective, "DELETE", `/vms/${uuid}`, "deletion", vmName);
+    return { ok: true, vmName };
+  }
   if (result.status < 200 || result.status >= 300) {
     throw new NutanixActionError(`Prism Central refused deletion of VM "${vmName}" (status ${result.status}): ${result.raw.slice(0, 300)}`, 502);
   }
@@ -1008,7 +1062,12 @@ export async function migrateNutanixVm(uuid: string, targetHostUuid: string): Pr
     ...entity.spec,
     resources: { ...entity.spec.resources, host_reference: { kind: "host", uuid: targetHostUuid } },
   };
-  await putNutanixVmEntity(effective, uuid, entity, newSpec, "live migration");
+  try {
+    await putNutanixVmEntity(effective, uuid, entity, newSpec, "live migration");
+  } catch (err) {
+    if (!needsPeV2Fallback(err)) throw err;
+    await nutanixV2Mutation(effective, "POST", `/vms/${uuid}/migrate`, "live migration", vmName, { host_uuid: targetHostUuid });
+  }
   return { ok: true, vmName, targetHostName: targetHost.name };
 }
 
@@ -1087,7 +1146,28 @@ export async function addNutanixVmDisk(uuid: string, opts: { sizeMib: number }):
     ...(templateStorage !== undefined ? { storage_config: templateStorage } : {}),
   };
   const newSpec = { ...entity.spec, resources: { ...entity.spec.resources, disk_list: [...diskList, newDisk] } };
-  await putNutanixVmEntity(effective, uuid, entity, newSpec, "disk add");
+  try {
+    await putNutanixVmEntity(effective, uuid, entity, newSpec, "disk add");
+  } catch (err) {
+    if (!needsPeV2Fallback(err)) throw err;
+    // v2.0 exige le container de stockage explicitement — recopié d'un disque existant, jamais inventé.
+    const containerUuid = (templateStorage as { storage_container_reference?: { uuid?: string } } | undefined)
+      ?.storage_container_reference?.uuid;
+    if (!containerUuid) {
+      throw new NutanixActionError(
+        `Cannot add a disk to VM "${vmName}" through the Prism v2.0 API: no storage container could be determined from its existing disks`,
+        502,
+      );
+    }
+    await nutanixV2Mutation(effective, "POST", `/vms/${uuid}/disks/attach`, "disk add", vmName, {
+      vm_disks: [
+        {
+          disk_address: { device_bus: "scsi" },
+          vm_disk_create: { size: sizeMib * 1024 * 1024, storage_container_uuid: containerUuid },
+        },
+      ],
+    });
+  }
   return { ok: true, vmName, sizeMib };
 }
 
@@ -1112,7 +1192,14 @@ export async function addNutanixVmNic(uuid: string, opts: { subnetUuid: string }
     is_connected: true,
   };
   const newSpec = { ...entity.spec, resources: { ...entity.spec.resources, nic_list: [...nicList, newNic] } };
-  await putNutanixVmEntity(effective, uuid, entity, newSpec, "NIC add");
+  try {
+    await putNutanixVmEntity(effective, uuid, entity, newSpec, "NIC add");
+  } catch (err) {
+    if (!needsPeV2Fallback(err)) throw err;
+    await nutanixV2Mutation(effective, "POST", `/vms/${uuid}/nics`, "NIC add", vmName, {
+      spec_list: [{ network_uuid: opts.subnetUuid, is_connected: true }],
+    });
+  }
   return { ok: true, vmName, subnetName: subnet.name };
 }
 
@@ -1153,7 +1240,17 @@ export async function updateNutanixVmCompute(
       ...(memoryMib !== undefined ? { memory_size_mib: memoryMib } : {}),
     },
   };
-  await putNutanixVmEntity(effective, uuid, entity, newSpec, "compute update");
+  try {
+    await putNutanixVmEntity(effective, uuid, entity, newSpec, "compute update");
+  } catch (err) {
+    if (!needsPeV2Fallback(err)) throw err;
+    // Mapping v3 -> v2 : num_sockets -> num_vcpus, num_vcpus_per_socket -> num_cores_per_vcpu, memory_size_mib -> memory_mb.
+    await nutanixV2Mutation(effective, "PUT", `/vms/${uuid}`, "compute update", vmName, {
+      ...(numVcpus !== undefined ? { num_vcpus: numVcpus } : {}),
+      ...(numCoresPerVcpu !== undefined ? { num_cores_per_vcpu: numCoresPerVcpu } : {}),
+      ...(memoryMib !== undefined ? { memory_mb: memoryMib } : {}),
+    });
+  }
   return { ok: true, vmName };
 }
 
