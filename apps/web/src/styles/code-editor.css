@@ -236,6 +236,43 @@
   text-overflow: ellipsis;
 }
 
+/* --- Catalogue d'images cloud (CloudImageBaseEditor, TemplateStudioModal.tsx) --------------- */
+
+.cloud-image__url {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-faint);
+  word-break: break-all;
+}
+
+.cloud-image__check {
+  margin: 0;
+  font-size: 12px;
+}
+
+.cloud-image__check--ok {
+  color: var(--color-success);
+}
+
+.cloud-image__check--warn {
+  color: var(--color-warning);
+}
+
+.cloud-image__advanced-toggle {
+  align-self: flex-start;
+  padding: 0;
+  background: none;
+  border: none;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.cloud-image__advanced-toggle:hover {
+  color: var(--color-text);
+}
+
 /* --- Choix du tag Docker Hub (DockerImageSearch.tsx, étape 2) ------------------------------- */
 
 .docker-tags {

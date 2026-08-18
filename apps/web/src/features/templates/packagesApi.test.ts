@@ -6,6 +6,9 @@ describe("packageSearchDistro", () => {
     expect(packageSearchDistro({ type: "cloud-image", distro: "ubuntu", version: "24.04" })).toBe("ubuntu");
     expect(packageSearchDistro({ type: "cloud-image", distro: " Debian ", version: "12" })).toBe("debian");
     expect(packageSearchDistro({ type: "cloud-image", distro: "opensuse", version: "15" })).toBeNull();
+    // Rocky/Alma (catalogue cloud-images) : hors des 5 distros Repology -> recherche masquée.
+    expect(packageSearchDistro({ type: "cloud-image", distro: "rocky", version: "9" })).toBeNull();
+    expect(packageSearchDistro({ type: "cloud-image", distro: "alma", version: "9" })).toBeNull();
   });
 
   it("container : déduit de l'image, registry/tag ignorés", () => {

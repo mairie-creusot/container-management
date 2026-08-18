@@ -4,6 +4,7 @@
 import type { FastifyInstance } from "fastify";
 import { searchPackages, repoPrefixForDistro } from "../services/packageSearch.js";
 import { listDockerHubTags, searchDockerHubImages } from "../services/dockerHubSearch.js";
+import { CLOUD_IMAGE_CATALOG, checkCloudImageUrl } from "../services/cloudImageCatalog.js";
 
 export default async function packagesRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get<{ Querystring: { distro?: string; q?: string } }>("/api/packages/search", async (request, reply) => {
@@ -26,6 +27,23 @@ export default async function packagesRoutes(fastify: FastifyInstance): Promise<
       return reply.send({ results: await searchDockerHubImages(q.trim()) });
     } catch (err) {
       return reply.code(502).send({ error: `Recherche Docker Hub indisponible : ${err instanceof Error ? err.message : String(err)}` });
+    }
+  });
+
+  fastify.get("/api/cloud-images", async (_request, reply) => {
+    return reply.send({ distros: CLOUD_IMAGE_CATALOG });
+  });
+
+  // HEAD réel sur les miroirs officiels uniquement (anti-SSRF) — jamais un lien affirmé sans preuve.
+  fastify.get<{ Querystring: { url?: string } }>("/api/cloud-images/check", async (request, reply) => {
+    const { url } = request.query;
+    if (!url?.trim()) return reply.code(400).send({ error: "url is required" });
+    try {
+      return reply.send(await checkCloudImageUrl(url.trim()));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.startsWith("Invalid URL") || message.startsWith("Only official")) return reply.code(400).send({ error: message });
+      return reply.code(502).send({ error: `Vérification indisponible : ${message}` });
     }
   });
 

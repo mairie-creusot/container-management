@@ -19,6 +19,7 @@ import {
   ISO_STEPS_DISABLED_MESSAGE,
   MKOSI_DEFAULT_RELEASE,
   MKOSI_DISTROS,
+  MKOSI_RELEASE_SUGGESTIONS,
   STEP_TYPES,
   STEP_TYPE_LABEL,
   TEMPLATE_BASE_TYPE_LABEL,
@@ -41,6 +42,15 @@ import { LINT_UNAVAILABLE_MESSAGE, lintShell, type ShellLintResult } from "@/fea
 import { packageSearchDistro, type PackageSearchDistro, type PackageSearchItem } from "@/features/templates/packagesApi";
 import PackageSearch from "@/features/templates/PackageSearch";
 import DockerImageSearch from "@/features/templates/DockerImageSearch";
+import {
+  checkCloudImageUrl,
+  defaultCatalogVersion,
+  fetchCloudImageCatalog,
+  formatImageSize,
+  type CloudImageCheckOutcome,
+  type CloudImageDistro,
+  type CloudImageVersion,
+} from "@/features/templates/cloudImagesApi";
 import RecipeVerification from "@/features/templates/RecipeVerification";
 import type { ImageTemplate, TemplateArtifactSource, TemplateBase, TemplatePreset, TemplateStep } from "@/types";
 
@@ -448,54 +458,7 @@ function BaseEditor({
         ))}
       </div>
 
-      {base.type === "cloud-image" && (
-        <>
-          <div className="field">
-            <label htmlFor="studio-distro">Distribution (saisie libre)</label>
-            <input
-              id="studio-distro"
-              type="text"
-              list="studio-distro-suggestions"
-              value={base.distro}
-              onChange={(e) => onChange({ ...base, distro: e.target.value })}
-              placeholder="ex : ubuntu, debian"
-              disabled={busy}
-            />
-            <datalist id="studio-distro-suggestions">
-              {CLOUD_IMAGE_DISTRO_SUGGESTIONS.map((d) => (
-                <option key={d} value={d} />
-              ))}
-            </datalist>
-          </div>
-          <div className="field">
-            <label htmlFor="studio-version">Version</label>
-            <input
-              id="studio-version"
-              type="text"
-              value={base.version}
-              onChange={(e) => onChange({ ...base, version: e.target.value })}
-              placeholder="ex : 24.04, 12"
-              disabled={busy}
-            />
-          </div>
-          <div className="field">
-            <label htmlFor="studio-image-url">URL d'image cloud (avancé, optionnel)</label>
-            <input
-              id="studio-image-url"
-              type="text"
-              className="cell-mono"
-              value={base.imageUrl ?? ""}
-              onChange={(e) => {
-                const v = e.target.value;
-                const { imageUrl: _omit, ...rest } = base;
-                onChange(v === "" ? rest : { ...rest, imageUrl: v });
-              }}
-              placeholder="https://… (sinon résolue par le serveur depuis distro/version)"
-              disabled={busy}
-            />
-          </div>
-        </>
-      )}
+      {base.type === "cloud-image" && <CloudImageBaseEditor base={base} onChange={onChange} busy={busy} />}
 
       {base.type === "container" && (
         <>
@@ -542,7 +505,20 @@ function BaseEditor({
             </select>
           </div>
           <div className="field">
-            <label htmlFor="studio-mkosi-release">Release</label>
+            <label htmlFor="studio-mkosi-release">Release (suggestions ou saisie libre)</label>
+            <div className="template-studio__tabs">
+              {MKOSI_RELEASE_SUGGESTIONS[base.distro].map((release) => (
+                <button
+                  key={release}
+                  type="button"
+                  className={`template-studio__tab${base.release === release ? " is-selected" : ""}`}
+                  onClick={() => onChange({ ...base, release })}
+                  disabled={busy}
+                >
+                  {release}
+                </button>
+              ))}
+            </div>
             <input
               id="studio-mkosi-release"
               type="text"
@@ -562,6 +538,203 @@ function BaseEditor({
       {base.type === "iso" && <IsoBaseEditor base={base} onChange={onChange} busy={busy} />}
 
       {issue && <p className="template-modal__field-error">{issue}</p>}
+    </>
+  );
+}
+
+/** Base cloud-image : catalogue serveur (GET /api/cloud-images, URLs officielles vérifiées) —
+ * choix distro puis version (LTS la plus récente par défaut), distro/version/imageUrl remplis
+ * d'un clic, HEAD de contrôle automatique ; l'URL personnalisée reste disponible (repliée). */
+function CloudImageBaseEditor({
+  base,
+  onChange,
+  busy,
+}: {
+  base: Extract<TemplateBase, { type: "cloud-image" }>;
+  onChange: (next: TemplateBase) => void;
+  busy: boolean;
+}) {
+  const [catalog, setCatalog] = useState<CloudImageDistro[]>([]);
+  const [catalogStatus, setCatalogStatus] = useState<"loading" | "ready" | "unavailable">("loading");
+  const [customOpen, setCustomOpen] = useState(false);
+  const [check, setCheck] = useState<"pending" | CloudImageCheckOutcome | null>(null);
+  const checkSeqRef = useRef(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchCloudImageCatalog().then((result) => {
+      if (cancelled) return;
+      if (result.state === "unavailable") {
+        setCatalogStatus("unavailable");
+        return;
+      }
+      setCatalog(result.distros);
+      setCatalogStatus("ready");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const selectedDistro = catalog.find((d) => d.distro === base.distro) ?? null;
+  // URL de catalogue effectivement portée par la base — seule une URL du catalogue est
+  // auto-vérifiée (une URL personnalisée prime mais n'est pas revérifiée à chaque frappe).
+  const catalogUrl = selectedDistro?.versions.find((v) => v.url === base.imageUrl)?.url ?? null;
+
+  useEffect(() => {
+    checkSeqRef.current += 1;
+    if (!catalogUrl) {
+      setCheck(null);
+      return;
+    }
+    const seq = checkSeqRef.current;
+    setCheck("pending");
+    void checkCloudImageUrl(catalogUrl).then((result) => {
+      if (checkSeqRef.current === seq) setCheck(result);
+    });
+  }, [catalogUrl]);
+
+  function pickDistro(d: CloudImageDistro) {
+    if (d.distro === base.distro && catalogUrl) return;
+    const def = defaultCatalogVersion(d.versions);
+    onChange(
+      def
+        ? { type: "cloud-image", distro: d.distro, version: def.version, imageUrl: def.url }
+        : { type: "cloud-image", distro: d.distro, version: "" },
+    );
+  }
+
+  function pickVersion(v: CloudImageVersion) {
+    onChange({ ...base, version: v.version, imageUrl: v.url });
+  }
+
+  const showFreeFields = customOpen || catalogStatus === "unavailable";
+
+  return (
+    <>
+      {catalogStatus === "loading" && <p className="template-modal__hint">Chargement du catalogue d'images cloud…</p>}
+      {catalogStatus === "unavailable" && (
+        <p className="template-modal__hint">Catalogue d'images cloud indisponible — saisie libre ci-dessous.</p>
+      )}
+
+      {catalogStatus === "ready" && (
+        <>
+          <div className="field">
+            <label>Distribution</label>
+            <div className="template-studio__tabs">
+              {catalog.map((d) => (
+                <button
+                  key={d.distro}
+                  type="button"
+                  className={`template-studio__tab${d.distro === base.distro ? " is-selected" : ""}`}
+                  onClick={() => pickDistro(d)}
+                  disabled={busy}
+                >
+                  {d.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {selectedDistro && (
+            <div className="field">
+              <label>Version</label>
+              <div className="template-studio__tabs">
+                {selectedDistro.versions.map((v) => (
+                  <button
+                    key={v.version}
+                    type="button"
+                    className={`template-studio__tab${v.version === base.version ? " is-selected" : ""}`}
+                    onClick={() => pickVersion(v)}
+                    disabled={busy}
+                  >
+                    {v.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {!selectedDistro && (
+            <p className="template-modal__hint">
+              Distribution « {base.distro || "?"} » hors catalogue — choisissez une carte ci-dessus ou utilisez la saisie
+              libre.
+            </p>
+          )}
+
+          {catalogUrl && !customOpen && <p className="cloud-image__url">{catalogUrl}</p>}
+          {check === "pending" && <p className="template-modal__hint">Vérification de l'image (HEAD serveur)…</p>}
+          {check !== null && check !== "pending" && check.state === "checked" && check.ok && (
+            <p className="cloud-image__check cloud-image__check--ok">
+              ✓ image vérifiée{check.sizeBytes !== undefined ? ` (${formatImageSize(check.sizeBytes)})` : ""}
+            </p>
+          )}
+          {check !== null && check !== "pending" && check.state === "checked" && !check.ok && (
+            <p className="cloud-image__check cloud-image__check--warn">⚠ inaccessible (HTTP {check.status})</p>
+          )}
+          {check !== null && check !== "pending" && check.state === "failed" && (
+            <p className="cloud-image__check cloud-image__check--warn">⚠ vérification impossible — {check.message}</p>
+          )}
+
+          <button
+            type="button"
+            className="cloud-image__advanced-toggle"
+            onClick={() => setCustomOpen((o) => !o)}
+            disabled={busy}
+            aria-expanded={customOpen}
+          >
+            {customOpen ? "▾" : "▸"} URL personnalisée (avancé)
+          </button>
+        </>
+      )}
+
+      {showFreeFields && (
+        <>
+          <div className="field">
+            <label htmlFor="studio-distro">Distribution (saisie libre — sert aussi à la recherche de paquets)</label>
+            <input
+              id="studio-distro"
+              type="text"
+              list="studio-distro-suggestions"
+              value={base.distro}
+              onChange={(e) => onChange({ ...base, distro: e.target.value })}
+              placeholder="ex : ubuntu, debian"
+              disabled={busy}
+            />
+            <datalist id="studio-distro-suggestions">
+              {CLOUD_IMAGE_DISTRO_SUGGESTIONS.map((d) => (
+                <option key={d} value={d} />
+              ))}
+            </datalist>
+          </div>
+          <div className="field">
+            <label htmlFor="studio-version">Version</label>
+            <input
+              id="studio-version"
+              type="text"
+              value={base.version}
+              onChange={(e) => onChange({ ...base, version: e.target.value })}
+              placeholder="ex : 24.04, 12"
+              disabled={busy}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="studio-image-url">URL d'image cloud (si remplie, elle prime)</label>
+            <input
+              id="studio-image-url"
+              type="text"
+              className="cell-mono"
+              value={base.imageUrl ?? ""}
+              onChange={(e) => {
+                const v = e.target.value;
+                const { imageUrl: _omit, ...rest } = base;
+                onChange(v === "" ? rest : { ...rest, imageUrl: v });
+              }}
+              placeholder="https://… (sinon résolue par le serveur depuis distro/version)"
+              disabled={busy}
+            />
+          </div>
+        </>
+      )}
     </>
   );
 }

@@ -201,3 +201,59 @@ describe("GET /api/dockerhub/search + /tags", () => {
     expect((await app.inject({ method: "GET", url: "/api/dockerhub/search?q=zzznocachehub", cookies: adminCookie() })).statusCode).toBe(502);
   });
 });
+
+describe("GET /api/cloud-images + /check", () => {
+  it("catalogue : distros et versions avec URLs des miroirs officiels", async () => {
+    app = buildServer();
+    const response = await app.inject({ method: "GET", url: "/api/cloud-images", cookies: adminCookie() });
+    expect(response.statusCode).toBe(200);
+    const { distros } = response.json();
+    const ubuntu = distros.find((d: { distro: string }) => d.distro === "ubuntu");
+    expect(ubuntu.versions[0]).toEqual({
+      version: "24.04",
+      label: "Ubuntu Server 24.04 LTS (noble)",
+      url: "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img",
+    });
+    expect(distros.map((d: { distro: string }) => d.distro)).toEqual(["ubuntu", "debian", "rocky", "alma"]);
+  });
+
+  it("check : HEAD réel stubé -> ok + taille ; hôte hors allowlist -> 400 (anti-SSRF)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 200, headers: { "content-length": "2147483648" } })),
+    );
+    app = buildServer();
+    const okRes = await app.inject({
+      method: "GET",
+      url: `/api/cloud-images/check?url=${encodeURIComponent("https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img")}`,
+      cookies: adminCookie(),
+    });
+    expect(okRes.statusCode).toBe(200);
+    expect(okRes.json()).toEqual({ ok: true, status: 200, sizeBytes: 2147483648 });
+
+    const ssrf = await app.inject({
+      method: "GET",
+      url: `/api/cloud-images/check?url=${encodeURIComponent("https://192.168.1.1/admin")}`,
+      cookies: adminCookie(),
+    });
+    expect(ssrf.statusCode).toBe(400);
+    const http = await app.inject({
+      method: "GET",
+      url: `/api/cloud-images/check?url=${encodeURIComponent("http://cloud-images.ubuntu.com/x")}`,
+      cookies: adminCookie(),
+    });
+    expect(http.statusCode).toBe(400);
+  });
+
+  it("check : 404 amont -> ok false, status 404 (jamais masqué)", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 404 })));
+    app = buildServer();
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/cloud-images/check?url=${encodeURIComponent("https://cloud.debian.org/images/cloud/nexistepas/latest/x.qcow2")}`,
+      cookies: adminCookie(),
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ok: false, status: 404 });
+  });
+});

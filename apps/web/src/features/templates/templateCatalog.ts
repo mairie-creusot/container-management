@@ -33,6 +33,14 @@ export const MKOSI_DEFAULT_RELEASE: Record<MkosiDistro, string> = {
   arch: "rolling",
 };
 
+/** Releases mkosi suggérées par distro (pills du studio) — la saisie reste libre. */
+export const MKOSI_RELEASE_SUGGESTIONS: Record<MkosiDistro, string[]> = {
+  debian: ["trixie", "bookworm"],
+  ubuntu: ["noble", "jammy"],
+  fedora: ["41", "40"],
+  arch: ["rolling"],
+};
+
 /** Base par défaut d'un onglet du studio quand on bascule dessus sans recette pré-remplie. */
 export function defaultBase(type: TemplateBase["type"]): TemplateBase {
   if (type === "cloud-image") return { type: "cloud-image", distro: "ubuntu", version: "24.04" };
