@@ -1,5 +1,6 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
-import { apiDelete, apiPost, ApiError } from "@/api/client";
+import { apiDelete, apiGet, apiPatch, apiPost, ApiError } from "@/api/client";
+import type { NutanixSubnetSummary } from "@/types";
 
 /**
  * Actions de cycle de vie + migration hôte-à-hôte d'une VM Nutanix (voir apps/api/src/routes/
@@ -30,9 +31,11 @@ interface NutanixState {
   /** uuid de la VM ayant une action de cycle de vie/suppression/migration en cours (désactive ses
    * boutons/le glisser-déposer) — un seul à la fois, même principe que ContainersState#actionPendingId. */
   actionPendingUuid: string | null;
+  /** Subnets réels (GET /api/nutanix/subnets) — pour le sélecteur "Ajouter une carte réseau". */
+  subnets: NutanixSubnetSummary[];
 }
 
-const initialState: NutanixState = { actionPendingUuid: null };
+const initialState: NutanixState = { actionPendingUuid: null, subnets: [] };
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : fallback;
@@ -84,6 +87,63 @@ export const migrateNutanixVm = createAsyncThunk<
   }
 });
 
+/** Subnets réels pour le sélecteur "Ajouter une carte réseau" — voir GET /api/nutanix/subnets. */
+export const fetchNutanixSubnets = createAsyncThunk<NutanixSubnetSummary[], void, { rejectValue: string }>(
+  "nutanix/fetchSubnets",
+  async (_arg, { rejectWithValue }) => {
+    try {
+      return await apiGet<NutanixSubnetSummary[]>("/nutanix/subnets");
+    } catch (error) {
+      return rejectWithValue(errorMessage(error, "Échec du chargement des subnets Nutanix."));
+    }
+  },
+);
+
+/** Ajout d'un disque SCSI — voir POST /api/nutanix/vms/:uuid/disks (services/nutanix.ts#
+ * addNutanixVmDisk : storage container recopié d'un disque existant de la VM). Appelé UNIQUEMENT
+ * après confirmation explicite côté popover (TopologyGraph.tsx). */
+export const addNutanixVmDisk = createAsyncThunk<
+  { uuid: string; vmName: string; sizeMib: number },
+  { uuid: string; sizeMib: number },
+  { rejectValue: string }
+>("nutanix/addVmDisk", async ({ uuid, sizeMib }, { rejectWithValue }) => {
+  try {
+    const result = await apiPost<NutanixVmActionResponse & { sizeMib: number }>(`/nutanix/vms/${uuid}/disks`, { sizeMib });
+    return { uuid, vmName: result.vmName, sizeMib: result.sizeMib };
+  } catch (error) {
+    return rejectWithValue(errorMessage(error, "Échec de l'ajout du disque."));
+  }
+});
+
+/** Ajout d'une carte réseau — voir POST /api/nutanix/vms/:uuid/nics (subnet vérifié serveur). */
+export const addNutanixVmNic = createAsyncThunk<
+  { uuid: string; vmName: string; subnetName: string },
+  { uuid: string; subnetUuid: string },
+  { rejectValue: string }
+>("nutanix/addVmNic", async ({ uuid, subnetUuid }, { rejectWithValue }) => {
+  try {
+    const result = await apiPost<NutanixVmActionResponse & { subnetName: string }>(`/nutanix/vms/${uuid}/nics`, { subnetUuid });
+    return { uuid, vmName: result.vmName, subnetName: result.subnetName };
+  } catch (error) {
+    return rejectWithValue(errorMessage(error, "Échec de l'ajout de la carte réseau."));
+  }
+});
+
+/** vCPU/cœurs par vCPU/mémoire — voir PATCH /api/nutanix/vms/:uuid/compute. Un refus à-chaud de
+ * Prism Central (VM allumée) remonte tel quel en toast via errorNotificationMiddleware. */
+export const updateNutanixVmCompute = createAsyncThunk<
+  { uuid: string; vmName: string },
+  { uuid: string; numVcpus?: number; numCoresPerVcpu?: number; memoryMib?: number },
+  { rejectValue: string }
+>("nutanix/updateVmCompute", async ({ uuid, ...fields }, { rejectWithValue }) => {
+  try {
+    const result = await apiPatch<NutanixVmActionResponse>(`/nutanix/vms/${uuid}/compute`, fields);
+    return { uuid, vmName: result.vmName };
+  } catch (error) {
+    return rejectWithValue(errorMessage(error, "Échec de la mise à jour vCPU/mémoire."));
+  }
+});
+
 const nutanixSlice = createSlice({
   name: "nutanix",
   initialState,
@@ -115,6 +175,37 @@ const nutanixSlice = createSlice({
         state.actionPendingUuid = null;
       })
       .addCase(migrateNutanixVm.rejected, (state) => {
+        state.actionPendingUuid = null;
+      })
+      .addCase(fetchNutanixSubnets.fulfilled, (state, action) => {
+        state.subnets = action.payload;
+      })
+      // Même verrou actionPendingUuid pour les 3 mutations matérielles que pour le cycle de vie.
+      .addCase(addNutanixVmDisk.pending, (state, action) => {
+        state.actionPendingUuid = action.meta.arg.uuid;
+      })
+      .addCase(addNutanixVmDisk.fulfilled, (state) => {
+        state.actionPendingUuid = null;
+      })
+      .addCase(addNutanixVmDisk.rejected, (state) => {
+        state.actionPendingUuid = null;
+      })
+      .addCase(addNutanixVmNic.pending, (state, action) => {
+        state.actionPendingUuid = action.meta.arg.uuid;
+      })
+      .addCase(addNutanixVmNic.fulfilled, (state) => {
+        state.actionPendingUuid = null;
+      })
+      .addCase(addNutanixVmNic.rejected, (state) => {
+        state.actionPendingUuid = null;
+      })
+      .addCase(updateNutanixVmCompute.pending, (state, action) => {
+        state.actionPendingUuid = action.meta.arg.uuid;
+      })
+      .addCase(updateNutanixVmCompute.fulfilled, (state) => {
+        state.actionPendingUuid = null;
+      })
+      .addCase(updateNutanixVmCompute.rejected, (state) => {
         state.actionPendingUuid = null;
       });
   },

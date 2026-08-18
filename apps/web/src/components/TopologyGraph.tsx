@@ -56,7 +56,7 @@ import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import Modal from "@/components/Modal";
 import TopologyNodeDetailPanel, { type TabId } from "@/components/TopologyNodeDetailPanel";
 import TopologySubGraphPanel from "@/components/TopologySubGraphPanel";
-import { IconGithub, IconInfo, IconKey, IconSearch, IconTopology, IconTrash, IconVolumes } from "@/components/icons";
+import { IconGithub, IconInfo, IconKey, IconNetworks, IconSearch, IconServer, IconTopology, IconTrash, IconVolumes } from "@/components/icons";
 // Réutilise TEL QUEL le flux de déploiement GitHub existant (détection Dockerfile/compose/
 // Terraform, build, déploiement, déploiement auto sur push — voir ARCHITECTURE.md § "Intégration
 // GitHub") : CreateSpotlight ne fait que le monter dans une modal par-dessus le canevas, aucune
@@ -83,7 +83,15 @@ import { createBackupDefinition } from "@/features/backups/backupsSlice";
 import { createAutomationEdge, createAutomationNode, deleteAutomationEdge, deleteAutomationNode } from "@/features/automation/automationSlice";
 import { fetchRoutes } from "@/features/reverseProxy/reverseProxySlice";
 import { fetchNotificationChannels } from "@/features/notificationChannels/notificationChannelsSlice";
-import { migrateNutanixVm, runNutanixVmAction, type NutanixVmLifecycleAction } from "@/features/nutanix/nutanixSlice";
+import {
+  addNutanixVmDisk,
+  addNutanixVmNic,
+  fetchNutanixSubnets,
+  migrateNutanixVm,
+  runNutanixVmAction,
+  updateNutanixVmCompute,
+  type NutanixVmLifecycleAction,
+} from "@/features/nutanix/nutanixSlice";
 import type { IacEngine } from "@/types";
 // Registre déclaratif des kinds (voir topologyNodeContract.tsx#NODE_CONTRACT) — ports, actions de
 // menu par kind, colonne par défaut : ce composant n'est plus qu'un consommateur générique qui
@@ -97,6 +105,7 @@ import {
   mapNodeContract,
   type ConnectionActionId,
   type NodeMenuActionId,
+  type QuickLifecycleAction,
 } from "@/components/topologyNodeContract";
 import {
   ACTION_LABEL,
@@ -2117,6 +2126,317 @@ function AttachEnvPopover({ containerNode, x, y, onClose }: AttachEnvPopoverProp
   );
 }
 
+// --- Popovers "configuration matérielle" d'une VM Nutanix (18/08/2026) — mêmes entrées que le
+// menu "Update VM" de Prism (captures de référence) : Add New Disk / Add New NIC / Compute.
+// Mêmes patterns que MountVolumePopover/AttachEnvPopover ci-dessus (useDismiss + confirmation
+// explicite variant danger AVANT tout appel réel — ces actions modifient une VRAIE VM de
+// production de la mairie, jamais déclenchées par le seul clic de soumission). Backend :
+// POST /api/nutanix/vms/:uuid/{disks,nics}, PATCH .../compute (services/nutanix.ts).
+
+interface NutanixVmPopoverProps {
+  vmNode: TopologyNode;
+  x: number;
+  y: number;
+  onClose: () => void;
+}
+
+/** "Ajouter un disque" — taille en Gio (bornes QUAI 1 Gio – 2 Tio, revalidées serveur). Type/bus
+ * fixes (DISK/SCSI, seule forme d'ajout supportée ici) et storage container recopié du disque
+ * existant de la VM côté serveur — affichés comme informations, jamais des choix fictifs. */
+function NutanixAddDiskPopover({ vmNode, x, y, onClose }: NutanixVmPopoverProps) {
+  const dispatch = useAppDispatch();
+  const confirm = useConfirm();
+  const { ref, style } = useDismiss(onClose, x, y);
+  const [sizeGib, setSizeGib] = useState("50");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const parsed = Number(sizeGib);
+  const sizeValid = Number.isInteger(parsed) && parsed >= 1 && parsed <= 2048;
+
+  async function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (!sizeValid) return;
+    const ok = await confirm({
+      title: "Ajouter un disque à la VM",
+      description: `Ajouter un disque SCSI de ${parsed} Gio à "${vmNode.label}" ? Cette action modifie réellement la VM sur Prism Central.`,
+      confirmLabel: "Ajouter le disque",
+      variant: "danger",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    const result = await dispatch(addNutanixVmDisk({ uuid: idWithoutPrefix(vmNode.id), sizeMib: parsed * 1024 }));
+    setBusy(false);
+    if (addNutanixVmDisk.fulfilled.match(result)) {
+      dispatch(pushNotification({ level: "success", message: `Disque de ${parsed} Gio ajouté à "${result.payload.vmName}".` }));
+      dispatch(fetchTopology());
+      onClose();
+    } else {
+      setError(result.payload ?? "Échec de l'ajout du disque.");
+    }
+  }
+
+  return (
+    <div className="graph-popover" style={style} ref={ref}>
+      <div className="graph-popover__title">{`Nouveau disque pour « ${vmNode.label} »`}</div>
+      <form onSubmit={handleSubmit}>
+        <div className="field">
+          <label htmlFor="graph-nutanix-disk-size">Taille (Gio)</label>
+          <input
+            id="graph-nutanix-disk-size"
+            type="number"
+            autoFocus
+            min={1}
+            max={2048}
+            value={sizeGib}
+            onChange={(e) => setSizeGib(e.target.value)}
+            disabled={busy}
+            required
+          />
+          {sizeGib.trim().length > 0 && !sizeValid && (
+            <span style={{ fontSize: 12, color: "var(--color-critical)" }}>Entier entre 1 et 2048 Gio.</span>
+          )}
+        </div>
+        <p className="create-container-hint">
+          Disque SCSI ajouté via Prism Central (ajout à chaud supporté par AHV, VM allumée ou éteinte). Le storage
+          container du disque existant de la VM est réutilisé — à défaut, celui par défaut du cluster.
+        </p>
+        {error && <p className="graph-popover__error">{error}</p>}
+        <div className="graph-popover__actions">
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={busy}>
+            Annuler
+          </button>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !sizeValid}>
+            {busy ? "…" : "Ajouter"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/** "Ajouter une carte réseau" — subnets RÉELS (GET /api/nutanix/subnets, mêmes données que la
+ * résolution VLAN du poll de topologie), jamais une liste inventée ; subnet revalidé côté serveur. */
+function NutanixAddNicPopover({ vmNode, x, y, onClose }: NutanixVmPopoverProps) {
+  const dispatch = useAppDispatch();
+  const confirm = useConfirm();
+  const { ref, style } = useDismiss(onClose, x, y);
+  const subnets = useAppSelector((s) => s.nutanix.subnets);
+  const [subnetUuid, setSubnetUuid] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    dispatch(fetchNutanixSubnets());
+  }, [dispatch]);
+
+  useEffect(() => {
+    if ((!subnetUuid || !subnets.some((s) => s.uuid === subnetUuid)) && subnets.length > 0) setSubnetUuid(subnets[0]!.uuid);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subnets.length]);
+
+  const selected = subnets.find((s) => s.uuid === subnetUuid);
+
+  async function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (!subnetUuid) return;
+    const ok = await confirm({
+      title: "Ajouter une carte réseau à la VM",
+      description: `Ajouter une carte réseau sur le subnet "${selected?.name ?? subnetUuid}" à "${vmNode.label}" ? Cette action modifie réellement la VM sur Prism Central.`,
+      confirmLabel: "Ajouter la carte réseau",
+      variant: "danger",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    const result = await dispatch(addNutanixVmNic({ uuid: idWithoutPrefix(vmNode.id), subnetUuid }));
+    setBusy(false);
+    if (addNutanixVmNic.fulfilled.match(result)) {
+      dispatch(
+        pushNotification({ level: "success", message: `Carte réseau (${result.payload.subnetName}) ajoutée à "${result.payload.vmName}".` }),
+      );
+      dispatch(fetchTopology());
+      onClose();
+    } else {
+      setError(result.payload ?? "Échec de l'ajout de la carte réseau.");
+    }
+  }
+
+  return (
+    <div className="graph-popover" style={style} ref={ref}>
+      <div className="graph-popover__title">{`Nouvelle carte réseau pour « ${vmNode.label} »`}</div>
+      <form onSubmit={handleSubmit}>
+        {subnets.length === 0 ? (
+          <p className="graph-popover__error" style={{ color: "var(--color-text-faint)" }}>
+            Aucun subnet Nutanix disponible (Prism Central injoignable, ou aucun subnet configuré).
+          </p>
+        ) : (
+          <div className="field">
+            <label htmlFor="graph-nutanix-nic-subnet">Subnet / VLAN</label>
+            <select
+              id="graph-nutanix-nic-subnet"
+              value={subnetUuid}
+              onChange={(e) => setSubnetUuid(e.target.value)}
+              disabled={busy}
+              required
+            >
+              {subnets.map((s) => (
+                <option key={s.uuid} value={s.uuid}>
+                  {s.name}
+                  {s.vlanId !== undefined ? ` (VLAN ${s.vlanId})` : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        {error && <p className="graph-popover__error">{error}</p>}
+        <div className="graph-popover__actions">
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={busy}>
+            Annuler
+          </button>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !subnetUuid || subnets.length === 0}>
+            {busy ? "…" : "Ajouter"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+/** "vCPU / Mémoire" — champ vide = inchangé (le nœud du graphe ne porte que le TOTAL de vCPUs,
+ * jamais la décomposition sockets × cœurs : aucun pré-remplissage inventé). Contrainte à-chaud
+ * affichée honnêtement ; un refus réel de Prism Central remonte tel quel (jamais masqué). */
+function NutanixComputePopover({ vmNode, x, y, onClose }: NutanixVmPopoverProps) {
+  const dispatch = useAppDispatch();
+  const confirm = useConfirm();
+  const { ref, style } = useDismiss(onClose, x, y);
+  const [numVcpus, setNumVcpus] = useState("");
+  const [coresPerVcpu, setCoresPerVcpu] = useState("");
+  const [memoryMib, setMemoryMib] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function parseField(raw: string, min: number, max: number): { value?: number; invalid: boolean } {
+    const trimmed = raw.trim();
+    if (!trimmed) return { invalid: false };
+    const n = Number(trimmed);
+    if (!Number.isInteger(n) || n < min || n > max) return { invalid: true };
+    return { value: n, invalid: false };
+  }
+
+  const vcpus = parseField(numVcpus, 1, 64);
+  const cores = parseField(coresPerVcpu, 1, 16);
+  const memory = parseField(memoryMib, 256, 1024 * 1024);
+  const anyProvided = vcpus.value !== undefined || cores.value !== undefined || memory.value !== undefined;
+  const anyInvalid = vcpus.invalid || cores.invalid || memory.invalid;
+
+  async function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (!anyProvided || anyInvalid) return;
+    const changes = [
+      ...(vcpus.value !== undefined ? [`${vcpus.value} vCPU`] : []),
+      ...(cores.value !== undefined ? [`${cores.value} cœur(s) par vCPU`] : []),
+      ...(memory.value !== undefined ? [`${memory.value} Mio de mémoire`] : []),
+    ].join(", ");
+    const ok = await confirm({
+      title: "Modifier vCPU / mémoire de la VM",
+      description: `Appliquer ${changes} à "${vmNode.label}" ? Cette action modifie réellement la VM sur Prism Central.`,
+      confirmLabel: "Appliquer",
+      variant: "danger",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    const result = await dispatch(
+      updateNutanixVmCompute({
+        uuid: idWithoutPrefix(vmNode.id),
+        ...(vcpus.value !== undefined ? { numVcpus: vcpus.value } : {}),
+        ...(cores.value !== undefined ? { numCoresPerVcpu: cores.value } : {}),
+        ...(memory.value !== undefined ? { memoryMib: memory.value } : {}),
+      }),
+    );
+    setBusy(false);
+    if (updateNutanixVmCompute.fulfilled.match(result)) {
+      dispatch(pushNotification({ level: "success", message: `vCPU/mémoire mis à jour pour "${result.payload.vmName}".` }));
+      dispatch(fetchTopology());
+      onClose();
+    } else {
+      setError(result.payload ?? "Échec de la mise à jour vCPU/mémoire.");
+    }
+  }
+
+  return (
+    <div className="graph-popover" style={style} ref={ref}>
+      <div className="graph-popover__title">{`vCPU / Mémoire de « ${vmNode.label} »`}</div>
+      <p className="graph-popover__desc">
+        Actuel :{" "}
+        {typeof vmNode.numVcpus === "number" ? `${vmNode.numVcpus} vCPU au total` : "vCPU non rapportés"}
+        {typeof vmNode.memoryMib === "number" ? ` · ${vmNode.memoryMib} Mio` : ""}. Champ vide = inchangé.
+      </p>
+      <form onSubmit={handleSubmit}>
+        <div className="field">
+          <label htmlFor="graph-nutanix-vcpus">vCPU (sockets)</label>
+          <input
+            id="graph-nutanix-vcpus"
+            type="number"
+            autoFocus
+            min={1}
+            max={64}
+            placeholder="inchangé"
+            value={numVcpus}
+            onChange={(e) => setNumVcpus(e.target.value)}
+            disabled={busy}
+          />
+          {vcpus.invalid && <span style={{ fontSize: 12, color: "var(--color-critical)" }}>Entier entre 1 et 64.</span>}
+        </div>
+        <div className="field">
+          <label htmlFor="graph-nutanix-cores">Cœurs par vCPU</label>
+          <input
+            id="graph-nutanix-cores"
+            type="number"
+            min={1}
+            max={16}
+            placeholder="inchangé"
+            value={coresPerVcpu}
+            onChange={(e) => setCoresPerVcpu(e.target.value)}
+            disabled={busy}
+          />
+          {cores.invalid && <span style={{ fontSize: 12, color: "var(--color-critical)" }}>Entier entre 1 et 16.</span>}
+        </div>
+        <div className="field">
+          <label htmlFor="graph-nutanix-memory">Mémoire (Mio)</label>
+          <input
+            id="graph-nutanix-memory"
+            type="number"
+            min={256}
+            max={1024 * 1024}
+            placeholder="inchangé"
+            value={memoryMib}
+            onChange={(e) => setMemoryMib(e.target.value)}
+            disabled={busy}
+          />
+          {memory.invalid && <span style={{ fontSize: 12, color: "var(--color-critical)" }}>Entier entre 256 et 1 048 576 Mio.</span>}
+        </div>
+        <p className="create-container-hint">
+          VM allumée : l'AJOUT de vCPU/mémoire est généralement appliqué à chaud par AHV ; une DIMINUTION ou un
+          changement des cœurs par vCPU exigent en général la VM éteinte — dans ce cas Prism Central refuse et son
+          message d'erreur réel s'affiche tel quel.
+        </p>
+        {error && <p className="graph-popover__error">{error}</p>}
+        <div className="graph-popover__actions">
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={busy}>
+            Annuler
+          </button>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !anyProvided || anyInvalid}>
+            {busy ? "…" : "Appliquer"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 interface TopologyGraphProps {
   height?: number;
   onSelectNode?: (node: TopologyNode | null) => void;
@@ -2225,6 +2545,15 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [attachEnvPopover, setAttachEnvPopover] = useState<{ node: TopologyNode; x: number; y: number } | null>(
     null,
   );
+  // Popovers "configuration matérielle" d'une VM Nutanix (picker ＋ contextuel / menu contextuel,
+  // 18/08/2026) — voir NutanixAddDiskPopover/NutanixAddNicPopover/NutanixComputePopover ci-dessus.
+  const [nutanixDiskPopover, setNutanixDiskPopover] = useState<{ node: TopologyNode; x: number; y: number } | null>(null);
+  const [nutanixNicPopover, setNutanixNicPopover] = useState<{ node: TopologyNode; x: number; y: number } | null>(null);
+  const [nutanixComputePopover, setNutanixComputePopover] = useState<{ node: TopologyNode; x: number; y: number } | null>(null);
+  // Verrous "action en cours" (boutons rapides des cartes, 18/08/2026) — mêmes sources que le
+  // panneau de détail (nutanix.actionPendingUuid) et la page Conteneurs (containers.actionPendingId).
+  const nutanixActionPendingUuid = useAppSelector((s) => s.nutanix.actionPendingUuid);
+  const containerActionPendingId = useAppSelector((s) => s.containers.actionPendingId);
   // "Ajouter un environnement…" depuis un nœud cluster Nutanix — même modale réelle que le spotlight.
   const [remoteEnvModalOpen, setRemoteEnvModalOpen] = useState(false);
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
@@ -2405,22 +2734,35 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           // voir TopologyAlertStack ci-dessous) : la nouvelle pile fixe vit directement dans ce
           // composant, qui a déjà accès à openNodeDetail/handleCpuAlertRestart sans détour par
           // node.data.
+          // Picker ＋ ancré sous le bouton — partagé conteneur/VM (le contenu du picker est
+          // contextuel par kind, voir attachPicker plus bas).
+          const openAttachPicker = (event: React.MouseEvent) => {
+            const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+            setAttachPicker({ x: rect.left, y: rect.bottom + 6, node: n });
+          };
+          const rawActionId = idWithoutPrefix(n.id);
           const callbacks: GraphNodeCallbacks =
             n.kind === "container"
               ? {
                   onOpenAttachment: (attachment) => handleOpenAttachment(attachment),
                   onAttachmentContextMenu: (event, attachment) => handleAttachmentContextMenu(event, n.id, attachment),
-                  // Bouton ＋ (operator+ uniquement — non injecté = non rendu) : picker ancré sous le bouton.
+                  // Bouton ＋ + actions rapides (operator+ uniquement — non injecté = non rendu).
                   ...(operate
                     ? {
-                        onOpenAttachPicker: (event: React.MouseEvent) => {
-                          const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
-                          setAttachPicker({ x: rect.left, y: rect.bottom + 6, node: n });
-                        },
+                        onOpenAttachPicker: openAttachPicker,
+                        // MÊMES handlers réels que le menu contextuel (confirmations comprises).
+                        onQuickAction: (action: QuickLifecycleAction) => void handleContainerAction(rawActionId, n.label, action),
+                        actionPending: containerActionPendingId === rawActionId,
                       }
                     : {}),
                 }
-              : {};
+              : n.kind === "nutanix-vm" && operate
+                ? {
+                    onOpenAttachPicker: openAttachPicker,
+                    onQuickAction: (action: QuickLifecycleAction) => void handleNutanixVmAction(rawActionId, n.label, action),
+                    actionPending: nutanixActionPendingUuid === rawActionId,
+                  }
+                : {};
           return {
             id: n.id,
             type: "graphNode",
@@ -2466,7 +2808,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       }
       return nodes;
     });
-  }, [data, positions, hostTreePositions]);
+    // Les deux ids "action en cours" invalident le rendu des boutons rapides (voir
+    // graphNodePropsEqual#actionPending, topologyGraphShared.tsx) — d'où leur présence ici.
+  }, [data, positions, hostTreePositions, nutanixActionPendingUuid, containerActionPendingId]);
 
   /**
    * Cadre décoratif (voir topologyGraphShared.tsx#GroupFrameNode) autour des membres d'un groupe
@@ -3280,6 +3624,10 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       "nutanix-vm-stop": () => void handleNutanixVmAction(id, node.label, "stop"),
       "nutanix-vm-restart": () => void handleNutanixVmAction(id, node.label, "restart"),
       "nutanix-vm-start": () => void handleNutanixVmAction(id, node.label, "start"),
+      // Configuration matérielle (18/08/2026) — mêmes popovers que le picker ＋ de la carte.
+      "nutanix-vm-add-disk": () => setNutanixDiskPopover({ node, x, y }),
+      "nutanix-vm-add-nic": () => setNutanixNicPopover({ node, x, y }),
+      "nutanix-vm-edit-compute": () => setNutanixComputePopover({ node, x, y }),
       "volume-mount-on-container": () => setMountVolumePopover({ target: { kind: "existing-volume", volumeName: id }, x, y }),
       "volume-remove": () => void handleRemoveVolume(id),
       "network-remove": () => void handleRemoveNetwork(id, node.label),
@@ -3626,27 +3974,75 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         />
       )}
 
-      {/* Picker du bouton ＋ (ou "Attacher…" du menu) : 2 flux réels, tous par recréation — les
-          variables d'un conteneur SONT les secrets de la plateforme (icône clé), jamais un second
-          flux à valeur saisie en clair. */}
+      {/* Picker du bouton ＋ (ou "Attacher…"/entrées matérielles du menu) — CONTEXTUEL par kind
+          (18/08/2026) : conteneur -> Stockage/Variable (flux par recréation, les variables SONT
+          les secrets de la plateforme) ; VM Nutanix -> Disque/Carte réseau/vCPU-Mémoire (mêmes
+          entrées que le menu "Update VM" de Prism, backend réel routes/nutanix.ts). */}
       {attachPicker && (
         <ContextMenu
           x={attachPicker.x}
           y={attachPicker.y}
           onClose={() => setAttachPicker(null)}
-          items={[
-            {
-              label: "Stockage (volume)…",
-              icon: IconVolumes,
-              onClick: () =>
-                setMountVolumePopover({ target: { kind: "new-volume", containerNode: attachPicker.node }, x: attachPicker.x, y: attachPicker.y }),
-            },
-            {
-              label: "Variable d'environnement…",
-              icon: IconKey,
-              onClick: () => setAttachEnvPopover({ node: attachPicker.node, x: attachPicker.x, y: attachPicker.y }),
-            },
-          ]}
+          items={
+            attachPicker.node.kind === "nutanix-vm"
+              ? [
+                  {
+                    label: "Disque…",
+                    icon: IconVolumes,
+                    onClick: () => setNutanixDiskPopover({ node: attachPicker.node, x: attachPicker.x, y: attachPicker.y }),
+                  },
+                  {
+                    label: "Carte réseau…",
+                    icon: IconNetworks,
+                    onClick: () => setNutanixNicPopover({ node: attachPicker.node, x: attachPicker.x, y: attachPicker.y }),
+                  },
+                  {
+                    label: "vCPU / Mémoire…",
+                    icon: IconServer,
+                    onClick: () => setNutanixComputePopover({ node: attachPicker.node, x: attachPicker.x, y: attachPicker.y }),
+                  },
+                ]
+              : [
+                  {
+                    label: "Stockage (volume)…",
+                    icon: IconVolumes,
+                    onClick: () =>
+                      setMountVolumePopover({ target: { kind: "new-volume", containerNode: attachPicker.node }, x: attachPicker.x, y: attachPicker.y }),
+                  },
+                  {
+                    label: "Variable d'environnement…",
+                    icon: IconKey,
+                    onClick: () => setAttachEnvPopover({ node: attachPicker.node, x: attachPicker.x, y: attachPicker.y }),
+                  },
+                ]
+          }
+        />
+      )}
+
+      {nutanixDiskPopover && (
+        <NutanixAddDiskPopover
+          vmNode={nutanixDiskPopover.node}
+          x={nutanixDiskPopover.x}
+          y={nutanixDiskPopover.y}
+          onClose={() => setNutanixDiskPopover(null)}
+        />
+      )}
+
+      {nutanixNicPopover && (
+        <NutanixAddNicPopover
+          vmNode={nutanixNicPopover.node}
+          x={nutanixNicPopover.x}
+          y={nutanixNicPopover.y}
+          onClose={() => setNutanixNicPopover(null)}
+        />
+      )}
+
+      {nutanixComputePopover && (
+        <NutanixComputePopover
+          vmNode={nutanixComputePopover.node}
+          x={nutanixComputePopover.x}
+          y={nutanixComputePopover.y}
+          onClose={() => setNutanixComputePopover(null)}
         />
       )}
 

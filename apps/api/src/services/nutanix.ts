@@ -1013,6 +1013,167 @@ export async function migrateNutanixVm(uuid: string, targetHostUuid: string): Pr
 }
 
 // ============================================================================================
+// Configuration matérielle d'une VM (ajout de disque, ajout de carte réseau, vCPU/mémoire) —
+// mission du 18/08/2026 : mêmes entrées que le menu "Update VM" de Prism (captures de référence),
+// via le MÊME mécanisme PUT spec déclaratif que start/stop/migrate ci-dessus (jamais un second
+// système). Formes RÉELLES vérifiées EN LECTURE SEULE le 18/08/2026 sur l'instance 172.20.0.10:9440
+// (GET /vms/{uuid} sur 2 VMs réelles, POST /subnets/list — AUCUNE mutation testée contre
+// l'instance réelle, interdiction absolue de cette mission ; les mutations ne sont exercées que
+// contre des réponses mockées reproduisant ces formes, voir test/nutanixVmConfig.test.ts) :
+//  - une entrée disk_list DISQUE réelle porte device_properties.{device_type:"DISK",
+//    disk_address:{adapter_type:"SCSI", device_index}}, disk_size_mib (+ disk_size_bytes dérivé
+//    par Prism, jamais envoyé par nous) et storage_config.storage_container_reference
+//    {kind:"storage_container", uuid} — présent sur TOUS les disques réels observés : l'ajout
+//    recopie celui d'un disque existant de la VM (même container de stockage), et l'omet si la VM
+//    n'a aucun disque (Prism applique alors le container par défaut du cluster).
+//  - une entrée nic_list réelle porte nic_type:"NORMAL_NIC", vlan_mode:"ACCESS",
+//    subnet_reference{kind:"subnet", uuid}, is_connected:true (mac_address/uuid assignés par Prism).
+//  - le compute vit dans num_sockets ("vCPU(s)" de Prism), num_vcpus_per_socket ("cœurs par vCPU")
+//    et memory_size_mib. `boot_config` est un champ DISTINCT, jamais touché ici — le message Prism
+//    "Boot Configuration cannot be updated while the VM is running" (capture) concerne ce champ-là.
+// Contrainte à-chaud (NON vérifiée par mutation sur cette instance — comportement AHV documenté par
+// Nutanix, jamais supposé vérifié ici) : l'AJOUT à chaud de vCPU (num_sockets) et de mémoire est
+// supporté sur une VM allumée ; la DIMINUTION de l'un ou l'autre et le changement de
+// num_vcpus_per_socket exigent en général la VM éteinte. AUCUN garde-fou local ne masque ce cas :
+// le PUT est tenté tel quel et un refus Prism remonte TEL QUEL (502 + message réel) à l'UI.
+// ============================================================================================
+
+/** Bornes QUAI (garde-fous délibérés, pas des limites Prism documentées) — évite qu'une faute de
+ * frappe alloue 300 Tio sur la prod de la mairie. */
+export const NUTANIX_DISK_MIN_SIZE_MIB = 1024; // 1 Gio
+export const NUTANIX_DISK_MAX_SIZE_MIB = 2 * 1024 * 1024; // 2 Tio
+export const NUTANIX_MAX_VCPUS = 64;
+export const NUTANIX_MAX_CORES_PER_VCPU = 16;
+export const NUTANIX_MIN_MEMORY_MIB = 256;
+export const NUTANIX_MAX_MEMORY_MIB = 1024 * 1024; // 1 Tio
+
+/** Forme (partielle) d'une entrée disk_list côté spec — uniquement les champs lus pour calculer le
+ * prochain device_index SCSI et recopier le storage container, le reste passe tel quel. */
+interface NutanixDiskSpecEntry {
+  device_properties?: { device_type?: string; disk_address?: { adapter_type?: string; device_index?: number } };
+  storage_config?: unknown;
+  [key: string]: unknown;
+}
+
+/**
+ * Ajoute un disque SCSI à une VM — reproduit EXACTEMENT la forme d'entrée observée en conditions
+ * réelles (voir en-tête de section) : device_type DISK, adapter SCSI au prochain device_index
+ * libre, disk_size_mib, storage_config recopié d'un disque existant de la MÊME VM (jamais un
+ * container inventé). Fonctionne VM allumée ou éteinte (le hot-add de disque SCSI est supporté par
+ * AHV) — un refus Prism éventuel remonte tel quel.
+ */
+export async function addNutanixVmDisk(uuid: string, opts: { sizeMib: number }): Promise<{ ok: true; vmName: string; sizeMib: number }> {
+  const { sizeMib } = opts;
+  if (!Number.isInteger(sizeMib) || sizeMib < NUTANIX_DISK_MIN_SIZE_MIB || sizeMib > NUTANIX_DISK_MAX_SIZE_MIB) {
+    throw new NutanixActionError(
+      `Invalid disk size ${sizeMib} MiB — must be an integer between ${NUTANIX_DISK_MIN_SIZE_MIB} and ${NUTANIX_DISK_MAX_SIZE_MIB} MiB (QUAI safety bounds)`,
+      400,
+    );
+  }
+  const { effective, entity } = await loadNutanixVmFullEntity(uuid);
+  const vmName = entity.status?.name ?? entity.spec.name ?? uuid;
+  const diskList: NutanixDiskSpecEntry[] = Array.isArray(entity.spec.resources.disk_list)
+    ? (entity.spec.resources.disk_list as NutanixDiskSpecEntry[])
+    : [];
+  const scsiIndexes = diskList
+    .filter((d) => d.device_properties?.disk_address?.adapter_type === "SCSI")
+    .map((d) => d.device_properties?.disk_address?.device_index)
+    .filter((i): i is number => typeof i === "number");
+  const nextIndex = scsiIndexes.length > 0 ? Math.max(...scsiIndexes) + 1 : 0;
+  const templateStorage = diskList.find((d) => d.device_properties?.device_type === "DISK" && d.storage_config)?.storage_config;
+  const newDisk: NutanixDiskSpecEntry = {
+    device_properties: { device_type: "DISK", disk_address: { adapter_type: "SCSI", device_index: nextIndex } },
+    disk_size_mib: sizeMib,
+    ...(templateStorage !== undefined ? { storage_config: templateStorage } : {}),
+  };
+  const newSpec = { ...entity.spec, resources: { ...entity.spec.resources, disk_list: [...diskList, newDisk] } };
+  await putNutanixVmEntity(effective, uuid, entity, newSpec, "disk add");
+  return { ok: true, vmName, sizeMib };
+}
+
+/**
+ * Ajoute une carte réseau (NIC) reliée à un subnet RÉEL — le subnet est vérifié via /subnets/list
+ * (même résolution que le poll de topologie, jamais un uuid accepté à l'aveugle). Forme d'entrée
+ * minimale reproduisant l'observé (voir en-tête de section) : Prism assigne lui-même uuid/mac.
+ */
+export async function addNutanixVmNic(uuid: string, opts: { subnetUuid: string }): Promise<{ ok: true; vmName: string; subnetName: string }> {
+  const { effective, entity } = await loadNutanixVmFullEntity(uuid);
+  const vmName = entity.status?.name ?? entity.spec.name ?? uuid;
+  const subnets = await fetchNutanixSubnets(effective);
+  const subnet = subnets.get(opts.subnetUuid);
+  if (!subnet) {
+    throw new NutanixActionError(`Subnet "${opts.subnetUuid}" not found on Prism Central (or subnets list temporarily unavailable)`, 404);
+  }
+  const nicList: unknown[] = Array.isArray(entity.spec.resources.nic_list) ? (entity.spec.resources.nic_list as unknown[]) : [];
+  const newNic = {
+    nic_type: "NORMAL_NIC",
+    vlan_mode: "ACCESS",
+    subnet_reference: { kind: "subnet", uuid: opts.subnetUuid },
+    is_connected: true,
+  };
+  const newSpec = { ...entity.spec, resources: { ...entity.spec.resources, nic_list: [...nicList, newNic] } };
+  await putNutanixVmEntity(effective, uuid, entity, newSpec, "NIC add");
+  return { ok: true, vmName, subnetName: subnet.name };
+}
+
+/**
+ * Met à jour vCPU (num_sockets), cœurs par vCPU (num_vcpus_per_socket) et/ou mémoire
+ * (memory_size_mib) — champs fournis uniquement, le reste du spec passe intact (jamais reconstruit).
+ * AUCUN refus local selon le power_state : la contrainte à-chaud réelle (voir en-tête de section)
+ * est arbitrée par Prism Central lui-même et son erreur remonte TELLE QUELLE — jamais masquée.
+ */
+export async function updateNutanixVmCompute(
+  uuid: string,
+  opts: { numVcpus?: number; numCoresPerVcpu?: number; memoryMib?: number },
+): Promise<{ ok: true; vmName: string }> {
+  const { numVcpus, numCoresPerVcpu, memoryMib } = opts;
+  if (numVcpus === undefined && numCoresPerVcpu === undefined && memoryMib === undefined) {
+    throw new NutanixActionError("At least one of numVcpus, numCoresPerVcpu, memoryMib is required", 400);
+  }
+  if (numVcpus !== undefined && (!Number.isInteger(numVcpus) || numVcpus < 1 || numVcpus > NUTANIX_MAX_VCPUS)) {
+    throw new NutanixActionError(`Invalid numVcpus ${numVcpus} — must be an integer between 1 and ${NUTANIX_MAX_VCPUS}`, 400);
+  }
+  if (numCoresPerVcpu !== undefined && (!Number.isInteger(numCoresPerVcpu) || numCoresPerVcpu < 1 || numCoresPerVcpu > NUTANIX_MAX_CORES_PER_VCPU)) {
+    throw new NutanixActionError(`Invalid numCoresPerVcpu ${numCoresPerVcpu} — must be an integer between 1 and ${NUTANIX_MAX_CORES_PER_VCPU}`, 400);
+  }
+  if (memoryMib !== undefined && (!Number.isInteger(memoryMib) || memoryMib < NUTANIX_MIN_MEMORY_MIB || memoryMib > NUTANIX_MAX_MEMORY_MIB)) {
+    throw new NutanixActionError(
+      `Invalid memoryMib ${memoryMib} — must be an integer between ${NUTANIX_MIN_MEMORY_MIB} and ${NUTANIX_MAX_MEMORY_MIB}`,
+      400,
+    );
+  }
+  const { effective, entity } = await loadNutanixVmFullEntity(uuid);
+  const vmName = entity.status?.name ?? entity.spec.name ?? uuid;
+  const newSpec = {
+    ...entity.spec,
+    resources: {
+      ...entity.spec.resources,
+      ...(numVcpus !== undefined ? { num_sockets: numVcpus } : {}),
+      ...(numCoresPerVcpu !== undefined ? { num_vcpus_per_socket: numCoresPerVcpu } : {}),
+      ...(memoryMib !== undefined ? { memory_size_mib: memoryMib } : {}),
+    },
+  };
+  await putNutanixVmEntity(effective, uuid, entity, newSpec, "compute update");
+  return { ok: true, vmName };
+}
+
+/** uuid + nom + VLAN d'un subnet réel — exposé au frontend (GET /api/nutanix/subnets) pour le
+ * sélecteur "Ajouter une carte réseau" ; même source (/subnets/list) que la résolution VLAN du
+ * poll de topologie, [] si Nutanix n'a jamais été configuré ou est injoignable. */
+export interface NutanixSubnetSummary {
+  uuid: string;
+  name: string;
+  vlanId?: number;
+}
+
+export async function getNutanixSubnets(): Promise<NutanixSubnetSummary[]> {
+  const effective = await loadNutanixConfig();
+  if (!effective) return [];
+  const map = await fetchNutanixSubnets(effective);
+  return Array.from(map.entries()).map(([uuid, s]) => ({ uuid, name: s.name, ...(s.vlanId !== undefined ? { vlanId: s.vlanId } : {}) }));
+}
+
+// ============================================================================================
 // Console VNC réelle d'une VM — mission "je pousse voir interieur des vm comme en bureaux
 // distance aussi" : accès clavier/souris RÉEL à l'intérieur d'une VM AHV, PAS un RDP authentifié
 // séparé — l'utilisateur tape ses identifiants directement dans l'écran affiché, exactement comme

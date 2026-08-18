@@ -11,18 +11,20 @@ import {
   type EdgeProps,
   type NodeProps,
 } from "@xyflow/react";
-import { IconBell, IconChevron, IconClose, IconFolder, IconGlobe, IconNetworks, IconPlus, IconVolumes } from "@/components/icons";
+import { IconBell, IconChevron, IconClose, IconFolder, IconGlobe, IconNetworks, IconPlay, IconPlus, IconRestart, IconStop, IconVolumes } from "@/components/icons";
 import {
   CAPABILITY_DEFS,
   CAPABILITY_PORT_META,
   KIND_ICON,
   NODE_CONTRACT,
   nodeIcon,
+  quickLifecycleActions,
   type AutomationTriggerStatus,
   type CapabilityId,
   type EdgeHealthInfo,
   type EdgeHealthState,
   type PortSpec,
+  type QuickLifecycleAction,
 } from "@/components/topologyNodeContract";
 import type { TopologyEdge, TopologyEdgePort, TopologyGroup, TopologyNode, TopologyNodeAttachment } from "@/types";
 import type { LifecycleAction } from "@/features/containers/containersSlice";
@@ -797,9 +799,18 @@ const ATTACHMENT_ICON: Record<TopologyNodeAttachment["kind"], (props: { classNam
 export interface GraphNodeCallbacks {
   onOpenAttachment?: (attachment: TopologyNodeAttachment) => void;
   onAttachmentContextMenu?: (event: React.MouseEvent, attachment: TopologyNodeAttachment) => void;
-  /** Bouton ＋ au survol d'une carte conteneur (picker Stockage/Variable/Secret) — injecté par
+  /** Bouton ＋ au survol d'une carte conteneur OU VM Nutanix (picker contextuel par kind :
+   * conteneur -> Stockage/Variable ; VM -> Disque/Carte réseau/vCPU-Mémoire) — injecté par
    * TopologyGraph.tsx uniquement pour un rôle operator+ ; absent = bouton non rendu. */
   onOpenAttachPicker?: (event: React.MouseEvent) => void;
+  /** Boutons d'action directs au survol (Démarrer/Arrêter/Redémarrer selon l'état RÉEL, voir
+   * quickLifecycleActions dans topologyNodeContract.tsx) — MÊMES handlers réels que le menu
+   * contextuel (confirmations comprises), injectés par TopologyGraph.tsx pour operator+ ;
+   * absent = boutons non rendus. */
+  onQuickAction?: (action: QuickLifecycleAction, event: React.MouseEvent) => void;
+  /** true si une action est déjà en cours sur CE nœud (nutanix.actionPendingUuid /
+   * containers.actionPendingId) — désactive les boutons rapides, comparé par graphNodePropsEqual. */
+  actionPending?: boolean;
 }
 
 /** Reconstruit un TopologyNode "synthétique" pour une brique (voir TopologyNode#attachments) —
@@ -858,10 +869,13 @@ function domainsEqual(a: string[] | undefined, b: string[] | undefined): boolean
 function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
   if (prev.selected !== next.selected) return false;
   if (prev.data === next.data) return true;
-  const a = prev.data as unknown as TopologyNode;
-  const b = next.data as unknown as TopologyNode;
+  const a = prev.data as unknown as TopologyNode & GraphNodeCallbacks;
+  const b = next.data as unknown as TopologyNode & GraphNodeCallbacks;
   return (
     a.kind === b.kind &&
+    // Boutons rapides (18/08/2026) : l'état "action en cours" est RENDU (boutons désactivés) —
+    // doit invalider le memo, contrairement aux callbacks eux-mêmes (voir JSDoc ci-dessus).
+    a.actionPending === b.actionPending &&
     a.label === b.label &&
     a.subtitle === b.subtitle &&
     a.status === b.status &&
@@ -1107,14 +1121,43 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
           })}
         </div>
       )}
-      {/* ＋ révélé au survol (CSS) — conteneurs uniquement : les VMs Nutanix n'ont pas encore de
-          backend d'attache, pas de bouton qui mentirait. Rendu seulement si le callback est
+      {/* Boutons d'action directs révélés au survol (18/08/2026, retour utilisateur : "ajoute
+          directement dessus start stop restart... suivant leur etat") — actions dérivées de l'état
+          RÉEL par quickLifecycleActions (contrat, même grille que le menu contextuel), handlers
+          RÉELS injectés par TopologyGraph.tsx (confirmations existantes comprises, jamais
+          dupliquées). Désactivés pendant une action en cours (actionPending). "Supprimer"
+          volontairement absent — voir quickLifecycleActions (topologyNodeContract.tsx). */}
+      {!isCompact && node.onQuickAction && quickLifecycleActions(node).length > 0 && (
+        <div className="topology-node__quick-actions nodrag nopan">
+          {quickLifecycleActions(node).map((action) => {
+            const QuickIcon = action === "start" ? IconPlay : action === "stop" ? IconStop : IconRestart;
+            return (
+              <button
+                key={action}
+                type="button"
+                className={`topology-node__quick-btn topology-node__quick-btn--${action}`}
+                title={node.actionPending ? "Action en cours…" : ACTION_LABEL[action]}
+                disabled={node.actionPending}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  node.onQuickAction?.(action, event);
+                }}
+              >
+                <QuickIcon />
+              </button>
+            );
+          })}
+        </div>
+      )}
+      {/* ＋ révélé au survol (CSS) — conteneurs ET VMs Nutanix (18/08/2026 : le backend d'attache
+          VM existe désormais, voir routes/nutanix.ts disks/nics/compute) ; le picker ouvert est
+          contextuel par kind (TopologyGraph.tsx#attachPicker). Rendu seulement si le callback est
           injecté (operator+, voir GraphNodeCallbacks). */}
-      {isContainer && !isCompact && node.onOpenAttachPicker && (
+      {(isContainer || isNutanixVm) && !isCompact && node.onOpenAttachPicker && (
         <button
           type="button"
           className="topology-node__attach-btn nodrag nopan"
-          title="Attacher un stockage, une variable ou un secret"
+          title={isNutanixVm ? "Ajouter un disque, une carte réseau ou modifier vCPU/mémoire" : "Attacher un stockage, une variable ou un secret"}
           onClick={(event) => {
             event.stopPropagation();
             node.onOpenAttachPicker?.(event);

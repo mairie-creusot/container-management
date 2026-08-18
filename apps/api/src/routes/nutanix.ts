@@ -33,6 +33,23 @@
  *                                          garde-fou QUAI délibéré vu la sensibilité de l'action
  *                                          (voir JSDoc de la fonction). La confirmation "taper le
  *                                          nom de la VM" est portée par le frontend.
+ * GET    /api/nutanix/subnets            — subnets réels (uuid/nom/VLAN) pour le sélecteur
+ *                                          "Ajouter une carte réseau" du frontend — même source
+ *                                          (/subnets/list) que la résolution VLAN du poll, []
+ *                                          si non configuré/injoignable (services/nutanix.ts#
+ *                                          getNutanixSubnets).
+ * POST   /api/nutanix/vms/:uuid/disks    — ajoute un disque SCSI ({ sizeMib }) via le mécanisme
+ *                                          PUT spec (services/nutanix.ts#addNutanixVmDisk —
+ *                                          forme d'entrée reproduite d'un disque réel, storage
+ *                                          container recopié d'un disque existant de la VM).
+ * POST   /api/nutanix/vms/:uuid/nics     — ajoute une carte réseau ({ subnetUuid }) — subnet
+ *                                          vérifié contre /subnets/list (404 sinon), voir
+ *                                          services/nutanix.ts#addNutanixVmNic.
+ * PATCH  /api/nutanix/vms/:uuid/compute  — met à jour vCPU/cœurs par vCPU/mémoire ({ numVcpus?,
+ *                                          numCoresPerVcpu?, memoryMib? }) — un refus à-chaud de
+ *                                          Prism Central remonte TEL QUEL (502 + message réel),
+ *                                          jamais masqué (services/nutanix.ts#
+ *                                          updateNutanixVmCompute).
  * GET    /api/nutanix/vms/:uuid/console (WebSocket) — console VNC RÉELLE de la VM (clavier/souris,
  *                                          voir services/nutanix.ts#getNutanixVmConsoleTarget pour
  *                                          le mécanisme exact vérifié en conditions réelles) —
@@ -71,7 +88,10 @@ import WebSocket from "ws";
 import { config } from "../config.js";
 import { recordAuditEvent } from "../services/auditLog.js";
 import {
+  addNutanixVmDisk,
+  addNutanixVmNic,
   deleteNutanixVm,
+  getNutanixSubnets,
   getNutanixVmConsoleTarget,
   getNutanixVms,
   migrateNutanixVm,
@@ -80,6 +100,7 @@ import {
   startNutanixVm,
   stopNutanixVm,
   testNutanixConnection,
+  updateNutanixVmCompute,
 } from "../services/nutanix.js";
 import { clearNutanixConfig, getEffectiveNutanixConfig, setNutanixConfig } from "../services/setupStore.js";
 import type { SetupNutanixConfig } from "../services/setupStore.js";
@@ -231,6 +252,62 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
       sendNutanixActionError(reply, err);
     }
   });
+
+  // --- Configuration matérielle (disque/NIC/compute — voir en-tête de fichier) : mêmes gardes
+  // (operator/admin via plugins/auth.ts, audit automatique plugins/audit.ts) que les actions de
+  // cycle de vie ci-dessus, mêmes traductions d'erreur (sendNutanixActionError). -----------------
+
+  fastify.get("/api/nutanix/subnets", async (_request, reply) => {
+    return reply.send(await getNutanixSubnets());
+  });
+
+  fastify.post<{ Params: { uuid: string }; Body: { sizeMib?: number } }>("/api/nutanix/vms/:uuid/disks", async (request, reply) => {
+    const sizeMib = request.body?.sizeMib;
+    if (typeof sizeMib !== "number" || !Number.isFinite(sizeMib)) {
+      return reply.code(400).send({ error: "sizeMib (number, MiB) is required" });
+    }
+    try {
+      const result = await addNutanixVmDisk(request.params.uuid, { sizeMib });
+      return reply.send(result);
+    } catch (err) {
+      sendNutanixActionError(reply, err);
+    }
+  });
+
+  fastify.post<{ Params: { uuid: string }; Body: { subnetUuid?: string } }>("/api/nutanix/vms/:uuid/nics", async (request, reply) => {
+    const subnetUuid = request.body?.subnetUuid?.trim();
+    if (!subnetUuid) {
+      return reply.code(400).send({ error: "subnetUuid is required" });
+    }
+    try {
+      const result = await addNutanixVmNic(request.params.uuid, { subnetUuid });
+      return reply.send(result);
+    } catch (err) {
+      sendNutanixActionError(reply, err);
+    }
+  });
+
+  fastify.patch<{ Params: { uuid: string }; Body: { numVcpus?: number; numCoresPerVcpu?: number; memoryMib?: number } }>(
+    "/api/nutanix/vms/:uuid/compute",
+    async (request, reply) => {
+      const body = request.body ?? {};
+      for (const [key, value] of Object.entries({ numVcpus: body.numVcpus, numCoresPerVcpu: body.numCoresPerVcpu, memoryMib: body.memoryMib })) {
+        if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value))) {
+          return reply.code(400).send({ error: `${key} must be a number` });
+        }
+      }
+      try {
+        const result = await updateNutanixVmCompute(request.params.uuid, {
+          ...(body.numVcpus !== undefined ? { numVcpus: body.numVcpus } : {}),
+          ...(body.numCoresPerVcpu !== undefined ? { numCoresPerVcpu: body.numCoresPerVcpu } : {}),
+          ...(body.memoryMib !== undefined ? { memoryMib: body.memoryMib } : {}),
+        });
+        return reply.send(result);
+      } catch (err) {
+        sendNutanixActionError(reply, err);
+      }
+    },
+  );
 
   // --- Console VNC réelle d'une VM (voir en-tête de fichier + services/nutanix.ts#
   // getNutanixVmConsoleTarget pour le mécanisme). ADMIN UNIQUEMENT — restriction délibérément PLUS

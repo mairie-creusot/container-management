@@ -315,6 +315,9 @@ export type NodeMenuActionId =
   | "nutanix-vm-stop"
   | "nutanix-vm-restart"
   | "nutanix-vm-start"
+  | "nutanix-vm-add-disk"
+  | "nutanix-vm-add-nic"
+  | "nutanix-vm-edit-compute"
   | "volume-mount-on-container"
   | "volume-remove"
   | "network-remove"
@@ -608,6 +611,13 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
       { id: "nutanix-vm-stop", label: "Arrêter", visible: (n) => n.status === "running" },
       { id: "nutanix-vm-restart", label: "Redémarrer", visible: (n) => n.status === "running" },
       { id: "nutanix-vm-start", label: "Démarrer", visible: (n) => n.status === "stopped" },
+      // Configuration matérielle (18/08/2026, mêmes entrées que le menu "Update VM" de Prism —
+      // backend réel : POST /api/nutanix/vms/:uuid/{disks,nics}, PATCH .../compute). Toujours
+      // visibles quel que soit le power_state : le hot-add disque/NIC est supporté par AHV, et un
+      // refus à-chaud éventuel de Prism (compute) remonte tel quel plutôt que d'être anticipé ici.
+      { id: "nutanix-vm-add-disk", label: "Ajouter un disque…" },
+      { id: "nutanix-vm-add-nic", label: "Ajouter une carte réseau…" },
+      { id: "nutanix-vm-edit-compute", label: "vCPU / Mémoire…" },
     ],
   },
   // Contrôleur de domaine/DNS AD (services/adDns.ts) : jamais relié par une arête (aucune donnée
@@ -835,6 +845,28 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     menuItems: [{ id: "automation-node-remove", label: "Supprimer", danger: true }],
   },
 };
+
+// --- Actions rapides au survol de la carte (18/08/2026) ------------------------------------------
+
+/** Actions de cycle de vie proposées en BOUTONS DIRECTS au survol d'une carte (retour utilisateur :
+ * "ajoute directement dessus start stop restart... suivant leur etat") — même grille de visibilité
+ * que les entrées de menu du contrat (jamais une seconde règle qui pourrait diverger) : running ->
+ * Arrêter/Redémarrer, arrêté -> Démarrer ; une VM au power_state inconnu ("neutral") ne propose
+ * RIEN (même nuance que son menu). "Supprimer" volontairement ABSENT des boutons de carte : la
+ * suppression garde ses protections existantes (conteneur : menu contextuel + confirmation ; VM :
+ * confirmation lourde "taper le nom" du SEUL panneau de détail) — jamais une poubelle en un survol.
+ * Fonction PURE consommée par GraphNode (topologyGraphShared.tsx), callbacks injectés par
+ * TopologyGraph.tsx (mêmes handlers réels que le menu contextuel, jamais dupliqués). */
+export type QuickLifecycleAction = "start" | "stop" | "restart";
+export function quickLifecycleActions(node: TopologyNode): QuickLifecycleAction[] {
+  if (node.kind === "container") return node.status === "running" ? ["stop", "restart"] : ["start"];
+  if (node.kind === "nutanix-vm") {
+    if (node.status === "running") return ["stop", "restart"];
+    if (node.status === "stopped") return ["start"];
+    return [];
+  }
+  return [];
+}
 
 // --- Déclinaison PAR hostKind du kind "host" (même principe que IAC_ENGINE_CONTRACT) ------------
 

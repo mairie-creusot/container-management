@@ -12,6 +12,7 @@ import {
   capabilityPairKey,
   nodeIcon,
   nodeMinimapColor,
+  quickLifecycleActions,
   type CapabilityId,
 } from "./topologyNodeContract";
 import { buildTopologyEdges, computeNodeResourceAlerts } from "./topologyGraphShared";
@@ -335,6 +336,9 @@ describe("buildNodeMenuItems — la liste vit dans le contrat, les callbacks che
       "nutanix-vm-stop",
       "nutanix-vm-restart",
       "nutanix-vm-start",
+      "nutanix-vm-add-disk",
+      "nutanix-vm-add-nic",
+      "nutanix-vm-edit-compute",
       "volume-mount-on-container",
       "volume-remove",
       "network-remove",
@@ -367,11 +371,16 @@ describe("buildNodeMenuItems — la liste vit dans le contrat, les callbacks che
     expect(items.map((i) => i.label)).toEqual(["Arrêter", "Redémarrer", "Supprimer"]);
   });
 
-  it("VM Nutanix : running -> Arrêter/Redémarrer, stopped -> Démarrer, neutral -> RIEN, jamais de Supprimer rapide (réservé au panneau de détail)", () => {
+  it("VM Nutanix : running -> Arrêter/Redémarrer, stopped -> Démarrer, jamais de Supprimer rapide (réservé au panneau de détail) ; entrées matérielles TOUJOURS présentes (18/08/2026)", () => {
     const { handlers } = allHandlers();
-    expect(buildNodeMenuItems(node("nutanix-vm"), handlers).map((i) => i.label)).toEqual(["Arrêter", "Redémarrer"]);
-    expect(buildNodeMenuItems(node("nutanix-vm", { status: "stopped" }), handlers).map((i) => i.label)).toEqual(["Démarrer"]);
-    expect(buildNodeMenuItems(node("nutanix-vm", { status: "neutral" }), handlers)).toEqual([]);
+    const hardware = ["Ajouter un disque…", "Ajouter une carte réseau…", "vCPU / Mémoire…"];
+    expect(buildNodeMenuItems(node("nutanix-vm"), handlers).map((i) => i.label)).toEqual(["Arrêter", "Redémarrer", ...hardware]);
+    expect(buildNodeMenuItems(node("nutanix-vm", { status: "stopped" }), handlers).map((i) => i.label)).toEqual(["Démarrer", ...hardware]);
+    // power_state inconnu ("neutral") : aucune action de cycle de vie, mais la configuration
+    // matérielle reste proposée (un refus réel éventuel de Prism remonte tel quel).
+    expect(buildNodeMenuItems(node("nutanix-vm", { status: "neutral" }), handlers).map((i) => i.label)).toEqual(hardware);
+    // Aucune entrée matérielle n'est marquée danger (la confirmation vit dans les popovers).
+    for (const item of buildNodeMenuItems(node("nutanix-vm"), handlers)) expect(item.danger).toBeUndefined();
   });
 
   it("volume : Monter sur un conteneur… (Phase 2) puis Supprimer (danger) — le montage n'est jamais marqué danger ici, l'avertissement/la confirmation vivent dans le popover (MountVolumePopover)", () => {
@@ -412,6 +421,21 @@ describe("buildNodeMenuItems — la liste vit dans le contrat, les callbacks che
     // Moteur absent (jamais censé arriver, l'API renvoie toujours iacEngine) : aucune action
     // inventée, jamais un plantage.
     expect(buildNodeMenuItems(node("iac-workspace"), handlers)).toEqual([]);
+  });
+
+  it("quickLifecycleActions (boutons directs au survol, 18/08/2026) : même grille d'état que le menu, jamais de suppression, [] pour tout autre kind", () => {
+    // Conteneur : running -> stop/restart, tout le reste -> start (même règle que son menu).
+    expect(quickLifecycleActions(node("container"))).toEqual(["stop", "restart"]);
+    expect(quickLifecycleActions(node("container", { status: "stopped" }))).toEqual(["start"]);
+    expect(quickLifecycleActions(node("container", { status: "neutral" }))).toEqual(["start"]);
+    // VM Nutanix : nuance "neutral" (power_state inconnu) -> RIEN, comme son menu.
+    expect(quickLifecycleActions(node("nutanix-vm"))).toEqual(["stop", "restart"]);
+    expect(quickLifecycleActions(node("nutanix-vm", { status: "stopped" }))).toEqual(["start"]);
+    expect(quickLifecycleActions(node("nutanix-vm", { status: "neutral" }))).toEqual([]);
+    // Jamais sur un autre kind (volume/host/automation... n'ont pas de cycle de vie pilotable ici).
+    for (const kind of ["volume", "network", "host", "ad-server", "iac-workspace", "automation-trigger"] as const) {
+      expect(quickLifecycleActions(node(kind)), kind).toEqual([]);
+    }
   });
 
   it("nœuds d'automatisation : Supprimer (danger) pour les trois kinds", () => {

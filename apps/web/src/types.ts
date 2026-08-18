@@ -135,6 +135,14 @@ export interface NutanixVmNetwork {
   ips: string[];
 }
 
+/** Un subnet réel (uuid/nom/VLAN) — GET /api/nutanix/subnets, pour le sélecteur "Ajouter une
+ * carte réseau" (voir apps/api/src/services/nutanix.ts#getNutanixSubnets). */
+export interface NutanixSubnetSummary {
+  uuid: string;
+  name: string;
+  vlanId?: number;
+}
+
 /** VM Nutanix (Prism Central API v3) — voir apps/api/src/services/nutanix.ts. */
 export interface NutanixVm {
   id: string;
