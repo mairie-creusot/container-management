@@ -866,11 +866,13 @@ export interface IacRunDetail extends IacRun {
 // /api/templates (routes/templates.ts) — frontend développé en parallèle contre ce contrat.
 
 /** Base d'une recette : image cloud (build Packer SUR le cluster Nutanix), image conteneur
- * (docker build, "scratch" accepté) ou OS minimal from-scratch via mkosi (rootfs + noyau). */
+ * (docker build, "scratch" accepté), OS minimal from-scratch via mkosi (rootfs + noyau), ou ISO
+ * du catalogue Prism (rien à construire : la VM vierge s'installe via la console VNC). */
 export type TemplateBase =
   | { type: "cloud-image"; distro: string; version: string; imageUrl?: string }
   | { type: "container"; image: string }
-  | { type: "mkosi"; distro: "debian" | "ubuntu" | "fedora" | "arch"; release: string };
+  | { type: "mkosi"; distro: "debian" | "ubuntu" | "fedora" | "arch"; release: string }
+  | { type: "iso"; imageUuid: string };
 
 /** Étape d'une recette — validée par services/templates.ts, jamais interprétée par un shell QUAI
  * (les scripts libres ne s'exécutent QUE dans la VM/l'image de build). */

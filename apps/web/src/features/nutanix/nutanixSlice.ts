@@ -1,5 +1,5 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
-import { apiDelete, apiGet, apiPatch, apiPost, ApiError } from "@/api/client";
+import { apiDelete, apiGet, apiPatch, apiPost, apiUrl, ApiError } from "@/api/client";
 import type { NutanixImageSummary, NutanixSubnetSummary } from "@/types";
 
 /**
@@ -123,6 +123,38 @@ export const fetchNutanixImages = createAsyncThunk<FetchNutanixImagesResult, voi
     return { outcome: "error" };
   }
 });
+
+/** Upload d'un ISO local vers le catalogue Prism — POST /api/nutanix/images/upload (multipart,
+ * champs `file` + `name`). XMLHttpRequest plutôt que le client fetch JSON : seule API donnant la
+ * progression d'ENVOI réelle (xhr.upload.onprogress), cookie de session via withCredentials.
+ * Résout `{ uuid }` si le serveur le renvoie (uuid/imageUuid), `{}` sinon — l'appelant re-fetch le
+ * catalogue et retrouve l'image par nom. Rejette une ApiError (404 = backend pas encore là). */
+export function uploadNutanixImage(file: File, name: string, onProgress: (percent: number) => void): Promise<{ uuid?: string }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", apiUrl("/nutanix/images/upload"));
+    xhr.withCredentials = true;
+    xhr.responseType = "json";
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onerror = () => reject(new Error("Échec réseau pendant l'envoi de l'ISO."));
+    xhr.onload = () => {
+      const body = (xhr.response ?? {}) as Record<string, unknown>;
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const uuid = typeof body["uuid"] === "string" ? body["uuid"] : typeof body["imageUuid"] === "string" ? body["imageUuid"] : undefined;
+        resolve(uuid === undefined ? {} : { uuid });
+        return;
+      }
+      const message = typeof body["error"] === "string" ? body["error"] : `Erreur ${xhr.status} sur /nutanix/images/upload`;
+      reject(new ApiError(xhr.status, message));
+    };
+    const form = new FormData();
+    form.append("file", file);
+    form.append("name", name);
+    xhr.send(form);
+  });
+}
 
 /** Ajout d'un disque SCSI — voir POST /api/nutanix/vms/:uuid/disks (services/nutanix.ts#
  * addNutanixVmDisk : storage container recopié d'un disque existant de la VM). Appelé UNIQUEMENT

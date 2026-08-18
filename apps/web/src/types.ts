@@ -181,10 +181,14 @@ export interface NutanixImageSummary {
   imageType?: string;
 }
 
-/** POST /api/nutanix/vms — `guestCustomization.password`/`sshAuthorizedKey` sont write-only. */
+/** POST /api/nutanix/vms — `guestCustomization.password`/`sshAuthorizedKey` sont write-only.
+ * Exactement l'un des deux : `imageUuid` (clone d'image disque, déploiement classique) OU
+ * `isoImageUuid` (template base "iso" : disque système vide de `diskSizeMib` requis + CD-ROM sur
+ * l'ISO, pas de guestCustomization — l'OS n'est pas encore installé). */
 export interface NutanixVmCreateInput {
   name: string;
-  imageUuid: string;
+  imageUuid?: string;
+  isoImageUuid?: string;
   subnetUuid: string;
   numVcpus: number;
   numCoresPerVcpu?: number;
@@ -680,11 +684,14 @@ export interface IacRunDetail extends IacRun {
 // Contrat FIGÉ v2 : les deux backends (templates + topologie) sont développés EN PARALLÈLE contre
 // ces formes exactes — un 404 signifie "backend pas encore là", jamais masqué par de fausses données.
 
-/** Base d'une recette : VM cloud-image, image de conteneur (scratch compris) ou OS minimal mkosi. */
+/** Base d'une recette : VM cloud-image, image de conteneur (scratch compris), OS minimal mkosi,
+ * ou ISO du catalogue Prism ("iso" : template prêt sans build — POST .../build répond 400 —,
+ * installation manuelle de l'OS via la console VNC après déploiement). */
 export type TemplateBase =
   | { type: "cloud-image"; distro: string; version: string; imageUrl?: string }
   | { type: "container"; image: string }
-  | { type: "mkosi"; distro: "debian" | "ubuntu" | "fedora" | "arch"; release: string };
+  | { type: "mkosi"; distro: "debian" | "ubuntu" | "fedora" | "arch"; release: string }
+  | { type: "iso"; imageUuid: string };
 
 /** Une étape ORDONNÉE de la recette — exécutée dans l'ordre du tableau `steps`. */
 export type TemplateStep =
@@ -736,7 +743,14 @@ export interface ImageTemplateCreateInput {
   steps: TemplateStep[];
 }
 
-/** GET /api/templates/presets — recettes de départ servies par le backend (dont les 3 anciennes). */
+/** Corps de PUT /api/templates/:id (édition de recette depuis le sous-graphe) — seules les étapes
+ * sont modifiables par cette route, la base reste du ressort du studio. */
+export interface ImageTemplateUpdateInput {
+  steps: TemplateStep[];
+}
+
+/** GET /api/templates/presets — recettes de départ servies par le backend (scratch + mkosi minimal),
+ * l'accueil du studio affiche ce qui vient sans carte codée en dur (+ la recette vierge). */
 export interface TemplatePreset {
   id: string;
   label: string;

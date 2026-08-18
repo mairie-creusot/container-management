@@ -9,6 +9,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { getEffectiveNutanixConfig } from "./setupStore.js";
 import { createWorkspace, deleteWorkspace, workspaceFilesPath, writeFile, WorkspaceNotFoundError } from "./iac/workspaces.js";
+import { lintShellScript } from "./iac/lint.js";
 import { getEngineStatus } from "./iac/engines.js";
 import { getRun, listRuns, startRun } from "./iac/runner.js";
 import {
@@ -38,6 +39,8 @@ export class NutanixNotConfiguredError extends Error {}
 
 export class MkosiUnavailableError extends Error {}
 
+export class TemplateBuildInProgressError extends Error {}
+
 // Noms de paquets : jamais interprétés par un shell QUAI — validés ici puis interpolés uniquement
 // dans des fichiers exécutés DANS la VM/l'image de build.
 const PACKAGE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9+._-]*$/;
@@ -56,6 +59,9 @@ const SSH_KEY_PATTERN = /^[A-Za-z0-9@:. +\/=_-]+$/;
 const DOCKER_REFERENCE_PATTERN = /^[a-z0-9]+(?:[._/-][a-z0-9]+)*(?::[A-Za-z0-9][A-Za-z0-9._-]{0,127})?$/;
 
 const MKOSI_DISTROS = ["debian", "ubuntu", "fedora", "arch"] as const;
+// uuid v3 Prism (même forme que WORKSPACE_ID_PATTERN) — format seulement : l'existence réelle de
+// l'ISO dans le catalogue est arbitrée par Prism au déploiement, jamais devinée ici.
+const IMAGE_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_STEPS = 50;
 const MAX_SCRIPT_LENGTH = 256 * 1024;
 const MAX_FILE_CONTENT_LENGTH = 1024 * 1024;
@@ -180,6 +186,12 @@ function validateBase(base: TemplateBase): void {
       if (!SAFE_VERSION_PATTERN.test(base.release)) throw new TemplateValidationError(`release mkosi invalide "${base.release}"`);
       return;
     }
+    case "iso": {
+      if (typeof base.imageUuid !== "string" || !IMAGE_UUID_PATTERN.test(base.imageUuid)) {
+        throw new TemplateValidationError(`imageUuid doit être un uuid d'image Prism (reçu "${String(base.imageUuid)}")`);
+      }
+      return;
+    }
     default:
       throw new TemplateValidationError(`base.type inconnu`);
   }
@@ -273,6 +285,9 @@ export function validateCreateInput(input: CreateTemplateInput): void {
   validateBase(input.base);
   if (!Array.isArray(input.steps)) throw new TemplateValidationError("steps must be an array");
   if (input.steps.length > MAX_STEPS) throw new TemplateValidationError(`steps: ${MAX_STEPS} étapes maximum`);
+  if (input.base.type === "iso" && input.steps.length > 0) {
+    throw new TemplateValidationError("une base ISO n'exécute aucune étape (installation manuelle via la console VNC) — steps doit être vide");
+  }
   input.steps.forEach((step, index) => validateStep(step, index, input.base));
 }
 
@@ -730,6 +745,26 @@ Artefact produit : ${mkosiOutputPathForTemplate(template)} (type raw-image).
   return files;
 }
 
+/** Fichiers d'une base iso : un README seul — rien à construire, la VM vierge démarre sur l'ISO
+ * (POST /api/nutanix/vms, variant isoImageUuid) et s'installe via la console VNC. */
+export function generateIsoFiles(template: Pick<ImageTemplate, "id" | "name" | "base" | "steps">): Record<string, string> {
+  const base = template.base;
+  if (base.type !== "iso") throw new TemplateValidationError("base iso attendue");
+  return {
+    "README.md": `# Template QUAI — ${template.name} (ISO)
+
+Base ISO du catalogue d'images Prism (uuid ${base.imageUuid}) : rien à construire côté QUAI
+(le template est "ready" dès sa création, POST /:id/build est refusé).
+
+Flux de déploiement :
+1. déployer une VM depuis ce template (POST /api/nutanix/vms avec isoImageUuid + diskSizeMib) :
+   disque SCSI vide + lecteur CDROM branché sur l'ISO, démarrage CDROM puis DISK ;
+2. ouvrir la console VNC de la VM et dérouler l'installateur de l'OS manuellement ;
+3. une fois l'OS installé sur le disque, retirer/ignorer le CDROM — la VM démarre sur le disque.
+`,
+  };
+}
+
 export function generateTemplateFiles(template: Pick<ImageTemplate, "id" | "name" | "base" | "steps">): Record<string, string> {
   switch (template.base.type) {
     case "cloud-image":
@@ -738,35 +773,14 @@ export function generateTemplateFiles(template: Pick<ImageTemplate, "id" | "name
       return generateContainerFiles(template);
     case "mkosi":
       return generateMkosiFiles(template);
+    case "iso":
+      return generateIsoFiles(template);
   }
 }
 
-/** Recettes pré-remplies (GET /api/templates/presets) — de simples valeurs de départ éditables. */
+/** Recettes pré-remplies (GET /api/templates/presets) — réduites à 2 : le générateur cloud-image
+ * reste disponible pour une recette vierge, mais n'est plus proposé en preset. */
 export const TEMPLATE_PRESETS: readonly TemplatePreset[] = [
-  {
-    id: "ubuntu-docker",
-    label: "VM Ubuntu + Docker",
-    description: "Image disque Nutanix depuis l'image cloud Ubuntu 24.04 officielle, avec Docker et le plugin compose.",
-    base: { type: "cloud-image", distro: "ubuntu", version: "24.04" },
-    steps: [
-      { type: "packages", packages: ["docker.io", "docker-compose-v2", "qemu-guest-agent"] },
-      { type: "service", name: "docker", enable: true },
-    ],
-  },
-  {
-    id: "debian-python3",
-    label: "VM Debian + Python 3",
-    description: "Image disque Nutanix depuis l'image cloud Debian 12 officielle, avec juste python3.",
-    base: { type: "cloud-image", distro: "debian", version: "12" },
-    steps: [{ type: "packages", packages: ["python3"] }],
-  },
-  {
-    id: "alpine",
-    label: "Conteneur Alpine",
-    description: "Image conteneur minimale basée sur alpine:3.20 — ajoutez vos étapes.",
-    base: { type: "container", image: "alpine:3.20" },
-    steps: [],
-  },
   {
     id: "scratch",
     label: "Conteneur scratch",
@@ -836,7 +850,21 @@ export async function getTemplate(id: string): Promise<ImageTemplate | undefined
 }
 
 function engineForBase(base: TemplateBase): IacEngine {
-  return base.type === "cloud-image" ? "packer" : base.type === "container" ? "docker" : "mkosi";
+  // "packer" pour iso : jamais exécuté (une base ISO ne se construit pas), simple rattachement à la
+  // famille Nutanix pour l'affichage du workspace.
+  return base.type === "container" ? "docker" : base.type === "mkosi" ? "mkosi" : "packer";
+}
+
+/** Remplace TOUT le contenu du dossier files/ du workspace par les fichiers générés — utilisé à la
+ * création (écrase le scaffold) et par updateTemplate (aucun fichier de l'ancienne recette ne doit
+ * survivre : un mkosi.postinst.chroot orphelin s'exécuterait encore au prochain build). */
+async function replaceWorkspaceFiles(workspaceId: string, files: Record<string, string>): Promise<void> {
+  const dir = workspaceFilesPath(workspaceId);
+  await fs.rm(dir, { recursive: true, force: true });
+  await fs.mkdir(dir, { recursive: true });
+  for (const [relativePath, content] of Object.entries(files)) {
+    await writeFile(workspaceId, relativePath, content);
+  }
 }
 
 export async function createTemplate(input: CreateTemplateInput, createdBy: string): Promise<ImageTemplate> {
@@ -860,20 +888,85 @@ export async function createTemplate(input: CreateTemplateInput, createdBy: stri
     name: normalized.name,
     base: normalized.base,
     steps: normalized.steps,
-    status: "draft",
+    // iso : rien à construire — "ready" dès la création (POST /:id/build refusé).
+    status: normalized.base.type === "iso" ? "ready" : "draft",
     workspaceId: workspace.id,
     createdAt: now,
     updatedAt: now,
   };
 
-  // Écrase le scaffold du workspace par les vrais fichiers de build générés depuis la recette.
-  const files = generateTemplateFiles(template);
-  for (const [relativePath, content] of Object.entries(files)) {
-    await writeFile(workspace.id, relativePath, content);
-  }
+  await replaceWorkspaceFiles(workspace.id, generateTemplateFiles(template));
 
   await insertTemplate(template);
   return template;
+}
+
+export interface UpdateTemplateInput {
+  name?: string;
+  base?: TemplateBase;
+  steps?: TemplateStep[];
+}
+
+/**
+ * PUT /api/templates/:id — met à jour la recette ET régénère les fichiers du workspace (mêmes
+ * générateurs que la création). Refuse (TemplateBuildInProgressError -> 409) si un build est en
+ * cours. Si le MOTEUR change (base d'un autre type), le workspace est recréé (l'index workspaces
+ * porte l'engine, non modifiable) et lastBuild est abandonné — l'artefact de l'ancienne base n'a
+ * plus de sens pour la nouvelle recette.
+ */
+export async function updateTemplate(id: string, patch: UpdateTemplateInput, updatedBy: string): Promise<ImageTemplate> {
+  // getTemplate réconcilie un "building" périmé avec le run réel avant le garde-fou 409.
+  const existing = await getTemplate(id);
+  if (!existing) throw new TemplateNotFoundError(`Template "${id}" not found`);
+  if (existing.status === "building") {
+    throw new TemplateBuildInProgressError(`Template "${existing.name}" a un build en cours — attendez sa fin avant de le modifier`);
+  }
+
+  const normalized: CreateTemplateInput = {
+    name: (patch.name ?? existing.name).trim(),
+    base: patch.base ?? existing.base,
+    steps: patch.steps ?? existing.steps,
+  };
+  validateCreateInput(normalized);
+  await validateArtifactSteps(normalized.steps);
+  if (normalized.base.type === "mkosi" && !(await isMkosiAvailable())) {
+    throw new MkosiUnavailableError("mkosi non disponible — reconstruire le conteneur API");
+  }
+
+  const engineChanged = engineForBase(normalized.base) !== engineForBase(existing.base);
+  let workspaceId = existing.workspaceId;
+  if (engineChanged) {
+    const workspace = await createWorkspace({
+      name: `template-${sanitizeTemplateSlug(normalized.name)}`,
+      engine: engineForBase(normalized.base),
+      createdBy: updatedBy,
+    });
+    workspaceId = workspace.id;
+    await deleteWorkspace(existing.workspaceId).catch((err) => {
+      if (!(err instanceof WorkspaceNotFoundError)) throw err;
+    });
+  }
+
+  const now = new Date().toISOString();
+  const keepLastBuild = !engineChanged && existing.lastBuild ? existing.lastBuild : undefined;
+  const updated: ImageTemplate = {
+    id: existing.id,
+    name: normalized.name,
+    base: normalized.base,
+    steps: normalized.steps,
+    status: normalized.base.type === "iso" ? "ready" : keepLastBuild ? existing.status : "draft",
+    workspaceId,
+    createdAt: existing.createdAt,
+    updatedAt: now,
+    ...(keepLastBuild ? { lastBuild: keepLastBuild } : {}),
+  };
+
+  await replaceWorkspaceFiles(workspaceId, generateTemplateFiles(updated));
+
+  // remove+insert plutôt qu'un patch : permet d'EFFACER lastBuild quand le moteur change.
+  await removeStoredTemplate(id);
+  await insertTemplate(updated);
+  return updated;
 }
 
 export async function deleteTemplate(id: string): Promise<void> {
@@ -941,6 +1034,8 @@ export async function buildTemplate(id: string, startedBy: string): Promise<Imag
 
   let run: IacRun;
   switch (template.base.type) {
+    case "iso":
+      throw new TemplateValidationError("une base ISO ne se construit pas — la VM s'installe depuis l'ISO via la console VNC");
     case "cloud-image": {
       // Identifiants Prism lus AU MOMENT du spawn, jamais persistés ni loggés (StartRunOptions#extraEnv).
       const nutanix = await getEffectiveNutanixConfig();
@@ -996,4 +1091,76 @@ export async function listTemplateBuilds(id: string): Promise<IacRun[]> {
   const template = await getStoredTemplate(id);
   if (!template) throw new TemplateNotFoundError(`Template "${id}" not found`);
   return listRuns(template.workspaceId);
+}
+
+const VALIDATE_TIMEOUT_MS = 60_000;
+
+// `packer validate` avec des variables factices : la syntaxe/cohérence HCL est vérifiée sans
+// toucher ni au cluster ni aux vrais identifiants (jamais lus ici).
+function runValidateCommand(bin: string, args: string[], cwd: string, extraEnv: Record<string, string>): Promise<{ ok: boolean; output: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(bin, args, { cwd, env: { ...process.env, ...extraEnv }, stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), VALIDATE_TIMEOUT_MS);
+    const collect = (chunk: Buffer) => {
+      if (output.length < 128 * 1024) output += chunk.toString("utf-8");
+    };
+    child.stdout.on("data", collect);
+    child.stderr.on("data", collect);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, output: output.trim() });
+    });
+  });
+}
+
+/** Vérification RÉELLE de la recette (POST /api/templates/:id/validate) : `sh -n` sur chaque
+ * script du workspace + `packer init`/`packer validate` (variables factices) pour une base
+ * cloud-image. Ne construit rien, ne contacte jamais Prism. */
+export async function validateTemplate(id: string): Promise<{ ok: boolean; output: string }> {
+  const template = await getStoredTemplate(id);
+  if (!template) throw new TemplateNotFoundError(`Template "${id}" not found`);
+  if (template.base.type === "iso") {
+    return { ok: true, output: "Base ISO : aucune étape à vérifier — installation manuelle via la console VNC." };
+  }
+
+  const filesDir = workspaceFilesPath(template.workspaceId);
+  const sections: string[] = [];
+  let ok = true;
+
+  const scriptFiles = await fs.readdir(path.join(filesDir, "scripts")).catch(() => [] as string[]);
+  for (const name of scriptFiles.filter((f) => f.endsWith(".sh")).sort()) {
+    const content = await fs.readFile(path.join(filesDir, "scripts", name), "utf-8");
+    const result = await lintShellScript(content);
+    if (!result.ok) {
+      ok = false;
+      sections.push(`scripts/${name} :\n${result.errors.map((e) => `  ${e.line !== undefined ? `ligne ${e.line} : ` : ""}${e.message}`).join("\n")}`);
+    }
+  }
+  if (scriptFiles.some((f) => f.endsWith(".sh")) && ok) sections.push("Scripts shell : syntaxe OK (sh -n).");
+
+  if (template.base.type === "cloud-image") {
+    const fakeVars = {
+      PKR_VAR_nutanix_username: "validate-only",
+      PKR_VAR_nutanix_password: "validate-only",
+      PKR_VAR_nutanix_endpoint: "validate.invalid",
+    };
+    const init = await runValidateCommand("packer", ["init", "-color=false", "."], filesDir, fakeVars);
+    if (!init.ok) {
+      ok = false;
+      sections.push(`packer init :\n${init.output}`);
+    } else {
+      const validate = await runValidateCommand("packer", ["validate", "-color=false", "."], filesDir, fakeVars);
+      if (!validate.ok) ok = false;
+      sections.push(`packer validate :\n${validate.output || "OK"}`);
+    }
+  } else if (template.base.type === "mkosi") {
+    sections.push("mkosi n'a pas de validateur dédié — seuls les scripts shell sont vérifiés.");
+  }
+
+  return { ok, output: sections.join("\n\n") || "Rien à vérifier pour cette recette." };
 }

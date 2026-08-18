@@ -9,6 +9,7 @@ import {
   useStore,
   type Edge,
   type EdgeProps,
+  type Node,
   type NodeProps,
 } from "@xyflow/react";
 import { IconBell, IconChevron, IconClose, IconFolder, IconGlobe, IconNetworks, IconPlay, IconPlus, IconRestart, IconStop, IconVolumes } from "@/components/icons";
@@ -26,8 +27,10 @@ import {
   type PortSpec,
   type QuickLifecycleAction,
 } from "@/components/topologyNodeContract";
-import type { TopologyEdge, TopologyEdgePort, TopologyGroup, TopologyNode, TopologyNodeAttachment } from "@/types";
+import type { ImageTemplate, TemplateStep, TopologyEdge, TopologyEdgePort, TopologyGroup, TopologyNode, TopologyNodeAttachment } from "@/types";
 import type { LifecycleAction } from "@/features/containers/containersSlice";
+// Logique PURE de recette réutilisée telle quelle (libellés/résumés du studio — jamais dupliqués).
+import { STEP_TYPE_LABEL, stepSummary, templateBaseLabel } from "@/features/templates/templateCatalog";
 
 /**
  * Registre déclaratif des kinds (17/08/2026) : TOUT ce qui est spécifique à un `kind` de nœud
@@ -815,6 +818,16 @@ export interface GraphNodeCallbacks {
   actionPending?: boolean;
 }
 
+/** Métadonnées de recette injectées par TopologyGraph.tsx sur `node.data` d'un nœud
+ * "image-template" (depuis state.templates.items — la projection topologie ne porte ni le nombre
+ * d'étapes ni le détail de la base) : la carte du graphe principal est "l'appliance repliée",
+ * ces chips résument ce que le sous-graphe déplie. Absentes tant que la liste de templates n'est
+ * pas chargée (backend 404 compris) — aucun compte inventé. */
+export interface GraphNodeTemplateMeta {
+  templateStepCount?: number;
+  templateBaseLabel?: string;
+}
+
 /** Reconstruit un TopologyNode "synthétique" pour une brique (voir TopologyNode#attachments) —
  * une brique n'a PAS de nœud top-level correspondant dans `topology.nodes` (c'est tout l'objet de
  * son "briquage") : ouvrir son détail nécessite donc de reconstituer un TopologyNode minimal mais
@@ -871,8 +884,8 @@ function domainsEqual(a: string[] | undefined, b: string[] | undefined): boolean
 function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
   if (prev.selected !== next.selected) return false;
   if (prev.data === next.data) return true;
-  const a = prev.data as unknown as TopologyNode & GraphNodeCallbacks;
-  const b = next.data as unknown as TopologyNode & GraphNodeCallbacks;
+  const a = prev.data as unknown as TopologyNode & GraphNodeCallbacks & GraphNodeTemplateMeta;
+  const b = next.data as unknown as TopologyNode & GraphNodeCallbacks & GraphNodeTemplateMeta;
   return (
     a.kind === b.kind &&
     // Boutons rapides (18/08/2026) : l'état "action en cours" est RENDU (boutons désactivés) —
@@ -893,13 +906,17 @@ function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
     a.numVcpus === b.numVcpus &&
     a.memoryMib === b.memoryMib &&
     a.nutanixHostName === b.nutanixHostName &&
+    // Chips "appliance repliée" d'un nœud image-template (voir GraphNodeTemplateMeta) — rendues,
+    // donc comparées, comme le reste des champs affichés.
+    a.templateStepCount === b.templateStepCount &&
+    a.templateBaseLabel === b.templateBaseLabel &&
     attachmentsEqual(a.attachments, b.attachments) &&
     domainsEqual(a.domains, b.domains)
   );
 }
 
 function GraphNodeImpl({ data, selected }: NodeProps) {
-  const node = data as unknown as TopologyNode & GraphNodeCallbacks;
+  const node = data as unknown as TopologyNode & GraphNodeCallbacks & GraphNodeTemplateMeta;
   const Icon = nodeIcon(node);
   const isContainer = node.kind === "container";
   // Flash bref du point de statut quand le statut constaté change entre deux polls — le `key`
@@ -1064,6 +1081,24 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
           {!!node.nutanixHostName && (
             <span className="topology-node__spec-chip" title="Hôte physique actuel">
               {node.nutanixHostName}
+            </span>
+          )}
+        </div>
+      )}
+      {node.kind === "image-template" && (typeof node.templateStepCount === "number" || !!node.templateBaseLabel) && (
+        // "Appliance repliée" (voir GraphNodeTemplateMeta) : mêmes chips discrètes que les specs VM.
+        <div className="topology-node__specs">
+          {typeof node.templateStepCount === "number" && (
+            <span
+              className="topology-node__spec-chip"
+              title="Étapes de la recette — double-clic sur la carte pour ouvrir et éditer le sous-graphe"
+            >
+              {node.templateStepCount} étape{node.templateStepCount > 1 ? "s" : ""}
+            </span>
+          )}
+          {!!node.templateBaseLabel && (
+            <span className="topology-node__spec-chip" title="Base de la recette (noyau de départ)">
+              {node.templateBaseLabel}
             </span>
           )}
         </div>
@@ -1685,6 +1720,155 @@ export function ProcessNode({ data }: NodeProps) {
 }
 
 export const interiorNodeTypes = { graphNode: GraphNode, processNode: ProcessNode };
+
+// --- Sous-graphe "recette" d'un template d'image (18/08/2026) -----------------------------------
+// La recette (ImageTemplate#base + steps) devient un pipeline éditable dans le sous-graphe :
+// nœuds SYNTHÉTIQUES frontend (même approche que ProcessNode ci-dessus — jamais des TopologyNode,
+// jamais envoyés au backend), l'ordre visuel gauche -> droite = l'ordre réel d'exécution de steps[].
+
+/** Données d'un nœud synthétique de la vue recette — voir buildTemplateRecipeGraph ci-dessous. */
+export interface TemplateRecipeNodeData {
+  role: "base" | "step" | "artifact-source";
+  /** Ligne haute de la carte (ex : "Base", "Étape 2 — Paquets", nom du template source). */
+  title: string;
+  /** Résumé réel (templateCatalog.ts#stepSummary / templateBaseLabel) — jamais le contenu complet. */
+  summary: string;
+  /** Rôle "step" uniquement : index réel dans steps[] (= ordre d'exécution). */
+  stepIndex?: number;
+  stepType?: TemplateStep["type"];
+  /** Rôle "artifact-source" uniquement : id réel du template producteur (drill-down/menu). */
+  sourceTemplateId?: string;
+}
+
+/** Espacement horizontal entre deux maillons de la chaîne (cartes ~230px de large). */
+export const RECIPE_COLUMN_SPACING = 300;
+/** Décalage vertical d'un nœud "template source" au-dessus de l'étape artifact qui le consomme. */
+export const RECIPE_SOURCE_OFFSET_Y = -170;
+
+export function templateRecipeNodeId(role: TemplateRecipeNodeData["role"], key: string | number): string {
+  return `recipe:${role}:${key}`;
+}
+
+function TemplateRecipeNodeImpl({ data, selected }: NodeProps) {
+  const d = data as unknown as TemplateRecipeNodeData;
+  return (
+    <div className={`topology-recipe-node topology-recipe-node--${d.role}${selected ? " is-selected" : ""}`} title={d.summary}>
+      {d.role !== "base" && d.role !== "artifact-source" && (
+        <Handle id="chain-in" type="target" position={Position.Left} className="topology-handle topology-handle--template" title="Étape précédente" />
+      )}
+      {d.role !== "artifact-source" && (
+        <Handle id="chain-out" type="source" position={Position.Right} className="topology-handle topology-handle--template" title="Étape suivante" />
+      )}
+      {d.role === "step" && d.stepType === "artifact" && (
+        <Handle id="artifact-in" type="target" position={Position.Top} className="topology-handle topology-handle--template" title="Artefact consommé" />
+      )}
+      {d.role === "artifact-source" && (
+        <Handle id="artifact-out" type="source" position={Position.Bottom} className="topology-handle topology-handle--template" title="Artefact fourni" />
+      )}
+      <div className="topology-recipe-node__title">
+        {typeof d.stepIndex === "number" && <span className="topology-recipe-node__index">{d.stepIndex + 1}</span>}
+        <span>{d.title}</span>
+      </div>
+      <div className="topology-recipe-node__summary">{d.summary}</div>
+    </div>
+  );
+}
+
+export const TemplateRecipeNode = memo(TemplateRecipeNodeImpl);
+export const templateRecipeNodeTypes = { templateRecipeNode: TemplateRecipeNode };
+
+/**
+ * Construit le pipeline React Flow de la recette d'un template : un nœud BASE à gauche, puis un
+ * nœud par étape câblés en chaîne (ordre visuel = steps[]) ; chaque étape "artifact" reçoit en plus
+ * une arête entrante cyan depuis un nœud représentant le template source (esthétique uses-artifact,
+ * badge "artefact <nom>"). Fonction pure — les positions sont recalculées à chaque rendu, la
+ * recette est un pipeline fixe, pas un canevas à disposition libre.
+ */
+export function buildTemplateRecipeGraph(
+  template: ImageTemplate,
+  options: { reducedMotion: boolean; templateNameById: Map<string, string> },
+): { nodes: Node[]; edges: Edge[] } {
+  const nodes: Node[] = [];
+  const edges: Edge[] = [];
+  const baseId = templateRecipeNodeId("base", "root");
+  nodes.push({
+    id: baseId,
+    type: "templateRecipeNode",
+    position: { x: 0, y: 0 },
+    draggable: false,
+    data: { role: "base", title: "Base", summary: templateBaseLabel(template.base) } satisfies TemplateRecipeNodeData as unknown as Record<string, unknown>,
+  });
+
+  const chainStyle = { stroke: "var(--accent-end)" } as const;
+  let previousId = baseId;
+  const sourceNodeByTemplateId = new Map<string, string>();
+  template.steps.forEach((step, index) => {
+    const stepId = templateRecipeNodeId("step", index);
+    nodes.push({
+      id: stepId,
+      type: "templateRecipeNode",
+      position: { x: (index + 1) * RECIPE_COLUMN_SPACING, y: 0 },
+      draggable: false,
+      data: {
+        role: "step",
+        title: STEP_TYPE_LABEL[step.type],
+        summary: stepSummary(step),
+        stepIndex: index,
+        stepType: step.type,
+      } satisfies TemplateRecipeNodeData as unknown as Record<string, unknown>,
+    });
+    edges.push({
+      id: `recipe-chain:${index}`,
+      source: previousId,
+      target: stepId,
+      sourceHandle: "chain-out",
+      targetHandle: "chain-in",
+      type: "networkEdge",
+      animated: false,
+      className: "topology-edge topology-edge--recipe-chain",
+      style: chainStyle,
+      markerEnd: { type: MarkerType.ArrowClosed, color: "var(--accent-end)", width: 16, height: 16 },
+    });
+    previousId = stepId;
+
+    if (step.type === "artifact" && step.templateId) {
+      // Un même template source consommé par plusieurs étapes ne produit qu'UN nœud (au-dessus de
+      // sa première étape consommatrice), avec une arête par consommation.
+      let sourceId = sourceNodeByTemplateId.get(step.templateId);
+      if (!sourceId) {
+        sourceId = templateRecipeNodeId("artifact-source", step.templateId);
+        sourceNodeByTemplateId.set(step.templateId, sourceId);
+        nodes.push({
+          id: sourceId,
+          type: "templateRecipeNode",
+          position: { x: (index + 1) * RECIPE_COLUMN_SPACING, y: RECIPE_SOURCE_OFFSET_Y },
+          draggable: false,
+          data: {
+            role: "artifact-source",
+            title: options.templateNameById.get(step.templateId) ?? step.templateId,
+            summary: "Template source — artefact injecté par cette étape",
+            sourceTemplateId: step.templateId,
+          } satisfies TemplateRecipeNodeData as unknown as Record<string, unknown>,
+        });
+      }
+      const sourceLabel = options.templateNameById.get(step.templateId) ?? step.templateId;
+      edges.push({
+        id: `recipe-artifact:${index}`,
+        source: sourceId,
+        target: stepId,
+        sourceHandle: "artifact-out",
+        targetHandle: "artifact-in",
+        type: "networkEdge",
+        animated: !options.reducedMotion,
+        className: "topology-edge topology-edge--uses-artifact",
+        style: { stroke: "#22d3ee", strokeDasharray: "4 4" },
+        markerEnd: { type: MarkerType.ArrowClosed, color: "#22d3ee", width: 16, height: 16 },
+        data: { kindLabel: `artefact ${sourceLabel}` },
+      });
+    }
+  });
+  return { nodes, edges };
+}
 
 /** Ferme un popover au clic en dehors ou à Échap — même pattern que ContextMenu/Topbar. Partagé
  * par les popovers de création/renommage du graphe principal et par tout futur usage similaire. */

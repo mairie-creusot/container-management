@@ -498,15 +498,14 @@ describe("Routes /api/templates — cycle de vie complet (store + workspace rée
     await app.inject({ method: "DELETE", url: `/api/templates/${template.id}`, cookies: cookieFor(["operator"]) });
   });
 
-  it("GET /api/templates/presets : les 5 recettes pré-remplies du contrat", async () => {
+  it("GET /api/templates/presets : réduits à scratch + mkosi-minimal (générateur cloud-image conservé pour la recette vierge)", async () => {
     app = buildServer();
     const res = await app.inject({ method: "GET", url: "/api/templates/presets", cookies: cookieFor(["viewer"]) });
     expect(res.statusCode).toBe(200);
     const presets = res.json() as Array<{ id: string; base: TemplateBase; steps: TemplateStep[]; label: string; description: string }>;
-    expect(presets.map((p) => p.id)).toEqual(["ubuntu-docker", "debian-python3", "alpine", "scratch", "mkosi-minimal"]);
-    const debianPy = presets.find((p) => p.id === "debian-python3")!;
-    expect(debianPy.base).toEqual({ type: "cloud-image", distro: "debian", version: "12" });
-    expect(debianPy.steps).toEqual([{ type: "packages", packages: ["python3"] }]);
+    expect(presets.map((p) => p.id)).toEqual(["scratch", "mkosi-minimal"]);
+    expect(presets.find((p) => p.id === "scratch")!.base).toEqual({ type: "container", image: "scratch" });
+    expect(presets.find((p) => p.id === "mkosi-minimal")!.base).toEqual({ type: "mkosi", distro: "debian", release: "bookworm" });
   });
 
   it("GET /api/templates/artifact-sources : docker-image/raw-image exposés, nutanix-image exclu", async () => {
@@ -626,6 +625,174 @@ describe("Routes /api/templates — cycle de vie complet (store + workspace rée
     expect(buildNotFound.statusCode).toBe(404);
     const deleteNotFound = await app.inject({ method: "DELETE", url: "/api/templates/unknown-id", cookies: cookieFor(["admin"]) });
     expect(deleteNotFound.statusCode).toBe(404);
+  });
+
+  it("base iso : création OK (README seul), status ready direct, build refusé 400, steps refusées", async () => {
+    app = buildServer();
+    const isoBase: TemplateBase = { type: "iso", imageUuid: "0366005c-515c-4ee7-ba6e-379da8084255" };
+
+    const withSteps = await app.inject({
+      method: "POST",
+      url: "/api/templates",
+      cookies: cookieFor(["admin"]),
+      payload: { name: "win iso", base: isoBase, steps: [{ type: "script", content: "echo x" }] },
+    });
+    expect(withSteps.statusCode).toBe(400);
+    expect((withSteps.json() as { error: string }).error).toContain("ISO");
+
+    const badUuid = await app.inject({
+      method: "POST",
+      url: "/api/templates",
+      cookies: cookieFor(["admin"]),
+      payload: { name: "win iso", base: { type: "iso", imageUuid: "pas-un-uuid" }, steps: [] },
+    });
+    expect(badUuid.statusCode).toBe(400);
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/templates",
+      cookies: cookieFor(["admin"]),
+      payload: { name: "Windows 2019", base: isoBase, steps: [] },
+    });
+    expect(created.statusCode).toBe(201);
+    const template = created.json() as ImageTemplate;
+    expect(template.status).toBe("ready");
+    expect(template.base).toEqual(isoBase);
+    expect(template.lastBuild).toBeUndefined();
+
+    const wsDir = workspaceFilesPath(template.workspaceId);
+    const readme = await fs.readFile(path.join(wsDir, "README.md"), "utf-8");
+    expect(readme).toContain("console VNC");
+    expect(readme).toContain("0366005c-515c-4ee7-ba6e-379da8084255");
+    // Aucun scaffold résiduel : le README est le SEUL fichier du workspace.
+    expect(((await fs.readdir(wsDir, { recursive: true })) as string[]).sort()).toEqual(["README.md"]);
+
+    const build = await app.inject({ method: "POST", url: `/api/templates/${template.id}/build`, cookies: cookieFor(["admin"]) });
+    expect(build.statusCode).toBe(400);
+    expect((build.json() as { error: string }).error).toContain("ne se construit pas");
+
+    await app.inject({ method: "DELETE", url: `/api/templates/${template.id}`, cookies: cookieFor(["admin"]) });
+  });
+
+  it("PUT /api/templates/:id : met à jour la recette ET régénère les fichiers (aucun orphelin)", async () => {
+    app = buildServer();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/templates",
+      cookies: cookieFor(["operator"]),
+      payload: {
+        name: "outils",
+        base: { type: "container", image: "alpine:3.20" },
+        steps: [
+          { type: "packages", packages: ["git"] },
+          { type: "script", content: "echo old" },
+        ],
+      },
+    });
+    const template = created.json() as ImageTemplate;
+    const wsDir = workspaceFilesPath(template.workspaceId);
+    await fs.access(path.join(wsDir, "scripts", "02-script.sh"));
+
+    const updated = await app.inject({
+      method: "PUT",
+      url: `/api/templates/${template.id}`,
+      cookies: cookieFor(["operator"]),
+      payload: { name: "outils v2", steps: [{ type: "packages", packages: ["curl"] }] },
+    });
+    expect(updated.statusCode).toBe(200);
+    const after = updated.json() as ImageTemplate;
+    expect(after.id).toBe(template.id);
+    expect(after.name).toBe("outils v2");
+    expect(after.workspaceId).toBe(template.workspaceId);
+    expect(after.steps).toEqual([{ type: "packages", packages: ["curl"] }]);
+
+    const dockerfile = await fs.readFile(path.join(wsDir, "Dockerfile"), "utf-8");
+    expect(dockerfile).toContain("curl");
+    expect(dockerfile).not.toContain("git");
+    // L'ancien script d'étape ne survit PAS à la régénération.
+    await expect(fs.access(path.join(wsDir, "scripts", "02-script.sh"))).rejects.toThrow();
+
+    await app.inject({ method: "DELETE", url: `/api/templates/${template.id}`, cookies: cookieFor(["operator"]) });
+  });
+
+  it("PUT : changement de moteur (container -> cloud-image) recrée le workspace et abandonne lastBuild", async () => {
+    app = buildServer();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/templates",
+      cookies: cookieFor(["admin"]),
+      payload: { name: "migrant", base: { type: "container", image: "alpine:3.20" }, steps: [] },
+    });
+    const template = created.json() as ImageTemplate;
+    await store.updateStoredTemplate(template.id, {
+      status: "ready",
+      lastBuild: { runId: randomUUID(), status: "success", artifact: { type: "docker-image", reference: "quai-template/migrant:12345678" } },
+    });
+
+    const updated = await app.inject({
+      method: "PUT",
+      url: `/api/templates/${template.id}`,
+      cookies: cookieFor(["admin"]),
+      payload: { base: cloudBase },
+    });
+    expect(updated.statusCode).toBe(200);
+    const after = updated.json() as ImageTemplate;
+    expect(after.workspaceId).not.toBe(template.workspaceId);
+    expect(after.status).toBe("draft");
+    expect(after.lastBuild).toBeUndefined();
+    await expect(fs.access(workspaceFilesPath(template.workspaceId))).rejects.toThrow();
+    const pkr = await fs.readFile(path.join(workspaceFilesPath(after.workspaceId), "template.pkr.hcl"), "utf-8");
+    expect(pkr).toContain('source "nutanix" "template"');
+
+    await app.inject({ method: "DELETE", url: `/api/templates/${template.id}`, cookies: cookieFor(["admin"]) });
+  });
+
+  it("PUT : 409 si build en cours, 404 inconnu, 400 recette invalide, 403 viewer", async () => {
+    app = buildServer();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/templates",
+      cookies: cookieFor(["admin"]),
+      payload: { name: "verrou", base: { type: "container", image: "alpine:3.20" }, steps: [] },
+    });
+    const template = created.json() as ImageTemplate;
+
+    await store.updateStoredTemplate(template.id, { status: "building" });
+    const locked = await app.inject({
+      method: "PUT",
+      url: `/api/templates/${template.id}`,
+      cookies: cookieFor(["admin"]),
+      payload: { name: "verrou 2" },
+    });
+    expect(locked.statusCode).toBe(409);
+    expect((locked.json() as { error: string }).error).toContain("build en cours");
+    await store.updateStoredTemplate(template.id, { status: "draft" });
+
+    const invalid = await app.inject({
+      method: "PUT",
+      url: `/api/templates/${template.id}`,
+      cookies: cookieFor(["admin"]),
+      payload: { steps: [{ type: "packages", packages: ["evil; rm -rf /"] }] },
+    });
+    expect(invalid.statusCode).toBe(400);
+
+    const forbidden = await app.inject({
+      method: "PUT",
+      url: `/api/templates/${template.id}`,
+      cookies: cookieFor(["viewer"]),
+      payload: { name: "nope" },
+    });
+    expect(forbidden.statusCode).toBe(403);
+
+    const notFound = await app.inject({
+      method: "PUT",
+      url: "/api/templates/unknown-id",
+      cookies: cookieFor(["admin"]),
+      payload: { name: "x" },
+    });
+    expect(notFound.statusCode).toBe(404);
+
+    await app.inject({ method: "DELETE", url: `/api/templates/${template.id}`, cookies: cookieFor(["admin"]) });
   });
 
   it("aucun secret Prism dans AUCUN fichier écrit par la création d'un template", async () => {

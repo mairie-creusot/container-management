@@ -97,6 +97,7 @@ import {
 // Fabrique de templates (assistant de création, build + poll de suivi, déploiement en VM) — voir
 // features/templates/* : POST /api/templates réels, 404 = backend pas encore là (état vide explicite).
 import { buildTemplate, deleteTemplate, fetchTemplates } from "@/features/templates/templatesSlice";
+import { templateBaseLabel } from "@/features/templates/templateCatalog";
 import TemplateStudioModal from "@/features/templates/TemplateStudioModal";
 import DeployVmModal from "@/features/templates/DeployVmModal";
 import TemplateBuildsPopover from "@/features/templates/TemplateBuildsPopover";
@@ -2607,6 +2608,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   } | null>(null);
   const [deployVmModal, setDeployVmModal] = useState<{ templateName: string; artifactReference: string } | null>(null);
   const templates = useAppSelector((s) => s.templates.items);
+  /** Recette réelle par id de template — chips "appliance repliée" des cartes image-template
+   * (GraphNodeTemplateMeta, topologyGraphShared.tsx) : nombre d'étapes + libellé de base. */
+  const templatesById = useMemo(() => new Map(templates.map((t) => [t.id, t])), [templates]);
   // Verrous "action en cours" (boutons rapides des cartes, 18/08/2026) — mêmes sources que le
   // panneau de détail (nutanix.actionPendingUuid) et la page Conteneurs (containers.actionPendingId).
   const nutanixActionPendingUuid = useAppSelector((s) => s.nutanix.actionPendingUuid);
@@ -2856,6 +2860,12 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
                       convergenceStillPending(nutanixConvergence[rawActionId], n.status),
                   }
                 : {};
+          // Chips "appliance repliée" d'un nœud template (voir templatesById) — absentes tant que
+          // la liste de templates n'est pas chargée, jamais un compte inventé.
+          const template = n.kind === "image-template" ? templatesById.get(rawActionId) : undefined;
+          const templateMeta = template
+            ? { templateStepCount: template.steps.length, templateBaseLabel: templateBaseLabel(template.base) }
+            : {};
           return {
             id: n.id,
             type: "graphNode",
@@ -2868,7 +2878,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
                     : {}),
                 }
               : {}),
-            data: { ...n, ...callbacks } as unknown as Record<string, unknown>,
+            data: { ...n, ...callbacks, ...templateMeta } as unknown as Record<string, unknown>,
           };
         });
       // Un nœud par groupe REPLIÉ (voir collapsedMemberIds ci-dessus) — position : celle déjà
@@ -2910,7 +2920,8 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     });
     // Les deux ids "action en cours" invalident le rendu des boutons rapides (voir
     // graphNodePropsEqual#actionPending, topologyGraphShared.tsx) — d'où leur présence ici.
-  }, [data, positions, hostTreePositions, nutanixActionPendingUuid, containerActionPendingId]);
+    // `templatesById` : chips des cartes image-template (graphNodePropsEqual borne les re-renders).
+  }, [data, positions, hostTreePositions, nutanixActionPendingUuid, containerActionPendingId, templatesById]);
 
   /**
    * Cadre décoratif (voir topologyGraphShared.tsx#GroupFrameNode) autour des membres d'un groupe

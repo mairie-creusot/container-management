@@ -488,6 +488,118 @@ describe("POST /api/nutanix/vms", () => {
   });
 });
 
+describe("POST /api/nutanix/vms — variant ISO (isoImageUuid + diskSizeMib)", () => {
+  const ISO_UUID = "0366005c-515c-4ee7-ba6e-379da8084255";
+  const isoPayload = {
+    name: "win-01",
+    isoImageUuid: ISO_UUID,
+    subnetUuid: SUBNET_UUID,
+    numVcpus: 4,
+    memoryMib: 8192,
+    diskSizeMib: 102400,
+  };
+
+  function seedAll(): void {
+    seedSubnetsList();
+    seedImagesList();
+    seedClustersList();
+  }
+
+  it("400 si imageUuid ET isoImageUuid fournis (exclusifs)", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/nutanix/vms",
+      cookies: adminCookie(),
+      payload: { ...isoPayload, imageUuid: IMAGE_UUID },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toMatch(/imageUuid|isoImageUuid/);
+  });
+
+  it("400 si NI imageUuid NI isoImageUuid", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    const { isoImageUuid: _iso, ...neither } = isoPayload;
+    const response = await app.inject({ method: "POST", url: "/api/nutanix/vms", cookies: adminCookie(), payload: neither });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("400 si isoImageUuid sans diskSizeMib (taille du disque vide requise)", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    const { diskSizeMib: _d, ...noDisk } = isoPayload;
+    const response = await app.inject({ method: "POST", url: "/api/nutanix/vms", cookies: adminCookie(), payload: noDisk });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toMatch(/diskSizeMib/);
+  });
+
+  it("400 si isoImageUuid pointe une image DISK_IMAGE (pas un ISO)", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    seedAll();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/nutanix/vms",
+      cookies: adminCookie(),
+      payload: { ...isoPayload, isoImageUuid: IMAGE_UUID },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toMatch(/ISO_IMAGE/);
+  });
+
+  it("404 si l'ISO est inconnu du catalogue", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    seedSubnetsList();
+    queueResponse("POST /api/nutanix/v3/images/list", { entities: [] });
+    seedClustersList();
+    const response = await app.inject({ method: "POST", url: "/api/nutanix/vms", cookies: adminCookie(), payload: isoPayload });
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("crée la VM ISO : disque SCSI VIDE + CDROM sur l'ISO, boot CDROM puis DISK, sans guest_customization", async () => {
+    app = buildServer();
+    await seedNutanixConfig();
+    seedAll();
+    queueResponse(
+      "POST /api/nutanix/v3/vms",
+      { metadata: { uuid: "new-iso-vm" }, status: { execution_context: { task_uuid: "t-iso" } } },
+      202,
+    );
+
+    const response = await app.inject({ method: "POST", url: "/api/nutanix/vms", cookies: adminCookie(), payload: isoPayload });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ ok: true, name: "win-01", vmUuid: "new-iso-vm", taskUuid: "t-iso" });
+
+    const body = lastRequestBodyByKey.get("POST /api/nutanix/v3/vms") as {
+      spec: {
+        resources: {
+          disk_list: {
+            device_properties: { device_type: string; disk_address: { adapter_type: string; device_index: number } };
+            data_source_reference?: { kind: string; uuid: string };
+            disk_size_mib?: number;
+          }[];
+          boot_config?: { boot_device_order_list: string[] };
+          guest_customization?: unknown;
+        };
+      };
+    };
+    expect(body.spec.resources.disk_list).toHaveLength(2);
+    const [disk, cdrom] = body.spec.resources.disk_list;
+    expect(disk!.device_properties).toEqual({ device_type: "DISK", disk_address: { adapter_type: "SCSI", device_index: 0 } });
+    expect(disk!.disk_size_mib).toBe(102400);
+    expect(disk!.data_source_reference).toBeUndefined();
+    expect(cdrom!.device_properties.device_type).toBe("CDROM");
+    expect(cdrom!.data_source_reference).toEqual({ kind: "image", uuid: ISO_UUID });
+    expect(cdrom!.disk_size_mib).toBeUndefined();
+    expect(body.spec.resources.boot_config).toEqual({ boot_device_order_list: ["CDROM", "DISK"] });
+    expect(body.spec.resources.guest_customization).toBeUndefined();
+  });
+});
+
 describe("GET /api/nutanix/tasks/:uuid", () => {
   it("renvoie l'état de la tâche (réponse v3 PLATE, forme réelle vérifiée le 18/08/2026) — accessible à un viewer", async () => {
     app = buildServer();

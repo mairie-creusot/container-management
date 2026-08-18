@@ -9,8 +9,11 @@ import {
   TEMPLATE_STATUS_LABEL,
   VM_DEPLOY_DEFAULTS,
   baseError,
+  baseIsBuildable,
+  baseSupportsSteps,
   createStep,
   defaultBase,
+  isIsoImage,
   isAbsolutePosixPath,
   isValidFileMode,
   isValidGuestAccount,
@@ -31,22 +34,25 @@ import type { TemplateStep } from "@/types";
 // Prism) — le contrat de types v2 (TemplateBase/TemplateStep...) est figé, le backend code contre lui.
 
 describe("bases de recette", () => {
-  it("les 3 types de base du contrat ont un libellé et un défaut valides", () => {
-    for (const type of ["cloud-image", "container", "mkosi"] as const) {
+  it("les 4 types de base du contrat ont un libellé et un défaut du bon type", () => {
+    for (const type of ["cloud-image", "container", "mkosi", "iso"] as const) {
       expect(TEMPLATE_BASE_TYPE_LABEL[type]).toBeTruthy();
-      const base = defaultBase(type);
-      expect(base.type).toBe(type);
-      expect(baseError(base)).toBeNull();
+      expect(defaultBase(type).type).toBe(type);
     }
+    for (const type of ["cloud-image", "container", "mkosi"] as const) expect(baseError(defaultBase(type))).toBeNull();
+    // iso : le défaut est invalide tant qu'aucun ISO du catalogue n'est choisi — rien n'est inventé.
+    expect(baseError(defaultBase("iso"))).not.toBeNull();
   });
 
   it("templateBaseLabel : résumé lisible pour chaque type", () => {
     expect(templateBaseLabel({ type: "cloud-image", distro: "debian", version: "12" })).toBe("VM cloud-image debian 12");
     expect(templateBaseLabel({ type: "container", image: "scratch" })).toBe("Conteneur scratch");
     expect(templateBaseLabel({ type: "mkosi", distro: "arch", release: "rolling" })).toBe("mkosi arch rolling");
+    expect(templateBaseLabel({ type: "iso", imageUuid: "" })).toBe("ISO (à choisir)");
+    expect(templateBaseLabel({ type: "iso", imageUuid: "abc-123" })).toBe("ISO abc-123");
   });
 
-  it("baseError : distro/version/image/release exigées, imageUrl http(s) si renseignée", () => {
+  it("baseError : distro/version/image/release/imageUuid exigées, imageUrl http(s) si renseignée", () => {
     expect(baseError({ type: "cloud-image", distro: "", version: "12" })).not.toBeNull();
     expect(baseError({ type: "cloud-image", distro: "debian", version: " " })).not.toBeNull();
     expect(baseError({ type: "cloud-image", distro: "debian", version: "12", imageUrl: "ftp://x" })).not.toBeNull();
@@ -54,6 +60,24 @@ describe("bases de recette", () => {
     expect(baseError({ type: "container", image: "" })).not.toBeNull();
     expect(baseError({ type: "container", image: "scratch" })).toBeNull();
     expect(baseError({ type: "mkosi", distro: "debian", release: "" })).not.toBeNull();
+    expect(baseError({ type: "iso", imageUuid: "" })).not.toBeNull();
+    expect(baseError({ type: "iso", imageUuid: "abc-123" })).toBeNull();
+  });
+
+  it("base iso : jamais de build ni d'étapes de provisioning (l'OS n'est pas encore installé)", () => {
+    expect(baseIsBuildable({ type: "iso", imageUuid: "abc" })).toBe(false);
+    expect(baseSupportsSteps({ type: "iso", imageUuid: "abc" })).toBe(false);
+    for (const type of ["cloud-image", "container", "mkosi"] as const) {
+      expect(baseIsBuildable(defaultBase(type))).toBe(true);
+      expect(baseSupportsSteps(defaultBase(type))).toBe(true);
+    }
+  });
+
+  it("isIsoImage : imageType contenant ISO (casse ignorée), jamais deviné sans type", () => {
+    expect(isIsoImage({ uuid: "a", name: "debian.iso", imageType: "ISO_IMAGE" })).toBe(true);
+    expect(isIsoImage({ uuid: "b", name: "x", imageType: "iso" })).toBe(true);
+    expect(isIsoImage({ uuid: "c", name: "disk", imageType: "DISK_IMAGE" })).toBe(false);
+    expect(isIsoImage({ uuid: "d", name: "sans-type.iso" })).toBe(false);
   });
 
   it("mkosi : chaque distro du contrat a une release par défaut", () => {

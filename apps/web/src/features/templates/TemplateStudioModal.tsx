@@ -1,8 +1,10 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import Modal from "@/components/Modal";
+import { ApiError } from "@/api/client";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
 import { fetchTopology } from "@/features/topology/topologySlice";
+import { fetchNutanixImages, uploadNutanixImage } from "@/features/nutanix/nutanixSlice";
 import {
   buildTemplate,
   createTemplate,
@@ -14,14 +16,18 @@ import {
   ARTIFACT_TYPE_LABEL,
   CLOUD_IMAGE_DISTRO_SUGGESTIONS,
   CONTAINER_IMAGE_SUGGESTIONS,
+  ISO_STEPS_DISABLED_MESSAGE,
   MKOSI_DEFAULT_RELEASE,
   MKOSI_DISTROS,
   STEP_TYPES,
   STEP_TYPE_LABEL,
   TEMPLATE_BASE_TYPE_LABEL,
   baseError,
+  baseIsBuildable,
+  baseSupportsSteps,
   createStep,
   defaultBase,
+  isIsoImage,
   moveStep,
   parsePackagesInput,
   stepError,
@@ -30,6 +36,9 @@ import {
   type MkosiDistro,
 } from "@/features/templates/templateCatalog";
 import { KIND_ICON } from "@/components/topologyGraphShared";
+import CodeEditor, { languageForPath } from "@/components/CodeEditor";
+import { LINT_UNAVAILABLE_MESSAGE, lintShell, type ShellLintResult } from "@/features/templates/lintApi";
+import RecipeVerification from "@/features/templates/RecipeVerification";
 import type { ImageTemplate, TemplateArtifactSource, TemplateBase, TemplatePreset, TemplateStep } from "@/types";
 
 interface TemplateStudioModalProps {
@@ -38,6 +47,58 @@ interface TemplateStudioModalProps {
 
 type Stage = "start" | "edit" | "created";
 type Selection = "base" | number;
+
+interface ShellLintController {
+  cache: ReadonlyMap<string, ShellLintResult>;
+  available: boolean;
+  lintNow: (content: string) => Promise<void>;
+}
+
+/** Lint shell serveur (POST /api/iac/lint), débouncé 800 ms et mémoïsé par contenu : le résultat
+ * suit l'étape même après réordonnancement/suppression, un contenu inchangé n'est jamais re-linté.
+ * 404 serveur -> available=false (contrat pas encore là), l'auto-lint s'arrête mais le bouton
+ * "Vérifier" reste cliquable (retente, ré-active si le backend apparaît). */
+function useShellLint(steps: TemplateStep[]): ShellLintController {
+  const [cache, setCache] = useState<ReadonlyMap<string, ShellLintResult>>(new Map());
+  const [available, setAvailable] = useState(true);
+  const pendingRef = useRef(new Set<string>());
+
+  const lintNow = useCallback(async (content: string) => {
+    if (content.trim() === "" || pendingRef.current.has(content)) return;
+    pendingRef.current.add(content);
+    const result = await lintShell(content);
+    pendingRef.current.delete(content);
+    if (result.state === "unavailable") {
+      setAvailable(false);
+      return;
+    }
+    setAvailable(true);
+    setCache((prev) => new Map(prev).set(content, result));
+  }, []);
+
+  useEffect(() => {
+    if (!available) return;
+    const missing = [
+      ...new Set(steps.flatMap((s) => (s.type === "script" && s.content.trim() !== "" ? [s.content] : []))),
+    ].filter((c) => !cache.has(c) && !pendingRef.current.has(c));
+    if (missing.length === 0) return;
+    const timer = setTimeout(() => {
+      for (const content of missing) void lintNow(content);
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [steps, cache, available, lintNow]);
+
+  return { cache, available, lintNow };
+}
+
+/** Pastille rouge d'une étape script quand le lint serveur a des erreurs — même pastille que la
+ * validation locale (unifiées dans la liste de recette). */
+function scriptLintIssue(step: TemplateStep, cache: ReadonlyMap<string, ShellLintResult>): string | null {
+  if (step.type !== "script") return null;
+  const result = cache.get(step.content);
+  if (!result || result.state !== "errors") return null;
+  return result.errors.length > 1 ? `${result.errors.length} erreurs de script (lint serveur)` : "1 erreur de script (lint serveur)";
+}
 
 /** Studio de recettes (spotlight du graphe / clic droit) — remplace l'assistant figé v1 : preset
  * de départ OU recette vierge, base librement choisie, étapes ordonnées toutes modifiables, POST
@@ -105,9 +166,15 @@ export default function TemplateStudioModal({ onClose }: TemplateStudioModalProp
     });
   }
 
+  const shellLint = useShellLint(steps);
   const baseIssue = baseError(base);
   const stepIssues = steps.map((s) => stepError(s));
-  const hasIssues = baseIssue !== null || stepIssues.some((e) => e !== null);
+  // Pastille unifiée dans la liste : validation locale d'abord, sinon lint serveur. Le lint reste
+  // consultatif (n'empêche pas la création — le serveur reste juge en dernier ressort).
+  const rowIssues = steps.map((s, i) => stepIssues[i] ?? scriptLintIssue(s, shellLint.cache));
+  const stepsAllowed = baseSupportsSteps(base);
+  const recipeIssue = !stepsAllowed && steps.length > 0 ? "Supprimez les étapes : une base ISO ne peut pas être provisionnée." : null;
+  const hasIssues = baseIssue !== null || recipeIssue !== null || stepIssues.some((e) => e !== null);
   const canSubmit = !busy && name.trim() !== "" && !hasIssues;
 
   async function handleSubmit(event: FormEvent) {
@@ -221,7 +288,7 @@ export default function TemplateStudioModal({ onClose }: TemplateStudioModalProp
                     <button type="button" className="template-studio__row-main" onClick={() => setSelection(i)}>
                       <span className="template-studio__row-type">{STEP_TYPE_LABEL[step.type]}</span>
                       <span className="template-studio__row-summary">{stepSummary(step)}</span>
-                      {stepIssues[i] && <span className="template-studio__row-error" title={stepIssues[i] ?? ""} />}
+                      {rowIssues[i] && <span className="template-studio__row-error" title={rowIssues[i] ?? ""} />}
                     </button>
                     <span className="template-studio__row-tools">
                       <button type="button" className="btn btn-ghost btn-sm" onClick={() => reorderStep(i, -1)} disabled={i === 0} aria-label="Monter">
@@ -242,15 +309,22 @@ export default function TemplateStudioModal({ onClose }: TemplateStudioModalProp
                     </span>
                   </div>
                 ))}
-                {steps.length === 0 && <p className="template-modal__hint">Aucune étape — la base sera construite nue.</p>}
+                {stepsAllowed && steps.length === 0 && (
+                  <p className="template-modal__hint">Aucune étape — la base sera construite nue.</p>
+                )}
 
-                <div className="template-studio__add">
-                  {STEP_TYPES.map((t) => (
-                    <button key={t} type="button" className="btn btn-secondary btn-sm" onClick={() => addStep(t)} disabled={busy}>
-                      + {STEP_TYPE_LABEL[t]}
-                    </button>
-                  ))}
-                </div>
+                {stepsAllowed ? (
+                  <div className="template-studio__add">
+                    {STEP_TYPES.map((t) => (
+                      <button key={t} type="button" className="btn btn-secondary btn-sm" onClick={() => addStep(t)} disabled={busy}>
+                        + {STEP_TYPE_LABEL[t]}
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="template-modal__hint">{ISO_STEPS_DISABLED_MESSAGE}</p>
+                )}
+                {recipeIssue && <p className="template-modal__field-error">{recipeIssue}</p>}
               </div>
 
               <div className="template-studio__editor">
@@ -263,6 +337,7 @@ export default function TemplateStudioModal({ onClose }: TemplateStudioModalProp
                     busy={busy}
                     artifactSources={artifactSources}
                     artifactSourcesStatus={artifactSourcesStatus}
+                    lint={shellLint}
                     onChange={(next) => updateStep(selection, next)}
                   />
                 ) : null}
@@ -285,12 +360,27 @@ export default function TemplateStudioModal({ onClose }: TemplateStudioModalProp
           </form>
         )}
 
-        {stage === "created" && created && (
+        {stage === "created" && created && !baseIsBuildable(created.base) && (
+          <div className="template-modal__body">
+            <p className="template-modal__hint">
+              « {created.name} » est créé et directement prêt : une base ISO ne se construit pas. Déployez-le en VM depuis le
+              graphe — la VM démarrera sur l'ISO, l'installation de l'OS se fera à la main via la console VNC.
+            </p>
+            <div className="template-modal__actions">
+              <button type="button" className="btn btn-primary btn-sm" onClick={onClose}>
+                Fermer
+              </button>
+            </div>
+          </div>
+        )}
+
+        {stage === "created" && created && baseIsBuildable(created.base) && (
           <div className="template-modal__body">
             <p className="template-modal__hint">
               « {created.name} » est créé (statut : brouillon). Lancer le build maintenant ? La construction se fait côté serveur —
               vous serez notifié à la fin, la modale peut être refermée.
             </p>
+            <RecipeVerification templateId={created.id} />
             {error && <p className="graph-popover__error">{error}</p>}
             <div className="template-modal__actions">
               <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={busy}>
@@ -316,6 +406,7 @@ function normalizeBase(base: TemplateBase): TemplateBase {
     return imageUrl === "" ? { type: "cloud-image", distro, version } : { type: "cloud-image", distro, version, imageUrl };
   }
   if (base.type === "container") return { type: "container", image: base.image.trim() };
+  if (base.type === "iso") return { type: "iso", imageUuid: base.imageUuid.trim() };
   return { type: "mkosi", distro: base.distro, release: base.release.trim() };
 }
 
@@ -338,7 +429,7 @@ function BaseEditor({
     <>
       <div className="inspector-section-title">Base de l'image</div>
       <div className="template-studio__tabs" role="tablist" aria-label="Type de base">
-        {(["cloud-image", "container", "mkosi"] as const).map((t) => (
+        {(["cloud-image", "container", "mkosi", "iso"] as const).map((t) => (
           <button
             key={t}
             type="button"
@@ -461,7 +552,142 @@ function BaseEditor({
         </>
       )}
 
+      {base.type === "iso" && <IsoBaseEditor base={base} onChange={onChange} busy={busy} />}
+
       {issue && <p className="template-modal__field-error">{issue}</p>}
+    </>
+  );
+}
+
+/** Base ISO : sélecteur des ISO réels du catalogue Prism (GET /api/nutanix/images, imageType
+ * contenant "ISO") + import d'un ISO local avec progression d'envoi réelle, puis re-fetch du
+ * catalogue et sélection automatique de l'image envoyée. */
+function IsoBaseEditor({
+  base,
+  onChange,
+  busy,
+}: {
+  base: Extract<TemplateBase, { type: "iso" }>;
+  onChange: (next: TemplateBase) => void;
+  busy: boolean;
+}) {
+  const dispatch = useAppDispatch();
+  const images = useAppSelector((s) => s.nutanix.images);
+  const imagesStatus = useAppSelector((s) => s.nutanix.imagesStatus);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [upload, setUpload] = useState<{ name: string; percent: number } | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    dispatch(fetchNutanixImages());
+  }, [dispatch]);
+
+  const isoImages = images.filter(isIsoImage);
+
+  async function handleIsoFile(file: File) {
+    setUploadError(null);
+    setUpload({ name: file.name, percent: 0 });
+    try {
+      const result = await uploadNutanixImage(file, file.name, (percent) => setUpload({ name: file.name, percent }));
+      const refreshed = await dispatch(fetchNutanixImages());
+      let uuid = result.uuid;
+      if (!uuid && fetchNutanixImages.fulfilled.match(refreshed) && refreshed.payload.outcome === "ok") {
+        uuid = refreshed.payload.items.find((i) => i.name === file.name)?.uuid;
+      }
+      if (uuid) {
+        onChange({ type: "iso", imageUuid: uuid });
+      } else {
+        setUploadError("ISO envoyé, mais introuvable dans le catalogue rafraîchi — sélectionnez-le manuellement.");
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        setUploadError("Le backend d'import d'ISO n'est pas encore disponible.");
+      } else {
+        setUploadError(err instanceof Error ? err.message : "Échec de l'envoi de l'ISO.");
+      }
+    } finally {
+      setUpload(null);
+    }
+  }
+
+  return (
+    <>
+      {(imagesStatus === "idle" || imagesStatus === "loading") && (
+        <p className="template-modal__hint">Chargement du catalogue d'images Prism…</p>
+      )}
+      {imagesStatus === "unavailable" && (
+        <p className="template-modal__hint">
+          Le catalogue d'images Nutanix n'est pas encore disponible côté API (backend en cours) — aucun ISO à proposer pour
+          l'instant.
+        </p>
+      )}
+      {imagesStatus === "error" && <p className="graph-popover__error">Échec du chargement du catalogue d'images.</p>}
+      {imagesStatus === "ready" && (
+        <div className="field">
+          <label htmlFor="studio-iso-image">ISO du catalogue Prism</label>
+          {isoImages.length === 0 ? (
+            <p className="template-modal__hint">Aucun ISO dans le catalogue Prism Central — importez-en un ci-dessous.</p>
+          ) : (
+            <select
+              id="studio-iso-image"
+              value={base.imageUuid}
+              onChange={(e) => onChange({ type: "iso", imageUuid: e.target.value })}
+              disabled={busy || upload !== null}
+            >
+              <option value="">— sélectionner —</option>
+              {isoImages.map((i) => (
+                <option key={i.uuid} value={i.uuid}>
+                  {i.name}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
+
+      {upload ? (
+        <div className="field">
+          <label>Envoi de « {upload.name} »…</label>
+          <div
+            className="template-deploy-progress"
+            role="progressbar"
+            aria-valuenow={upload.percent}
+            aria-valuemin={0}
+            aria-valuemax={100}
+          >
+            <div className="template-deploy-progress__bar" style={{ width: `${upload.percent}%` }} />
+          </div>
+          <span className="template-modal__hint">{upload.percent}% envoyés vers le catalogue Prism.</span>
+        </div>
+      ) : (
+        <div className="field">
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={busy || imagesStatus === "unavailable"}
+          >
+            Importer un ISO…
+          </button>
+        </div>
+      )}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".iso,application/x-iso9660-image"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) void handleIsoFile(file);
+          e.target.value = "";
+        }}
+      />
+      {uploadError && <p className="graph-popover__error">{uploadError}</p>}
+
+      <p className="template-modal__hint">
+        Un template ISO est prêt immédiatement (aucun build) : au déploiement, la VM démarre sur l'ISO avec un disque vide —
+        l'installation de l'OS se fait à la main via la console VNC.
+      </p>
     </>
   );
 }
@@ -472,6 +698,7 @@ function StepEditor({
   busy,
   artifactSources,
   artifactSourcesStatus,
+  lint,
   onChange,
 }: {
   step: TemplateStep;
@@ -479,6 +706,7 @@ function StepEditor({
   busy: boolean;
   artifactSources: TemplateArtifactSource[];
   artifactSourcesStatus: "idle" | "loading" | "ready" | "unavailable" | "error";
+  lint: ShellLintController;
   onChange: (next: TemplateStep) => void;
 }) {
   return (
@@ -487,20 +715,7 @@ function StepEditor({
 
       {step.type === "packages" && <PackagesEditor step={step} busy={busy} onChange={onChange} />}
 
-      {step.type === "script" && (
-        <div className="field">
-          <label htmlFor="studio-script">Script exécuté dans l'image</label>
-          <textarea
-            id="studio-script"
-            className="cell-mono template-studio__textarea"
-            value={step.content}
-            onChange={(e) => onChange({ ...step, content: e.target.value })}
-            placeholder={"#!/bin/sh\napt-get update…"}
-            rows={12}
-            disabled={busy}
-          />
-        </div>
-      )}
+      {step.type === "script" && <ScriptStepEditor step={step} busy={busy} lint={lint} onChange={onChange} />}
 
       {step.type === "file" && (
         <>
@@ -533,14 +748,13 @@ function StepEditor({
             />
           </div>
           <div className="field">
-            <label htmlFor="studio-file-content">Contenu</label>
-            <textarea
-              id="studio-file-content"
-              className="cell-mono template-studio__textarea"
+            <label>Contenu</label>
+            <CodeEditor
               value={step.content}
-              onChange={(e) => onChange({ ...step, content: e.target.value })}
-              rows={8}
-              disabled={busy}
+              onChange={(content) => onChange({ ...step, content })}
+              language={languageForPath(step.path)}
+              readOnly={busy}
+              ariaLabel="Contenu du fichier"
             />
           </div>
         </>
@@ -682,6 +896,68 @@ function StepEditor({
 
       {issue && <p className="template-modal__field-error">{issue}</p>}
     </>
+  );
+}
+
+/** Étape script : éditeur shell colorisé + lint serveur (auto débouncé via useShellLint, bouton
+ * "Vérifier" pour forcer) — erreurs ligne/message sous l'éditeur, jamais de fausse réussite. */
+function ScriptStepEditor({
+  step,
+  busy,
+  lint,
+  onChange,
+}: {
+  step: Extract<TemplateStep, { type: "script" }>;
+  busy: boolean;
+  lint: ShellLintController;
+  onChange: (next: TemplateStep) => void;
+}) {
+  const [verifying, setVerifying] = useState(false);
+  const result = step.content.trim() === "" ? null : lint.cache.get(step.content) ?? null;
+
+  async function handleVerify() {
+    setVerifying(true);
+    await lint.lintNow(step.content);
+    setVerifying(false);
+  }
+
+  return (
+    <div className="field">
+      <label>Script exécuté dans l'image</label>
+      <CodeEditor
+        value={step.content}
+        onChange={(content) => onChange({ ...step, content })}
+        language="shell"
+        readOnly={busy}
+        placeholder={"#!/bin/sh\napt-get update…"}
+        ariaLabel="Script exécuté dans l'image"
+      />
+      <div className="code-lint__bar">
+        <button
+          type="button"
+          className="btn btn-secondary btn-sm"
+          onClick={() => void handleVerify()}
+          disabled={busy || verifying || step.content.trim() === ""}
+          title={lint.available ? "Lint shell exécuté côté serveur" : LINT_UNAVAILABLE_MESSAGE}
+        >
+          {verifying ? "Vérification…" : "Vérifier"}
+          {result?.state === "errors" && <span className="code-lint__badge">{result.errors.length}</span>}
+        </button>
+        {!lint.available && <span className="template-modal__hint">{LINT_UNAVAILABLE_MESSAGE}</span>}
+        {result?.state === "ok" && <span className="code-lint__ok">vérifié ✓</span>}
+      </div>
+      {result?.state === "failed" && <p className="template-modal__field-error">{result.message}</p>}
+      {result?.state === "errors" && (
+        <ul className="code-lint__list">
+          {result.errors.map((e, i) => (
+            <li key={i} className="code-lint__item">
+              {typeof e.line === "number" && <span className="code-lint__line">ligne {e.line}</span>}
+              {e.message}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

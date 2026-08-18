@@ -20,8 +20,13 @@ const TASK_POLL_MS = 2000;
 export interface DeployVmModalProps {
   /** Nom du template source — affichage uniquement. */
   templateName: string;
-  /** Référence de l'artifact "nutanix-image" du dernier build (uuid ou nom d'image Prism). */
-  artifactReference: string;
+  /** Référence de l'artifact "nutanix-image" du dernier build (uuid ou nom d'image Prism) —
+   * absent pour un template base "iso". */
+  artifactReference?: string;
+  /** Template base "iso" : uuid de l'ISO Prism (base.imageUuid). La modale bascule alors en mode
+   * installation manuelle : POST { isoImageUuid, diskSizeMib } sans imageUuid ni guestCustomization
+   * (compte/cloud-init impossibles, l'OS n'est pas encore installé — console VNC après création). */
+  isoImageUuid?: string;
   onClose: () => void;
 }
 
@@ -39,7 +44,8 @@ interface CreateVmResponse {
  * /api/nutanix/vms puis suivi de tâche (GET /api/nutanix/tasks/:uuid) avec progression + toast.
  * Le mot de passe reste dans ce composant et le body du POST — jamais dans Redux/log/notification.
  */
-export default function DeployVmModal({ templateName, artifactReference, onClose }: DeployVmModalProps) {
+export default function DeployVmModal({ templateName, artifactReference = "", isoImageUuid, onClose }: DeployVmModalProps) {
+  const isoMode = typeof isoImageUuid === "string" && isoImageUuid !== "";
   const dispatch = useAppDispatch();
   const VmIcon = KIND_ICON["nutanix-vm"];
   const subnets = useAppSelector((s) => s.nutanix.subnets);
@@ -78,39 +84,55 @@ export default function DeployVmModal({ templateName, artifactReference, onClose
   // l'utilisateur choisit manuellement dans la liste réelle plutôt qu'un uuid envoyé à l'aveugle.
   const matchedImage = images.find((i) => i.uuid === artifactReference || i.name === artifactReference) ?? null;
   useEffect(() => {
-    if (matchedImage && !imageUuid) setImageUuid(matchedImage.uuid);
+    if (!isoMode && matchedImage && !imageUuid) setImageUuid(matchedImage.uuid);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [matchedImage?.uuid]);
 
+  // Mode ISO : l'ISO est fixé par le template, seul son nom est résolu depuis le catalogue.
+  const isoImage = isoMode ? images.find((i) => i.uuid === isoImageUuid) ?? null : null;
+
   const trimmedName = vmName.trim();
   const nameValid = trimmedName.length === 0 || isValidVmName(trimmedName);
-  const accountValid = isValidGuestAccount(username.trim(), authMethod === "password" ? password : "", authMethod === "ssh-key" ? sshKey : "");
+  const accountValid =
+    isoMode || isValidGuestAccount(username.trim(), authMethod === "password" ? password : "", authMethod === "ssh-key" ? sshKey : "");
   const vcpus = Number(numVcpus);
   const memory = Number(memoryMib);
   const disk = Number(diskGib);
   const resourcesValid =
     Number.isInteger(vcpus) && vcpus >= 1 && vcpus <= 64 && Number.isInteger(memory) && memory >= 256 && Number.isInteger(disk) && disk >= 1;
-  const canSubmit = trimmedName.length > 0 && nameValid && accountValid && !!subnetUuid && !!imageUuid && resourcesValid;
+  const canSubmit = trimmedName.length > 0 && nameValid && accountValid && !!subnetUuid && (isoMode || !!imageUuid) && resourcesValid;
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
     if (!canSubmit || busy || task) return;
     setBusy(true);
     setError(null);
-    const body: NutanixVmCreateInput = {
-      name: trimmedName,
-      imageUuid,
-      subnetUuid,
-      numVcpus: vcpus,
-      numCoresPerVcpu: VM_DEPLOY_DEFAULTS.numCoresPerVcpu,
-      memoryMib: memory,
-      diskSizeMib: disk * 1024,
-      guestCustomization: {
-        hostname: trimmedName,
-        username: username.trim(),
-        ...(authMethod === "password" ? { password } : { sshAuthorizedKey: sshKey.trim() }),
-      },
-    };
+    // Mode ISO : { isoImageUuid, diskSizeMib } au lieu d'imageUuid, JAMAIS de guestCustomization
+    // (l'OS n'est pas encore installé — installation manuelle via la console VNC).
+    const body: NutanixVmCreateInput = isoMode
+      ? {
+          name: trimmedName,
+          isoImageUuid: isoImageUuid as string,
+          subnetUuid,
+          numVcpus: vcpus,
+          numCoresPerVcpu: VM_DEPLOY_DEFAULTS.numCoresPerVcpu,
+          memoryMib: memory,
+          diskSizeMib: disk * 1024,
+        }
+      : {
+          name: trimmedName,
+          imageUuid,
+          subnetUuid,
+          numVcpus: vcpus,
+          numCoresPerVcpu: VM_DEPLOY_DEFAULTS.numCoresPerVcpu,
+          memoryMib: memory,
+          diskSizeMib: disk * 1024,
+          guestCustomization: {
+            hostname: trimmedName,
+            username: username.trim(),
+            ...(authMethod === "password" ? { password } : { sshAuthorizedKey: sshKey.trim() }),
+          },
+        };
     try {
       const response = await apiPost<CreateVmResponse>("/nutanix/vms", body);
       const taskUuid = response.taskUuid ?? response.task_uuid;
@@ -210,6 +232,22 @@ export default function DeployVmModal({ templateName, artifactReference, onClose
           </div>
         ) : (
           <form className="template-modal__body" onSubmit={handleSubmit}>
+            {isoMode ? (
+              <div className="field">
+                <label>ISO d'installation (base du template)</label>
+                {isoImage ? (
+                  <p className="template-modal__resolved cell-mono" title={isoImage.uuid}>
+                    {isoImage.name}
+                  </p>
+                ) : (
+                  <p className="template-modal__resolved cell-mono">{isoImageUuid}</p>
+                )}
+                <span className="template-modal__hint">
+                  La VM démarrera sur cet ISO avec un disque système vide — l'installation de l'OS se fera à la main via la
+                  console VNC après la création.
+                </span>
+              </div>
+            ) : (
             <div className="field">
               <label>Image (artifact du dernier build)</label>
               {imagesStatus === "unavailable" && (
@@ -249,6 +287,7 @@ export default function DeployVmModal({ templateName, artifactReference, onClose
                 <p className="template-modal__hint">Chargement du catalogue d'images…</p>
               )}
             </div>
+            )}
 
             <div className="field">
               <label htmlFor="deploy-vm-name">Nom de la VM / hostname</label>
@@ -270,6 +309,15 @@ export default function DeployVmModal({ templateName, artifactReference, onClose
               )}
             </div>
 
+            {isoMode && (
+              <p className="template-modal__hint">
+                Pas de compte ni de cloud-init à renseigner : l'OS n'est pas encore installé, tout se configurera pendant
+                l'installation manuelle via la console VNC.
+              </p>
+            )}
+
+            {!isoMode && (
+              <>
             <div className="field">
               <label htmlFor="deploy-vm-username">Compte à créer — utilisateur</label>
               <input
@@ -329,6 +377,8 @@ export default function DeployVmModal({ templateName, artifactReference, onClose
                 />
               </div>
             )}
+              </>
+            )}
 
             <div className="field">
               <label htmlFor="deploy-vm-subnet">Subnet / VLAN</label>
@@ -346,9 +396,26 @@ export default function DeployVmModal({ templateName, artifactReference, onClose
               )}
             </div>
 
+            {isoMode && (
+              <div className="field">
+                <label htmlFor="deploy-vm-disk-iso">Taille du disque système (Gio) — requis</label>
+                <input
+                  id="deploy-vm-disk-iso"
+                  type="number"
+                  min={1}
+                  value={diskGib}
+                  onChange={(e) => setDiskGib(e.target.value)}
+                  disabled={busy}
+                  required
+                />
+                <span className="template-modal__hint">Disque vide sur lequel l'OS sera installé depuis l'ISO.</span>
+              </div>
+            )}
+
             <div className="field">
               <button type="button" className="template-modal__resources-toggle" onClick={() => setShowResources((v) => !v)}>
-                Ressources : {numVcpus} vCPU · {memoryMib} Mio RAM · disque {diskGib} Gio — {showResources ? "replier" : "ajuster"}
+                Ressources : {numVcpus} vCPU · {memoryMib} Mio RAM{isoMode ? "" : ` · disque ${diskGib} Gio`} —{" "}
+                {showResources ? "replier" : "ajuster"}
               </button>
               {showResources && (
                 <div className="template-modal__resources">
@@ -375,17 +442,19 @@ export default function DeployVmModal({ templateName, artifactReference, onClose
                       disabled={busy}
                     />
                   </label>
-                  <label htmlFor="deploy-vm-disk">
-                    Disque (Gio)
-                    <input
-                      id="deploy-vm-disk"
-                      type="number"
-                      min={1}
-                      value={diskGib}
-                      onChange={(e) => setDiskGib(e.target.value)}
-                      disabled={busy}
-                    />
-                  </label>
+                  {!isoMode && (
+                    <label htmlFor="deploy-vm-disk">
+                      Disque (Gio)
+                      <input
+                        id="deploy-vm-disk"
+                        type="number"
+                        min={1}
+                        value={diskGib}
+                        onChange={(e) => setDiskGib(e.target.value)}
+                        disabled={busy}
+                      />
+                    </label>
+                  )}
                 </div>
               )}
               {!resourcesValid && <span className="template-modal__field-error">Valeurs de ressources invalides.</span>}

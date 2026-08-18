@@ -622,6 +622,8 @@ function imageTemplateSubtitle(template: ImageTemplate): string {
       return `Conteneur ${template.base.image}`;
     case "mkosi":
       return `OS mkosi ${template.base.distro} ${template.base.release}`;
+    case "iso":
+      return "ISO Prism (installation manuelle)";
   }
 }
 

@@ -5,6 +5,8 @@
 // GET    /api/templates/presets          — recettes pré-remplies (simples valeurs de départ).
 // GET    /api/templates/artifact-sources — templates à artefact exploitable (picker frontend).
 // GET    /api/templates/:id              — détail.
+// PUT    /api/templates/:id              — { name?, base?, steps? } : met à jour la recette ET
+//                                          régénère les fichiers du workspace (409 si build en cours).
 // DELETE /api/templates/:id              — supprime le template ET son workspace IaC.
 // POST   /api/templates/:id/build        — lance le build réel via services/iac/runner.ts.
 // GET    /api/templates/:id/builds       — historique des runs du workspace du template.
@@ -21,8 +23,11 @@ import {
   MkosiUnavailableError,
   NutanixNotConfiguredError,
   TEMPLATE_PRESETS,
+  TemplateBuildInProgressError,
   TemplateNotFoundError,
   TemplateValidationError,
+  updateTemplate,
+  validateTemplate,
 } from "../services/templates.js";
 import type { TemplateBase, TemplateStep } from "../types.js";
 
@@ -81,6 +86,37 @@ export default async function templatesRoutes(fastify: FastifyInstance): Promise
     return reply.send(template);
   });
 
+  fastify.put<{ Params: { id: string }; Body: CreateTemplateBody }>("/api/templates/:id", async (request, reply) => {
+    const { name, base, steps } = request.body ?? {};
+    if (name !== undefined && (typeof name !== "string" || !name.trim())) {
+      return reply.code(400).send({ error: "name must be a non-empty string" });
+    }
+    if (base !== undefined && (typeof base !== "object" || base === null || typeof (base as { type?: unknown }).type !== "string")) {
+      return reply.code(400).send({ error: "base must be an object ({ type, ... })" });
+    }
+    if (steps !== undefined && !isRecordArray(steps)) {
+      return reply.code(400).send({ error: "steps must be an array of step objects" });
+    }
+    try {
+      const template = await updateTemplate(
+        request.params.id,
+        {
+          ...(name !== undefined ? { name } : {}),
+          ...(base !== undefined ? { base: base as TemplateBase } : {}),
+          ...(steps !== undefined ? { steps: steps as TemplateStep[] } : {}),
+        },
+        request.authSession!.username,
+      );
+      return reply.send(template);
+    } catch (err) {
+      if (err instanceof TemplateNotFoundError) return reply.code(404).send({ error: err.message });
+      if (err instanceof TemplateValidationError) return reply.code(400).send({ error: err.message });
+      if (err instanceof TemplateBuildInProgressError) return reply.code(409).send({ error: err.message });
+      if (err instanceof MkosiUnavailableError) return reply.code(409).send({ error: err.message });
+      throw err;
+    }
+  });
+
   fastify.delete<{ Params: { id: string } }>("/api/templates/:id", async (request, reply) => {
     try {
       await deleteTemplate(request.params.id);
@@ -107,6 +143,16 @@ export default async function templatesRoutes(fastify: FastifyInstance): Promise
   fastify.get<{ Params: { id: string } }>("/api/templates/:id/builds", async (request, reply) => {
     try {
       return reply.send(await listTemplateBuilds(request.params.id));
+    } catch (err) {
+      if (err instanceof TemplateNotFoundError) return reply.code(404).send({ error: err.message });
+      throw err;
+    }
+  });
+
+  // Vérification réelle sans build (sh -n + packer validate factice) — voir services/templates.ts.
+  fastify.post<{ Params: { id: string } }>("/api/templates/:id/validate", async (request, reply) => {
+    try {
+      return reply.send(await validateTemplate(request.params.id));
     } catch (err) {
       if (err instanceof TemplateNotFoundError) return reply.code(404).send({ error: err.message });
       throw err;

@@ -13,6 +13,7 @@
  */
 
 import { request as httpsRequest } from "node:https";
+import type { Readable } from "node:stream";
 import { URL } from "node:url";
 import { config } from "../config.js";
 import { getEffectiveNutanixConfig } from "./setupStore.js";
@@ -1452,7 +1453,11 @@ export interface NutanixGuestCustomizationInput {
 
 export interface NutanixCreateVmInput {
   name: string;
-  imageUuid: string;
+  /** Variant "image disque" : clone du disque image — exclusif de isoImageUuid. */
+  imageUuid?: string;
+  /** Variant "ISO" : disque SCSI vide (diskSizeMib REQUIS) + CDROM branché sur l'ISO,
+   * boot CDROM puis DISK — l'OS s'installe ensuite via la console VNC. */
+  isoImageUuid?: string;
   subnetUuid: string;
   numVcpus: number;
   numCoresPerVcpu?: number;
@@ -1511,10 +1516,16 @@ function buildCloudInitUserData(gc: NutanixGuestCustomizationInput): string {
  * PLUSIEURS clusters existent (le choix de cluster n'est pas dans le contrat de cette mission).
  */
 export async function createNutanixVm(input: NutanixCreateVmInput): Promise<{ ok: true; name: string; vmUuid?: string; taskUuid?: string }> {
-  const { name, imageUuid, subnetUuid, numVcpus, memoryMib, diskSizeMib } = input;
+  const { name, imageUuid, isoImageUuid, subnetUuid, numVcpus, memoryMib, diskSizeMib } = input;
   const numCoresPerVcpu = input.numCoresPerVcpu ?? 1;
   if (!name.trim() || name.length > 80 || CONTROL_CHARS.test(name)) {
     throw new NutanixActionError("name must be a non-empty string of at most 80 characters without control characters", 400);
+  }
+  if ((imageUuid === undefined) === (isoImageUuid === undefined)) {
+    throw new NutanixActionError("exactly one of imageUuid (disk image clone) or isoImageUuid (empty disk + CDROM boot) is required", 400);
+  }
+  if (isoImageUuid !== undefined && diskSizeMib === undefined) {
+    throw new NutanixActionError("diskSizeMib is required with isoImageUuid (size of the empty disk the OS will be installed on)", 400);
   }
   if (!Number.isInteger(numVcpus) || numVcpus < 1 || numVcpus > NUTANIX_MAX_VCPUS) {
     throw new NutanixActionError(`Invalid numVcpus ${numVcpus} — must be an integer between 1 and ${NUTANIX_MAX_VCPUS}`, 400);
@@ -1545,8 +1556,16 @@ export async function createNutanixVm(input: NutanixCreateVmInput): Promise<{ ok
   if (!subnets.get(subnetUuid)) {
     throw new NutanixActionError(`Subnet "${subnetUuid}" not found on Prism Central (or subnets list temporarily unavailable)`, 404);
   }
-  if (!images.some((i) => i.uuid === imageUuid)) {
-    throw new NutanixActionError(`Image "${imageUuid}" not found on Prism Central (or images list temporarily unavailable)`, 404);
+  const wantedImageUuid = imageUuid ?? isoImageUuid!;
+  const catalogImage = images.find((i) => i.uuid === wantedImageUuid);
+  if (!catalogImage) {
+    throw new NutanixActionError(`Image "${wantedImageUuid}" not found on Prism Central (or images list temporarily unavailable)`, 404);
+  }
+  if (isoImageUuid !== undefined && catalogImage.imageType !== undefined && catalogImage.imageType !== "ISO_IMAGE") {
+    throw new NutanixActionError(
+      `Image "${catalogImage.name}" is ${catalogImage.imageType}, not an ISO_IMAGE — use imageUuid to clone a disk image instead`,
+      400,
+    );
   }
   if (clusters.length > 1) {
     throw new NutanixActionError(
@@ -1561,6 +1580,26 @@ export async function createNutanixVm(input: NutanixCreateVmInput): Promise<{ ok
 
   const userData = input.guestCustomization ? buildCloudInitUserData(input.guestCustomization) : undefined;
   const userDataB64 = userData !== undefined ? Buffer.from(userData, "utf-8").toString("base64") : undefined;
+  // Variant ISO : disque SCSI VIDE (l'OS s'y installera) + CDROM sur l'ISO, boot CDROM puis DISK.
+  const diskList =
+    isoImageUuid !== undefined
+      ? [
+          {
+            device_properties: { device_type: "DISK", disk_address: { adapter_type: "SCSI", device_index: 0 } },
+            disk_size_mib: diskSizeMib!,
+          },
+          {
+            device_properties: { device_type: "CDROM", disk_address: { adapter_type: "IDE", device_index: 0 } },
+            data_source_reference: { kind: "image", uuid: isoImageUuid },
+          },
+        ]
+      : [
+          {
+            device_properties: { device_type: "DISK", disk_address: { adapter_type: "SCSI", device_index: 0 } },
+            data_source_reference: { kind: "image", uuid: imageUuid! },
+            ...(diskSizeMib !== undefined ? { disk_size_mib: diskSizeMib } : {}),
+          },
+        ];
   const body = {
     api_version: "3.1",
     metadata: { kind: "vm" },
@@ -1572,14 +1611,9 @@ export async function createNutanixVm(input: NutanixCreateVmInput): Promise<{ ok
         num_sockets: numVcpus,
         num_vcpus_per_socket: numCoresPerVcpu,
         memory_size_mib: memoryMib,
-        disk_list: [
-          {
-            device_properties: { device_type: "DISK", disk_address: { adapter_type: "SCSI", device_index: 0 } },
-            data_source_reference: { kind: "image", uuid: imageUuid },
-            ...(diskSizeMib !== undefined ? { disk_size_mib: diskSizeMib } : {}),
-          },
-        ],
+        disk_list: diskList,
         nic_list: [{ nic_type: "NORMAL_NIC", vlan_mode: "ACCESS", subnet_reference: { kind: "subnet", uuid: subnetUuid }, is_connected: true }],
+        ...(isoImageUuid !== undefined ? { boot_config: { boot_device_order_list: ["CDROM", "DISK"] } } : {}),
         ...(userDataB64 !== undefined ? { guest_customization: { cloud_init: { user_data: userDataB64 } } } : {}),
       },
     },
@@ -1645,4 +1679,119 @@ export async function getNutanixTask(uuid: string): Promise<NutanixTaskStatus> {
     status: result.data.status ?? "UNKNOWN",
     ...(typeof result.data.percentage_complete === "number" ? { percentageComplete: result.data.percentage_complete } : {}),
   };
+}
+
+// ============================================================================================
+// Upload direct d'un fichier image (ISO/qcow2/img) vers le catalogue — POST /api/nutanix/images/
+// upload (routes/nutanix.ts). Mécanisme v3 documenté par Nutanix : POST /images SANS source_uri
+// (l'entité est créée vide), puis PUT /images/{uuid}/file avec le binaire en corps (Content-Type
+// application/octet-stream). Ces mutations n'ont JAMAIS été exercées contre l'instance réelle
+// (interdiction absolue) : formes exercées uniquement contre le mock des tests. Aucun repli v2.0
+// (jamais vérifié) : un 405 REQUEST_NOT_SUPPORTED remonte en 502 honnête, comme createNutanixImage.
+// ============================================================================================
+
+export type NutanixUploadImageType = "ISO_IMAGE" | "DISK_IMAGE";
+
+/** PUT binaire STREAMÉ (pipe direct multipart -> Prism, backpressure respectée) — jamais le
+ * fichier entier en mémoire. Timeout = inactivité socket (se réarme à chaque chunk). */
+function nutanixPutBinaryStream(
+  effective: SetupNutanixConfig,
+  path: string,
+  stream: Readable,
+): Promise<{ status: number; raw: string }> {
+  const target = new URL(path, normalizedBaseUrl(effective.prismCentralUrl));
+  const auth = Buffer.from(`${effective.username}:${effective.password}`).toString("base64");
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(
+      target,
+      {
+        method: "PUT",
+        headers: { Accept: "application/json", Authorization: `Basic ${auth}`, "Content-Type": "application/octet-stream" },
+        rejectUnauthorized: config.nutanix.tlsRejectUnauthorized,
+        timeout: config.nutanix.requestTimeoutMs,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, raw: Buffer.concat(chunks).toString("utf-8") }));
+      },
+    );
+    req.on("timeout", () => req.destroy(new Error(`Nutanix image upload to ${path} timed out (no socket activity for ${config.nutanix.requestTimeoutMs}ms)`)));
+    req.on("error", (err) => reject(err));
+    stream.on("error", (err: Error) => req.destroy(err));
+    stream.pipe(req);
+  });
+}
+
+/** Suppression best-effort d'une image (nettoyage d'un upload échoué/tronqué) — jamais d'erreur
+ * levée : l'échec d'origine reste le diagnostic principal. */
+export async function deleteNutanixImageBestEffort(uuid: string): Promise<void> {
+  const effective = await loadNutanixConfig();
+  if (!effective) return;
+  await nutanixRequest<unknown>(effective.prismCentralUrl, "DELETE", `/api/nutanix/v3/images/${uuid}`, effective.username, effective.password).catch(
+    () => undefined,
+  );
+}
+
+/**
+ * Crée l'entité image (POST /images sans source_uri) puis téléverse le binaire en streaming
+ * (PUT /images/{uuid}/file). Si le PUT échoue, l'entité vide est supprimée (best-effort) et
+ * l'erreur remonte — jamais une image fantôme laissée silencieusement dans le catalogue.
+ */
+export async function uploadNutanixImage(opts: {
+  name: string;
+  imageType: NutanixUploadImageType;
+  stream: Readable;
+}): Promise<{ ok: true; name: string; uuid: string; taskUuid?: string }> {
+  const { name, imageType, stream } = opts;
+  if (!name.trim() || name.length > 80 || CONTROL_CHARS.test(name)) {
+    throw new NutanixActionError("name must be a non-empty string of at most 80 characters without control characters", 400);
+  }
+  const effective = await loadNutanixConfig();
+  if (!effective) {
+    throw new NutanixActionError("Nutanix is not configured — configure Prism Central before uploading an image", 400);
+  }
+
+  const createBody = { api_version: "3.1", metadata: { kind: "image" }, spec: { name, resources: { image_type: imageType } } };
+  const created = await nutanixRequest<NutanixCreateResponse>(
+    effective.prismCentralUrl,
+    "POST",
+    "/api/nutanix/v3/images",
+    effective.username,
+    effective.password,
+    createBody,
+  );
+  if (created.status === 405 && created.raw.includes("REQUEST_NOT_SUPPORTED")) {
+    throw new NutanixActionError(
+      `Prism Central refused v3 image creation for "${name}" (405 REQUEST_NOT_SUPPORTED — Prism Element managed). No v2.0 fallback is implemented: the v2.0 image upload form was never verified on this instance, deliberately not guessed.`,
+      502,
+    );
+  }
+  const uuid = created.data?.metadata?.uuid;
+  if (created.status < 200 || created.status >= 300 || !uuid) {
+    throw new NutanixActionError(
+      `Prism Central refused image creation for "${name}" (status ${created.status}): ${sanitizedPrismErrorMessage(created.raw, [])}`,
+      502,
+    );
+  }
+
+  let put: { status: number; raw: string };
+  try {
+    put = await nutanixPutBinaryStream(effective, `/api/nutanix/v3/images/${uuid}/file`, stream);
+  } catch (err) {
+    await deleteNutanixImageBestEffort(uuid);
+    throw new NutanixActionError(
+      `Image file upload for "${name}" failed mid-stream: ${err instanceof Error ? err.message : String(err)} (empty image entity removed)`,
+      502,
+    );
+  }
+  if (put.status < 200 || put.status >= 300) {
+    await deleteNutanixImageBestEffort(uuid);
+    throw new NutanixActionError(
+      `Prism Central refused the image file upload for "${name}" (status ${put.status}): ${sanitizedPrismErrorMessage(put.raw, [])} (empty image entity removed)`,
+      502,
+    );
+  }
+  const taskUuid = created.data?.status?.execution_context?.task_uuid;
+  return { ok: true, name, uuid, ...(taskUuid ? { taskUuid } : {}) };
 }

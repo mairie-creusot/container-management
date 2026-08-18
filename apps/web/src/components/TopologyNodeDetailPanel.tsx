@@ -81,11 +81,15 @@ import { deleteNutanixVm, runNutanixVmAction, type NutanixVmLifecycleAction } fr
 // panneau IaC ci-dessus pour son workspace de build (mission : "réutilise le panneau IaC existant").
 import { buildTemplate, fetchTemplates } from "@/features/templates/templatesSlice";
 import DeployVmModal from "@/features/templates/DeployVmModal";
+import RecipeVerification from "@/features/templates/RecipeVerification";
+import CodeEditor, { languageForPath } from "@/components/CodeEditor";
 import {
   ARTIFACT_TYPE_LABEL,
+  ISO_STEPS_DISABLED_MESSAGE,
   STEP_TYPE_LABEL,
   TEMPLATE_STATUS_LABEL,
   TEMPLATE_STATUS_SEMANTIC,
+  baseIsBuildable,
   recipeSummary,
   stepSummary,
   templateBaseLabel,
@@ -409,15 +413,17 @@ function IacWorkspacePanel({
       )}
       {openFilePath && (
         <>
-          <textarea
-            className="iac-editor"
+          <CodeEditor
+            className="code-editor--tall"
             value={openFileContent}
-            onChange={(e) => dispatch(setOpenFileContent(e.target.value))}
-            spellCheck={false}
-            disabled={!operate}
+            onChange={(content) => dispatch(setOpenFileContent(content))}
+            language={languageForPath(openFilePath)}
+            readOnly={!operate}
+            onSave={operate ? handleSave : undefined}
+            ariaLabel={`Contenu de ${openFilePath}`}
           />
           {operate && (
-            <button type="button" className="btn btn-primary btn-sm" onClick={handleSave}>
+            <button type="button" className="btn btn-primary btn-sm" onClick={handleSave} title="Raccourci : Ctrl+S / Cmd+S dans l'éditeur">
               Enregistrer {openFilePath}
             </button>
           )}
@@ -489,6 +495,8 @@ function ImageTemplatePanel({ node, operate, onClose }: { node: TopologyNode; op
   const artifact = template?.lastBuild?.artifact ?? null;
   const artifactType = artifact?.type ?? node.templateArtifactType;
   const artifactReference = artifact?.reference ?? node.templateArtifactReference;
+  // Base ISO : jamais de bouton Construire (400 serveur), déploiement direct depuis base.imageUuid.
+  const isoBase = template && template.base.type === "iso" ? template.base : null;
 
   async function handleBuild() {
     setBuildBusy(true);
@@ -517,7 +525,7 @@ function ImageTemplatePanel({ node, operate, onClose }: { node: TopologyNode; op
       {template && (
         <>
           <div className="inspector-section-title">Recette</div>
-          <p className="template-modal__hint">{recipeSummary(template.steps)}</p>
+          <p className="template-modal__hint">{isoBase ? ISO_STEPS_DISABLED_MESSAGE : recipeSummary(template.steps)}</p>
           {template.steps.length > 0 && (
             <div className="template-recipe-summary">
               {template.steps.map((s, i) => (
@@ -545,18 +553,20 @@ function ImageTemplatePanel({ node, operate, onClose }: { node: TopologyNode; op
 
       {operate && (
         <div className="iac-actions">
-          {status !== "building" && (
+          {status !== "building" && (template === null || baseIsBuildable(template.base)) && (
             <button type="button" className="btn btn-secondary btn-sm" onClick={() => void handleBuild()} disabled={buildBusy}>
               {buildBusy ? "…" : "Construire"}
             </button>
           )}
-          {artifactType === "nutanix-image" && artifactReference && (
+          {(isoBase !== null || (artifactType === "nutanix-image" && artifactReference)) && (
             <button type="button" className="btn btn-primary btn-sm" onClick={() => setDeployOpen(true)}>
               Déployer en VM…
             </button>
           )}
         </div>
       )}
+
+      {operate && template && baseIsBuildable(template.base) && <RecipeVerification templateId={templateId} />}
 
       {workspaceId ? (
         <>
@@ -583,9 +593,11 @@ function ImageTemplatePanel({ node, operate, onClose }: { node: TopologyNode; op
         )
       )}
 
-      {deployOpen && artifactReference && (
+      {deployOpen && isoBase !== null ? (
+        <DeployVmModal templateName={node.label} isoImageUuid={isoBase.imageUuid} onClose={() => setDeployOpen(false)} />
+      ) : deployOpen && artifactReference ? (
         <DeployVmModal templateName={node.label} artifactReference={artifactReference} onClose={() => setDeployOpen(false)} />
-      )}
+      ) : null}
     </>
   );
 }

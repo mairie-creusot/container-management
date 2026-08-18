@@ -3,6 +3,7 @@
 import type {
   ImageTemplateArtifactType,
   ImageTemplateStatus,
+  NutanixImageSummary,
   NutanixTaskStatus,
   TemplateBase,
   TemplateStep,
@@ -14,6 +15,7 @@ export const TEMPLATE_BASE_TYPE_LABEL: Record<TemplateBase["type"], string> = {
   "cloud-image": "VM cloud-image",
   container: "Conteneur",
   mkosi: "OS minimal (mkosi)",
+  iso: "ISO (installation manuelle)",
 };
 
 /** Suggestions de saisie — la distro/l'image restent LIBRES (cœur de la demande utilisateur). */
@@ -35,6 +37,7 @@ export const MKOSI_DEFAULT_RELEASE: Record<MkosiDistro, string> = {
 export function defaultBase(type: TemplateBase["type"]): TemplateBase {
   if (type === "cloud-image") return { type: "cloud-image", distro: "ubuntu", version: "24.04" };
   if (type === "container") return { type: "container", image: "debian:bookworm" };
+  if (type === "iso") return { type: "iso", imageUuid: "" };
   return { type: "mkosi", distro: "debian", release: MKOSI_DEFAULT_RELEASE.debian };
 }
 
@@ -42,14 +45,33 @@ export function defaultBase(type: TemplateBase["type"]): TemplateBase {
 export function templateBaseLabel(base: TemplateBase): string {
   if (base.type === "cloud-image") return `VM cloud-image ${base.distro} ${base.version}`.trim();
   if (base.type === "container") return `Conteneur ${base.image}`.trim();
+  if (base.type === "iso") return base.imageUuid === "" ? "ISO (à choisir)" : `ISO ${base.imageUuid}`;
   return `mkosi ${base.distro} ${base.release}`.trim();
 }
 
 /** Cible produite par la base — pilote uniquement des textes d'aide côté studio. */
 export function templateBaseTarget(base: TemplateBase): "vm" | "container" | "raw-image" {
-  if (base.type === "cloud-image") return "vm";
+  if (base.type === "cloud-image" || base.type === "iso") return "vm";
   if (base.type === "container") return "container";
   return "raw-image";
+}
+
+/** Une base ISO ne se construit pas : le template est "ready" dès la création (POST .../build → 400). */
+export function baseIsBuildable(base: TemplateBase): boolean {
+  return base.type !== "iso";
+}
+
+/** Une base ISO n'accepte aucune étape de provisioning — l'OS n'est pas encore installé. */
+export function baseSupportsSteps(base: TemplateBase): boolean {
+  return base.type !== "iso";
+}
+
+export const ISO_STEPS_DISABLED_MESSAGE =
+  "Une base ISO n'a pas d'étapes de provisioning : l'OS n'est pas encore installé — il s'installera à la main via la console VNC après le déploiement en VM.";
+
+/** ISO du catalogue Prism : imageType contenant "ISO" (casse ignorée) — jamais deviné sans type. */
+export function isIsoImage(image: NutanixImageSummary): boolean {
+  return (image.imageType ?? "").toUpperCase().includes("ISO");
 }
 
 // --- Étapes de recette -------------------------------------------------------------------------
@@ -174,6 +196,9 @@ export function baseError(base: TemplateBase): string | null {
   }
   if (base.type === "container") {
     return base.image.trim() === "" ? "Indiquez une image de base (ex : scratch, debian:bookworm)." : null;
+  }
+  if (base.type === "iso") {
+    return base.imageUuid === "" ? "Choisissez un ISO du catalogue Prism (ou importez-en un)." : null;
   }
   return base.release.trim() === "" ? "Indiquez une release (ex : bookworm, noble)." : null;
 }

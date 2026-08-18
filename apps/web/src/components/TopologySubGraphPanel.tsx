@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { ReactFlow, Background, MiniMap, SelectionMode, applyNodeChanges, type Node, type NodeChange } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useAppDispatch, useAppSelector } from "@/hooks";
@@ -14,6 +14,19 @@ import {
 } from "@/features/containers/containersSlice";
 import { removeVolume } from "@/features/volumes/volumesSlice";
 import { removeNetwork } from "@/features/networks/networksSlice";
+// Recette de template éditable dans le sous-graphe (18/08/2026) — thunks réels + logique pure du
+// studio réutilisée telle quelle (libellés/validation/réordonnancement, jamais dupliqués).
+import { fetchArtifactSources, fetchTemplates, updateTemplate, type StudioListStatus } from "@/features/templates/templatesSlice";
+import {
+  ISO_STEPS_DISABLED_MESSAGE,
+  STEP_TYPES,
+  STEP_TYPE_LABEL,
+  baseSupportsSteps,
+  createStep,
+  moveStep,
+  parsePackagesInput,
+  stepError,
+} from "@/features/templates/templateCatalog";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
 import { createTopologyGroup, fetchTopology } from "@/features/topology/topologySlice";
 import { fetchImageHistory, fetchImages } from "@/features/images/imagesSlice";
@@ -29,6 +42,7 @@ import {
   ACTION_LABEL,
   GroupLabelPopover,
   attachmentToTopologyNode,
+  buildTemplateRecipeGraph,
   buildTopologyEdges,
   deriveGroupPorts,
   edgeTypes,
@@ -39,14 +53,19 @@ import {
   nodeTypes,
   radialPositions,
   resolveGroupMemberNodeIds,
+  templateRecipeNodeTypes,
+  useDismiss,
   type GraphNodeCallbacks,
   type GroupNodeData,
+  type TemplateRecipeNodeData,
 } from "@/components/topologyGraphShared";
 import type {
   ContainerProcessDetail,
   ContainerProcessInspection,
   FileHexdump,
   PackageFilesResult,
+  TemplateArtifactSource,
+  TemplateStep,
   Topology,
   TopologyEdge,
   TopologyGroup,
@@ -96,7 +115,18 @@ const PROCESS_POLL_INTERVAL_MS = 2500;
  * suspect, jamais un téléchargement de fichier entier. */
 const HEXDUMP_WINDOW_BYTES = 512;
 
-type ViewMode = "shell" | "logs" | "dependencies" | "interior";
+type ViewMode = "shell" | "logs" | "dependencies" | "interior" | "recipe";
+
+/** Menu contextuel de la vue "recette" — une cible par rôle de nœud synthétique + le canevas vide. */
+type RecipeMenuTarget =
+  | { kind: "pane" }
+  | { kind: "base" }
+  | { kind: "step"; index: number }
+  | { kind: "source"; templateId: string };
+
+type RecipeStepPopoverState =
+  | { mode: "create"; stepType: TemplateStep["type"]; x: number; y: number }
+  | { mode: "edit"; index: number; x: number; y: number };
 
 /**
  * Panneau repliable générique de la vue "Composition interne" (fusion du 13/08/2026) — état
@@ -234,6 +264,12 @@ export default function TopologySubGraphPanel({
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number } | null>(null);
 
   const [viewMode, setViewMode] = useState<ViewMode>("dependencies");
+  // --- Vue "recette" d'un template d'image (18/08/2026) — voir le bloc de rendu plus bas. ---
+  const [recipeMenu, setRecipeMenu] = useState<{ x: number; y: number; target: RecipeMenuTarget } | null>(null);
+  const [recipeStepPopover, setRecipeStepPopover] = useState<RecipeStepPopoverState | null>(null);
+  const templates = useAppSelector((s) => s.templates.items);
+  const artifactSources = useAppSelector((s) => s.templates.artifactSources);
+  const artifactSourcesStatus = useAppSelector((s) => s.templates.artifactSourcesStatus);
   const session = useAppSelector((s) => s.auth.session);
   const operate = canOperate(session);
   // Hexdump (GET .../files/hexdump) est ADMIN UNIQUEMENT côté serveur — bouton absent plutôt
@@ -349,7 +385,12 @@ export default function TopologySubGraphPanel({
   // après l'avoir fait. Seul un changement RÉEL de racine (nouvelle navigation) doit rejouer ce
   // calcul — `nodesById` reste lu à l'intérieur (closure), jamais dans les dépendances.
   useEffect(() => {
-    setViewMode(currentRootId && nodesById.get(currentRootId)?.kind === "container" ? "shell" : "dependencies");
+    const rootKind = currentRootId ? nodesById.get(currentRootId)?.kind : undefined;
+    // Un template s'ouvre sur sa RECETTE (la vision "appliance dépliée") ; un conteneur sur son
+    // shell ; tout le reste sur les dépendances — même logique de "destination la plus utile".
+    setViewMode(rootKind === "container" ? "shell" : rootKind === "image-template" ? "recipe" : "dependencies");
+    setRecipeMenu(null);
+    setRecipeStepPopover(null);
     // Nouvelle racine -> les inspecteurs ponctuels de l'ancienne "Composition interne" (process
     // inspecté, paquet, hexdump) n'ont plus de sens pour CE conteneur précis, jamais reportés
     // silencieusement sur le nouveau (voir leurs effets de fetch plus bas, gardés par ces états).
@@ -539,6 +580,160 @@ export default function TopologySubGraphPanel({
 
   // --- Vue "Composition interne" (conteneurs uniquement, fusion du 13/08/2026) -------------------
   const isContainerRoot = rootNode?.kind === "container";
+
+  // --- Vue "recette" (nœuds "image-template" uniquement, 18/08/2026) ----------------------------
+  // La recette réelle (base + steps) vient de state.templates.items — la projection topologie ne
+  // porte que des champs résumés (templateStatus/templateKind), jamais steps[].
+  const isTemplateRoot = rootNode?.kind === "image-template";
+  const template = isTemplateRoot ? templates.find((t) => t.id === rawRootId) ?? null : null;
+  const templateIsIso = !!template && !baseSupportsSteps(template.base);
+  /** Édition réservée operator+ et aux bases non-ISO — le backend refuse de toute façon (409/400),
+   * mais aucune entrée de menu mutante n'est proposée à qui ne peut pas s'en servir. */
+  const recipeEditable = !!template && operate && !templateIsIso;
+
+  // Recharge templates + sources d'artefacts en entrant dans la vue recette : la liste du graphe
+  // principal peut dater (poll uniquement pendant un build), et le popover "Artefact" a besoin des
+  // sources réelles (GET /api/templates/artifact-sources, 404 = état "unavailable" explicite).
+  useEffect(() => {
+    if (viewMode !== "recipe" || !isTemplateRoot) return;
+    dispatch(fetchTemplates());
+    dispatch(fetchArtifactSources());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dispatch, viewMode, currentRootId]);
+
+  const templateNameById = useMemo(() => new Map(templates.map((t) => [t.id, t.name])), [templates]);
+  /** Pipeline synthétique base -> étapes (+ sources d'artefact) — pur calcul dérivé, positions
+   * recalculées à chaque changement de recette (pipeline fixe, pas un canevas à disposition libre). */
+  const recipeGraph = useMemo(
+    () => (template ? buildTemplateRecipeGraph(template, { reducedMotion, templateNameById }) : { nodes: [], edges: [] }),
+    [template, reducedMotion, templateNameById],
+  );
+
+  /** UNE seule porte de mutation : PUT /api/templates/:id { steps } (updateTemplate) puis refetch.
+   * Rejet (404 backend absent/supprimé, 409 build en cours) : toast déjà poussé par
+   * errorNotificationMiddleware, état local inchangé — le graphe continue d'afficher la recette
+   * réelle du store, jamais un état optimiste. */
+  async function applyRecipeSteps(nextSteps: TemplateStep[]): Promise<{ ok: boolean; error?: string }> {
+    if (!template) return { ok: false, error: "Recette introuvable." };
+    const result = await dispatch(updateTemplate({ id: template.id, steps: nextSteps }));
+    if (updateTemplate.fulfilled.match(result)) {
+      dispatch(fetchTemplates());
+      return { ok: true };
+    }
+    return { ok: false, error: result.payload ?? "Échec de la mise à jour de la recette." };
+  }
+
+  async function handleRecipeStepDelete(index: number) {
+    if (!template) return;
+    const step = template.steps[index];
+    if (!step) return;
+    const ok = await confirm({
+      title: "Supprimer l'étape",
+      description: `Supprimer l'étape ${index + 1} (${STEP_TYPE_LABEL[step.type]}) de la recette de « ${template.name} » ?`,
+      confirmLabel: "Supprimer",
+      variant: "danger",
+    });
+    if (!ok) return;
+    await applyRecipeSteps(template.steps.filter((_, i) => i !== index));
+  }
+
+  /** Réordonnancement par Monter/Descendre (templateCatalog.ts#moveStep, même logique que le
+   * studio) — choisi plutôt que le re-câblage de la chaîne au fil : un échange d'indices est un
+   * geste atomique (1 PUT, aucun état intermédiaire "chaîne coupée" à valider/annuler), le
+   * re-câblage React Flow aurait exigé de tolérer un pipeline temporairement incohérent. */
+  async function handleRecipeStepMove(index: number, delta: -1 | 1) {
+    if (!template) return;
+    const next = moveStep(template.steps, index, delta);
+    if (next === template.steps) return;
+    await applyRecipeSteps(next);
+  }
+
+  function handleRecipeNodeContextMenu(event: React.MouseEvent, node: Node) {
+    event.preventDefault();
+    const d = node.data as unknown as TemplateRecipeNodeData;
+    if (d.role === "step" && typeof d.stepIndex === "number") {
+      setRecipeMenu({ x: event.clientX, y: event.clientY, target: { kind: "step", index: d.stepIndex } });
+    } else if (d.role === "artifact-source" && d.sourceTemplateId) {
+      setRecipeMenu({ x: event.clientX, y: event.clientY, target: { kind: "source", templateId: d.sourceTemplateId } });
+    } else if (d.role === "base") {
+      setRecipeMenu({ x: event.clientX, y: event.clientY, target: { kind: "base" } });
+    }
+  }
+
+  function handleRecipePaneContextMenu(event: MouseEvent | React.MouseEvent) {
+    event.preventDefault();
+    const mouseEvent = event as MouseEvent;
+    setRecipeMenu({ x: mouseEvent.clientX, y: mouseEvent.clientY, target: { kind: "pane" } });
+  }
+
+  function handleRecipeNodeDoubleClick(event: React.MouseEvent, node: Node) {
+    const d = node.data as unknown as TemplateRecipeNodeData;
+    // Source d'artefact -> drill-down vers le VRAI nœud template producteur (déjà récursif).
+    if (d.role === "artifact-source" && d.sourceTemplateId && nodesById.has(`image-template:${d.sourceTemplateId}`)) {
+      drillInto(`image-template:${d.sourceTemplateId}`);
+      return;
+    }
+    if (d.role === "step" && typeof d.stepIndex === "number" && recipeEditable) {
+      setRecipeStepPopover({ mode: "edit", index: d.stepIndex, x: event.clientX, y: event.clientY });
+    }
+  }
+
+  function recipeMenuItems(menu: { x: number; y: number; target: RecipeMenuTarget }): ContextMenuItem[] {
+    const target = menu.target;
+    if (target.kind === "pane") {
+      if (!recipeEditable) {
+        return [
+          {
+            label: templateIsIso ? "Base ISO — aucune étape ajoutable (installation manuelle via console VNC)" : "Lecture seule",
+            disabled: true,
+            onClick: () => {},
+          },
+        ];
+      }
+      // Les 6 types du contrat (templateCatalog.ts#STEP_TYPES) — l'étape est ajoutée EN FIN de
+      // chaîne, Monter/Descendre couvrant ensuite le placement précis.
+      return STEP_TYPES.map((type) => ({
+        label: `Ajouter une étape — ${STEP_TYPE_LABEL[type]}`,
+        onClick: () => setRecipeStepPopover({ mode: "create", stepType: type, x: menu.x, y: menu.y }),
+      }));
+    }
+    if (target.kind === "base") {
+      // Base en LECTURE SEULE dans ce lot — info honnête au clic droit, l'édition reste au studio.
+      return [
+        {
+          label: templateIsIso
+            ? "Base ISO — installation manuelle via console VNC"
+            : "Base définie dans le studio — non modifiable depuis le sous-graphe",
+          disabled: true,
+          onClick: () => {},
+        },
+      ];
+    }
+    if (target.kind === "source") {
+      const items: ContextMenuItem[] = [];
+      const realNodeId = `image-template:${target.templateId}`;
+      if (nodesById.has(realNodeId)) {
+        items.push({ label: "Visualiser ce template", onClick: () => drillInto(realNodeId) });
+      }
+      items.push({ label: "Dépendance portée par l'étape « Artefact » qui la consomme", disabled: true, onClick: () => {} });
+      return items;
+    }
+    // target.kind === "step"
+    if (!recipeEditable) {
+      return [{ label: templateIsIso ? ISO_STEPS_DISABLED_MESSAGE : "Lecture seule", disabled: true, onClick: () => {} }];
+    }
+    const stepCount = template?.steps.length ?? 0;
+    return [
+      { label: "Modifier…", onClick: () => setRecipeStepPopover({ mode: "edit", index: target.index, x: menu.x, y: menu.y }) },
+      { label: "Monter (exécuter plus tôt)", disabled: target.index === 0, onClick: () => void handleRecipeStepMove(target.index, -1) },
+      {
+        label: "Descendre (exécuter plus tard)",
+        disabled: target.index >= stepCount - 1,
+        onClick: () => void handleRecipeStepMove(target.index, 1),
+      },
+      { label: "Supprimer", danger: true, onClick: () => void handleRecipeStepDelete(target.index) },
+    ];
+  }
 
   useEffect(() => {
     if (viewMode !== "interior" || !rootNode || rootNode.kind !== "container") return;
@@ -868,11 +1063,11 @@ export default function TopologySubGraphPanel({
     function handleKeyDown(event: KeyboardEvent) {
       // Un menu contextuel ouvert gère déjà sa propre touche Échap (ContextMenu.tsx) — éviter de
       // fermer le panneau ENTIER en même temps qu'un simple menu contextuel.
-      if (event.key === "Escape" && !nodeMenu) onRequestClose();
+      if (event.key === "Escape" && !nodeMenu && !recipeMenu && !recipeStepPopover) onRequestClose();
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [visible, nodeMenu, onRequestClose]);
+  }, [visible, nodeMenu, recipeMenu, recipeStepPopover, onRequestClose]);
 
   const breadcrumbLabels = [...stack, ...(currentRootId ? [currentRootId] : [])].map((id) => labelForId(id));
   // "Layer N" (groupes imbriqués, 13/08/2026) : N = position dans `stack` + 1, le tout premier
@@ -1142,6 +1337,28 @@ export default function TopologySubGraphPanel({
               </button>
             </div>
           )}
+          {isTemplateRoot && (
+            <div className="topology-subgraph-panel__mode-toggle" role="tablist" aria-label="Vue du sous-graphe">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewMode === "recipe"}
+                className={`topology-subgraph-panel__mode-btn${viewMode === "recipe" ? " is-active" : ""}`}
+                onClick={() => setViewMode("recipe")}
+              >
+                Recette
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewMode === "dependencies"}
+                className={`topology-subgraph-panel__mode-btn${viewMode === "dependencies" ? " is-active" : ""}`}
+                onClick={() => setViewMode("dependencies")}
+              >
+                Dépendances
+              </button>
+            </div>
+          )}
           {stack.length > 0 && (
             <button type="button" className="btn btn-ghost btn-sm" onClick={handleBack}>
               ← Retour
@@ -1169,6 +1386,53 @@ export default function TopologySubGraphPanel({
         <div className="topology-subgraph-panel__shell">
           <ContainerLogsBody containerId={rawRootId} containerName={rootNode.label} />
         </div>
+      )}
+
+      {viewMode === "recipe" && isTemplateRoot && (
+        <>
+          {!template && (
+            <div className="topology-subgraph-panel__note">
+              Recette indisponible — la liste des templates n'a pas (encore) pu être chargée (backend absent ou
+              template supprimé entre deux rafraîchissements).
+            </div>
+          )}
+          {template && templateIsIso && (
+            <div className="topology-subgraph-panel__note">
+              Installation manuelle via console VNC — {ISO_STEPS_DISABLED_MESSAGE}
+            </div>
+          )}
+          {template && !templateIsIso && template.steps.length === 0 && (
+            <div className="topology-subgraph-panel__note">
+              Recette vide (base nue){recipeEditable ? " — clic droit sur le canevas pour ajouter une première étape." : "."}
+            </div>
+          )}
+          {template && !templateIsIso && template.steps.length > 0 && recipeEditable && (
+            <div className="topology-subgraph-panel__note">
+              L'ordre gauche → droite est l'ordre réel d'exécution. Clic droit : canevas = ajouter une étape ·
+              étape = modifier / monter / descendre / supprimer.
+            </div>
+          )}
+          <div className="topology-subgraph-panel__graph">
+            <ReactFlow
+              key={`recipe-${currentRootId ?? "none"}`}
+              nodes={recipeGraph.nodes}
+              edges={recipeGraph.edges}
+              nodeTypes={templateRecipeNodeTypes}
+              edgeTypes={edgeTypes}
+              onNodeContextMenu={handleRecipeNodeContextMenu}
+              onNodeDoubleClick={handleRecipeNodeDoubleClick}
+              onPaneContextMenu={handleRecipePaneContextMenu}
+              nodesConnectable={false}
+              nodesDraggable={false}
+              deleteKeyCode={null}
+              fitView
+              proOptions={{ hideAttribution: true }}
+              minZoom={0.3}
+            >
+              <Background gap={20} size={1.6} color="var(--color-text-faint)" />
+            </ReactFlow>
+          </div>
+        </>
       )}
 
       {viewMode === "dependencies" && (
@@ -1571,6 +1835,40 @@ export default function TopologySubGraphPanel({
         <ContextMenu x={groupMenu.x} y={groupMenu.y} onClose={() => setGroupMenu(null)} items={groupMenuItems(groupMenu.group)} />
       )}
 
+      {recipeMenu && (
+        <ContextMenu x={recipeMenu.x} y={recipeMenu.y} onClose={() => setRecipeMenu(null)} items={recipeMenuItems(recipeMenu)} />
+      )}
+
+      {recipeStepPopover && template && (
+        <TemplateStepPopover
+          key={recipeStepPopover.mode === "edit" ? `edit-${recipeStepPopover.index}` : `create-${recipeStepPopover.stepType}`}
+          title={
+            recipeStepPopover.mode === "edit"
+              ? `Étape ${recipeStepPopover.index + 1} — ${STEP_TYPE_LABEL[template.steps[recipeStepPopover.index]?.type ?? "script"]}`
+              : `Ajouter — ${STEP_TYPE_LABEL[recipeStepPopover.stepType]}`
+          }
+          submitLabel={recipeStepPopover.mode === "edit" ? "Enregistrer" : "Ajouter"}
+          initialStep={
+            recipeStepPopover.mode === "edit"
+              ? template.steps[recipeStepPopover.index] ?? createStep("script")
+              : createStep(recipeStepPopover.stepType)
+          }
+          x={recipeStepPopover.x}
+          y={recipeStepPopover.y}
+          currentTemplateId={template.id}
+          artifactSources={artifactSources}
+          artifactSourcesStatus={artifactSourcesStatus}
+          onSubmit={async (step) => {
+            const nextSteps =
+              recipeStepPopover.mode === "edit"
+                ? template.steps.map((s, i) => (i === recipeStepPopover.index ? step : s))
+                : [...template.steps, step];
+            return applyRecipeSteps(nextSteps);
+          }}
+          onClose={() => setRecipeStepPopover(null)}
+        />
+      )}
+
       {selectionMenu && operate && (
         <ContextMenu
           x={selectionMenu.x}
@@ -1596,6 +1894,279 @@ export default function TopologySubGraphPanel({
           onClose={() => setGroupLabelPopover(null)}
         />
       )}
+    </div>
+  );
+}
+
+interface TemplateStepPopoverProps {
+  title: string;
+  submitLabel: string;
+  initialStep: TemplateStep;
+  x: number;
+  y: number;
+  currentTemplateId: string;
+  artifactSources: TemplateArtifactSource[];
+  artifactSourcesStatus: StudioListStatus;
+  onSubmit: (step: TemplateStep) => Promise<{ ok: boolean; error?: string }>;
+  onClose: () => void;
+}
+
+/**
+ * Popover d'ajout/édition d'UNE étape de recette — volontairement un mini-formulaire par type
+ * (mêmes champs/validations que le studio via templateCatalog.ts#stepError, jamais dupliquées),
+ * pas le studio complet. Même famille que GroupLabelPopover (useDismiss, .graph-popover).
+ */
+function TemplateStepPopover({
+  title,
+  submitLabel,
+  initialStep,
+  x,
+  y,
+  currentTemplateId,
+  artifactSources,
+  artifactSourcesStatus,
+  onSubmit,
+  onClose,
+}: TemplateStepPopoverProps) {
+  const { ref, style } = useDismiss(onClose, x, y);
+  const [step, setStep] = useState<TemplateStep>(initialStep);
+  // Saisie libre des paquets (espaces/virgules) — recomposée en string[] à la soumission.
+  const [packagesText, setPackagesText] = useState(initialStep.type === "packages" ? initialStep.packages.join(" ") : "");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Jamais soi-même comme source (le backend refuserait de toute façon un cycle direct).
+  const usableSources = artifactSources.filter((s) => s.templateId !== currentTemplateId);
+
+  async function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    const candidate: TemplateStep = step.type === "packages" ? { ...step, packages: parsePackagesInput(packagesText) } : step;
+    const validation = stepError(candidate);
+    if (validation) {
+      setError(validation);
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    const result = await onSubmit(candidate);
+    setBusy(false);
+    if (result.ok) onClose();
+    else setError(result.error ?? "Échec de la mise à jour de la recette.");
+  }
+
+  return (
+    <div className="graph-popover topology-recipe-popover" style={style} ref={ref}>
+      <div className="graph-popover__title">{title}</div>
+      <form onSubmit={handleSubmit}>
+        {step.type === "packages" && (
+          <div className="field">
+            <label htmlFor="recipe-step-packages">Paquets (séparés par espaces ou virgules)</label>
+            <input
+              id="recipe-step-packages"
+              type="text"
+              autoFocus
+              placeholder="nginx curl ca-certificates"
+              value={packagesText}
+              onChange={(e) => setPackagesText(e.target.value)}
+              disabled={busy}
+            />
+          </div>
+        )}
+
+        {step.type === "script" && (
+          <div className="field">
+            <label htmlFor="recipe-step-script">Script (exécuté tel quel dans l'image)</label>
+            <textarea
+              id="recipe-step-script"
+              className="topology-recipe-popover__textarea"
+              rows={6}
+              autoFocus
+              placeholder={"#!/bin/sh\napt-get update"}
+              value={step.content}
+              onChange={(e) => setStep({ ...step, content: e.target.value })}
+              disabled={busy}
+            />
+          </div>
+        )}
+
+        {step.type === "file" && (
+          <>
+            <div className="field">
+              <label htmlFor="recipe-step-file-path">Chemin absolu</label>
+              <input
+                id="recipe-step-file-path"
+                type="text"
+                autoFocus
+                placeholder="/etc/motd"
+                value={step.path}
+                onChange={(e) => setStep({ ...step, path: e.target.value })}
+                disabled={busy}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="recipe-step-file-mode">Mode (optionnel, ex : 644)</label>
+              <input
+                id="recipe-step-file-mode"
+                type="text"
+                placeholder="644"
+                value={step.mode ?? ""}
+                onChange={(e) => {
+                  const { mode: _mode, ...rest } = step;
+                  setStep(e.target.value === "" ? rest : { ...rest, mode: e.target.value });
+                }}
+                disabled={busy}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="recipe-step-file-content">Contenu</label>
+              <textarea
+                id="recipe-step-file-content"
+                className="topology-recipe-popover__textarea"
+                rows={5}
+                value={step.content}
+                onChange={(e) => setStep({ ...step, content: e.target.value })}
+                disabled={busy}
+              />
+            </div>
+          </>
+        )}
+
+        {step.type === "artifact" && (
+          <>
+            {usableSources.length === 0 && !step.templateId ? (
+              <p className="graph-popover__desc">
+                {artifactSourcesStatus === "unavailable"
+                  ? "Sources d'artefacts indisponibles (backend absent)."
+                  : artifactSourcesStatus === "error"
+                    ? "Impossible de charger les sources d'artefacts."
+                    : "Aucun autre template n'a d'artefact construit exploitable — construisez d'abord un template source."}
+              </p>
+            ) : (
+              <div className="field">
+                <label htmlFor="recipe-step-artifact-source">Artefact source</label>
+                <select
+                  id="recipe-step-artifact-source"
+                  value={step.templateId}
+                  onChange={(e) => setStep({ ...step, templateId: e.target.value })}
+                  disabled={busy}
+                >
+                  <option value="">— choisir —</option>
+                  {step.templateId && !usableSources.some((s) => s.templateId === step.templateId) && (
+                    <option value={step.templateId}>{step.templateId} (source actuelle)</option>
+                  )}
+                  {usableSources.map((s) => (
+                    <option key={s.templateId} value={s.templateId}>
+                      {s.name} — {s.artifactType}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            <div className="field">
+              <label htmlFor="recipe-step-artifact-dest">Chemin de destination</label>
+              <input
+                id="recipe-step-artifact-dest"
+                type="text"
+                placeholder="/opt/app.tar"
+                value={step.destPath}
+                onChange={(e) => setStep({ ...step, destPath: e.target.value })}
+                disabled={busy}
+              />
+            </div>
+            <label className="topology-recipe-popover__check">
+              <input
+                type="checkbox"
+                checked={!!step.dockerLoad}
+                onChange={(e) => {
+                  const { dockerLoad: _dockerLoad, ...rest } = step;
+                  setStep(e.target.checked ? { ...rest, dockerLoad: true } : rest);
+                }}
+                disabled={busy}
+              />
+              Charger dans Docker (docker load)
+            </label>
+          </>
+        )}
+
+        {step.type === "user" && (
+          <>
+            <div className="field">
+              <label htmlFor="recipe-step-user-name">Nom d'utilisateur (POSIX, minuscules)</label>
+              <input
+                id="recipe-step-user-name"
+                type="text"
+                autoFocus
+                placeholder="deploy"
+                value={step.username}
+                onChange={(e) => setStep({ ...step, username: e.target.value })}
+                disabled={busy}
+              />
+            </div>
+            <label className="topology-recipe-popover__check">
+              <input
+                type="checkbox"
+                checked={!!step.sudo}
+                onChange={(e) => {
+                  const { sudo: _sudo, ...rest } = step;
+                  setStep(e.target.checked ? { ...rest, sudo: true } : rest);
+                }}
+                disabled={busy}
+              />
+              Accès sudo
+            </label>
+            <div className="field">
+              <label htmlFor="recipe-step-user-key">Clé SSH autorisée (optionnel)</label>
+              <textarea
+                id="recipe-step-user-key"
+                className="topology-recipe-popover__textarea"
+                rows={2}
+                placeholder="ssh-ed25519 AAAA…"
+                value={step.sshAuthorizedKey ?? ""}
+                onChange={(e) => {
+                  const { sshAuthorizedKey: _key, ...rest } = step;
+                  setStep(e.target.value === "" ? rest : { ...rest, sshAuthorizedKey: e.target.value });
+                }}
+                disabled={busy}
+              />
+            </div>
+          </>
+        )}
+
+        {step.type === "service" && (
+          <>
+            <div className="field">
+              <label htmlFor="recipe-step-service-name">Nom du service (systemd)</label>
+              <input
+                id="recipe-step-service-name"
+                type="text"
+                autoFocus
+                placeholder="nginx"
+                value={step.name}
+                onChange={(e) => setStep({ ...step, name: e.target.value })}
+                disabled={busy}
+              />
+            </div>
+            <label className="topology-recipe-popover__check">
+              <input
+                type="checkbox"
+                checked={step.enable}
+                onChange={(e) => setStep({ ...step, enable: e.target.checked })}
+                disabled={busy}
+              />
+              Activer au démarrage
+            </label>
+          </>
+        )}
+
+        {error && <p className="graph-popover__error">{error}</p>}
+        <div className="graph-popover__actions">
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={busy}>
+            Annuler
+          </button>
+          <button type="submit" className="btn btn-primary btn-sm" disabled={busy}>
+            {busy ? "…" : submitLabel}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }

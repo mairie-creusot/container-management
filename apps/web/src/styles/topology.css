@@ -2458,6 +2458,96 @@
   text-overflow: ellipsis;
 }
 
+/* --- Sous-graphe "recette" d'un template d'image (18/08/2026) ---------------------------------
+   Nœuds SYNTHÉTIQUES (TemplateRecipeNode, topologyGraphShared.tsx) — même famille sobre que
+   .topology-process-node, teintée du cyan template (#22d3ee) pour la filiation visuelle avec la
+   carte image-template et les arêtes uses-artifact. */
+.topology-recipe-node {
+  width: 230px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  cursor: default;
+}
+
+.topology-recipe-node.is-selected {
+  border-color: #22d3ee;
+}
+
+/* Base = le noyau de départ : cadre plein cyan, légèrement plus affirmé que les étapes. */
+.topology-recipe-node--base {
+  border-color: rgba(34, 211, 238, 0.55);
+  background: rgba(34, 211, 238, 0.08);
+}
+
+/* Source d'artefact = un AUTRE template (même esthétique cyan que l'arête uses-artifact),
+   pointillé : ce n'est pas un maillon de la chaîne d'exécution, juste une provenance. */
+.topology-recipe-node--artifact-source {
+  border-style: dashed;
+  border-color: rgba(34, 211, 238, 0.45);
+}
+
+.topology-recipe-node__title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Numéro d'ordre RÉEL de l'étape (index dans steps[] + 1) — l'ordre visuel EST l'ordre d'exécution. */
+.topology-recipe-node__index {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(34, 211, 238, 0.16);
+  color: #22d3ee;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.topology-recipe-node__summary {
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Popover d'étape (TemplateStepPopover, TopologySubGraphPanel.tsx) — extensions du .graph-popover. */
+.topology-recipe-popover {
+  width: 320px;
+}
+
+.topology-recipe-popover__textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.topology-recipe-popover__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
 /* --- Domaine(s) de reverse proxy sur la carte du nœud (façon Railway, voir TopologyNode#domains
    et GraphNode dans topologyGraphShared.tsx) --------------------------------------------------- */
 

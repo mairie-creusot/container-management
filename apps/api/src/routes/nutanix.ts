@@ -52,7 +52,11 @@
  *                                          updateNutanixVmCompute).
  * GET    /api/nutanix/images             — images du catalogue (uuid/nom/taille/type), tout rôle authentifié.
  * POST   /api/nutanix/images             — crée une image DISK_IMAGE depuis une URL ({ name, sourceUri }).
- * POST   /api/nutanix/vms                — crée une VM depuis une image (+ cloud-init optionnel) et la démarre
+ * POST   /api/nutanix/images/upload      — multipart (name + file) : upload direct d'un .iso/.qcow2/.img
+ *                                          vers le catalogue, streamé (jamais en mémoire) → { ok, name, uuid }.
+ * POST   /api/nutanix/vms                — crée une VM depuis une image ({ imageUuid }, + cloud-init optionnel)
+ *                                          OU depuis un ISO ({ isoImageUuid, diskSizeMib } : disque vide + CDROM,
+ *                                          boot CDROM puis DISK — installation via la console VNC) et la démarre
  *                                          (services/nutanix.ts#createNutanixVm — le body contient un SECRET,
  *                                          jamais loggé/échoïsé).
  * GET    /api/nutanix/tasks/:uuid        — suivi d'une tâche asynchrone ({ uuid, status, percentageComplete? }).
@@ -89,6 +93,7 @@
  * qui mérite son propre chemin `/api/nutanix/*` plutôt que de surcharger la route environnements.
  */
 
+import multipart from "@fastify/multipart";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import WebSocket from "ws";
 import { config } from "../config.js";
@@ -98,6 +103,7 @@ import {
   addNutanixVmNic,
   createNutanixImage,
   createNutanixVm,
+  deleteNutanixImageBestEffort,
   deleteNutanixVm,
   getNutanixImages,
   getNutanixSubnets,
@@ -111,8 +117,9 @@ import {
   stopNutanixVm,
   testNutanixConnection,
   updateNutanixVmCompute,
+  uploadNutanixImage,
 } from "../services/nutanix.js";
-import type { NutanixGuestCustomizationInput } from "../services/nutanix.js";
+import type { NutanixGuestCustomizationInput, NutanixUploadImageType } from "../services/nutanix.js";
 import { clearNutanixConfig, getEffectiveNutanixConfig, setNutanixConfig } from "../services/setupStore.js";
 import type { SetupNutanixConfig } from "../services/setupStore.js";
 import type { NutanixConfig, NutanixStatus } from "../types.js";
@@ -162,7 +169,23 @@ function toPublicConfig(cfg: SetupNutanixConfig): NutanixConfig {
   return { prismCentralUrl: cfg.prismCentralUrl, username: cfg.username };
 }
 
+// Limite d'upload d'image : généreuse (ISO d'installation Windows/Linux) mais bornée — le fichier
+// est STREAMÉ vers Prism (pipe), jamais chargé en mémoire (voir uploadNutanixImage).
+const IMAGE_UPLOAD_MAX_BYTES = 8 * 1024 * 1024 * 1024;
+
+/** ISO_IMAGE/DISK_IMAGE selon l'extension du nom de fichier — undefined si inconnue (400 honnête,
+ * jamais un type deviné). */
+function imageTypeForFilename(filename: string): NutanixUploadImageType | undefined {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith(".iso")) return "ISO_IMAGE";
+  if (lower.endsWith(".qcow2") || lower.endsWith(".img")) return "DISK_IMAGE";
+  return undefined;
+}
+
 export default async function nutanixRoutes(fastify: FastifyInstance): Promise<void> {
+  // Multipart scopé à ce plugin (seule la route /images/upload le consomme).
+  await fastify.register(multipart, { limits: { fileSize: IMAGE_UPLOAD_MAX_BYTES, files: 1 } });
+
   fastify.get("/api/nutanix/vms", async (_request, reply) => {
     return reply.send(await getNutanixVms());
   });
@@ -352,10 +375,48 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
     }
   });
 
+  // Upload direct d'un fichier image : multipart champ `name` (AVANT le champ `file` dans le corps)
+  // + champ `file` streamé tel quel vers Prism — voir services/nutanix.ts#uploadNutanixImage.
+  fastify.post("/api/nutanix/images/upload", async (request, reply) => {
+    if (!request.isMultipart()) {
+      return reply.code(400).send({ error: "multipart/form-data expected (fields: name, file)" });
+    }
+    const part = await request.file().catch(() => undefined);
+    if (!part) {
+      return reply.code(400).send({ error: "file field is required" });
+    }
+    const nameField = part.fields["name"];
+    const rawName = !Array.isArray(nameField) && nameField?.type === "field" ? nameField.value : undefined;
+    const name = typeof rawName === "string" ? rawName.trim() : "";
+    if (!name) {
+      part.file.resume();
+      return reply.code(400).send({ error: "name field is required (must appear before the file field in the multipart body)" });
+    }
+    const imageType = imageTypeForFilename(name) ?? imageTypeForFilename(part.filename ?? "");
+    if (!imageType) {
+      part.file.resume();
+      return reply.code(400).send({ error: "unsupported file extension — expected .iso (ISO_IMAGE) or .qcow2/.img (DISK_IMAGE)" });
+    }
+    try {
+      const result = await uploadNutanixImage({ name, imageType, stream: part.file });
+      if (part.file.truncated) {
+        // Fichier coupé par la limite : l'image partielle est retirée, jamais laissée comme valide.
+        await deleteNutanixImageBestEffort(result.uuid);
+        return reply.code(413).send({ error: `file exceeds the ${IMAGE_UPLOAD_MAX_BYTES} bytes upload limit — partial image removed` });
+      }
+      return reply.send({ ok: true, name: result.name, uuid: result.uuid });
+    } catch (err) {
+      // Draine le flux si le service a échoué avant de le consommer (no-op s'il l'a déjà lu).
+      part.file.resume();
+      sendNutanixActionError(reply, err);
+    }
+  });
+
   fastify.post<{
     Body: {
       name?: string;
       imageUuid?: string;
+      isoImageUuid?: string;
       subnetUuid?: string;
       numVcpus?: number;
       numCoresPerVcpu?: number;
@@ -367,9 +428,17 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
     const body = request.body ?? {};
     const name = typeof body.name === "string" ? body.name.trim() : "";
     const imageUuid = typeof body.imageUuid === "string" ? body.imageUuid.trim() : "";
+    const isoImageUuid = typeof body.isoImageUuid === "string" ? body.isoImageUuid.trim() : "";
     const subnetUuid = typeof body.subnetUuid === "string" ? body.subnetUuid.trim() : "";
-    if (!name || !imageUuid || !subnetUuid) {
-      return reply.code(400).send({ error: "name, imageUuid and subnetUuid are required" });
+    if (!name || !subnetUuid) {
+      return reply.code(400).send({ error: "name and subnetUuid are required" });
+    }
+    // Exclusivité imageUuid/isoImageUuid revalidée par le service — garde précoce pour un 400 clair.
+    if ((imageUuid === "") === (isoImageUuid === "")) {
+      return reply.code(400).send({ error: "exactly one of imageUuid or isoImageUuid is required" });
+    }
+    if (isoImageUuid && body.diskSizeMib === undefined) {
+      return reply.code(400).send({ error: "diskSizeMib is required with isoImageUuid (size of the empty disk)" });
     }
     for (const [key, value] of Object.entries({
       numVcpus: body.numVcpus,
@@ -406,7 +475,8 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
       return reply.send(
         await createNutanixVm({
           name,
-          imageUuid,
+          ...(imageUuid ? { imageUuid } : {}),
+          ...(isoImageUuid ? { isoImageUuid } : {}),
           subnetUuid,
           numVcpus: body.numVcpus,
           memoryMib: body.memoryMib,

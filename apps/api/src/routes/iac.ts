@@ -28,6 +28,7 @@ import {
   WorkspaceNotFoundError,
 } from "../services/iac/workspaces.js";
 import { getRun, listRuns, readRunLog, startRun } from "../services/iac/runner.js";
+import { LINT_MAX_CONTENT_BYTES, lintShellScript } from "../services/iac/lint.js";
 import type { IacEngine } from "../types.js";
 
 const VALID_ENGINES: readonly IacEngine[] = ["tofu", "ansible", "packer"];
@@ -48,6 +49,17 @@ async function requireWorkspace(id: string, reply: FastifyReply): Promise<boolea
 export default async function iacRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get("/api/iac/engines", async (_request, reply) => {
     return reply.send(await listEngineStatuses());
+  });
+
+  // Analyse syntaxique réelle (`sh -n`, aucune exécution) — studio de templates, étapes "script".
+  fastify.post<{ Body: { kind?: string; content?: string } }>("/api/iac/lint", async (request, reply) => {
+    const { kind, content } = request.body ?? {};
+    if (kind !== "shell") return reply.code(400).send({ error: 'kind must be "shell"' });
+    if (typeof content !== "string") return reply.code(400).send({ error: "content must be a string" });
+    if (Buffer.byteLength(content, "utf-8") > LINT_MAX_CONTENT_BYTES) {
+      return reply.code(413).send({ error: `content exceeds ${LINT_MAX_CONTENT_BYTES} bytes` });
+    }
+    return reply.send(await lintShellScript(content));
   });
 
   fastify.get("/api/iac/workspaces", async (_request, reply) => {

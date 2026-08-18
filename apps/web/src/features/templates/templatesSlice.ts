@@ -1,8 +1,14 @@
 import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
-import { apiDelete, apiGet, apiPost, ApiError } from "@/api/client";
+import { apiDelete, apiGet, apiPost, apiPut, ApiError } from "@/api/client";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
 import { fetchTopology } from "@/features/topology/topologySlice";
-import type { ImageTemplate, ImageTemplateCreateInput, TemplateArtifactSource, TemplatePreset } from "@/types";
+import type {
+  ImageTemplate,
+  ImageTemplateCreateInput,
+  ImageTemplateUpdateInput,
+  TemplateArtifactSource,
+  TemplatePreset,
+} from "@/types";
 
 // Fabrique de templates (GET/POST /api/templates...) — backend développé EN PARALLÈLE contre le
 // contrat de types.ts : un 404 est traité PARTOUT comme "backend pas encore disponible" (état vide
@@ -109,6 +115,21 @@ export const createTemplate = createAsyncThunk<ImageTemplate, ImageTemplateCreat
   },
 );
 
+/** PUT /api/templates/:id { steps } — édition de la recette depuis le sous-graphe. 404 (backend
+ * absent/template supprimé) et 409 (build en cours) remontent en rejectValue : toast honnête via
+ * errorNotificationMiddleware, l'état local reste inchangé (le reducer ne touche à rien sur rejet). */
+export const updateTemplate = createAsyncThunk<
+  ImageTemplate,
+  { id: string } & ImageTemplateUpdateInput,
+  { rejectValue: string }
+>("templates/update", async ({ id, steps }, { rejectWithValue }) => {
+  try {
+    return await apiPut<ImageTemplate>(`/templates/${id}`, { steps });
+  } catch (error) {
+    return rejectWithValue(mutationErrorMessage(error, "Échec de la mise à jour de la recette."));
+  }
+});
+
 /** POST /api/templates/:id/build — la forme exacte de la réponse n'est pas figée par le contrat :
  * seule la relance de fetchTemplates (statut "building" + poll) fait foi côté client. */
 export const buildTemplate = createAsyncThunk<{ id: string }, { id: string }, { rejectValue: string }>(
@@ -185,6 +206,10 @@ const templatesSlice = createSlice({
       .addCase(createTemplate.fulfilled, (state, action) => {
         state.availability = "available";
         state.items.unshift(action.payload);
+      })
+      .addCase(updateTemplate.fulfilled, (state, action) => {
+        const index = state.items.findIndex((t) => t.id === action.payload.id);
+        if (index !== -1) state.items[index] = action.payload;
       })
       .addCase(deleteTemplate.fulfilled, (state, action) => {
         state.items = state.items.filter((t) => t.id !== action.payload.id);
