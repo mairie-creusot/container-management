@@ -1,4 +1,4 @@
-import { createAsyncThunk, createSlice } from "@reduxjs/toolkit";
+import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { apiDelete, apiGet, apiPost, apiPut, ApiError } from "@/api/client";
 import type {
   HycuConfig,
@@ -18,6 +18,18 @@ export interface HycuConfigFormInput {
   url: string;
   username: string;
   password?: string;
+}
+
+/** Onglets réels de la page Sauvegardes (HycuPage.tsx) — déclarés ici pour qu'un autre écran
+ * (menu contextuel du nœud HYCU du graphe) puisse en demander un précis sans dépendre de la page. */
+export type HycuTab = "vms" | "policies" | "targets" | "jobs" | "events";
+
+/** Demande d'ouverture ciblée de la page Sauvegardes — consommée UNE fois par HycuPage, qui la
+ * remet aussitôt à `null` (jamais un état persistant qui rejouerait à chaque montage). */
+export interface HycuFocusRequest {
+  tab?: HycuTab;
+  /** Fait défiler jusqu'à la section Configuration (admin uniquement, seule à l'afficher). */
+  config?: boolean;
 }
 
 type LoadStatus = "idle" | "loading" | "ready" | "error";
@@ -43,6 +55,8 @@ interface HycuState {
   clearing: boolean;
   testing: boolean;
   testResult: HycuTestResult | null;
+  /** Voir HycuFocusRequest — `null` en dehors d'une navigation ciblée depuis le graphe. */
+  focus: HycuFocusRequest | null;
 }
 
 const initialState: HycuState = {
@@ -66,6 +80,7 @@ const initialState: HycuState = {
   clearing: false,
   testing: false,
   testResult: null,
+  focus: null,
 };
 
 function errorMessage(error: unknown, fallback: string): string {
@@ -137,6 +152,12 @@ const hycuSlice = createSlice({
   reducers: {
     clearHycuTestResult(state) {
       state.testResult = null;
+    },
+    focusHycuSection(state, action: PayloadAction<HycuFocusRequest>) {
+      state.focus = action.payload;
+    },
+    clearHycuFocus(state) {
+      state.focus = null;
     },
   },
   extraReducers: (builder) => {
@@ -271,5 +292,5 @@ const hycuSlice = createSlice({
   },
 });
 
-export const { clearHycuTestResult } = hycuSlice.actions;
+export const { clearHycuTestResult, focusHycuSection, clearHycuFocus } = hycuSlice.actions;
 export default hycuSlice.reducer;

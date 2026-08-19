@@ -652,6 +652,20 @@ export interface HycuEvent {
   createdInMillis?: number;
 }
 
+/**
+ * État de protection RÉEL d'une VM tel que HYCU le rapporte (voir services/hycu.ts#
+ * hycuVmProtectionState) — jamais calculé pour une VM que HYCU ne connaît pas (champ absent) :
+ *  - "unprotected" : VM vue par HYCU mais assignée à AUCUNE policy (protectionGroupUuid absent,
+ *    champ CONFIRMÉ) ;
+ *  - "non-compliant" : `complianceStatus` réellement renvoyé et hors des libellés conformes
+ *    (même convention que features/hycu/HycuPage.tsx#COMPLIANT_VALUES côté web) ;
+ *  - "never-backed-up" : protégée, mais aucune date de dernière sauvegarde ALORS QUE HYCU
+ *    renseigne ce champ pour d'autres VMs du même poll — jamais déduit d'un champ simplement
+ *    absent de cette version d'API ;
+ *  - "protected" : protégée, rien d'anormal rapporté.
+ */
+export type HycuVmProtectionState = "protected" | "non-compliant" | "never-backed-up" | "unprotected";
+
 /** GET /api/hycu/status — résumé calculé côté QUAI à partir des listes réelles (jamais un champ
  * dashboard supposé : /rest/v1.0/dashboard n'existe PAS sur l'appliance, 404 observé). `null`
  * pour chaque bloc si l'appel correspondant a échoué — jamais des zéros inventés. */
@@ -965,7 +979,13 @@ export type TopologyNodeKind =
   | "gitops-source"
   | "automation-trigger"
   | "automation-condition"
-  | "automation-action";
+  | "automation-action"
+  // Appliance HYCU (contrôleur de sauvegarde des VMs Nutanix, services/hycu.ts) — kind À PART
+  // plutôt qu'un `hostKind` de "host" : elle n'héberge aucune charge de travail (elle les
+  // protège), porte ses propres ports "protection-out"/menu lecture seule, et un nœud "host"
+  // arbore des ports d'hébergement qui n'auraient ici aucun sens. Au plus UN nœud (config HYCU
+  // unique), aucun tant que HYCU n'a jamais été configuré.
+  | "hycu-appliance";
 
 /**
  * Sous-type d'un nœud "host" (voir TopologyNode#hostKind ci-dessous, services/topology.ts) —
@@ -1077,6 +1097,37 @@ export interface TopologyNode {
   nutanixHostNumCpuSockets?: number;
   nutanixHostMemoryCapacityMib?: number;
   nutanixHostHypervisorFullName?: string;
+  /**
+   * Nœud "hycu-appliance" UNIQUEMENT (voir services/topology.ts#getHycuTopologyParts) : compteurs
+   * RÉELS du dernier poll HYCU réussi — tous absents si l'appliance est configurée mais
+   * injoignable (`status: "stopped"` porte alors seul l'information, jamais des zéros inventés).
+   */
+  hycuVmTotal?: number;
+  hycuProtectedVmCount?: number;
+  hycuPolicyCount?: number;
+  hycuTargetCount?: number;
+  /** Jobs récents (une page réelle, voir services/hycu.ts) au statut "ERROR" — 0 est une VRAIE
+   * information ici (poll réussi, aucun échec), à ne pas confondre avec l'absence du champ. */
+  hycuFailedJobCount?: number;
+  /** Horodatage ISO du DERNIER essai réel de poll HYCU (services/hycu.ts#lastKnownHycuPoll, en
+   * mémoire process) — absent tant qu'aucun poll n'a eu lieu depuis le démarrage. */
+  hycuLastPollAt?: string;
+  /**
+   * VMs Nutanix UNIQUEMENT, et seulement si HYCU est configuré, joignable ET connaît réellement
+   * cette VM (rapprochement par uuid, sinon par nom exact non ambigu — voir
+   * services/topology.ts#getHycuTopologyParts) : absent = QUAI ne sait rien de sa protection,
+   * jamais interprété comme "non sauvegardée".
+   */
+  hycuProtection?: HycuVmProtectionState;
+  /** VMs Nutanix UNIQUEMENT : date ISO de la dernière sauvegarde rapportée par HYCU
+   * (`lastBackupInMillis`, champ supposé — absent s'il n'est pas renvoyé). */
+  hycuLastBackupAt?: string;
+  /** VMs Nutanix UNIQUEMENT : nom réel de la policy HYCU qui protège cette VM (jointure
+   * /policies), absent si non protégée ou nom non résolu. */
+  hycuPolicyName?: string;
+  /** VMs Nutanix UNIQUEMENT : valeur BRUTE de `complianceStatus` telle que renvoyée par HYCU —
+   * jamais traduite/normalisée (champ supposé, valeurs réelles à confirmer avec identifiants). */
+  hycuComplianceStatus?: string;
   /**
    * Volumes/networks uniquement : horodatage de création RÉEL rapporté par Docker (`CreatedAt`/
    * `Created`). Absent pour les conteneurs/VMs Nutanix (pas nécessaire : leur id EST déjà un
@@ -1292,7 +1343,11 @@ export interface TopologyEdge {
   /** "uses-artifact" : template B consomme l'artefact du template A (étape "artifact" réelle de sa
    * recette) — source = template producteur, target = consommateur. Jamais construite si le
    * template source n'existe plus. */
-  kind: "mount" | "network" | "hosts" | "automation-flow" | "uses-artifact";
+  /** "protects" : l'appliance HYCU (source) sauvegarde RÉELLEMENT cette VM Nutanix (target) — VM
+   * assignée à une policy HYCU ET rapprochée du graphe par une clé fiable (uuid, sinon nom exact
+   * non ambigu — voir services/topology.ts#getHycuTopologyParts). Jamais construite sur un
+   * rapprochement douteux. */
+  kind: "mount" | "network" | "hosts" | "automation-flow" | "uses-artifact" | "protects";
   /**
    * "network" uniquement : ports RÉELLEMENT publiés par le conteneur à l'une des deux extrémités
    * (docker.listContainers()[].Ports, dédupliqués) — affiché façon Railway comme un badge flottant

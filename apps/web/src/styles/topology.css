@@ -326,6 +326,23 @@
   color: #22d3ee;
 }
 
+/* Appliance HYCU (contrôleur de sauvegarde réel, services/hycu.ts) — magenta, distinct du bleu
+   ciel de "backup" (#0ea5e9) et du rose/rouge de gitops-source (#f43f5e), cohérent avec
+   NODE_CONTRACT["hycu-appliance"].minimapColor. */
+.topology-node--hycu-appliance .topology-node__icon {
+  background: rgba(236, 72, 153, 0.16);
+  color: #ec4899;
+}
+
+/* Ports de protection HYCU (arêtes "protects") — même magenta que le nœud. */
+.topology-handle--backup.react-flow__handle {
+  border-color: #ec4899;
+}
+
+.topology-handle--backup.react-flow__handle:hover {
+  background: #ec4899;
+}
+
 /* Handles génériques de connexion des nœuds d'automatisation (voir GraphNode,
    topologyGraphShared.tsx) — même mécanique visuelle que .topology-handle--network/--volume
    ci-dessus, couleur reprise de l'icône "automation-trigger" (rouge) : un seul token de couleur
@@ -406,6 +423,12 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Chip d'alerte (ex : jobs HYCU récents en échec) — même forme, teinte critique. */
+.topology-node__spec-chip--critical {
+  border-color: var(--color-critical);
+  color: var(--color-critical);
 }
 
 .topology-node--compact .topology-node__specs {
@@ -564,6 +587,12 @@
 .topology-badge--critical {
   background: var(--color-critical-bg);
   color: var(--color-critical);
+}
+
+/* Badge positif (ex : "Protégée" — VM réellement sauvegardée par HYCU). */
+.topology-badge--ok {
+  background: var(--color-success-bg);
+  color: var(--color-success);
 }
 
 /* CPU/mémoire en direct sur le nœud conteneur. */
@@ -1177,6 +1206,15 @@
    dasharray plus serré ("2 4", voir buildTopologyEdges). */
 .react-flow__edge.topology-edge--automation-flow .react-flow__edge-path {
   stroke-width: 2.2;
+}
+
+/* "protects" (appliance HYCU -> VM Nutanix qu'elle sauvegarde réellement) : relation structurelle
+   non animée comme "hosts" (une sauvegarde est périodique, pas un flux continu) — la COULEUR reste
+   celle de la palette de santé partagée (verte = protégée, rouge = non conforme, orange = jamais
+   sauvegardée), jamais un second système ; seuls le liseré magenta du marqueur de nœud/handle et
+   ce trait plus fin la distinguent visuellement des arêtes d'hébergement. */
+.react-flow__edge.topology-edge--protects .react-flow__edge-path {
+  stroke-width: 1.8;
 }
 
 /* Transition douce de la couleur quand l'état de santé change (vague 3) : le <path> React Flow

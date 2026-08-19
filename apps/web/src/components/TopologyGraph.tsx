@@ -52,6 +52,8 @@ import RemoteEnvironmentCreateModal from "@/features/remoteEnvironments/RemoteEn
 // connexion Prism Central avant persistance) — l'entrée du spotlight NAVIGUE vers cette page
 // plutôt que de dupliquer son formulaire ici.
 import { setCurrentView } from "@/features/ui/uiSlice";
+// Ouverture ciblée de la page Sauvegardes depuis le menu du nœud HYCU (onglet Jobs/Configuration).
+import { focusHycuSection } from "@/features/hycu/hycuSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import Modal from "@/components/Modal";
@@ -2759,7 +2761,11 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
    */
   const hostTreePositions = useMemo(() => {
     if (!data) return {};
-    const hostTreeNodeIds = data.nodes.filter((n) => n.kind === "host" || n.kind === "nutanix-vm").map((n) => n.id);
+    // L'appliance HYCU est rattachée au master par une arête "hosts" : elle appartient donc au
+    // même arbre auto-disposé, sinon elle resterait dans sa colonne fixe loin de sa racine.
+    const hostTreeNodeIds = data.nodes
+      .filter((n) => n.kind === "host" || n.kind === "nutanix-vm" || n.kind === "hycu-appliance")
+      .map((n) => n.id);
     const hostsEdges = data.edges.filter((e) => e.kind === "hosts");
     return hostHierarchyPositions(hostTreeNodeIds, hostsEdges, { x: HOST_TREE_ANCHOR_X, y: 0 });
   }, [data]);
@@ -3748,7 +3754,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     // dispatch/confirm/aux popovers. `id` : partie utile de l'id du nœud (id Docker brut, uuid de
     // VM, nom de volume... selon le kind — même convention idWithoutPrefix qu'avant).
     const id = idWithoutPrefix(node.id);
-    const actionHandlers: Record<NodeMenuActionId, () => void> = {
+    // "hycu-configure" exclu de cette table : il n'est proposé qu'aux admins (voir plus bas) — le
+    // compilateur continue d'exiger un handler pour TOUTES les autres actions déclarées.
+    const actionHandlers: Record<Exclude<NodeMenuActionId, "hycu-configure">, () => void> = {
       "container-stop": () => void handleContainerAction(id, node.label, "stop"),
       "container-start": () => void handleContainerAction(id, node.label, "start"),
       "container-restart": () => void handleContainerAction(id, node.label, "restart"),
@@ -3780,8 +3788,28 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       "image-template-create-container": () =>
         setPopover({ kind: "container", x, y, ...(node.templateArtifactReference ? { initialImage: node.templateArtifactReference } : {}) }),
       "image-template-remove": () => void handleDeleteTemplate(id, node.label),
+      // HYCU : navigation vers la page Sauvegardes RÉELLE (aucune mutation possible — l'appliance
+      // est en lecture seule côté API). "Voir les jobs" ouvre la page directement sur cet onglet.
+      "hycu-open-page": () => dispatch(setCurrentView("hycu")),
+      "hycu-view-jobs": () => {
+        dispatch(focusHycuSection({ tab: "jobs" }));
+        dispatch(setCurrentView("hycu"));
+      },
     };
-    items.push(...buildNodeMenuItems(node, actionHandlers));
+    // "Configurer…" seulement pour un admin : la section de configuration de la page Sauvegardes
+    // lui est réservée — sans handler, buildNodeMenuItems omet simplement l'entrée.
+    const allowedHandlers: Partial<Record<NodeMenuActionId, () => void>> = {
+      ...actionHandlers,
+      ...(admin
+        ? {
+            "hycu-configure": () => {
+              dispatch(focusHycuSection({ config: true }));
+              dispatch(setCurrentView("hycu"));
+            },
+          }
+        : {}),
+    };
+    items.push(...buildNodeMenuItems(node, allowedHandlers));
     return items;
   }
 

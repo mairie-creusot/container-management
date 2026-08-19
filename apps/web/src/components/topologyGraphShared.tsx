@@ -18,6 +18,7 @@ import {
   CAPABILITY_PORT_META,
   KIND_ICON,
   NODE_CONTRACT,
+  hycuProtectionBadge,
   nodeIcon,
   quickLifecycleActions,
   type AutomationTriggerStatus,
@@ -54,6 +55,7 @@ export {
   nodeIcon,
   nodeMinimapColor,
   nutanixVmHostEdgeState,
+  hycuProtectionEdgeState,
   type CapabilityDef,
   type CapabilityId,
   type EdgeHealthState,
@@ -66,6 +68,13 @@ export {
  * que les deux rendus aient EXACTEMENT le même look (mêmes nœuds, mêmes arêtes, mêmes couleurs),
  * sans dupliquer le JSX/CSS. Voir ARCHITECTURE.md § "Graphe de topologie" pour le contexte complet.
  */
+
+/** "2026-08-18T02:00:00Z" -> "18/08/26" — chip compacte de carte (l'horodatage complet reste dans
+ * l'attribut title, jamais tronqué sans recours). */
+function formatShortDate(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? "—" : date.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "2-digit" });
+}
 
 /** "container:abcd1234" -> "abcd1234" (l'id du nœud préfixe toujours son type). */
 export function idWithoutPrefix(id: string): string {
@@ -170,6 +179,9 @@ export function deriveGroupPorts(group: Pick<TopologyGroup, "nodeIds">, edges: T
     if (edge.kind === "mount") capabilities.add(targetIn ? "volume-mount" : "provide");
     else if (edge.kind === "network") capabilities.add(sourceIn ? "network" : "attach");
     else if (edge.kind === "hosts" && targetIn) capabilities.add("hosted-by");
+    // Sauvegarde HYCU : un groupe replié contenant une VM protégée (ou l'appliance) garde un port
+    // réel — sans lui, l'arête redirigée vers le groupe n'aurait aucun ancrage et disparaîtrait.
+    else if (edge.kind === "protects") capabilities.add(targetIn ? "protected-by" : "protection-out");
   }
   return Array.from(capabilities).map((capability) => ({ id: capability, capability, ...CAPABILITY_PORT_META[capability] }));
 }
@@ -331,6 +343,7 @@ const EDGE_KIND_PORT_CAPABILITY: Record<TopologyEdge["kind"], { source: Capabili
   hosts: { source: "hosts", target: "hosted-by" },
   "automation-flow": { source: "automation-out", target: "automation-in" },
   "uses-artifact": { source: "artifact-out", target: "artifact-in" },
+  protects: { source: "protection-out", target: "protected-by" },
 };
 
 function portIdForCapability(node: TopologyNode | undefined, capability: CapabilityId): string | undefined {
@@ -398,6 +411,9 @@ export function buildTopologyEdges(
   return edges.map((e) => {
     const isMount = e.kind === "mount";
     const isHostsEdge = e.kind === "hosts";
+    // "protects" (HYCU -> VM) : relation structurelle comme "hosts" — une sauvegarde est un
+    // événement périodique, jamais un flux continu à animer en tirets défilants.
+    const isProtectsEdge = e.kind === "protects";
     // Port(s) réellement publié(s) sur l'hôte (voir TopologyEdgePort#publicPort, jamais déduit —
     // absent si Docker n'a mappé aucun port hôte pour ce conteneur) : seul signal d'activité
     // "confirmée" dont QUAI dispose sans sonde active à chaque rafraîchissement du graphe (une
@@ -438,7 +454,7 @@ export function buildTopologyEdges(
     // "stopped" ici, ce cas n'existe que via un contrat qui a répondu).
     const strokeDasharray = edgeHealthInfo
       ? edgeHealthInfo.strokeDasharray
-      : isMount || isHostsEdge
+      : isMount || isHostsEdge || isProtectsEdge
         ? undefined
         : e.kind === "automation-flow"
           ? "2 4"
@@ -456,7 +472,7 @@ export function buildTopologyEdges(
       ...(sourceHandle ? { sourceHandle } : {}),
       ...(targetHandle ? { targetHandle } : {}),
       type: isMount ? "mountFlow" : "networkEdge",
-      animated: !isMount && !isHostsEdge,
+      animated: !isMount && !isHostsEdge && !isProtectsEdge,
       className: `topology-edge topology-edge--${e.kind} topology-edge--${state}`,
       style: { stroke: color, ...(strokeDasharray ? { strokeDasharray } : {}) },
       markerEnd: { type: MarkerType.ArrowClosed, color, width: 16, height: 16 },
@@ -555,9 +571,13 @@ export const EDGE_KIND_LABEL: Record<
   },
   mount: () => "montage",
   // Cluster -> hôte AHV = "hôte physique" ; hôte/environnement -> conteneur ou VM = "hébergement".
-  hosts: (_source, target) => (target?.kind === "host" ? "hôte physique" : "hébergement"),
+  // Master -> appliance HYCU = "intégration" : QUAI la lit, il ne l'héberge pas.
+  hosts: (_source, target) =>
+    target?.kind === "host" ? "hôte physique" : target?.kind === "hycu-appliance" ? "intégration" : "hébergement",
   "automation-flow": () => "automatisation",
   "uses-artifact": (source) => (source ? `artefact ${source.label}` : "artefact"),
+  // HYCU -> VM : nom de la politique RÉELLE quand HYCU l'a résolue, sinon la nature du lien seule.
+  protects: (_source, target) => (target?.hycuPolicyName ? `sauvegarde ${target.hycuPolicyName}` : "sauvegarde"),
 };
 
 export interface EdgeBadgeData {
@@ -906,6 +926,15 @@ function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
     a.numVcpus === b.numVcpus &&
     a.memoryMib === b.memoryMib &&
     a.nutanixHostName === b.nutanixHostName &&
+    // Protection HYCU RÉELLEMENT rendue sur la carte d'une VM (badge + date) — mêmes raisons.
+    a.hycuProtection === b.hycuProtection &&
+    a.hycuLastBackupAt === b.hycuLastBackupAt &&
+    // Compteurs de la carte de l'appliance HYCU — rendus, donc comparés (ils bougent à chaque poll).
+    a.hycuVmTotal === b.hycuVmTotal &&
+    a.hycuProtectedVmCount === b.hycuProtectedVmCount &&
+    a.hycuPolicyCount === b.hycuPolicyCount &&
+    a.hycuTargetCount === b.hycuTargetCount &&
+    a.hycuFailedJobCount === b.hycuFailedJobCount &&
     // Chips "appliance repliée" d'un nœud image-template (voir GraphNodeTemplateMeta) — rendues,
     // donc comparées, comme le reste des champs affichés.
     a.templateStepCount === b.templateStepCount &&
@@ -951,6 +980,9 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   // volontairement inchangée : son sous-titre porte déjà CPU/RAM (voir services/topology.ts,
   // formatHostMemorySubtitle) — un résumé identique en double sur la carte n'ajouterait rien.
   const isNutanixVm = node.kind === "nutanix-vm";
+  const isHycuAppliance = node.kind === "hycu-appliance";
+  // Badge de protection HYCU (VM Nutanix uniquement) — `null` dès que HYCU ne dit rien de réel.
+  const hycuBadge = isNutanixVm ? hycuProtectionBadge(node) : null;
   // Répartition des attachments (TopologyNode#attachments — VRAIES données Docker, jamais un
   // nouveau stockage) entre les deux rendus (Phase 2, 17/08/2026, maquette Railway validée par
   // l'utilisateur) : un VOLUME attaché devient un "tiroir" (sous-carte glissée SOUS la carte du
@@ -1062,8 +1094,45 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
           )}
         </div>
       )}
+      {/* Protection HYCU RÉELLE d'une VM Nutanix (voir hycuProtectionBadge) — rien du tout tant que
+          HYCU n'est pas configuré/joignable ou ne connaît pas cette VM : jamais un "non
+          sauvegardée" déduit d'un silence. */}
+      {hycuBadge && (
+        <div className="topology-node__badges">
+          <span className={`topology-badge topology-badge--${hycuBadge.tone}`} title={hycuBadge.title}>
+            {hycuBadge.label}
+          </span>
+        </div>
+      )}
       <div className="topology-node__subtitle">{node.subtitle}</div>
-      {isNutanixVm && (typeof node.numVcpus === "number" || typeof node.memoryMib === "number" || !!node.nutanixHostName) && (
+      {isHycuAppliance && (typeof node.hycuProtectedVmCount === "number" || typeof node.hycuPolicyCount === "number") && (
+        // Compteurs RÉELS du dernier poll (services/topology.ts) — absents si l'appliance est
+        // injoignable, où seul le statut "stopped" de la carte parle.
+        <div className="topology-node__specs">
+          {typeof node.hycuProtectedVmCount === "number" && (
+            <span className="topology-node__spec-chip" title="VMs protégées / VMs vues par HYCU">
+              {node.hycuProtectedVmCount}/{node.hycuVmTotal ?? node.hycuProtectedVmCount} VMs
+            </span>
+          )}
+          {typeof node.hycuPolicyCount === "number" && (
+            <span className="topology-node__spec-chip" title="Politiques de sauvegarde">
+              {node.hycuPolicyCount} politique{node.hycuPolicyCount > 1 ? "s" : ""}
+            </span>
+          )}
+          {typeof node.hycuTargetCount === "number" && (
+            <span className="topology-node__spec-chip" title="Cibles de sauvegarde">
+              {node.hycuTargetCount} cible{node.hycuTargetCount > 1 ? "s" : ""}
+            </span>
+          )}
+          {!!node.hycuFailedJobCount && (
+            <span className="topology-node__spec-chip topology-node__spec-chip--critical" title="Jobs récents en échec (statut ERROR)">
+              {node.hycuFailedJobCount} job{node.hycuFailedJobCount > 1 ? "s" : ""} en échec
+            </span>
+          )}
+        </div>
+      )}
+      {isNutanixVm &&
+        (typeof node.numVcpus === "number" || typeof node.memoryMib === "number" || !!node.nutanixHostName || !!node.hycuLastBackupAt) && (
         // Résumé compact des specs RÉELLES de la VM (voir isNutanixVm ci-dessus pour le pourquoi) —
         // chips non interactives (pas de nodrag/nopan/stopPropagation nécessaires, rien n'est
         // cliquable ici contrairement aux briques d'un conteneur juste plus bas).
@@ -1081,6 +1150,11 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
           {!!node.nutanixHostName && (
             <span className="topology-node__spec-chip" title="Hôte physique actuel">
               {node.nutanixHostName}
+            </span>
+          )}
+          {!!node.hycuLastBackupAt && (
+            <span className="topology-node__spec-chip" title={`Dernière sauvegarde rapportée par HYCU : ${new Date(node.hycuLastBackupAt).toLocaleString("fr-FR")}`}>
+              Sauv. {formatShortDate(node.hycuLastBackupAt)}
             </span>
           )}
         </div>

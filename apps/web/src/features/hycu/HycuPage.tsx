@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import {
+  clearHycuFocus,
   clearHycuTestResult,
   disableHycu,
   fetchHycuConfig,
@@ -13,6 +14,7 @@ import {
   saveHycuConfig,
   testHycuConfig,
   type HycuConfigFormInput,
+  type HycuTab,
 } from "@/features/hycu/hycuSlice";
 import { canAdminister } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
@@ -22,8 +24,6 @@ import { IconBackup, IconCheck } from "@/components/icons";
 import type { HycuJob, HycuVm } from "@/types";
 
 const EMPTY_FORM: HycuConfigFormInput = { url: "", username: "", password: "" };
-
-type HycuTab = "vms" | "policies" | "targets" | "jobs" | "events";
 
 const TABS: { id: HycuTab; label: string }[] = [
   { id: "vms", label: "VMs protégées" },
@@ -302,11 +302,22 @@ export default function HycuPage() {
     eventsStatus,
     configured,
     configStatus,
+    focus,
   } = useAppSelector((s) => s.hycu);
   const session = useAppSelector((s) => s.auth.session);
   const admin = canAdminister(session);
 
   const [activeTab, setActiveTab] = useState<HycuTab>("vms");
+  const configSectionRef = useRef<HTMLDivElement | null>(null);
+
+  // Ouverture ciblée demandée par le menu contextuel du nœud HYCU du graphe (voir
+  // hycuSlice#focusHycuSection) — consommée une seule fois, jamais rejouée au montage suivant.
+  useEffect(() => {
+    if (!focus) return;
+    if (focus.tab) setActiveTab(focus.tab);
+    if (focus.config) configSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    dispatch(clearHycuFocus());
+  }, [dispatch, focus]);
 
   useEffect(() => {
     if (summaryStatus === "idle") dispatch(fetchHycuStatus());
@@ -664,7 +675,7 @@ export default function HycuPage() {
         )}
 
         {admin && (
-          <div style={{ marginTop: configured ? 32 : 0 }}>
+          <div ref={configSectionRef} style={{ marginTop: configured ? 32 : 0 }}>
             <HycuConfigSection />
           </div>
         )}

@@ -67,6 +67,20 @@ vi.mock("../src/services/lxcStore.js", () => ({
   getEffectiveLxcConfig: () => getEffectiveLxcConfigMock(),
 }));
 
+// HYCU : le snapshot est piloté par test — SANS ce mock, getHycuTopologySnapshot lirait la vraie
+// config persistée et pourrait interroger l'appliance RÉELLE de production depuis un test.
+// hycuVmProtectionState reste la VRAIE fonction (la règle de protection est testée telle quelle).
+const getHycuTopologySnapshotMock = vi.fn<[], Promise<import("../src/services/hycu.js").HycuTopologySnapshot | null>>();
+const lastKnownHycuPollMock = vi.fn<[], import("../src/services/hycu.js").HycuPollOutcome | null>();
+vi.mock("../src/services/hycu.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/services/hycu.js")>();
+  return {
+    ...actual,
+    getHycuTopologySnapshot: () => getHycuTopologySnapshotMock(),
+    lastKnownHycuPoll: () => lastKnownHycuPollMock(),
+  };
+});
+
 const { getTopology } = await import("../src/services/topology.js");
 
 // Défauts "rien configuré" pour CHAQUE test — les describe dédiés aux nœuds "host" ci-dessous
@@ -79,6 +93,8 @@ beforeEach(() => {
   getLxcEnvironmentMock.mockResolvedValue(null);
   getEffectiveLxcConfigMock.mockResolvedValue(null);
   lastKnownNutanixPollMock.mockReturnValue(null);
+  getHycuTopologySnapshotMock.mockResolvedValue(null);
+  lastKnownHycuPollMock.mockReturnValue(null);
   getDockerHostInfoMock.mockResolvedValue(null);
   isDockerReachableMock.mockResolvedValue(false);
   getClientMock.mockResolvedValue({});
@@ -660,5 +676,193 @@ describe("getTopology — nœud master QUAI (hostKind \"quai-master\") et rattac
     expect(topology.edges.some((e) => e.kind === "hosts" && (e.target === "volume:shared-data" || e.target === "network:n1"))).toBe(false);
     expect(topology.edges).toContainEqual(expect.objectContaining({ kind: "mount", source: "volume:shared-data", target: "container:c1" }));
     expect(topology.edges).toContainEqual(expect.objectContaining({ kind: "network", source: "container:c1", target: "network:n1" }));
+  });
+});
+
+/**
+ * Nœud "hycu-appliance" + arêtes "protects" (voir services/topology.ts#getHycuTopologyParts).
+ * AUCUN test ne touche l'appliance réelle : le snapshot HYCU est entièrement mocké plus haut.
+ */
+describe("getTopology — appliance HYCU et arêtes de sauvegarde", () => {
+  const VM_UUID = "aaaaaaaa-1111-4222-8333-444444444444";
+
+  function vmListedByNutanix(name = "HDVAPPLI") {
+    isNutanixConfiguredMock.mockResolvedValue(true);
+    getNutanixVmsMock.mockResolvedValue([
+      { id: VM_UUID, name, powerState: "on", numVcpus: 2, memoryMib: 2048, cluster: "Cluster Mairie" },
+    ]);
+  }
+
+  it("aucun nœud HYCU tant que l'appliance n'a jamais été configurée (jamais de sauvegarde inventée)", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(false);
+    getNutanixVmsMock.mockResolvedValue([]);
+    getHycuTopologySnapshotMock.mockResolvedValue(null);
+
+    const topology = await getTopology();
+
+    expect(topology.nodes.some((n) => n.kind === "hycu-appliance")).toBe(false);
+    expect(topology.edges.some((e) => e.kind === "protects")).toBe(false);
+  });
+
+  it("configurée mais injoignable : nœud \"stopped\" SANS compteur ni arête (jamais de zéros ni de valeur mise en cache)", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(false);
+    getNutanixVmsMock.mockResolvedValue([]);
+    getHycuTopologySnapshotMock.mockResolvedValue({
+      url: "https://172.20.0.100:8443",
+      reachable: false,
+      vms: [],
+      lastBackupFieldPresent: false,
+    });
+    lastKnownHycuPollMock.mockReturnValue({ reachable: false, at: "2026-08-18T06:00:00.000Z" });
+
+    const topology = await getTopology();
+    const hycu = topology.nodes.find((n) => n.kind === "hycu-appliance");
+
+    expect(hycu).toMatchObject({ id: "hycu-appliance:main", label: "HYCU", subtitle: "https://172.20.0.100:8443", status: "stopped" });
+    expect(hycu?.hycuVmTotal).toBeUndefined();
+    expect(hycu?.hycuProtectedVmCount).toBeUndefined();
+    expect(hycu?.hycuFailedJobCount).toBeUndefined();
+    expect(hycu?.hycuLastPollAt).toBe("2026-08-18T06:00:00.000Z");
+    expect(topology.edges.some((e) => e.kind === "protects")).toBe(false);
+  });
+
+  it("joignable : compteurs réels sur le nœud + rattachement au master QUAI", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(false);
+    getNutanixVmsMock.mockResolvedValue([]);
+    getHycuTopologySnapshotMock.mockResolvedValue({
+      url: "https://172.20.0.100:8443",
+      reachable: true,
+      vms: [],
+      lastBackupFieldPresent: false,
+      counts: { vms: 12, protectedVms: 9, policies: 3, targets: 2, recentJobs: 50, failedJobs: 4 },
+    });
+
+    const topology = await getTopology();
+    const hycu = topology.nodes.find((n) => n.kind === "hycu-appliance");
+
+    expect(hycu).toMatchObject({
+      status: "running",
+      hycuVmTotal: 12,
+      hycuProtectedVmCount: 9,
+      hycuPolicyCount: 3,
+      hycuTargetCount: 2,
+      hycuFailedJobCount: 4,
+    });
+    expect(topology.edges).toContainEqual(
+      expect.objectContaining({ kind: "hosts", source: "host:quai-master", target: "hycu-appliance:main" }),
+    );
+  });
+
+  it("rapprochement par uuid : arête \"protects\" + protection réelle posée sur la VM Nutanix", async () => {
+    vmListedByNutanix();
+    getHycuTopologySnapshotMock.mockResolvedValue({
+      url: "https://hycu",
+      reachable: true,
+      lastBackupFieldPresent: true,
+      vms: [
+        {
+          uuid: VM_UUID,
+          vmName: "nom-different-cote-hycu",
+          protectionGroupUuid: "policy-1",
+          policyName: "Gold",
+          complianceStatus: "GREEN",
+          lastBackupInMillis: Date.UTC(2026, 7, 18, 2, 0, 0),
+        },
+      ],
+      counts: { vms: 1, protectedVms: 1, policies: 1, targets: 1, recentJobs: 1, failedJobs: 0 },
+    });
+
+    const topology = await getTopology();
+    const vm = topology.nodes.find((n) => n.kind === "nutanix-vm");
+
+    expect(topology.edges).toContainEqual(
+      expect.objectContaining({ kind: "protects", source: "hycu-appliance:main", target: `nutanix-vm:${VM_UUID}` }),
+    );
+    expect(vm).toMatchObject({
+      hycuProtection: "protected",
+      hycuPolicyName: "Gold",
+      hycuComplianceStatus: "GREEN",
+      hycuLastBackupAt: new Date(Date.UTC(2026, 7, 18, 2, 0, 0)).toISOString(),
+    });
+  });
+
+  it("rapprochement par NOM exact quand l'uuid ne correspond pas — et AUCUN rapprochement si le nom est ambigu", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(true);
+    getNutanixVmsMock.mockResolvedValue([
+      { id: "uuid-a", name: "HDVAPPLI", powerState: "on", numVcpus: 2, memoryMib: 2048, cluster: "c" },
+      { id: "uuid-b", name: "DOUBLON", powerState: "on", numVcpus: 2, memoryMib: 2048, cluster: "c" },
+      { id: "uuid-c", name: "DOUBLON", powerState: "on", numVcpus: 2, memoryMib: 2048, cluster: "c" },
+    ]);
+    getHycuTopologySnapshotMock.mockResolvedValue({
+      url: "https://hycu",
+      reachable: true,
+      lastBackupFieldPresent: false,
+      vms: [
+        { uuid: "hycu-interne-1", vmName: "HDVAPPLI", protectionGroupUuid: "policy-1", policyName: "Gold" },
+        { uuid: "hycu-interne-2", vmName: "DOUBLON", protectionGroupUuid: "policy-1" },
+      ],
+      counts: { vms: 2, protectedVms: 2, policies: 1, targets: 1, recentJobs: 0, failedJobs: 0 },
+    });
+
+    const topology = await getTopology();
+    const protects = topology.edges.filter((e) => e.kind === "protects");
+
+    expect(protects).toHaveLength(1);
+    expect(protects[0]).toMatchObject({ target: "nutanix-vm:uuid-a" });
+    expect(topology.nodes.find((n) => n.id === "nutanix-vm:uuid-a")?.hycuProtection).toBe("protected");
+    // Homonymes : ni arête, ni protection affichée — jamais un rapprochement au hasard.
+    expect(topology.nodes.find((n) => n.id === "nutanix-vm:uuid-b")?.hycuProtection).toBeUndefined();
+    expect(topology.nodes.find((n) => n.id === "nutanix-vm:uuid-c")?.hycuProtection).toBeUndefined();
+  });
+
+  it("VM connue de HYCU mais assignée à aucune policy : \"unprotected\", AUCUNE arête de sauvegarde", async () => {
+    vmListedByNutanix();
+    getHycuTopologySnapshotMock.mockResolvedValue({
+      url: "https://hycu",
+      reachable: true,
+      lastBackupFieldPresent: false,
+      vms: [{ uuid: VM_UUID, vmName: "HDVAPPLI" }],
+      counts: { vms: 1, protectedVms: 0, policies: 0, targets: 1, recentJobs: 0, failedJobs: 0 },
+    });
+
+    const topology = await getTopology();
+
+    expect(topology.nodes.find((n) => n.kind === "nutanix-vm")?.hycuProtection).toBe("unprotected");
+    expect(topology.edges.some((e) => e.kind === "protects")).toBe(false);
+  });
+
+  it("VM inconnue de HYCU : aucun champ de protection posé (une absence de donnée n'est jamais une VM non sauvegardée)", async () => {
+    vmListedByNutanix();
+    getHycuTopologySnapshotMock.mockResolvedValue({
+      url: "https://hycu",
+      reachable: true,
+      lastBackupFieldPresent: true,
+      vms: [{ uuid: "autre-vm", vmName: "AUTRE", protectionGroupUuid: "policy-1" }],
+      counts: { vms: 1, protectedVms: 1, policies: 1, targets: 1, recentJobs: 0, failedJobs: 0 },
+    });
+
+    const topology = await getTopology();
+    const vm = topology.nodes.find((n) => n.kind === "nutanix-vm");
+
+    expect(vm?.hycuProtection).toBeUndefined();
+    expect(vm?.hycuLastBackupAt).toBeUndefined();
+    expect(topology.edges.some((e) => e.kind === "protects")).toBe(false);
+  });
+
+  it("?scope=local (premier rendu rapide) : HYCU n'est jamais interrogé — source externe lente comme Nutanix", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(false);
+    getNutanixVmsMock.mockResolvedValue([]);
+    getHycuTopologySnapshotMock.mockResolvedValue({
+      url: "https://hycu",
+      reachable: true,
+      vms: [],
+      lastBackupFieldPresent: false,
+      counts: { vms: 1, protectedVms: 1, policies: 1, targets: 1, recentJobs: 0, failedJobs: 0 },
+    });
+
+    const topology = await getTopology("local");
+
+    expect(getHycuTopologySnapshotMock).not.toHaveBeenCalled();
+    expect(topology.nodes.some((n) => n.kind === "hycu-appliance")).toBe(false);
   });
 });

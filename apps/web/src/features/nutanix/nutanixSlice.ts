@@ -18,6 +18,121 @@ import type { NutanixImageSummary, NutanixSubnetSummary } from "@/types";
  */
 export type NutanixVmLifecycleAction = "start" | "stop" | "restart";
 
+/**
+ * Statistiques temps réel + alertes (GET /api/nutanix/cluster-stats, /api/nutanix/alerts).
+ * Types déclarés ICI plutôt que dans @/types : ce sont des formes propres à l'intégration Nutanix,
+ * miroir exact de celles exportées par apps/api/src/services/nutanix.ts (un module apps/api n'est
+ * pas importable depuis apps/web — même duplication assumée que partout ailleurs dans le dépôt).
+ *
+ * UNITÉS explicites dans les noms de champs, jamais un nombre nu : les latences Nutanix sont en
+ * MICROsecondes (`...Usec`) et les débits en kilo-octets/s (`...KbytesPerSec`, unité SOURCE de
+ * l'API — jamais convertie en octets/s sur une hypothèse). Un champ ABSENT = métrique réellement
+ * non communiquée par Prism (sentinelle "-1" côté API), jamais un 0 de remplissage.
+ */
+export interface NutanixIoStats {
+  readIops?: number;
+  writeIops?: number;
+  totalIops?: number;
+  avgLatencyUsec?: number;
+  avgReadLatencyUsec?: number;
+  avgWriteLatencyUsec?: number;
+  readThroughputKbytesPerSec?: number;
+  writeThroughputKbytesPerSec?: number;
+  totalThroughputKbytesPerSec?: number;
+}
+
+export interface NutanixStorageUsage {
+  capacityBytes?: number;
+  usedBytes?: number;
+  freeBytes?: number;
+  logicalUsedBytes?: number;
+}
+
+export interface NutanixStorageContainerStats {
+  uuid: string;
+  name: string;
+  storage: NutanixStorageUsage;
+}
+
+export interface NutanixHostStats {
+  uuid: string;
+  name: string;
+  state?: string;
+  numVms?: number;
+  inMaintenanceMode?: boolean;
+  degraded?: boolean;
+  cpuUsagePercent?: number;
+  memoryUsagePercent?: number;
+  cpuCapacityHz?: number;
+  numCpuCores?: number;
+  memoryCapacityBytes?: number;
+  controllerIo: NutanixIoStats;
+  storage: NutanixStorageUsage;
+}
+
+export interface NutanixClusterHealth {
+  currentFaultTolerance?: number;
+  desiredFaultTolerance?: number;
+  currentRedundancyFactor?: number;
+  desiredRedundancyFactor?: number;
+  hostsTotal: number;
+  hostsNormal: number;
+}
+
+export interface NutanixClusterStats {
+  uuid: string;
+  name: string;
+  version?: string;
+  numNodes?: number;
+  cpuUsagePercent?: number;
+  memoryUsagePercent?: number;
+  cpuCapacityHz?: number;
+  memoryCapacityBytes?: number;
+  controllerIo: NutanixIoStats;
+  clusterIo: NutanixIoStats;
+  storage: NutanixStorageUsage;
+  storageContainers: NutanixStorageContainerStats[];
+  health: NutanixClusterHealth;
+  hosts: NutanixHostStats[];
+}
+
+export interface NutanixPollOutcome {
+  reachable: boolean;
+  at: string;
+}
+
+export interface NutanixClusterStatsResponse {
+  configured: boolean;
+  reachable: boolean;
+  clusters: NutanixClusterStats[];
+  lastPoll: NutanixPollOutcome | null;
+}
+
+export type NutanixAlertSeverity = "critical" | "warning" | "info" | "audit" | "unknown";
+
+export interface NutanixAlert {
+  id: string;
+  severity: NutanixAlertSeverity;
+  severityRaw: string;
+  title: string;
+  message: string;
+  acknowledged: boolean;
+  createdAt?: string;
+  lastOccurredAt?: string;
+  entityType?: string;
+  entityName?: string;
+  entityUuid?: string;
+  clusterUuid?: string;
+}
+
+export interface NutanixAlertsResponse {
+  configured: boolean;
+  reachable: boolean;
+  alerts: NutanixAlert[];
+  totalUnresolved?: number;
+  lastPoll: NutanixPollOutcome | null;
+}
+
 interface NutanixVmActionResponse {
   ok: true;
   vmName: string;
@@ -41,9 +156,26 @@ interface NutanixState {
    * template. "unavailable" = 404 (backend pas encore là), distinct d'un catalogue vide légitime. */
   images: NutanixImageSummary[];
   imagesStatus: "idle" | "loading" | "ready" | "unavailable" | "error";
+  /** Dernière réponse RÉELLE de /nutanix/cluster-stats — conservée entre deux polls pour que le
+   * panneau ne clignote pas ; `null` tant que rien n'a jamais été chargé (état "pas encore
+   * chargé", distinct de "non configuré"/"injoignable" que porte la réponse elle-même). */
+  clusterStats: NutanixClusterStatsResponse | null;
+  clusterStatsStatus: "idle" | "loading" | "ready" | "error";
+  alerts: NutanixAlertsResponse | null;
+  alertsStatus: "idle" | "loading" | "ready" | "error";
 }
 
-const initialState: NutanixState = { actionPendingUuid: null, convergence: {}, subnets: [], images: [], imagesStatus: "idle" };
+const initialState: NutanixState = {
+  actionPendingUuid: null,
+  convergence: {},
+  subnets: [],
+  images: [],
+  imagesStatus: "idle",
+  clusterStats: null,
+  clusterStatsStatus: "idle",
+  alerts: null,
+  alertsStatus: "idle",
+};
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : fallback;
@@ -156,6 +288,35 @@ export function uploadNutanixImage(file: File, name: string, onProgress: (percen
   });
 }
 
+/** Statistiques temps réel du/des clusters — pollé UNIQUEMENT tant que le panneau de détail d'un
+ * nœud Nutanix est ouvert (voir TopologyNodeDetailPanel.tsx), jamais en tâche de fond permanente.
+ * JAMAIS rejeté : un accroc réseau à chaque tour de poll ne doit pas déclencher un toast d'erreur
+ * via errorNotificationMiddleware (même choix que fetchNutanixImages) — l'échec se lit dans
+ * `clusterStatsStatus`/`reachable`, affiché explicitement dans le panneau. */
+export const fetchNutanixClusterStats = createAsyncThunk<NutanixClusterStatsResponse | null, void>(
+  "nutanix/fetchClusterStats",
+  async () => {
+    try {
+      return await apiGet<NutanixClusterStatsResponse>("/nutanix/cluster-stats");
+    } catch {
+      return null;
+    }
+  },
+);
+
+/** Alertes non résolues les plus récentes — même politique de poll et de non-rejet que ci-dessus. */
+export const fetchNutanixAlerts = createAsyncThunk<NutanixAlertsResponse | null, { limit?: number } | void>(
+  "nutanix/fetchAlerts",
+  async (arg) => {
+    const limit = arg && typeof arg === "object" ? arg.limit : undefined;
+    try {
+      return await apiGet<NutanixAlertsResponse>(`/nutanix/alerts${limit !== undefined ? `?limit=${limit}` : ""}`);
+    } catch {
+      return null;
+    }
+  },
+);
+
 /** Ajout d'un disque SCSI — voir POST /api/nutanix/vms/:uuid/disks (services/nutanix.ts#
  * addNutanixVmDisk : storage container recopié d'un disque existant de la VM). Appelé UNIQUEMENT
  * après confirmation explicite côté popover (TopologyGraph.tsx). */
@@ -257,6 +418,30 @@ const nutanixSlice = createSlice({
         } else {
           state.imagesStatus = "error";
         }
+      })
+      // "loading" seulement au TOUT PREMIER chargement : les polls suivants gardent la dernière
+      // valeur réelle affichée plutôt que de vider le panneau à chaque tour.
+      .addCase(fetchNutanixClusterStats.pending, (state) => {
+        if (state.clusterStatsStatus === "idle") state.clusterStatsStatus = "loading";
+      })
+      .addCase(fetchNutanixClusterStats.fulfilled, (state, action) => {
+        if (action.payload === null) {
+          state.clusterStatsStatus = "error";
+          return;
+        }
+        state.clusterStatsStatus = "ready";
+        state.clusterStats = action.payload;
+      })
+      .addCase(fetchNutanixAlerts.pending, (state) => {
+        if (state.alertsStatus === "idle") state.alertsStatus = "loading";
+      })
+      .addCase(fetchNutanixAlerts.fulfilled, (state, action) => {
+        if (action.payload === null) {
+          state.alertsStatus = "error";
+          return;
+        }
+        state.alertsStatus = "ready";
+        state.alerts = action.payload;
       })
       // Même verrou actionPendingUuid pour les 3 mutations matérielles que pour le cycle de vie.
       .addCase(addNutanixVmDisk.pending, (state, action) => {

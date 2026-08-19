@@ -19,6 +19,10 @@ import ContainerLogs from "@/features/containers/ContainerLogs";
 import VulnerabilitiesPanel from "@/components/VulnerabilitiesPanel";
 import { IconHistory, IconTerminal } from "@/components/icons";
 import { KIND_ICON, formatMem, idWithoutPrefix } from "@/components/topologyGraphShared";
+// Statistiques temps réel Nutanix (onglet "Statistiques" d'un nœud cluster/hôte, voir
+// NutanixStatsPanel plus bas) — thunks pollés UNIQUEMENT tant que ce panneau est monté.
+import { fetchNutanixAlerts, fetchNutanixClusterStats } from "@/features/nutanix/nutanixSlice";
+import type { NutanixAlertSeverity, NutanixClusterStats, NutanixHostStats } from "@/features/nutanix/nutanixSlice";
 // Panneau "iac-workspace" ci-dessous (mission point 3) : réutilise TEL QUEL le state/les thunks
 // déjà exposés par iacSlice.ts (auparavant consommés par la page dédiée IacPage.tsx, retirée —
 // voir mission point 5) — aucune route/logique dupliquée, juste une nouvelle UI par-dessus.
@@ -95,7 +99,7 @@ import {
   templateBaseLabel,
 } from "@/features/templates/templateCatalog";
 import TypeToConfirmDialog from "@/components/TypeToConfirmDialog";
-import type { ContainerMetricPoint, Topology, TopologyHostKind, TopologyNode, TopologyNodeKind } from "@/types";
+import type { ContainerMetricPoint, Topology, TopologyHostKind, TopologyNode } from "@/types";
 import type { AutomationRunLogEntry, BackupRun, CronJobRun } from "@/types";
 import type { GithubDeployment, GithubDeploymentDetail } from "@/types";
 import type { IacEngine, IacRunStatus } from "@/types";
@@ -224,9 +228,18 @@ const CONTAINER_TABS: TabDef[] = [
   { id: "metrics", label: "Métriques" },
 ];
 const OVERVIEW_ONLY_TABS: TabDef[] = [{ id: "overview", label: "Aperçu" }];
+/** Cluster/hôte physique Nutanix : un second onglet RÉEL "Statistiques" (voir NutanixStatsPanel
+ * ci-dessous) — il réutilise l'id "metrics" déjà présent dans TabId plutôt que d'en introduire un
+ * nouveau : c'est bien le même rôle (compteurs temps réel), avec une source différente. */
+const NUTANIX_TABS: TabDef[] = [
+  { id: "overview", label: "Aperçu" },
+  { id: "metrics", label: "Statistiques" },
+];
 
-function tabsForKind(kind: TopologyNodeKind): TabDef[] {
-  return kind === "container" ? CONTAINER_TABS : OVERVIEW_ONLY_TABS;
+function tabsForNode(node: TopologyNode): TabDef[] {
+  if (node.kind === "container") return CONTAINER_TABS;
+  if (node.kind === "host" && (node.hostKind === "nutanix-cluster" || node.hostKind === "nutanix-host")) return NUTANIX_TABS;
+  return OVERVIEW_ONLY_TABS;
 }
 
 function formatDate(iso: string | null | undefined): string {
@@ -1218,6 +1231,485 @@ interface NetworkAttachmentRow {
   shared: boolean; // true = vrai nœud du graphe (partagé ou par défaut), false = brique mono-conteneur
 }
 
+// --- Statistiques temps réel Nutanix (GET /api/nutanix/cluster-stats, /api/nutanix/alerts) ------
+// Retour utilisateur du 19/08/2026, capture du dashboard Prism à l'appui : "il manque toutes les
+// infos intégrées du dashboard à voir en temps réel". Toutes les valeurs affichées ici viennent de
+// l'API Prism v2.0 (voir apps/api/src/services/nutanix.ts, section "Statistiques temps réel") —
+// une métrique que Prism ne communique pas reste explicitement vide, jamais remplacée par 0.
+
+/** Poll court, ACTIF UNIQUEMENT tant que ce composant est monté (donc tant que le panneau de
+ * détail d'un nœud Nutanix est ouvert) — jamais de poll permanent en arrière-plan. */
+const NUTANIX_STATS_POLL_MS = 7000;
+/** Profondeur des sparklines : ~40 échantillons = un peu moins de 5 min d'historique observé. */
+const NUTANIX_SPARK_MAX_SAMPLES = 40;
+const NUTANIX_ALERTS_LIMIT = 20;
+
+/** Octets -> unité BINAIRE (division par 1024, d'où Kio/Mio/Gio/Tio) — formatMem() de
+ * topologyGraphShared s'arrête aux Go, insuffisant pour un stockage cluster de plusieurs dizaines
+ * de Tio. */
+function formatBigBytes(bytes: number | undefined): string | undefined {
+  if (bytes === undefined) return undefined;
+  const units = ["o", "Kio", "Mio", "Gio", "Tio", "Pio"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(unit === 0 || value >= 100 ? 0 : 2).replace(".", ",")} ${units[unit]}`;
+}
+
+function formatPercentValue(percent: number | undefined): string | undefined {
+  return percent === undefined ? undefined : `${percent.toFixed(1).replace(".", ",")} %`;
+}
+
+function formatIops(iops: number | undefined): string | undefined {
+  return iops === undefined ? undefined : `${iops.toLocaleString("fr-FR")} IOPS`;
+}
+
+/** Microsecondes -> millisecondes (division exacte par 1000, aucune hypothèse) — la valeur brute
+ * en µs telle que rendue par Prism reste dans l'infobulle, voir les appelants. */
+function formatLatency(usec: number | undefined): string | undefined {
+  if (usec === undefined) return undefined;
+  const ms = usec / 1000;
+  return `${ms.toFixed(ms < 10 ? 2 : 1).replace(".", ",")} ms`;
+}
+
+/** Débit en kilo-octets/s (unité SOURCE de Prism, `..._io_bandwidth_kBps`) — affiché en Mo/s
+ * au-delà de 1000 ko/s. Jamais reconverti en octets/s : le nombre d'octets dans un « k » n'est pas
+ * déductible du payload Prism (voir apps/api/src/services/nutanix.ts). */
+function formatThroughput(kbytesPerSec: number | undefined): string | undefined {
+  if (kbytesPerSec === undefined) return undefined;
+  if (kbytesPerSec < 1000) return `${kbytesPerSec.toLocaleString("fr-FR")} ko/s`;
+  return `${(kbytesPerSec / 1000).toFixed(2).replace(".", ",")} Mo/s`;
+}
+
+function NutanixStatTile({
+  label,
+  value,
+  hint,
+  title,
+}: {
+  label: string;
+  value?: string | undefined;
+  hint?: string | undefined;
+  title?: string | undefined;
+}) {
+  return (
+    <div className="nutanix-stat-tile" {...(title ? { title } : {})}>
+      <span className="nutanix-stat-tile__label">{label}</span>
+      <span className={`nutanix-stat-tile__value${value === undefined ? " is-missing" : ""}`}>{value ?? NOT_REPORTED_BY_API}</span>
+      {hint && <span className="nutanix-stat-tile__hint">{hint}</span>}
+    </div>
+  );
+}
+
+/** Jauge horizontale — seuils de couleur alignés sur ceux que Prism applique lui-même au stockage
+ * (`cluster_usage_warning_alert_threshold_pct` / `..._critical_...`, 75/90 par défaut). */
+function NutanixMeter({ label, percent, footer }: { label: string; percent: number | undefined; footer?: string | undefined }) {
+  if (percent === undefined) {
+    return (
+      <div className="nutanix-meter">
+        <div className="nutanix-meter__head">
+          <span className="nutanix-meter__label">{label}</span>
+        </div>
+        <span className="nutanix-meter__foot">{NOT_REPORTED_BY_API}</span>
+      </div>
+    );
+  }
+  const clamped = Math.max(0, Math.min(100, percent));
+  const severity = clamped >= 90 ? " is-critical" : clamped >= 75 ? " is-warning" : "";
+  return (
+    <div className="nutanix-meter">
+      <div className="nutanix-meter__head">
+        <span className="nutanix-meter__label">{label}</span>
+        <span className="nutanix-meter__value">{formatPercentValue(percent)}</span>
+      </div>
+      <div className="nutanix-meter__track">
+        <div className={`nutanix-meter__fill${severity}`} style={{ width: `${clamped}%` }} />
+      </div>
+      {footer && <span className="nutanix-meter__foot">{footer}</span>}
+    </div>
+  );
+}
+
+/** Sparkline des ÉCHANTILLONS RÉELLEMENT OBSERVÉS par QUAI depuis l'ouverture du panneau — jamais
+ * un historique reconstitué : vérifié en conditions réelles le 19/08/2026, l'endpoint de séries
+ * temporelles de Prism (`/cluster/stats/?metrics=…&intervalInSecs=…`) ignore l'intervalle demandé
+ * et ne renvoie qu'UN point (le plus récent), il n'y a donc aucune vraie série à afficher. */
+function NutanixSparkline({ label, values, current }: { label: string; values: number[]; current?: string | undefined }) {
+  const width = 100;
+  const height = 30;
+  const points =
+    values.length >= 2
+      ? values.map((value, index) => {
+          const max = Math.max(...values);
+          const min = Math.min(...values);
+          const span = max - min || 1;
+          const x = (index / (values.length - 1)) * width;
+          const y = height - ((value - min) / span) * (height - 2) - 1;
+          return `${x.toFixed(2)},${y.toFixed(2)}`;
+        })
+      : [];
+  return (
+    <div className="nutanix-spark">
+      <div className="nutanix-spark__head">
+        <span className="nutanix-spark__label">{label}</span>
+        {current && <span className="nutanix-spark__value">{current}</span>}
+      </div>
+      {points.length >= 2 ? (
+        <svg className="nutanix-spark__svg" viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" aria-hidden="true">
+          <polygon className="nutanix-spark__area" points={`0,${height} ${points.join(" ")} ${width},${height}`} />
+          <polyline className="nutanix-spark__line" points={points.join(" ")} />
+        </svg>
+      ) : (
+        <span className="nutanix-spark__empty">Historique en cours de collecte (un point toutes les {NUTANIX_STATS_POLL_MS / 1000} s)…</span>
+      )}
+    </div>
+  );
+}
+
+const NUTANIX_ALERT_SEVERITY_LABEL: Record<NutanixAlertSeverity, string> = {
+  critical: "Critique",
+  warning: "Avertissement",
+  info: "Information",
+  audit: "Audit",
+  unknown: "Sévérité inconnue",
+};
+
+/**
+ * Onglet "Statistiques" d'un nœud cluster/hôte physique Nutanix : valeurs RÉELLES de Prism
+ * rafraîchies toutes les {NUTANIX_STATS_POLL_MS}ms tant que ce panneau est ouvert (le poll s'arrête
+ * au démontage, voir le useEffect ci-dessous). Trois états explicites plutôt qu'un panneau vide
+ * muet : "Nutanix non configuré", "Prism injoignable" et "pas encore chargé".
+ */
+function NutanixStatsPanel({ node }: { node: TopologyNode }) {
+  const dispatch = useAppDispatch();
+  const clusterStats = useAppSelector((s) => s.nutanix.clusterStats);
+  const clusterStatsStatus = useAppSelector((s) => s.nutanix.clusterStatsStatus);
+  const alertsResponse = useAppSelector((s) => s.nutanix.alerts);
+  const alertsStatus = useAppSelector((s) => s.nutanix.alertsStatus);
+
+  const isCluster = node.hostKind === "nutanix-cluster";
+  // "host:nutanix-cluster:<uuid>" -> "<uuid>" (idWithoutPrefix ne retire que le premier segment).
+  const entityUuid = idWithoutPrefix(node.id).split(":").pop() ?? "";
+
+  useEffect(() => {
+    const tick = () => {
+      void dispatch(fetchNutanixClusterStats());
+      if (isCluster) void dispatch(fetchNutanixAlerts({ limit: NUTANIX_ALERTS_LIMIT }));
+    };
+    tick();
+    const timer = window.setInterval(tick, NUTANIX_STATS_POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [dispatch, isCluster]);
+
+  const cluster = useMemo(() => {
+    const clusters = clusterStats?.clusters ?? [];
+    return (isCluster ? clusters.find((c) => c.uuid === entityUuid) : clusters.find((c) => c.hosts.some((h) => h.uuid === entityUuid))) ?? null;
+  }, [clusterStats, entityUuid, isCluster]);
+
+  const host = useMemo(() => (isCluster ? null : (cluster?.hosts.find((h) => h.uuid === entityUuid) ?? null)), [cluster, entityUuid, isCluster]);
+
+  // Entité observée (cluster OU hôte) : sa RÉFÉRENCE change à chaque poll réussi (le reducer
+  // remplace toute la réponse), et seulement alors — d'où un échantillon de sparkline par poll
+  // RÉELLEMENT abouti, aucun point ajouté quand Prism n'a pas répondu.
+  const observed = isCluster ? cluster : host;
+  const [samples, setSamples] = useState<{ cpuPercent?: number; iops?: number; latencyUsec?: number }[]>([]);
+
+  useEffect(() => {
+    setSamples([]);
+  }, [entityUuid]);
+
+  useEffect(() => {
+    if (!observed) return;
+    const io = isCluster ? (observed as NutanixClusterStats).controllerIo : (observed as NutanixHostStats).controllerIo;
+    setSamples((previous) =>
+      [
+        ...previous,
+        {
+          ...(observed.cpuUsagePercent !== undefined ? { cpuPercent: observed.cpuUsagePercent } : {}),
+          ...(io.totalIops !== undefined ? { iops: io.totalIops } : {}),
+          ...(io.avgLatencyUsec !== undefined ? { latencyUsec: io.avgLatencyUsec } : {}),
+        },
+      ].slice(-NUTANIX_SPARK_MAX_SAMPLES),
+    );
+  }, [observed, isCluster]);
+
+  const seriesOf = (pick: (s: { cpuPercent?: number; iops?: number; latencyUsec?: number }) => number | undefined): number[] =>
+    samples.map(pick).filter((v): v is number => v !== undefined);
+
+  if (clusterStats && !clusterStats.configured) {
+    return (
+      <div className="nutanix-stats">
+        <div className="nutanix-stats__state">
+          Nutanix n'est pas configuré — aucune statistique n'est collectée. Renseignez Prism Central dans Paramètres › Environnements
+          pour voir ici les compteurs réels (CPU/mémoire, IOPS, latence, stockage, alertes).
+        </div>
+      </div>
+    );
+  }
+
+  if (clusterStats && !clusterStats.reachable) {
+    return (
+      <div className="nutanix-stats">
+        <div className="nutanix-stats__state is-error">
+          Prism est actuellement injoignable — aucune statistique en direct disponible. Rien n'est affiché plutôt qu'une dernière
+          valeur connue potentiellement obsolète.
+          {clusterStats.lastPoll && <> Dernier contact constaté : {formatDate(clusterStats.lastPoll.at)}.</>}
+        </div>
+      </div>
+    );
+  }
+
+  if (!clusterStats) {
+    return (
+      <div className="nutanix-stats">
+        <div className={`nutanix-stats__state${clusterStatsStatus === "error" ? " is-error" : ""}`}>
+          {clusterStatsStatus === "error"
+            ? "Les statistiques n'ont pas pu être chargées (erreur réseau côté QUAI). Nouvelle tentative automatique dans quelques secondes."
+            : "Chargement des statistiques Prism en cours…"}
+        </div>
+      </div>
+    );
+  }
+
+  if (!observed) {
+    return (
+      <div className="nutanix-stats">
+        <div className="nutanix-stats__state">
+          Prism a répondu mais ne rapporte aucune statistique pour {isCluster ? "ce cluster" : "cet hôte"} ({entityUuid}) — il n'est
+          plus listé par l'API à cet instant.
+        </div>
+      </div>
+    );
+  }
+
+  const io = isCluster ? (observed as NutanixClusterStats).controllerIo : (observed as NutanixHostStats).controllerIo;
+  const storage = observed.storage;
+  const storagePercent =
+    storage.capacityBytes !== undefined && storage.usedBytes !== undefined && storage.capacityBytes > 0
+      ? (storage.usedBytes / storage.capacityBytes) * 100
+      : undefined;
+
+  return (
+    <div className="nutanix-stats">
+      <div className="nutanix-stats__freshness">
+        <span className={`nutanix-stats__dot${clusterStatsStatus === "error" ? " is-stale" : ""}`} />
+        {clusterStatsStatus === "error"
+          ? "Dernier rafraîchissement en échec — valeurs ci-dessous potentiellement figées"
+          : `Rafraîchissement automatique toutes les ${NUTANIX_STATS_POLL_MS / 1000} s (uniquement tant que ce panneau est ouvert)`}
+      </div>
+
+      <div className="inspector-section-title">Ressources</div>
+      <NutanixMeter
+        label="CPU hyperviseur"
+        percent={observed.cpuUsagePercent}
+        footer={
+          isCluster
+            ? (observed as NutanixClusterStats).cpuCapacityHz !== undefined
+              ? `Capacité totale : ${((observed as NutanixClusterStats).cpuCapacityHz! / 1e9).toFixed(1).replace(".", ",")} GHz`
+              : undefined
+            : (observed as NutanixHostStats).numCpuCores !== undefined
+              ? `${(observed as NutanixHostStats).numCpuCores} cœurs physiques`
+              : undefined
+        }
+      />
+      <NutanixMeter
+        label="Mémoire hyperviseur"
+        percent={observed.memoryUsagePercent}
+        footer={
+          isCluster
+            ? formatBigBytes((observed as NutanixClusterStats).memoryCapacityBytes)
+              ? `Capacité totale : ${formatBigBytes((observed as NutanixClusterStats).memoryCapacityBytes)}`
+              : undefined
+            : formatBigBytes((observed as NutanixHostStats).memoryCapacityBytes)
+              ? `Capacité totale : ${formatBigBytes((observed as NutanixHostStats).memoryCapacityBytes)}`
+              : undefined
+        }
+      />
+      <NutanixMeter
+        label="Stockage"
+        percent={storagePercent}
+        footer={
+          storage.usedBytes !== undefined && storage.capacityBytes !== undefined
+            ? `${formatBigBytes(storage.usedBytes)} utilisés sur ${formatBigBytes(storage.capacityBytes)}${
+                storage.logicalUsedBytes !== undefined ? ` · ${formatBigBytes(storage.logicalUsedBytes)} logiques avant réduction` : ""
+              }`
+            : undefined
+        }
+      />
+
+      <div className="inspector-section-title">Entrées/sorties (couche de stockage Nutanix)</div>
+      <div className="nutanix-stats__grid">
+        <NutanixStatTile label="IOPS total" value={formatIops(io.totalIops)} hint={`Lecture ${io.readIops ?? "—"} · Écriture ${io.writeIops ?? "—"}`} />
+        <NutanixStatTile
+          label="Latence moyenne"
+          value={formatLatency(io.avgLatencyUsec)}
+          hint={`Lecture ${formatLatency(io.avgReadLatencyUsec) ?? "—"} · Écriture ${formatLatency(io.avgWriteLatencyUsec) ?? "—"}`}
+          title={io.avgLatencyUsec !== undefined ? `Valeur brute Prism : ${io.avgLatencyUsec} µs` : undefined}
+        />
+        <NutanixStatTile
+          label="Débit total"
+          value={formatThroughput(io.totalThroughputKbytesPerSec)}
+          hint={`Lecture ${formatThroughput(io.readThroughputKbytesPerSec) ?? "—"} · Écriture ${formatThroughput(io.writeThroughputKbytesPerSec) ?? "—"}`}
+          title={io.totalThroughputKbytesPerSec !== undefined ? `Valeur brute Prism : ${io.totalThroughputKbytesPerSec} kBps` : undefined}
+        />
+        {isCluster && (
+          <NutanixStatTile
+            label="IOPS vus du cluster"
+            value={formatIops((observed as NutanixClusterStats).clusterIo.totalIops)}
+            hint={`Latence ${formatLatency((observed as NutanixClusterStats).clusterIo.avgLatencyUsec) ?? "—"} · Débit ${
+              formatThroughput((observed as NutanixClusterStats).clusterIo.totalThroughputKbytesPerSec) ?? "—"
+            }`}
+            title="Famille de métriques distincte de celle de la couche de stockage (controller_*) — deux mesures réellement différentes, jamais fusionnées."
+          />
+        )}
+      </div>
+
+      <NutanixSparkline label="IOPS observés" values={seriesOf((s) => s.iops)} current={formatIops(io.totalIops)} />
+      <NutanixSparkline label="Latence observée" values={seriesOf((s) => s.latencyUsec)} current={formatLatency(io.avgLatencyUsec)} />
+      <NutanixSparkline label="CPU observé" values={seriesOf((s) => s.cpuPercent)} current={formatPercentValue(observed.cpuUsagePercent)} />
+
+      {isCluster && (
+        <>
+          <div className="inspector-section-title">Santé</div>
+          <KeyValueList
+            rows={[
+              { key: "Version AOS", value: (observed as NutanixClusterStats).version ?? NOT_REPORTED_BY_API },
+              {
+                key: "Hôtes à l'état NORMAL",
+                value: `${(observed as NutanixClusterStats).health.hostsNormal} / ${(observed as NutanixClusterStats).health.hostsTotal}`,
+              },
+              {
+                key: "Tolérance aux pannes",
+                value:
+                  (observed as NutanixClusterStats).health.currentFaultTolerance !== undefined
+                    ? `${(observed as NutanixClusterStats).health.currentFaultTolerance} (souhaitée : ${
+                        (observed as NutanixClusterStats).health.desiredFaultTolerance ?? "—"
+                      })`
+                    : NOT_REPORTED_BY_API,
+              },
+              {
+                key: "Facteur de réplication",
+                value:
+                  (observed as NutanixClusterStats).health.currentRedundancyFactor !== undefined
+                    ? `RF${(observed as NutanixClusterStats).health.currentRedundancyFactor}`
+                    : NOT_REPORTED_BY_API,
+              },
+            ]}
+          />
+
+          <div className="inspector-section-title">Hôtes physiques ({(observed as NutanixClusterStats).hosts.length})</div>
+          <div className="nutanix-stats__rows">
+            {(observed as NutanixClusterStats).hosts.length === 0 && (
+              <div className="empty-state">Aucun hôte rapporté par Prism à cet instant.</div>
+            )}
+            {(observed as NutanixClusterStats).hosts.map((h) => (
+              <div key={h.uuid} className="nutanix-stats-row">
+                <div className="nutanix-stats-row__head">
+                  <span className="nutanix-stats-row__name" title={h.uuid}>
+                    {h.name}
+                  </span>
+                  <span
+                    className={`nutanix-stats-row__badge${h.state === "NORMAL" && !h.degraded && !h.inMaintenanceMode ? "" : " is-warning"}`}
+                  >
+                    {h.inMaintenanceMode ? "Maintenance" : h.degraded ? "Dégradé" : (h.state ?? "état inconnu")}
+                  </span>
+                </div>
+                <span className="nutanix-stats-row__meta">
+                  CPU {formatPercentValue(h.cpuUsagePercent) ?? "—"} · RAM {formatPercentValue(h.memoryUsagePercent) ?? "—"} ·{" "}
+                  {formatIops(h.controllerIo.totalIops) ?? "— IOPS"} · {h.numVms ?? "—"} VM(s)
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <div className="inspector-section-title">
+            Storage containers ({(observed as NutanixClusterStats).storageContainers.length})
+          </div>
+          <div className="nutanix-stats__rows">
+            {(observed as NutanixClusterStats).storageContainers.length === 0 && (
+              <div className="empty-state">Aucun storage container rapporté par Prism à cet instant.</div>
+            )}
+            {(observed as NutanixClusterStats).storageContainers.map((sc) => (
+              <div key={sc.uuid} className="nutanix-stats-row">
+                <div className="nutanix-stats-row__head">
+                  <span className="nutanix-stats-row__name" title={sc.uuid}>
+                    {sc.name}
+                  </span>
+                </div>
+                <span className="nutanix-stats-row__meta">
+                  {formatBigBytes(sc.storage.usedBytes) ?? "—"} utilisés sur {formatBigBytes(sc.storage.capacityBytes) ?? "—"}
+                  {sc.storage.freeBytes !== undefined && <> · {formatBigBytes(sc.storage.freeBytes)} libres</>}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          <div className="inspector-section-title">
+            Alertes non résolues
+            {alertsResponse?.totalUnresolved !== undefined && ` (${alertsResponse.alerts.length} sur ${alertsResponse.totalUnresolved})`}
+          </div>
+          {!alertsResponse && (
+            <div className={`nutanix-stats__state${alertsStatus === "error" ? " is-error" : ""}`}>
+              {alertsStatus === "error" ? "Les alertes n'ont pas pu être chargées." : "Chargement des alertes…"}
+            </div>
+          )}
+          {alertsResponse && !alertsResponse.reachable && (
+            <div className="nutanix-stats__state is-error">Prism injoignable — impossible de lister les alertes en ce moment.</div>
+          )}
+          {alertsResponse?.reachable && alertsResponse.alerts.length === 0 && (
+            <div className="empty-state">Aucune alerte non résolue — rien à signaler côté Prism.</div>
+          )}
+          {alertsResponse?.reachable && alertsResponse.alerts.length > 0 && (
+            <div className="nutanix-alerts">
+              {alertsResponse.alerts.map((alert) => (
+                <div key={alert.id} className={`nutanix-alert is-${alert.severity}`}>
+                  <div className="nutanix-alert__body">
+                    <span className="nutanix-alert__title">{alert.title}</span>
+                    {alert.message && <span className="nutanix-alert__message">{alert.message}</span>}
+                    <span className="nutanix-alert__meta">
+                      <span title={`Sévérité brute Prism : ${alert.severityRaw}`}>{NUTANIX_ALERT_SEVERITY_LABEL[alert.severity]}</span>
+                      {alert.entityName && (
+                        <span className="nutanix-alert__entity" title={alert.entityUuid}>
+                          {alert.entityType ?? "entité"} · {alert.entityName}
+                        </span>
+                      )}
+                      {(alert.lastOccurredAt ?? alert.createdAt) && <span>{formatDate(alert.lastOccurredAt ?? alert.createdAt)}</span>}
+                      {alert.acknowledged && <span className="nutanix-alert__ack">acquittée dans Prism</span>}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+
+      {!isCluster && (
+        <>
+          <div className="inspector-section-title">Stockage local de l'hôte</div>
+          <KeyValueList
+            rows={[
+              { key: "Capacité", value: formatBigBytes(storage.capacityBytes) ?? NOT_REPORTED_BY_API },
+              { key: "Utilisé", value: formatBigBytes(storage.usedBytes) ?? NOT_REPORTED_BY_API },
+              { key: "Libre", value: formatBigBytes(storage.freeBytes) ?? NOT_REPORTED_BY_API },
+              { key: "VMs hébergées", value: (observed as NutanixHostStats).numVms?.toString() ?? NOT_REPORTED_BY_API },
+              {
+                key: "État",
+                value: `${(observed as NutanixHostStats).state ?? NOT_REPORTED_BY_API}${
+                  (observed as NutanixHostStats).inMaintenanceMode ? " · en maintenance" : ""
+                }${(observed as NutanixHostStats).degraded ? " · dégradé" : ""}`,
+              },
+            ]}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
 /**
  * Panneau de détail complet — ANCRÉ en overlay fixe sur le bord droit du canevas (même pattern
  * d'ancrage que TopologySubGraphPanel.tsx : `position: absolute` à l'intérieur de `.topology-graph`,
@@ -1503,7 +1995,7 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
   const isContainerDetailReady = kind === "container" && detailStatus === "ready" && detail?.id === rawId;
   const volume = kind === "volume" ? volumes.find((v) => v.name === rawId) ?? null : null;
   const network = kind === "network" ? networks.find((n) => n.id === rawId) ?? null : null;
-  const tabs = tabsForKind(node.kind);
+  const tabs = tabsForNode(node);
 
   // Plafonds de référence RÉELS pour l'onglet "Métriques" (façon Railway "Max 8 vCPU"/"Max 8 GB")
   // — uniquement si une limite a effectivement été configurée à la création du conteneur
@@ -2202,8 +2694,13 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
           </>
         )}
 
-        {/* --- Hôte (cluster Nutanix physique / environnement Docker distant / hôte LXD) ---------- */}
-        {node.kind === "host" && (
+        {/* --- Hôte (cluster Nutanix physique / environnement Docker distant / hôte LXD) ----------
+            Onglet "Statistiques" pour un cluster/hôte Nutanix UNIQUEMENT (voir tabsForNode) : le
+            poll court vit dans NutanixStatsPanel, donc il démarre à l'affichage de cet onglet et
+            s'arrête dès qu'on le quitte ou qu'on ferme le panneau — jamais en arrière-plan. */}
+        {node.kind === "host" && activeTab === "metrics" && <NutanixStatsPanel node={node} />}
+
+        {node.kind === "host" && activeTab === "overview" && (
           <>
             <div className="chip-row topology-detail-panel__chips">
               <StatusPill status={node.status} />

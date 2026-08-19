@@ -79,7 +79,12 @@ export type CapabilityId =
   | "automation-out"
   | "automation-in"
   | "artifact-out"
-  | "artifact-in";
+  | "artifact-in"
+  // Sauvegarde HYCU : "protection-out" côté appliance, "protected-by" côté VM Nutanix protégée
+  // (arête "protects") — même patron que artifact-out/artifact-in, et non interactives pour la
+  // même raison : c'est une vérité rapportée par HYCU à chaque poll, en LECTURE SEULE stricte.
+  | "protection-out"
+  | "protected-by";
 
 export interface PortSpec {
   /** Id du Handle React Flow — unique au sein d'un même type de nœud. */
@@ -91,7 +96,7 @@ export interface PortSpec {
   label: string;
   /** Suffixe de classe .topology-handle--<token> — couleur reprise de celle de l'icône du même
    * type de nœud (variables.css), pas de couleur arbitraire ajoutée. */
-  colorToken: "network" | "volume" | "host" | "automation" | "template";
+  colorToken: "network" | "volume" | "host" | "automation" | "template" | "backup";
 }
 
 export interface CapabilityDef {
@@ -133,6 +138,18 @@ export const CAPABILITY_DEFS: Record<CapabilityId, CapabilityDef> = {
   // recalculée à chaque poll — se modifie dans le studio, pas au fil (phase sous-graphe à venir).
   "artifact-out": { linksTo: "artifact-in", interactive: false, infoMessage: "Dépendance d'artefact définie par la recette du template — modifiable dans le studio." },
   "artifact-in": { linksTo: "artifact-out", interactive: false, infoMessage: "Dépendance d'artefact définie par la recette du template — modifiable dans le studio." },
+  // Protection HYCU : QUAI lit l'appliance, il ne la pilote JAMAIS (aucune route de mutation) —
+  // un fil tiré depuis ce port doit le dire honnêtement plutôt que de laisser espérer une action.
+  "protection-out": {
+    linksTo: "protected-by",
+    interactive: false,
+    infoMessage: "Protection rapportée par HYCU (lecture seule) — elle s'assigne dans HYCU, pas depuis QUAI.",
+  },
+  "protected-by": {
+    linksTo: "protection-out",
+    interactive: false,
+    infoMessage: "Protection rapportée par HYCU (lecture seule) — elle s'assigne dans HYCU, pas depuis QUAI.",
+  },
 };
 
 /**
@@ -165,6 +182,8 @@ export const CAPABILITY_PORT_META: Record<CapabilityId, Pick<PortSpec, "handleTy
   "automation-in": { handleType: "target", position: Position.Left, colorToken: "automation", label: "Relié depuis un déclencheur/une condition" },
   "artifact-out": { handleType: "source", position: Position.Right, colorToken: "template", label: "Artefact fourni" },
   "artifact-in": { handleType: "target", position: Position.Left, colorToken: "template", label: "Artefact consommé" },
+  "protection-out": { handleType: "source", position: Position.Right, colorToken: "backup", label: "Sauvegarde cette VM" },
+  "protected-by": { handleType: "target", position: Position.Left, colorToken: "backup", label: "Sauvegardée par HYCU" },
 };
 
 // --- Câblage manuel au fil (React Flow onConnect) ------------------------------------------------
@@ -223,7 +242,7 @@ export interface EdgeHealthInfo {
  * légitimement vouloir consulter SANS que le moteur ait à connaître sa plateforme. */
 export interface EdgeHealthContext {
   /** Kind de l'arête interrogée — même union que TopologyEdge["kind"]. */
-  edgeKind: "mount" | "network" | "hosts" | "automation-flow" | "uses-artifact";
+  edgeKind: "mount" | "network" | "hosts" | "automation-flow" | "uses-artifact" | "protects";
   /** Rôle de CE nœud sur l'arête — permet à un contrat de ne répondre que pour le bout où son
    * signal a un sens (ex : une VM Nutanix n'est porteuse que comme CIBLE d'une arête "hosts"). */
   role: "source" | "target";
@@ -278,6 +297,44 @@ export function nutanixVmHostEdgeState(vmNode: TopologyNode): { state: EdgeHealt
   if (vmNode.nutanixApiError) return { state: "unhealthy", strokeDasharray };
   if (vmNode.status === "running") return { state: vmNode.nutanixHostPlacementConfirmed ? "healthy" : "starting", strokeDasharray };
   return { state: "none", strokeDasharray: undefined };
+}
+
+/**
+ * État + pointillé d'une arête "protects" (appliance HYCU -> VM Nutanix), lus sur la VM CIBLE —
+ * même palette/grammaire que tout le reste du graphe, jamais un second système :
+ *  - "protected" -> vert plein : HYCU la sauvegarde et ne signale rien d'anormal ;
+ *  - "non-compliant" -> rouge : HYCU renvoie une conformité hors des valeurs saines (valeur brute
+ *    reportée telle quelle sur la carte, jamais réinterprétée) ;
+ *  - "never-backed-up" -> orange, tirets fins : protégée mais aucune sauvegarde datée à ce jour ;
+ *  - tout le reste (dont "unprotected", qui ne produit de toute façon aucune arête) -> gris.
+ */
+export function hycuProtectionEdgeState(vmNode: TopologyNode): EdgeHealthInfo {
+  if (vmNode.hycuProtection === "protected") return { state: "healthy", strokeDasharray: undefined };
+  if (vmNode.hycuProtection === "non-compliant") return { state: "unhealthy", strokeDasharray: undefined };
+  if (vmNode.hycuProtection === "never-backed-up") return { state: "starting", strokeDasharray: "4 4" };
+  return { state: "none", strokeDasharray: undefined };
+}
+
+/** Badge de protection à afficher sur une carte de VM Nutanix — `null` tant que HYCU ne dit RIEN
+ * de cette VM (jamais un "non sauvegardée" déduit d'un silence). `tone` reprend les variantes de
+ * .topology-badge (topology.css). */
+export function hycuProtectionBadge(node: TopologyNode): { label: string; tone: "ok" | "warning" | "critical"; title: string } | null {
+  switch (node.hycuProtection) {
+    case "protected":
+      return { label: "Protégée", tone: "ok", title: `Sauvegardée par HYCU${node.hycuPolicyName ? ` — politique ${node.hycuPolicyName}` : ""}` };
+    case "non-compliant":
+      return {
+        label: "Non conforme",
+        tone: "critical",
+        title: `Conformité rapportée par HYCU : ${node.hycuComplianceStatus ?? "valeur non conforme"}`,
+      };
+    case "never-backed-up":
+      return { label: "Jamais sauvegardée", tone: "warning", title: "Assignée à une politique HYCU, mais aucune date de sauvegarde rapportée" };
+    case "unprotected":
+      return { label: "Non protégée", tone: "warning", title: "VM connue de HYCU mais assignée à aucune politique de sauvegarde" };
+    default:
+      return null;
+  }
 }
 
 // --- Alertes de ressources (CPU/mémoire) ---------------------------------------------------------
@@ -337,7 +394,12 @@ export type NodeMenuActionId =
   | "image-template-view-builds"
   | "image-template-deploy-vm"
   | "image-template-create-container"
-  | "image-template-remove";
+  | "image-template-remove"
+  // Appliance HYCU : navigation/consultation UNIQUEMENT — QUAI n'expose AUCUNE mutation vers
+  // l'appliance réelle (pas de "lancer une sauvegarde" tant qu'aucune route backend n'existe).
+  | "hycu-open-page"
+  | "hycu-view-jobs"
+  | "hycu-configure";
 
 export interface NodeMenuActionSpec {
   id: NodeMenuActionId;
@@ -594,6 +656,9 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     defaultColumnX: 1020,
     ports: [
       { id: "hosted-by", capability: "hosted-by", handleType: "target", position: Position.Left, label: "Hébergé par", colorToken: "host" },
+      // Cible de l'arête "protects" HYCU -> VM (18/08/2026) — sans ce Handle, l'arête existerait
+      // dans les données mais ne pourrait pas être dessinée (bug réel du 14/08/2026).
+      { id: "protected-by", capability: "protected-by", handleType: "target", position: Position.Left, label: "Sauvegardée par HYCU", colorToken: "backup" },
     ],
     // SEUL cas d'arête "hosts" qui porte un vrai signal de santé : la VM comme CIBLE (jamais le
     // cas cluster -> hôte physique, dont les deux bouts sont des nœuds "host" au contrat
@@ -601,6 +666,11 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     // hôte connu" (extraEdgeData) n'est posé QUE pour une VM allumée sans erreur API : pour une VM
     // éteinte/en erreur, la couleur/le pointillé portent déjà l'information sans ambiguïté.
     edgeHealth: (node, ctx) => {
+      // Arête "protects" HYCU -> VM : c'est la VM (cible) qui porte l'état RÉEL rapporté par HYCU,
+      // projeté sur la MÊME palette que le reste du graphe (voir hycuProtectionEdgeState).
+      if (ctx.edgeKind === "protects") {
+        return ctx.role === "target" ? hycuProtectionEdgeState(node) : null;
+      }
       if (ctx.edgeKind !== "hosts" || ctx.role !== "target") return null;
       const { state, strokeDasharray } = nutanixVmHostEdgeState(node);
       return {
@@ -883,6 +953,39 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
       { id: "image-template-deploy-vm", label: "Déployer en VM…", visible: (n) => n.templateArtifactType === "nutanix-image" },
       { id: "image-template-create-container", label: "Créer un conteneur…", visible: (n) => n.templateArtifactType === "docker-image" },
       { id: "image-template-remove", label: "Supprimer", danger: true },
+    ],
+  },
+  // Appliance HYCU (services/hycu.ts — contrôleur de sauvegarde RÉEL de la mairie, LECTURE SEULE
+  // stricte côté API). Icône IconBackup, comme le kind "backup" et la page Sauvegardes : c'est la
+  // même idée métier, la couleur (magenta, ci-dessous) suffit à distinguer l'appliance externe
+  // d'une définition de sauvegarde locale. Ports : cible du rattachement au master ("hosted-by")
+  // et source des arêtes "protects" vers les VMs qu'elle sauvegarde réellement.
+  "hycu-appliance": {
+    icon: IconBackup,
+    // Magenta — distinct du bleu ciel de "backup" (#0ea5e9), du rose/rouge de gitops-source
+    // (#f43f5e) et du fuchsia clair d'ad-server (#e879f9) ; cohérent avec
+    // .topology-node--hycu-appliance et .topology-handle--backup (topology.css).
+    minimapColor: "#ec4899",
+    defaultColumnX: 4760,
+    ports: [
+      { id: "hosted-by", capability: "hosted-by", handleType: "target", position: Position.Left, label: "Hébergé par", colorToken: "host" },
+      { id: "protection-out", capability: "protection-out", handleType: "source", position: Position.Right, label: "Sauvegarde cette VM", colorToken: "backup" },
+    ],
+    // L'état de santé d'une arête "protects" est porté par la VM CIBLE (voir
+    // NODE_CONTRACT["nutanix-vm"].edgeHealth) : l'appliance elle-même n'ajoute aucun signal — son
+    // `status` (joignable/injoignable) est déjà lisible sur sa carte.
+    edgeHealth: null,
+    automationStatusSeed: null,
+    // HYCU n'expose aucune métrique d'utilisation de l'appliance sur les endpoints REST utilisés.
+    resourceAlerts: null,
+    // AUCUNE action de mutation (pas de "lancer une sauvegarde") : services/hycu.ts n'émet que des
+    // GET contre une appliance de production — une entrée qui échouerait serait un mensonge.
+    // "Configurer" n'apparaît que si l'appelant injecte son handler (admin uniquement, voir
+    // buildNodeMenuItems et TopologyGraph.tsx).
+    menuItems: [
+      { id: "hycu-open-page", label: "Ouvrir la page Sauvegardes" },
+      { id: "hycu-view-jobs", label: "Voir les jobs" },
+      { id: "hycu-configure", label: "Configurer…" },
     ],
   },
 };

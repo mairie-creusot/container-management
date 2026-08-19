@@ -37,6 +37,10 @@
  * "nutanix-vm" (indépendant de Docker, [] tant que jamais configuré), jamais relié par une arête
  * à un nœud Docker ou Nutanix (aucune donnée ne prouve que c'est la même machine physique/VM).
  *
+ * Nœud "hycu-appliance" (voir getHycuTopologyParts ci-dessous) : le contrôleur de sauvegarde HYCU
+ * réel — aucun nœud tant qu'il n'a jamais été configuré, LECTURE SEULE stricte. Seul émetteur
+ * d'arêtes `kind: "protects"` vers les VMs Nutanix qu'il sauvegarde vraiment.
+ *
  * Nœuds "host" (kind "host", champ `hostKind` — voir getNutanixTopologyParts/
  * getRemoteDockerHostNodes/getLxcHostNodes ci-dessous) : une machine/cluster HÔTE réelle, PAS une
  * ressource applicative — trois sous-types possibles, un nœud par ressource RÉELLEMENT configurée,
@@ -107,6 +111,7 @@ import { getImages } from "./images.js";
 import { listGitOpsFiles } from "./gitops.js";
 import { listAllScans } from "./scan.js";
 import { getNutanixClusters, getNutanixHosts, getNutanixVms, isNutanixConfigured, lastKnownNutanixPoll } from "./nutanix.js";
+import { getHycuTopologySnapshot, hycuVmProtectionState, lastKnownHycuPoll } from "./hycu.js";
 import { getEffectiveAdDnsConfig } from "./setupStore.js";
 import { lastKnownDnsSync, listRoutes } from "./reverseProxy.js";
 import { listGroups } from "./topologyGroupsStore.js";
@@ -405,6 +410,87 @@ async function getNutanixTopologyParts(): Promise<{ vmNodes: TopologyNode[]; hos
   }
 
   return { vmNodes, hostNodes: [...clusterNodes, ...hostPhysicalNodes], hostEdges };
+}
+
+const HYCU_NODE_ID = "hycu-appliance:main";
+
+/** "nutanix-vm:<uuid>" -> "<uuid>" — inverse de nutanixVmToNode, pour rapprocher un nœud VM déjà
+ * construit d'une VM HYCU sans repasser par la liste Nutanix brute. */
+function uuidFromNutanixVmNodeId(nodeId: string): string {
+  return nodeId.slice("nutanix-vm:".length);
+}
+
+/**
+ * Nœud "hycu-appliance" + arêtes "protects" HYCU -> VM Nutanix + annotation de protection posée
+ * SUR les nœuds VM déjà construits (même mécanique que les `attachments` posés plus bas sur les
+ * nœuds conteneur — une seule source de vérité par nœud, pas de table parallèle à recroiser côté
+ * frontend). Aucun nœud tant que HYCU n'a jamais été configuré (`null` du snapshot) ; nœud
+ * "stopped" sans compteur ni arête si configuré mais injoignable — jamais de dernière valeur
+ * connue remise en cache.
+ *
+ * RAPPROCHEMENT HYCU <-> Nutanix, par ordre de fiabilité décroissante, jamais au-delà :
+ *  1. `HycuVm#uuid` === uuid de la VM Nutanix (champ CONFIRMÉ côté HYCU par tusc/hycu, mais RIEN
+ *     ne garantit encore qu'il s'agisse de l'uuid hyperviseur — l'égalité stricte avec une VM
+ *     réellement listée par Prism Central le prouve d'elle-même quand elle se produit) ;
+ *  2. `HycuVm#vmName` === nom exact d'UNE SEULE VM Nutanix, ET ce nom n'apparaît qu'une fois côté
+ *     HYCU : toute ambiguïté (homonymes d'un côté ou de l'autre) ne produit AUCUNE arête ni
+ *     annotation plutôt qu'un rapprochement au hasard.
+ * Une VM HYCU qui ne correspond à rien reste visible sur la page Sauvegardes, simplement sans
+ * lien dans le graphe.
+ */
+async function getHycuTopologyParts(nutanixVmNodes: TopologyNode[]): Promise<{ nodes: TopologyNode[]; edges: TopologyEdge[] }> {
+  const snapshot = await getHycuTopologySnapshot();
+  if (!snapshot) return { nodes: [], edges: [] };
+
+  const counts = snapshot.counts;
+  const lastPoll = lastKnownHycuPoll();
+  const node: TopologyNode = {
+    id: HYCU_NODE_ID,
+    kind: "hycu-appliance",
+    label: "HYCU",
+    subtitle: snapshot.url,
+    status: snapshot.reachable ? "running" : "stopped",
+    ...(counts
+      ? {
+          hycuVmTotal: counts.vms,
+          hycuProtectedVmCount: counts.protectedVms,
+          hycuPolicyCount: counts.policies,
+          hycuTargetCount: counts.targets,
+          hycuFailedJobCount: counts.failedJobs,
+        }
+      : {}),
+    ...(lastPoll ? { hycuLastPollAt: lastPoll.at } : {}),
+  };
+  if (!snapshot.reachable) return { nodes: [node], edges: [] };
+
+  const vmNodeByUuid = new Map(nutanixVmNodes.map((n) => [uuidFromNutanixVmNodeId(n.id), n]));
+  const vmNodesByLabel = new Map<string, TopologyNode[]>();
+  for (const n of nutanixVmNodes) {
+    const list = vmNodesByLabel.get(n.label) ?? [];
+    list.push(n);
+    vmNodesByLabel.set(n.label, list);
+  }
+  const hycuVmCountByName = new Map<string, number>();
+  for (const vm of snapshot.vms) hycuVmCountByName.set(vm.vmName, (hycuVmCountByName.get(vm.vmName) ?? 0) + 1);
+
+  const edges: TopologyEdge[] = [];
+  for (const vm of snapshot.vms) {
+    const byUuid = vmNodeByUuid.get(vm.uuid);
+    const sameName = vmNodesByLabel.get(vm.vmName) ?? [];
+    const byName = sameName.length === 1 && hycuVmCountByName.get(vm.vmName) === 1 ? sameName[0] : undefined;
+    const vmNode = byUuid ?? byName;
+    if (!vmNode) continue;
+    vmNode.hycuProtection = hycuVmProtectionState(vm, snapshot.lastBackupFieldPresent);
+    if (vm.policyName) vmNode.hycuPolicyName = vm.policyName;
+    if (vm.complianceStatus) vmNode.hycuComplianceStatus = vm.complianceStatus;
+    if (typeof vm.lastBackupInMillis === "number") vmNode.hycuLastBackupAt = new Date(vm.lastBackupInMillis).toISOString();
+    // Arête UNIQUEMENT pour une VM réellement assignée à une policy : une VM connue de HYCU mais
+    // non protégée porte son badge, jamais un lien de sauvegarde qui n'existe pas.
+    if (vm.protectionGroupUuid) {
+      edges.push({ id: `protects:${vm.uuid}:${vmNode.id}`, source: HYCU_NODE_ID, target: vmNode.id, kind: "protects" });
+    }
+  }
+  return { nodes: [node], edges };
 }
 
 /**
@@ -817,6 +903,9 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
   // Nutanix/ad-server ci-dessus.
   const remoteDockerHostNodes = external ? await getRemoteDockerHostNodes() : [];
   const lxcHostNodes = external ? await getLxcHostNodes() : [];
+  // Appliance HYCU : source EXTERNE lente au même titre que Nutanix (appels HTTPS réels) — jamais
+  // dans le premier rendu `?scope=local`, et annotée APRÈS les VMs Nutanix dont elle dépend.
+  const hycuParts = external ? await getHycuTopologyParts(nutanixVmNodes) : { nodes: [], edges: [] };
   const localDockerNode = await getLocalDockerEnvNode();
   // Racine MASTER "QUAI" : chaque ENVIRONNEMENT (Docker local/distant, cluster Nutanix, LXD) s'y
   // rattache par une arête "hosts" — jamais les nœuds hors-infra (ad-server, cron, backup, iac,
@@ -835,7 +924,9 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
     subtitle: `${environmentNodeIds.length} environnement${environmentNodeIds.length > 1 ? "s" : ""}`,
     status: "running",
   };
-  const masterEdges: TopologyEdge[] = environmentNodeIds.map((id) => ({
+  // L'appliance HYCU se rattache elle aussi au master (intégration à part entière) mais ne compte
+  // PAS comme un environnement dans le sous-titre ci-dessus : elle n'héberge rien.
+  const masterEdges: TopologyEdge[] = [...environmentNodeIds, ...hycuParts.nodes.map((n) => n.id)].map((id) => ({
     id: `hosts:quai-master:${id}`,
     source: QUAI_MASTER_NODE_ID,
     target: id,
@@ -880,8 +971,15 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
     ...imageTemplateParts.nodes,
     ...gitopsSourceNodes,
     ...automationParts.nodes,
+    ...hycuParts.nodes,
   ];
-  const staticEdges: TopologyEdge[] = [...masterEdges, ...nutanixHostEdges, ...automationParts.edges, ...imageTemplateParts.edges];
+  const staticEdges: TopologyEdge[] = [
+    ...masterEdges,
+    ...nutanixHostEdges,
+    ...automationParts.edges,
+    ...imageTemplateParts.edges,
+    ...hycuParts.edges,
+  ];
   // Dernier essai RÉEL de rafraîchissement Nutanix (voir services/nutanix.ts#lastKnownNutanixPoll,
   // mis à jour PAR getNutanixTopologyParts ci-dessus via getNutanixVms) — lu APRÈS, jamais avant,
   // l'appel qui vient de le produire. `undefined` (jamais un objet vide fabriqué) tant que Nutanix

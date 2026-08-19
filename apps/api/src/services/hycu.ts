@@ -29,7 +29,7 @@ import { URL } from "node:url";
 import { config } from "../config.js";
 import { getEffectiveHycuConfig } from "./setupStore.js";
 import type { SetupHycuConfig } from "./setupStore.js";
-import type { HycuEvent, HycuJob, HycuPolicy, HycuStatusSummary, HycuTarget, HycuVm } from "../types.js";
+import type { HycuEvent, HycuJob, HycuPolicy, HycuStatusSummary, HycuTarget, HycuVm, HycuVmProtectionState } from "../types.js";
 
 /** Config HYCU effective si complète, sinon `null` — garde "jamais configuré" + valeur déjà
  * déchiffrée, même rôle exact que nutanix.ts#loadNutanixConfig. */
@@ -406,6 +406,77 @@ export async function getHycuEvents(): Promise<HycuEvent[]> {
   } catch {
     recordPoll(false);
     return [];
+  }
+}
+
+const JOB_STATUS_ERROR = "ERROR";
+
+/** Libellés de conformité considérés SAINS — même convention exacte que la page Sauvegardes
+ * (apps/web/src/features/hycu/HycuPage.tsx#COMPLIANT_VALUES) : `complianceStatus` est un champ
+ * supposé, une valeur inconnue vaut donc "non conforme" plutôt qu'un silence rassurant. */
+const COMPLIANT_VALUES = new Set(["COMPLIANT", "OK", "GREEN", "PROTECTED"]);
+
+/**
+ * État de protection d'UNE VM à partir des SEULES données réellement renvoyées (voir
+ * types.ts#HycuVmProtectionState). `lastBackupFieldPresent` vaut true quand au moins une VM du
+ * MÊME poll porte `lastBackupInMillis` : sans cette preuve que l'API la renseigne, une date
+ * absente n'autorise jamais à conclure "jamais sauvegardée".
+ */
+export function hycuVmProtectionState(vm: HycuVm, lastBackupFieldPresent: boolean): HycuVmProtectionState {
+  if (!vm.protectionGroupUuid) return "unprotected";
+  if (vm.complianceStatus && !COMPLIANT_VALUES.has(vm.complianceStatus.toUpperCase())) return "non-compliant";
+  if (lastBackupFieldPresent && typeof vm.lastBackupInMillis !== "number") return "never-backed-up";
+  return "protected";
+}
+
+/** Instantané pour le graphe de topologie — UN SEUL poll pour le nœud HYCU, ses compteurs et les
+ * arêtes de protection (jamais getHycuStatus + getHycuVms, qui rappelleraient /vms et /policies). */
+export interface HycuTopologySnapshot {
+  url: string;
+  reachable: boolean;
+  /** VMs vues par HYCU, policy résolue — [] si injoignable. */
+  vms: HycuVm[];
+  /** Voir hycuVmProtectionState ci-dessus — false si injoignable/aucune VM n'expose la date. */
+  lastBackupFieldPresent: boolean;
+  /** Compteurs réels du poll — absents si injoignable, jamais des zéros de remplissage. */
+  counts?: { vms: number; protectedVms: number; policies: number; targets: number; recentJobs: number; failedJobs: number };
+}
+
+/** `null` si HYCU n'a JAMAIS été configuré (aucun nœud dans le graphe) ; `reachable: false` si
+ * configuré mais injoignable (nœud honnêtement "stopped", sans compteur). LECTURE SEULE. */
+export async function getHycuTopologySnapshot(): Promise<HycuTopologySnapshot | null> {
+  const effective = await loadHycuConfig();
+  if (!effective) return null;
+  try {
+    const [vms, policies, targets, jobs] = await Promise.all([
+      hycuListAll<HycuVmEntity>(effective, "vms"),
+      hycuListAll<HycuPolicyEntity>(effective, "policies"),
+      hycuListAll<HycuTargetEntity>(effective, "targets"),
+      fetchRecentJobs(effective),
+    ]);
+    const policyNameByUuid = new Map<string, string>();
+    for (const p of policies) {
+      if (p.uuid && p.name) policyNameByUuid.set(p.uuid, p.name);
+    }
+    const mapped = vms.map((v) => mapVmEntity(v, policyNameByUuid));
+    recordPoll(true);
+    return {
+      url: effective.url,
+      reachable: true,
+      vms: mapped,
+      lastBackupFieldPresent: mapped.some((v) => typeof v.lastBackupInMillis === "number"),
+      counts: {
+        vms: mapped.length,
+        protectedVms: mapped.filter((v) => Boolean(v.protectionGroupUuid)).length,
+        policies: policies.length,
+        targets: targets.length,
+        recentJobs: jobs.length,
+        failedJobs: jobs.filter((j) => j.status.toUpperCase() === JOB_STATUS_ERROR).length,
+      },
+    };
+  } catch {
+    recordPoll(false);
+    return { url: effective.url, reachable: false, vms: [], lastBackupFieldPresent: false };
   }
 }
 

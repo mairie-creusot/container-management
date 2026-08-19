@@ -1,0 +1,348 @@
+/* Panneau "Statistiques" d'un nœud cluster/hôte Nutanix (TopologyNodeDetailPanel.tsx) — jauges,
+   sparklines et alertes en CSS/SVG inline, aucune librairie de graphes. */
+
+.nutanix-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.nutanix-stats__state {
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.nutanix-stats__state.is-error {
+  border-color: rgba(239, 68, 68, 0.4);
+  background: var(--color-critical-bg);
+  color: var(--color-text);
+}
+
+.nutanix-stats__freshness {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--color-text-faint);
+  font-size: 11px;
+}
+
+.nutanix-stats__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px var(--color-success-bg);
+}
+
+.nutanix-stats__dot.is-stale {
+  background: var(--color-warning);
+  box-shadow: 0 0 0 3px var(--color-warning-bg);
+}
+
+/* --- Grille de tuiles ------------------------------------------------------------------- */
+
+.nutanix-stats__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.nutanix-stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+  min-width: 0;
+}
+
+.nutanix-stat-tile__label {
+  color: var(--color-text-muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.nutanix-stat-tile__value {
+  color: var(--color-text);
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.nutanix-stat-tile__value.is-missing {
+  color: var(--color-text-faint);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.nutanix-stat-tile__hint {
+  color: var(--color-text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Jauge horizontale (CPU/mémoire/stockage) --------------------------------------------- */
+
+.nutanix-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+}
+
+.nutanix-meter__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.nutanix-meter__label {
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+.nutanix-meter__value {
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.nutanix-meter__track {
+  position: relative;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--color-surface-3);
+  overflow: hidden;
+}
+
+.nutanix-meter__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  background: var(--gradient-accent);
+  transition: width 0.4s ease;
+}
+
+.nutanix-meter__fill.is-warning {
+  background: var(--color-warning);
+}
+
+.nutanix-meter__fill.is-critical {
+  background: var(--color-critical);
+}
+
+.nutanix-meter__foot {
+  color: var(--color-text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Sparkline (échantillons collectés pendant que le panneau est ouvert) ------------------ */
+
+.nutanix-spark {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+}
+
+.nutanix-spark__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.nutanix-spark__label {
+  color: var(--color-text-muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.nutanix-spark__value {
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.nutanix-spark__svg {
+  display: block;
+  width: 100%;
+  height: 34px;
+}
+
+.nutanix-spark__area {
+  fill: rgba(59, 111, 239, 0.16);
+}
+
+.nutanix-spark__line {
+  fill: none;
+  stroke: var(--accent-start);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.nutanix-spark__empty {
+  color: var(--color-text-faint);
+  font-size: 11px;
+}
+
+/* --- Liste des hôtes / storage containers ------------------------------------------------- */
+
+.nutanix-stats__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.nutanix-stats-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+}
+
+.nutanix-stats-row__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.nutanix-stats-row__name {
+  color: var(--color-text);
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nutanix-stats-row__badge {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.nutanix-stats-row__badge.is-warning {
+  background: var(--color-warning-bg);
+  color: var(--color-warning);
+}
+
+.nutanix-stats-row__badge.is-critical {
+  background: var(--color-critical-bg);
+  color: var(--color-critical);
+}
+
+.nutanix-stats-row__meta {
+  color: var(--color-text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Alertes ------------------------------------------------------------------------------ */
+
+.nutanix-alerts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.nutanix-alert {
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px 8px 8px;
+  border: 1px solid var(--color-border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+}
+
+.nutanix-alert.is-critical {
+  border-left-color: var(--color-critical);
+}
+
+.nutanix-alert.is-warning {
+  border-left-color: var(--color-warning);
+}
+
+.nutanix-alert.is-info {
+  border-left-color: var(--accent-start);
+}
+
+.nutanix-alert.is-audit,
+.nutanix-alert.is-unknown {
+  border-left-color: var(--color-text-faint);
+}
+
+.nutanix-alert__body {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.nutanix-alert__title {
+  color: var(--color-text);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.nutanix-alert__message {
+  color: var(--color-text-muted);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.nutanix-alert__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  color: var(--color-text-faint);
+  font-size: 10px;
+}
+
+.nutanix-alert__entity {
+  font-family: var(--font-mono);
+}
+
+.nutanix-alert__ack {
+  color: var(--color-text-muted);
+}
+
+@media (max-width: 1200px) {
+  .nutanix-stats__grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

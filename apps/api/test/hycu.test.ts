@@ -84,6 +84,7 @@ const { buildServer } = await import("../src/index.js");
 const { config } = await import("../src/config.js");
 const { signSessionToken } = await import("../src/services/session.js");
 const { setHycuConfig, clearHycuConfig } = await import("../src/services/setupStore.js");
+const { getHycuTopologySnapshot, hycuVmProtectionState, lastKnownHycuPoll } = await import("../src/services/hycu.js");
 
 afterAll(async () => {
   await fs.rm(tmpConfigPath, { force: true });
@@ -434,5 +435,59 @@ describe("Config HYCU — test réel avant persistance, chiffrement au repos, ja
     expect(cfg.json()).toEqual({ configured: false });
     const vms = await app.inject({ method: "GET", url: "/api/hycu/vms", cookies: viewerCookie() });
     expect(vms.json()).toEqual([]);
+  });
+});
+
+/**
+ * Instantané dédié au graphe de topologie + règle de protection par VM (services/hycu.ts) —
+ * toujours contre les mêmes réponses mockées, jamais l'appliance réelle.
+ */
+describe("getHycuTopologySnapshot / hycuVmProtectionState — projection graphe (lecture seule)", () => {
+  it("null tant que HYCU n'a jamais été configuré : aucun appel réseau, donc aucun nœud possible", async () => {
+    const snapshot = await getHycuTopologySnapshot();
+    expect(snapshot).toBeNull();
+    expect(seenSearchParamsByKey.size).toBe(0);
+  });
+
+  it("un SEUL poll alimente nœud + arêtes : VMs avec policy résolue et compteurs réels", async () => {
+    await seedHycuConfig();
+    seedVms();
+    seedPolicies();
+    seedTargets();
+    seedJobs();
+
+    const snapshot = await getHycuTopologySnapshot();
+
+    expect(snapshot).toMatchObject({ url: "https://172.20.0.100:8443", reachable: true, lastBackupFieldPresent: true });
+    expect(snapshot?.counts).toEqual({ vms: 3, protectedVms: 2, policies: 2, targets: 2, recentJobs: 4, failedJobs: 1 });
+    expect(snapshot?.vms.find((v) => v.uuid === "vm-1")).toMatchObject({ vmName: "HDVAPPLI", policyName: "Gold" });
+    expect(snapshot?.vms.find((v) => v.uuid === "vm-3")?.protectionGroupUuid).toBeUndefined();
+  });
+
+  it("configuré mais injoignable : reachable false, aucune VM, aucun compteur inventé", async () => {
+    await seedHycuConfig();
+    queueResponse("GET /rest/v1.0/vms", { message: "boom" }, 500);
+
+    const snapshot = await getHycuTopologySnapshot();
+
+    expect(snapshot).toMatchObject({ reachable: false, vms: [], lastBackupFieldPresent: false });
+    expect(snapshot?.counts).toBeUndefined();
+    expect(lastKnownHycuPoll()).toMatchObject({ reachable: false });
+  });
+
+  it("état de protection dérivé des SEULS champs réellement renvoyés", () => {
+    // Aucune policy assignée (champ confirmé) -> non protégée.
+    expect(hycuVmProtectionState({ uuid: "a", vmName: "A" }, true)).toBe("unprotected");
+    // Conformité hors valeurs saines -> non conforme (même convention que la page Sauvegardes).
+    expect(
+      hycuVmProtectionState({ uuid: "b", vmName: "B", protectionGroupUuid: "p", complianceStatus: "NOT_COMPLIANT" }, true),
+    ).toBe("non-compliant");
+    expect(hycuVmProtectionState({ uuid: "c", vmName: "C", protectionGroupUuid: "p", complianceStatus: "GREEN" }, false)).toBe(
+      "protected",
+    );
+    // Date absente ALORS que HYCU la renseigne ailleurs dans le même poll -> jamais sauvegardée.
+    expect(hycuVmProtectionState({ uuid: "d", vmName: "D", protectionGroupUuid: "p" }, true)).toBe("never-backed-up");
+    // Date absente et champ jamais renseigné par cette API : on ne conclut RIEN de négatif.
+    expect(hycuVmProtectionState({ uuid: "e", vmName: "E", protectionGroupUuid: "p" }, false)).toBe("protected");
   });
 });

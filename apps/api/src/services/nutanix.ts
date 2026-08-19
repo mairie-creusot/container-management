@@ -1795,3 +1795,485 @@ export async function uploadNutanixImage(opts: {
   const taskUuid = created.data?.status?.execution_context?.task_uuid;
   return { ok: true, name, uuid, ...(taskUuid ? { taskUuid } : {}) };
 }
+
+// ============================================================================================
+// Statistiques temps réel + alertes (API Prism v2.0 `/PrismGateway/services/rest/v2.0`, la même
+// base que nutanixV2Mutation ci-dessus) — retour utilisateur du 19/08/2026, capture du dashboard
+// Prism à l'appui : "il manque toutes les infos intégrées du dashboard à voir en temps réel"
+// (IOPS, latence, CPU/RAM du cluster, stockage utilisé/total, santé et alertes).
+//
+// POURQUOI PAS v3 : vérifié en conditions réelles le 19/08/2026 sur l'instance 172.20.0.10:9440,
+// `POST /api/nutanix/v3/clusters/list` ne renvoie AUCUNE statistique — `status.resources` n'a que
+// trois clés (`config`, `nodes`, `network`), que de la configuration statique. Les compteurs du
+// dashboard viennent tous de l'API v2.0, en LECTURE SEULE (GET uniquement).
+//
+// UNITÉS — toutes DÉDUITES ARITHMÉTIQUEMENT du payload réel, jamais supposées depuis la doc :
+//  - `*_num_iops` = IO/s : `controller_num_io`/`controller_timespan_usecs` = 15536/30 s = 517,9,
+//    et l'instance renvoyait bien `controller_num_iops = "517"`.
+//  - `*_avg_*_latency_usecs` = MICROsecondes : `controller_total_io_time_usecs`/`controller_num_io`
+//    = 10550552/15536 = 679,1, et l'instance renvoyait `controller_avg_io_latency_usecs = "679"`.
+//  - `*_ppm` = parts par million (1 000 000 = 100 %) : `read_io_ppm` + `write_io_ppm`
+//    = 690948 + 309051 = 999 999 sur le payload réel.
+//  - `*_io_bandwidth_kBps` = kilo-octets/s : `total_io_size_kbytes`/`timespan_usecs`
+//    = 103477/20 s = 5173,85, et l'instance renvoyait `io_bandwidth_kBps = "5173"`. Le nombre
+//    d'octets dans un « k » (1000 ou 1024) n'est PAS déductible du payload : la valeur est donc
+//    exposée telle quelle sous un nom qui porte son unité SOURCE (`...KbytesPerSec`), jamais
+//    convertie en octets/s sur une hypothèse.
+//  - `*_time_stamp_in_usecs` (alertes) = microsecondes depuis l'epoch Unix : 1786378665233736 µs
+//    = 2026-08-08, cohérent avec l'âge réel des alertes de cette instance.
+// ============================================================================================
+
+/** Bloc `stats`/`usage_stats` d'une entité v2.0 : toutes les valeurs sont des CHAÎNES, et "-1" est
+ * la sentinelle "métrique non disponible" (observée en masse sur l'instance réelle, ex.
+ * `avg_read_io_latency_usecs = "-1"` alors que `avg_io_latency_usecs = "403"`). */
+type NutanixV2StatsMap = Record<string, string>;
+
+/** Valeur numérique d'une métrique, ou `undefined` si absente/non numérique/sentinelle "-1".
+ * N'est appliquée QU'À des métriques dont une valeur négative n'a aucun sens (IOPS, latence,
+ * débit, ppm, octets) — jamais à un delta signé façon `content_cache_saved_memory_usage_bytes`. */
+function v2Stat(stats: NutanixV2StatsMap | undefined, key: string): number | undefined {
+  const raw = stats?.[key];
+  if (raw === undefined) return undefined;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/** Pourcentage réel depuis une métrique en ppm (voir en-tête de section pour la preuve). */
+function v2Percent(stats: NutanixV2StatsMap | undefined, key: string): number | undefined {
+  const ppm = v2Stat(stats, key);
+  return ppm === undefined ? undefined : ppm / 10_000;
+}
+
+/** Horodatage ISO depuis un timestamp Prism en microsecondes — `undefined` si absent ou nul (0 est
+ * la valeur réelle d'un champ « pas encore arrivé », ex. `resolved_time_stamp_in_usecs` d'une
+ * alerte non résolue), jamais une date de 1970 affichée comme si elle était vraie. */
+function isoFromUsecs(usecs: number | undefined): string | undefined {
+  if (typeof usecs !== "number" || !Number.isFinite(usecs) || usecs <= 0) return undefined;
+  const date = new Date(Math.round(usecs / 1000));
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+/** GET en LECTURE SEULE sur l'API v2.0 — `null` sur toute erreur (HTTP, réseau, JSON), jamais
+ * d'exception : ces routes de statistiques suivent le patron « [] / null honnête » du reste du
+ * fichier, jamais une donnée inventée ni un 500 sur un accroc réseau passager. */
+async function nutanixV2Get<T>(effective: SetupNutanixConfig, path: string): Promise<T | null> {
+  try {
+    const result = await nutanixRequest<T>(effective.prismCentralUrl, "GET", `${NUTANIX_V2_BASE}${path}`, effective.username, effective.password);
+    if (result.status < 200 || result.status >= 300) return null;
+    return result.data;
+  } catch {
+    return null;
+  }
+}
+
+/** Compteurs d'entrées/sorties d'une entité (cluster/hôte). Chaque champ porte son unité dans son
+ * nom — jamais un nombre nu ambigu (voir en-tête de section pour la preuve de chaque unité). */
+export interface NutanixIoStats {
+  readIops?: number;
+  writeIops?: number;
+  totalIops?: number;
+  avgLatencyUsec?: number;
+  avgReadLatencyUsec?: number;
+  avgWriteLatencyUsec?: number;
+  readThroughputKbytesPerSec?: number;
+  writeThroughputKbytesPerSec?: number;
+  totalThroughputKbytesPerSec?: number;
+}
+
+/** Occupation de stockage réelle (`usage_stats["storage.*"]`, déjà en octets côté Prism). */
+export interface NutanixStorageUsage {
+  capacityBytes?: number;
+  usedBytes?: number;
+  freeBytes?: number;
+  /** Taille vue par les VMs avant compression/dédup/EC — toujours >= `usedBytes`. */
+  logicalUsedBytes?: number;
+}
+
+export interface NutanixStorageContainerStats {
+  uuid: string;
+  name: string;
+  storage: NutanixStorageUsage;
+}
+
+/** Statistiques d'un hôte physique AHV — `uuid` est le MÊME que celui de `getNutanixHosts()`
+ * (v3), vérifié en conditions réelles (HDVNUTA1 = 655ce338-…-0c0d43 des deux côtés) : le frontend
+ * peut donc rapprocher ces stats d'un nœud "nutanix-host" du graphe par identité stable. */
+export interface NutanixHostStats {
+  uuid: string;
+  name: string;
+  /** État réel rapporté par Prism ("NORMAL" sur les 3 hôtes de l'instance vérifiée). */
+  state?: string;
+  numVms?: number;
+  inMaintenanceMode?: boolean;
+  degraded?: boolean;
+  cpuUsagePercent?: number;
+  memoryUsagePercent?: number;
+  cpuCapacityHz?: number;
+  numCpuCores?: number;
+  memoryCapacityBytes?: number;
+  controllerIo: NutanixIoStats;
+  storage: NutanixStorageUsage;
+}
+
+/** Santé du cluster — uniquement des faits rapportés par Prism (tolérance aux pannes réelle,
+ * nombre d'hôtes à l'état NORMAL), jamais un score maison. */
+export interface NutanixClusterHealth {
+  currentFaultTolerance?: number;
+  desiredFaultTolerance?: number;
+  currentRedundancyFactor?: number;
+  desiredRedundancyFactor?: number;
+  hostsTotal: number;
+  hostsNormal: number;
+}
+
+export interface NutanixClusterStats {
+  uuid: string;
+  name: string;
+  version?: string;
+  numNodes?: number;
+  cpuUsagePercent?: number;
+  memoryUsagePercent?: number;
+  /** Somme des capacités RÉELLES des hôtes de ce cluster (`cpu_capacity_in_hz` /
+   * `memory_capacity_in_bytes` par hôte) — une somme explicite, pas un champ d'API : Prism ne
+   * publie pas de capacité agrégée au niveau cluster sur cet endpoint. `undefined` si aucun hôte
+   * n'a communiqué sa capacité. */
+  cpuCapacityHz?: number;
+  memoryCapacityBytes?: number;
+  /** IO vues par la couche de stockage Nutanix (CVM/Stargate, préfixe `controller_*`) — c'est
+   * cette famille que le dashboard Prism met en avant. */
+  controllerIo: NutanixIoStats;
+  /** IO vues au niveau cluster agrégé (métriques sans préfixe) — exposée à part plutôt que
+   * fusionnée : ce sont deux mesures RÉELLEMENT différentes (517 vs 138 IOPS au même instant sur
+   * l'instance vérifiée), les confondre donnerait un chiffre faux. */
+  clusterIo: NutanixIoStats;
+  storage: NutanixStorageUsage;
+  storageContainers: NutanixStorageContainerStats[];
+  health: NutanixClusterHealth;
+  hosts: NutanixHostStats[];
+}
+
+/** Enveloppe honnête : `configured` distingue « Nutanix n'a jamais été configuré » de `reachable`
+ * « configuré mais Prism ne répond pas », et `lastPoll` reprend le signal déjà exposé au graphe
+ * (voir lastKnownNutanixPoll) — mêmes trois états explicites côté UI, jamais un tableau vide muet. */
+export interface NutanixClusterStatsResponse {
+  configured: boolean;
+  reachable: boolean;
+  clusters: NutanixClusterStats[];
+  lastPoll: NutanixPollOutcome | null;
+}
+
+interface NutanixV2ClusterEntity {
+  uuid?: string;
+  cluster_uuid?: string;
+  name?: string;
+  version?: string;
+  num_nodes?: number;
+  cluster_redundancy_state?: {
+    current_redundancy_factor?: number;
+    desired_redundancy_factor?: number;
+    current_cluster_fault_tolerance?: number;
+    desired_cluster_fault_tolerance?: number;
+  };
+  stats?: NutanixV2StatsMap;
+  usage_stats?: NutanixV2StatsMap;
+}
+
+interface NutanixV2HostEntity {
+  uuid?: string;
+  name?: string;
+  state?: string;
+  cluster_uuid?: string;
+  num_vms?: number;
+  is_degraded?: boolean;
+  host_in_maintenance_mode?: boolean;
+  num_cpu_cores?: number;
+  cpu_capacity_in_hz?: number;
+  memory_capacity_in_bytes?: number;
+  stats?: NutanixV2StatsMap;
+  usage_stats?: NutanixV2StatsMap;
+}
+
+interface NutanixV2StorageContainerEntity {
+  storage_container_uuid?: string;
+  name?: string;
+  cluster_uuid?: string;
+  usage_stats?: NutanixV2StatsMap;
+}
+
+interface NutanixV2ListResponse<T> {
+  metadata?: { grand_total_entities?: number; total_entities?: number; count?: number };
+  entities?: T[];
+}
+
+/** IO d'une entité, pour une famille de métriques donnée : `""` (cluster agrégé) ou `"controller_"`
+ * (couche de stockage Nutanix) — les deux familles portent EXACTEMENT les mêmes suffixes sur
+ * l'instance vérifiée, d'où ce mapping unique paramétré par préfixe. */
+function mapV2IoStats(stats: NutanixV2StatsMap | undefined, prefix: "" | "controller_"): NutanixIoStats {
+  const readIops = v2Stat(stats, `${prefix}num_read_iops`);
+  const writeIops = v2Stat(stats, `${prefix}num_write_iops`);
+  const totalIops = v2Stat(stats, `${prefix}num_iops`);
+  const avgLatencyUsec = v2Stat(stats, `${prefix}avg_io_latency_usecs`);
+  const avgReadLatencyUsec = v2Stat(stats, `${prefix}avg_read_io_latency_usecs`);
+  const avgWriteLatencyUsec = v2Stat(stats, `${prefix}avg_write_io_latency_usecs`);
+  const readThroughputKbytesPerSec = v2Stat(stats, `${prefix}read_io_bandwidth_kBps`);
+  const writeThroughputKbytesPerSec = v2Stat(stats, `${prefix}write_io_bandwidth_kBps`);
+  const totalThroughputKbytesPerSec = v2Stat(stats, `${prefix}io_bandwidth_kBps`);
+  return {
+    ...(readIops !== undefined ? { readIops } : {}),
+    ...(writeIops !== undefined ? { writeIops } : {}),
+    ...(totalIops !== undefined ? { totalIops } : {}),
+    ...(avgLatencyUsec !== undefined ? { avgLatencyUsec } : {}),
+    ...(avgReadLatencyUsec !== undefined ? { avgReadLatencyUsec } : {}),
+    ...(avgWriteLatencyUsec !== undefined ? { avgWriteLatencyUsec } : {}),
+    ...(readThroughputKbytesPerSec !== undefined ? { readThroughputKbytesPerSec } : {}),
+    ...(writeThroughputKbytesPerSec !== undefined ? { writeThroughputKbytesPerSec } : {}),
+    ...(totalThroughputKbytesPerSec !== undefined ? { totalThroughputKbytesPerSec } : {}),
+  };
+}
+
+function mapV2Storage(usage: NutanixV2StatsMap | undefined): NutanixStorageUsage {
+  const capacityBytes = v2Stat(usage, "storage.capacity_bytes");
+  const usedBytes = v2Stat(usage, "storage.usage_bytes");
+  const freeBytes = v2Stat(usage, "storage.free_bytes");
+  const logicalUsedBytes = v2Stat(usage, "storage.logical_usage_bytes");
+  return {
+    ...(capacityBytes !== undefined ? { capacityBytes } : {}),
+    ...(usedBytes !== undefined ? { usedBytes } : {}),
+    ...(freeBytes !== undefined ? { freeBytes } : {}),
+    ...(logicalUsedBytes !== undefined ? { logicalUsedBytes } : {}),
+  };
+}
+
+function mapV2HostStats(host: NutanixV2HostEntity & { uuid: string }): NutanixHostStats {
+  const cpuUsagePercent = v2Percent(host.stats, "hypervisor_cpu_usage_ppm");
+  const memoryUsagePercent = v2Percent(host.stats, "hypervisor_memory_usage_ppm");
+  return {
+    uuid: host.uuid,
+    name: host.name ?? host.uuid,
+    ...(host.state ? { state: host.state } : {}),
+    ...(typeof host.num_vms === "number" ? { numVms: host.num_vms } : {}),
+    ...(typeof host.host_in_maintenance_mode === "boolean" ? { inMaintenanceMode: host.host_in_maintenance_mode } : {}),
+    ...(typeof host.is_degraded === "boolean" ? { degraded: host.is_degraded } : {}),
+    ...(cpuUsagePercent !== undefined ? { cpuUsagePercent } : {}),
+    ...(memoryUsagePercent !== undefined ? { memoryUsagePercent } : {}),
+    ...(typeof host.cpu_capacity_in_hz === "number" ? { cpuCapacityHz: host.cpu_capacity_in_hz } : {}),
+    ...(typeof host.num_cpu_cores === "number" ? { numCpuCores: host.num_cpu_cores } : {}),
+    ...(typeof host.memory_capacity_in_bytes === "number" ? { memoryCapacityBytes: host.memory_capacity_in_bytes } : {}),
+    controllerIo: mapV2IoStats(host.stats, "controller_"),
+    storage: mapV2Storage(host.usage_stats),
+  };
+}
+
+/** Somme d'un champ de capacité sur une liste d'hôtes — `undefined` (et non 0) si AUCUN hôte ne
+ * l'a communiqué, pour ne jamais afficher « 0 Go de RAM » là où l'info manque simplement. */
+function sumHostCapacity(hosts: NutanixHostStats[], pick: (h: NutanixHostStats) => number | undefined): number | undefined {
+  let total = 0;
+  let found = false;
+  for (const host of hosts) {
+    const value = pick(host);
+    if (value === undefined) continue;
+    total += value;
+    found = true;
+  }
+  return found ? total : undefined;
+}
+
+/**
+ * Statistiques RÉELLES du/des clusters Nutanix (GET /api/nutanix/cluster-stats) : CPU/mémoire,
+ * IOPS/latence/débit, stockage utilisé/total (cluster + par storage container), santé et stats par
+ * hôte physique. Trois GET v2.0 en parallèle (`/clusters/`, `/hosts/`, `/storage_containers/`),
+ * jamais un appel par entité.
+ *
+ * `configured: false` si Nutanix n'a jamais été configuré ; `reachable: false` si configuré mais
+ * la liste des clusters n'a pas pu être lue (même patron que getNutanixVms — jamais de chiffre
+ * inventé). Un échec des SEULS hôtes/storage containers laisse `reachable: true` avec les listes
+ * correspondantes vides : la moitié réelle vaut mieux que rien, et l'absence reste visible.
+ *
+ * `lastPoll` est LU (jamais écrit) ici : ce compteur est le signal de fraîcheur du poll de
+ * TOPOLOGIE affiché dans la légende du graphe (voir lastKnownNutanixPoll) — l'écraser au rythme
+ * bien plus rapide du panneau de statistiques fausserait ce signal.
+ */
+export async function getNutanixClusterStats(): Promise<NutanixClusterStatsResponse> {
+  const effective = await loadNutanixConfig();
+  if (!effective) return { configured: false, reachable: false, clusters: [], lastPoll: lastKnownNutanixPoll() };
+
+  const [clustersData, hostsData, containersData] = await Promise.all([
+    nutanixV2Get<NutanixV2ListResponse<NutanixV2ClusterEntity>>(effective, "/clusters/"),
+    nutanixV2Get<NutanixV2ListResponse<NutanixV2HostEntity>>(effective, "/hosts/"),
+    nutanixV2Get<NutanixV2ListResponse<NutanixV2StorageContainerEntity>>(effective, "/storage_containers/"),
+  ]);
+
+  if (!clustersData) return { configured: true, reachable: false, clusters: [], lastPoll: lastKnownNutanixPoll() };
+
+  const hostEntities = (hostsData?.entities ?? []).filter((h): h is NutanixV2HostEntity & { uuid: string } => Boolean(h.uuid));
+  const containerEntities = containersData?.entities ?? [];
+
+  const clusters: NutanixClusterStats[] = [];
+  for (const entity of clustersData.entities ?? []) {
+    const uuid = entity.cluster_uuid ?? entity.uuid;
+    if (!uuid) continue;
+    // Hôtes/containers rattachés par `cluster_uuid` réel ; sur une instance mono-cluster Prism
+    // omet parfois ce champ — on retombe alors sur « tout appartient à l'unique cluster »,
+    // jamais sur une répartition devinée quand plusieurs clusters existent.
+    const soleCluster = (clustersData.entities ?? []).length === 1;
+    const hosts = hostEntities.filter((h) => h.cluster_uuid === uuid || (soleCluster && !h.cluster_uuid)).map(mapV2HostStats);
+    const storageContainers: NutanixStorageContainerStats[] = containerEntities
+      .filter((c) => Boolean(c.storage_container_uuid) && (c.cluster_uuid === uuid || (soleCluster && !c.cluster_uuid)))
+      .map((c) => ({ uuid: c.storage_container_uuid!, name: c.name ?? c.storage_container_uuid!, storage: mapV2Storage(c.usage_stats) }));
+
+    const cpuUsagePercent = v2Percent(entity.stats, "hypervisor_cpu_usage_ppm");
+    const memoryUsagePercent = v2Percent(entity.stats, "hypervisor_memory_usage_ppm");
+    const cpuCapacityHz = sumHostCapacity(hosts, (h) => h.cpuCapacityHz);
+    const memoryCapacityBytes = sumHostCapacity(hosts, (h) => h.memoryCapacityBytes);
+    const redundancy = entity.cluster_redundancy_state ?? {};
+
+    clusters.push({
+      uuid,
+      name: entity.name ?? uuid,
+      ...(entity.version ? { version: entity.version } : {}),
+      ...(typeof entity.num_nodes === "number" ? { numNodes: entity.num_nodes } : {}),
+      ...(cpuUsagePercent !== undefined ? { cpuUsagePercent } : {}),
+      ...(memoryUsagePercent !== undefined ? { memoryUsagePercent } : {}),
+      ...(cpuCapacityHz !== undefined ? { cpuCapacityHz } : {}),
+      ...(memoryCapacityBytes !== undefined ? { memoryCapacityBytes } : {}),
+      controllerIo: mapV2IoStats(entity.stats, "controller_"),
+      clusterIo: mapV2IoStats(entity.stats, ""),
+      storage: mapV2Storage(entity.usage_stats),
+      storageContainers,
+      health: {
+        ...(typeof redundancy.current_cluster_fault_tolerance === "number" ? { currentFaultTolerance: redundancy.current_cluster_fault_tolerance } : {}),
+        ...(typeof redundancy.desired_cluster_fault_tolerance === "number" ? { desiredFaultTolerance: redundancy.desired_cluster_fault_tolerance } : {}),
+        ...(typeof redundancy.current_redundancy_factor === "number" ? { currentRedundancyFactor: redundancy.current_redundancy_factor } : {}),
+        ...(typeof redundancy.desired_redundancy_factor === "number" ? { desiredRedundancyFactor: redundancy.desired_redundancy_factor } : {}),
+        hostsTotal: hosts.length,
+        hostsNormal: hosts.filter((h) => h.state === "NORMAL").length,
+      },
+      hosts,
+    });
+  }
+
+  return { configured: true, reachable: true, clusters, lastPoll: lastKnownNutanixPoll() };
+}
+
+/** Sévérité normalisée d'une alerte — Prism renvoie la forme préfixée `kCritical`/`kWarning`/
+ * `kInfo`/`kAudit` (observée : `kWarning`), tandis que son FILTRE d'entrée n'accepte que
+ * `CRITICAL/WARNING/INFO/AUDIT` (message d'erreur 422 réel de l'instance). `unknown` pour toute
+ * valeur inattendue : jamais rangée d'office en "info", ce qui minimiserait une alerte grave. */
+export type NutanixAlertSeverity = "critical" | "warning" | "info" | "audit" | "unknown";
+
+export interface NutanixAlert {
+  id: string;
+  severity: NutanixAlertSeverity;
+  /** Valeur brute Prism (`kWarning`…) — conservée telle quelle, jamais perdue par la normalisation. */
+  severityRaw: string;
+  title: string;
+  /** Message avec ses marqueurs `{…}` résolus depuis context_types/context_values (voir
+   * resolveAlertMessage) — un marqueur sans contexte correspondant reste littéral. */
+  message: string;
+  acknowledged: boolean;
+  createdAt?: string;
+  lastOccurredAt?: string;
+  entityType?: string;
+  entityName?: string;
+  entityUuid?: string;
+  clusterUuid?: string;
+}
+
+export interface NutanixAlertsResponse {
+  configured: boolean;
+  reachable: boolean;
+  alerts: NutanixAlert[];
+  /** Total RÉEL d'alertes non résolues côté Prism (`metadata.grand_total_entities`), qui peut
+   * largement dépasser `alerts.length` (borné par `limit`) — 25 sur l'instance vérifiée. */
+  totalUnresolved?: number;
+  lastPoll: NutanixPollOutcome | null;
+}
+
+interface NutanixV2AlertEntity {
+  id?: string;
+  severity?: string;
+  acknowledged?: boolean;
+  alert_title?: string;
+  message?: string;
+  cluster_uuid?: string;
+  created_time_stamp_in_usecs?: number;
+  last_occurrence_time_stamp_in_usecs?: number;
+  context_types?: string[];
+  context_values?: string[];
+  affected_entities?: { entity_type?: string; entity_name?: string; uuid?: string }[];
+}
+
+const NUTANIX_ALERT_SEVERITY: Record<string, NutanixAlertSeverity> = {
+  kCritical: "critical",
+  kWarning: "warning",
+  kInfo: "info",
+  kAudit: "audit",
+};
+
+/** Remplace les marqueurs `{clé}` du message par la valeur réelle portée par les tableaux
+ * PARALLÈLES `context_types`/`context_values` — mécanisme confirmé en conditions réelles :
+ * `"…for the VM {vm_name} failed because {reason}."` avec `context_types` contenant bien
+ * `vm_name`/`reason` aux index de `context_values` `"HDVAIRSDB"`/`"Quiescing guest VM failed…"`.
+ * Un marqueur sans clé correspondante (ou de valeur vide) reste AFFICHÉ TEL QUEL : mieux vaut un
+ * `{reason}` visible qu'un texte amputé donnant l'illusion d'un message complet. */
+function resolveAlertMessage(message: string, types: string[] | undefined, values: string[] | undefined): string {
+  if (!types || !values) return message;
+  return message.replace(/\{([a-z0-9_]+)\}/gi, (whole, key: string) => {
+    const index = types.indexOf(key);
+    const value = index >= 0 ? values[index] : undefined;
+    return value ? value : whole;
+  });
+}
+
+const NUTANIX_ALERTS_DEFAULT_LIMIT = 25;
+const NUTANIX_ALERTS_MAX_LIMIT = 100;
+
+/**
+ * Alertes RÉELLES non résolues du/des clusters (GET /api/nutanix/alerts), les `limit` plus
+ * récentes — `GET /alerts/?resolved=false&count=N`, en lecture seule (aucun acquittement/
+ * résolution : QUAI ne fait qu'AFFICHER, la remédiation reste dans Prism).
+ *
+ * L'instance réelle renvoie déjà les plus récentes d'abord ; le tri local par date de dernière
+ * occurrence ne fait que garantir cet ordre côté affichage, sans jamais réordonner ce que le
+ * serveur a sélectionné. Mêmes trois états explicites que getNutanixClusterStats.
+ */
+export async function getNutanixAlerts(limit = NUTANIX_ALERTS_DEFAULT_LIMIT): Promise<NutanixAlertsResponse> {
+  const effective = await loadNutanixConfig();
+  if (!effective) return { configured: false, reachable: false, alerts: [], lastPoll: lastKnownNutanixPoll() };
+
+  const count = Math.min(Math.max(Math.trunc(limit) || NUTANIX_ALERTS_DEFAULT_LIMIT, 1), NUTANIX_ALERTS_MAX_LIMIT);
+  const data = await nutanixV2Get<NutanixV2ListResponse<NutanixV2AlertEntity>>(effective, `/alerts/?resolved=false&count=${count}`);
+  if (!data) return { configured: true, reachable: false, alerts: [], lastPoll: lastKnownNutanixPoll() };
+
+  const alerts: NutanixAlert[] = (data.entities ?? [])
+    .filter((a): a is NutanixV2AlertEntity & { id: string } => Boolean(a.id))
+    .map((a) => {
+      const affected = a.affected_entities?.[0];
+      const createdAt = isoFromUsecs(a.created_time_stamp_in_usecs);
+      const lastOccurredAt = isoFromUsecs(a.last_occurrence_time_stamp_in_usecs);
+      return {
+        id: a.id,
+        severity: (a.severity ? NUTANIX_ALERT_SEVERITY[a.severity] : undefined) ?? "unknown",
+        severityRaw: a.severity ?? "unknown",
+        title: a.alert_title ?? "Alerte sans titre",
+        message: resolveAlertMessage(a.message ?? "", a.context_types, a.context_values),
+        acknowledged: a.acknowledged === true,
+        ...(createdAt ? { createdAt } : {}),
+        ...(lastOccurredAt ? { lastOccurredAt } : {}),
+        ...(affected?.entity_type ? { entityType: affected.entity_type } : {}),
+        ...(affected?.entity_name ? { entityName: affected.entity_name } : {}),
+        ...(affected?.uuid ? { entityUuid: affected.uuid } : {}),
+        ...(a.cluster_uuid ? { clusterUuid: a.cluster_uuid } : {}),
+      };
+    })
+    .sort((a, b) => (b.lastOccurredAt ?? b.createdAt ?? "").localeCompare(a.lastOccurredAt ?? a.createdAt ?? ""));
+
+  const totalUnresolved = data.metadata?.grand_total_entities;
+  return {
+    configured: true,
+    reachable: true,
+    alerts,
+    ...(typeof totalUnresolved === "number" ? { totalUnresolved } : {}),
+    lastPoll: lastKnownNutanixPoll(),
+  };
+}

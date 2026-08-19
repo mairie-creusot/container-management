@@ -5,6 +5,16 @@
  *                               injoignable — voir services/nutanix.ts#getNutanixVms (aucune
  *                               transformation supplémentaire nécessaire ici, la forme est déjà
  *                               NutanixVm[]).
+ * GET    /api/nutanix/cluster-stats — statistiques temps réel RÉELLES du/des clusters (CPU/mémoire,
+ *                               IOPS/latence/débit, stockage utilisé/total + par storage container,
+ *                               santé, et stats par hôte physique) — API Prism v2.0, LECTURE SEULE,
+ *                               voir services/nutanix.ts#getNutanixClusterStats. Répond toujours 200
+ *                               avec une enveloppe explicite `{ configured, reachable, clusters,
+ *                               lastPoll }` : « jamais configuré » et « injoignable » sont deux
+ *                               états distincts et affichables, jamais un 500 ni un tableau muet.
+ * GET    /api/nutanix/alerts   — alertes réelles NON RÉSOLUES, les plus récentes (`?limit=`, 25 par
+ *                               défaut, 100 max) — même enveloppe, voir getNutanixAlerts. Lecture
+ *                               seule stricte : aucun acquittement/résolution depuis QUAI.
  * GET    /api/nutanix/config — config Nutanix courante, REDACTÉE (jamais le mot de passe).
  * PUT    /api/nutanix/config — configure/remplace Nutanix EN DEHORS de l'assistant de premier
  *                               lancement (admin uniquement, mêmes identifiants de sensibilité
@@ -105,6 +115,8 @@ import {
   createNutanixVm,
   deleteNutanixImageBestEffort,
   deleteNutanixVm,
+  getNutanixAlerts,
+  getNutanixClusterStats,
   getNutanixImages,
   getNutanixSubnets,
   getNutanixTask,
@@ -188,6 +200,20 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
 
   fastify.get("/api/nutanix/vms", async (_request, reply) => {
     return reply.send(await getNutanixVms());
+  });
+
+  // Statistiques/alertes temps réel — GET purs, tout rôle authentifié (garde globale
+  // plugins/auth.ts), aucune mutation possible (voir en-tête de fichier).
+  fastify.get("/api/nutanix/cluster-stats", async (_request, reply) => {
+    return reply.send(await getNutanixClusterStats());
+  });
+
+  fastify.get<{ Querystring: { limit?: string } }>("/api/nutanix/alerts", async (request, reply) => {
+    const rawLimit = request.query?.limit;
+    // `limit` invalide = borne par défaut du service, jamais un 400 : un panneau d'affichage ne
+    // doit pas rester vide à cause d'un paramètre mal formé.
+    const limit = rawLimit !== undefined ? Number(rawLimit) : undefined;
+    return reply.send(await getNutanixAlerts(limit !== undefined && Number.isFinite(limit) ? limit : undefined));
   });
 
   fastify.get("/api/nutanix/config", async (_request, reply) => {

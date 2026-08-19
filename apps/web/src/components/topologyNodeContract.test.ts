@@ -10,6 +10,7 @@ import {
   NODE_KINDS,
   buildNodeMenuItems,
   capabilityPairKey,
+  hycuProtectionBadge,
   nodeIcon,
   nodeMinimapColor,
   quickLifecycleActions,
@@ -45,6 +46,7 @@ const ALL_KINDS_RECORD: Record<TopologyNodeKind, true> = {
   "automation-condition": true,
   "automation-action": true,
   "image-template": true,
+  "hycu-appliance": true,
 };
 const ALL_KINDS = Object.keys(ALL_KINDS_RECORD).sort() as TopologyNodeKind[];
 
@@ -98,9 +100,74 @@ describe("NODE_CONTRACT — totalité et conventions transverses", () => {
     expect(NODE_CONTRACT["automation-condition"].ports.map((p) => p.id)).toEqual(["automation-out", "automation-in"]);
   });
 
-  it("nutanix-vm garde son unique port cible \"hosted-by\" et host ses deux ports (bug réel du 14/08/2026 : ports absents = arêtes invisibles)", () => {
-    expect(NODE_CONTRACT["nutanix-vm"].ports.map((p) => p.id)).toEqual(["hosted-by"]);
+  it("nutanix-vm porte ses deux ports cibles (\"hosted-by\" + \"protected-by\" HYCU) et host ses deux ports (bug réel du 14/08/2026 : ports absents = arêtes invisibles)", () => {
+    expect(NODE_CONTRACT["nutanix-vm"].ports.map((p) => p.id)).toEqual(["hosted-by", "protected-by"]);
     expect(NODE_CONTRACT.host.ports.map((p) => p.id)).toEqual(["hosted-by", "hosts"]);
+  });
+
+  it("hycu-appliance : cible du rattachement au master + source des arêtes \"protects\", jamais l'inverse", () => {
+    expect(NODE_CONTRACT["hycu-appliance"].ports.map((p) => ({ id: p.id, handleType: p.handleType }))).toEqual([
+      { id: "hosted-by", handleType: "target" },
+      { id: "protection-out", handleType: "source" },
+    ]);
+  });
+
+  it("HYCU est en LECTURE SEULE : ses ports ne sont jamais interactifs et son menu ne propose aucune mutation", () => {
+    expect(CAPABILITY_DEFS["protection-out"].interactive).toBe(false);
+    expect(CAPABILITY_DEFS["protection-out"].infoMessage).toBeTruthy();
+    expect(CAPABILITY_DEFS["protected-by"].interactive).toBe(false);
+    const labels = buildNodeMenuItems(node("hycu-appliance"), {
+      "hycu-open-page": () => {},
+      "hycu-view-jobs": () => {},
+      "hycu-configure": () => {},
+    }).map((i) => i.label);
+    expect(labels).toEqual(["Ouvrir la page Sauvegardes", "Voir les jobs", "Configurer…"]);
+    expect(labels.some((l) => /sauvegarder|lancer|restaurer|supprimer/i.test(l))).toBe(false);
+  });
+
+  it("menu HYCU sans handler \"Configurer\" (non-admin) : l'entrée disparaît, jamais un item mort", () => {
+    const labels = buildNodeMenuItems(node("hycu-appliance"), { "hycu-open-page": () => {}, "hycu-view-jobs": () => {} }).map(
+      (i) => i.label,
+    );
+    expect(labels).toEqual(["Ouvrir la page Sauvegardes", "Voir les jobs"]);
+  });
+
+  it("badge de protection HYCU : rien tant que HYCU ne dit rien de la VM, sinon l'état réel rapporté", () => {
+    expect(hycuProtectionBadge(node("nutanix-vm"))).toBeNull();
+    expect(hycuProtectionBadge(node("nutanix-vm", { hycuProtection: "protected" }))?.label).toBe("Protégée");
+    expect(hycuProtectionBadge(node("nutanix-vm", { hycuProtection: "non-compliant" }))?.tone).toBe("critical");
+    expect(hycuProtectionBadge(node("nutanix-vm", { hycuProtection: "never-backed-up" }))?.label).toBe("Jamais sauvegardée");
+    expect(hycuProtectionBadge(node("nutanix-vm", { hycuProtection: "unprotected" }))?.label).toBe("Non protégée");
+  });
+
+  it("arête \"protects\" : ancrée sur protection-out/protected-by, couleur portée par la VM cible (palette partagée)", () => {
+    const hycu = node("hycu-appliance", { id: "hycu-appliance:main" });
+    const vm = node("nutanix-vm", { id: "nutanix-vm:uuid-1", hycuProtection: "protected" });
+    const nodesById = new Map([
+      [hycu.id, hycu],
+      [vm.id, vm],
+    ]);
+    const edges: TopologyEdge[] = [{ id: "protects:h1:nutanix-vm:uuid-1", source: hycu.id, target: vm.id, kind: "protects" }];
+    const [edge] = buildTopologyEdges(edges, nodesById);
+    expect(edge).toMatchObject({ sourceHandle: "protection-out", targetHandle: "protected-by" });
+    expect(edge?.data?.state).toBe("healthy");
+    // Jamais animée : une sauvegarde est périodique, pas un flux continu.
+    expect(edge?.animated).toBe(false);
+  });
+
+  it("arête \"protects\" d'une VM jamais sauvegardée : orange + tirets fins, jamais rouge (ce n'est pas une panne)", () => {
+    const hycu = node("hycu-appliance", { id: "hycu-appliance:main" });
+    const vm = node("nutanix-vm", { id: "nutanix-vm:uuid-2", hycuProtection: "never-backed-up" });
+    const nodesById = new Map([
+      [hycu.id, hycu],
+      [vm.id, vm],
+    ]);
+    const [edge] = buildTopologyEdges(
+      [{ id: "protects:h2:nutanix-vm:uuid-2", source: hycu.id, target: vm.id, kind: "protects" }],
+      nodesById,
+    );
+    expect(edge?.data?.state).toBe("starting");
+    expect(edge?.style?.strokeDasharray).toBe("4 4");
   });
 
   it("container porte un port cible \"hosted-by\" (arête \"Docker local\" -> conteneur) en plus de network/volume-mount", () => {
