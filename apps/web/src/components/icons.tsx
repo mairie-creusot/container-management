@@ -384,6 +384,26 @@ export function IconBackup({ className }: IconProps) {
 
 /** Baie de stockage (plateaux empilés + témoins) — page "Stockage de sauvegarde" (appliance
  * ExaGrid), distincte de IconBackup (le job de sauvegarde) et de IconServer (rack de calcul). */
+/** Bouée de sauvetage — page Assistance (GLPI). */
+export function IconLifebuoy({ className }: IconProps) {
+  return base(
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <circle cx="12" cy="12" r="3.6" />
+      <path d="M5.6 5.6l3.8 3.8M14.6 14.6l3.8 3.8M18.4 5.6l-3.8 3.8M9.4 14.6l-3.8 3.8" />
+    </>,
+    className,
+  );
+}
+
+/** Combiné téléphonique — page Téléphonie (3CX). */
+export function IconPhone({ className }: IconProps) {
+  return base(
+    <path d="M7 3.5h3l1.5 4-2 1.5a12 12 0 0 0 5.5 5.5l1.5-2 4 1.5v3a1.5 1.5 0 0 1-1.7 1.5C11.6 18.6 5.4 12.4 4.5 5.2A1.5 1.5 0 0 1 6 3.5z" />,
+    className,
+  );
+}
+
 export function IconStorageArray({ className }: IconProps) {
   return base(
     <>

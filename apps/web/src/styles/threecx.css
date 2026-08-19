@@ -1,0 +1,248 @@
+/* Page Téléphonie (PBX 3CX) — cartes d'appel en cours, refus du PBX, filtres de postes.
+   Mêmes variables et silhouettes que exagrid.css : rien n'est redéfini globalement. */
+
+.threecx-section-title {
+  margin: 24px 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  letter-spacing: 0.02em;
+}
+
+.threecx-section-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.threecx-filters {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.threecx-filters input[type="search"] {
+  min-width: 240px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-1);
+  color: var(--color-text);
+  font-size: 12.5px;
+}
+
+.threecx-count {
+  color: var(--color-text-faint);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Appels en cours ------------------------------------------------------------------------ */
+
+.threecx-calls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.threecx-call {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-success);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+}
+
+.threecx-call__parties {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1 1 320px;
+}
+
+.threecx-party {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.threecx-party__name {
+  color: var(--color-text);
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.threecx-party__number {
+  color: var(--color-text-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.threecx-party__unknown {
+  color: var(--color-text-faint);
+  font-size: 12.5px;
+  font-style: italic;
+}
+
+.threecx-call__arrow {
+  flex: none;
+  color: var(--color-text-muted);
+  font-size: 15px;
+}
+
+.threecx-call__meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.threecx-call__timer {
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.threecx-call__timer.is-missing {
+  color: var(--color-text-faint);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.threecx-call__since {
+  color: var(--color-text-faint);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Refus du PBX (licence Enterprise absente, droits du point de routage) ------------------- */
+
+.threecx-denied {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-warning);
+  border-radius: var(--radius-md);
+  background: var(--color-warning-bg);
+}
+
+.threecx-denied__title {
+  color: var(--color-text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.threecx-denied__text {
+  color: var(--color-text-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.threecx-denied__raw {
+  display: block;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-3);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+/* --- Formulaire de configuration ------------------------------------------------------------ */
+
+.threecx-checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--color-text);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.threecx-checkbox input[type="checkbox"] {
+  margin-top: 2px;
+  flex: none;
+}
+
+.threecx-checkbox > span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.threecx-checkbox--inline {
+  align-items: center;
+  white-space: nowrap;
+}
+
+.threecx-field-hint {
+  color: var(--color-text-faint);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.threecx-form-help {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2, var(--color-surface-1));
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.threecx-form-note {
+  margin: 0;
+  color: var(--color-text-faint);
+  font-size: 11.5px;
+}
+
+/* --- Divers --------------------------------------------------------------------------------- */
+
+.threecx-note {
+  padding: 10px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-1);
+  color: var(--color-text-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.threecx-poll {
+  margin: 16px 0 0;
+  color: var(--color-text-faint);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 900px) {
+  .threecx-filters {
+    flex-wrap: wrap;
+  }
+
+  .threecx-filters input[type="search"] {
+    min-width: 0;
+    flex: 1 1 160px;
+  }
+}

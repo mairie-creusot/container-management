@@ -14,7 +14,9 @@ export type ViewId =
   | "ad-dns"
   | "notification-channels"
   | "hycu"
-  | "exagrid";
+  | "exagrid"
+  | "threecx"
+  | "glpi";
 
 interface UiState {
   currentView: ViewId;
@@ -69,6 +71,8 @@ export const NAV_ITEMS: { id: ViewId; label: string }[] = [
   { id: "clusters", label: "Environnements" },
   { id: "hycu", label: "Sauvegardes" },
   { id: "exagrid", label: "Stockage de sauvegarde" },
+  { id: "threecx", label: "Téléphonie" },
+  { id: "glpi", label: "Assistance GLPI" },
 ];
 
 const PAGE_TITLES: Partial<Record<ViewId, string>> = {

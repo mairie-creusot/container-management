@@ -25,6 +25,8 @@ import automationReducer from "@/features/automation/automationSlice";
 import nutanixReducer from "@/features/nutanix/nutanixSlice";
 import hycuReducer from "@/features/hycu/hycuSlice";
 import exagridReducer from "@/features/exagrid/exagridSlice";
+import threecxReducer from "@/features/threecx/threecxSlice";
+import glpiReducer from "@/features/glpi/glpiSlice";
 import templatesReducer from "@/features/templates/templatesSlice";
 import { errorNotificationMiddleware } from "@/features/notifications/errorNotificationMiddleware";
 
@@ -56,6 +58,8 @@ export const store = configureStore({
     nutanix: nutanixReducer,
     hycu: hycuReducer,
     exagrid: exagridReducer,
+    threecx: threecxReducer,
+    glpi: glpiReducer,
     templates: templatesReducer,
   },
   middleware: (getDefaultMiddleware) => getDefaultMiddleware().concat(errorNotificationMiddleware),

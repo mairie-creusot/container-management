@@ -28,6 +28,8 @@ const NotificationsPage = lazy(() => import("@/features/notifications/Notificati
 const AuditPage = lazy(() => import("@/features/audit/AuditPage"));
 const HycuPage = lazy(() => import("@/features/hycu/HycuPage"));
 const ExagridPage = lazy(() => import("@/features/exagrid/ExagridPage"));
+const ThreecxPage = lazy(() => import("@/features/threecx/ThreecxPage"));
+const GlpiPage = lazy(() => import("@/features/glpi/GlpiPage"));
 
 // Notifications système (watchdog proactif côté API — nouvelle version d'image, intégration
 // devenue injoignable/de nouveau joignable) : câblé ici plutôt que dans une page précise, pour
@@ -79,6 +81,10 @@ function renderView(view: string) {
       return <HycuPage />;
     case "exagrid":
       return <ExagridPage />;
+    case "threecx":
+      return <ThreecxPage />;
+    case "glpi":
+      return <GlpiPage />;
     default:
       return <OverviewPage />;
   }
