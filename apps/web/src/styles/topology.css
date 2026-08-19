@@ -544,6 +544,29 @@
   }
 }
 
+/* --- Suppression en cours (classe posée quand deletePending est vrai) : contour ROUGE qui pulse
+   de la confirmation jusqu'à la disparition réelle du nœud. Prime sur --pending ci-dessus. ------ */
+.topology-node--deleting {
+  animation: topology-deleting-border 1s ease-in-out infinite;
+}
+
+@keyframes topology-deleting-border {
+  0%,
+  100% {
+    border-color: var(--color-critical);
+    box-shadow: 0 0 0 0 var(--color-critical-bg, rgba(239, 68, 68, 0.35));
+  }
+  50% {
+    border-color: var(--color-critical);
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+
+.topology-node--deleting .topology-node__status .topology-node__status-dot {
+  background: var(--color-critical);
+  animation: topology-dot-working 0.9s ease-in-out infinite;
+}
+
 /* Le point de statut passe en "travail en cours" (orange, pulsation plus rapide) quel que soit le
    statut encore affiché — prime sur la pulsation calme "running" (sélecteur plus spécifique). */
 .topology-node--pending .topology-node__status .topology-node__status-dot {
@@ -1309,6 +1332,8 @@
   .topology-node__status--running .topology-node__status-dot,
   .topology-node--pending,
   .topology-node--pending .topology-node__status .topology-node__status-dot,
+  .topology-node--deleting,
+  .topology-node--deleting .topology-node__status .topology-node__status-dot,
   .topology-graph .react-flow__node.topology-node-new .topology-node {
     animation: none;
   }
@@ -1316,6 +1341,11 @@
   /* L'information "action en cours" reste visible sans animation : bordure orange statique. */
   .topology-node--pending {
     border-color: var(--color-warning);
+  }
+
+  /* Idem pour une suppression : contour rouge statique. */
+  .topology-node--deleting {
+    border-color: var(--color-critical);
   }
 
   .topology-node--pending::after,

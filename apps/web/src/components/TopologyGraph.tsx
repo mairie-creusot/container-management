@@ -2622,6 +2622,25 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   // arrêté ou le succès") — voir nutanixSlice/containersSlice#convergence.
   const nutanixConvergence = useAppSelector((s) => s.nutanix.convergence);
   const containerConvergence = useAppSelector((s) => s.containers.convergence);
+  // Suppression en cours (contour rouge pulsé sur la carte visée) — de la confirmation jusqu'à la
+  // disparition réelle du nœud au poll suivant.
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
+  // Suppressions déclenchées ailleurs (panneau de détail d'une VM, page Conteneurs) : la carte
+  // pulse quand même, l'état vient des slices.
+  const nutanixDeletePendingUuid = useAppSelector((s) => s.nutanix.deletePendingUuid);
+  const containerDeletePendingId = useAppSelector((s) => s.containers.deletePendingId);
+  async function withDeleteAnimation(nodeId: string, run: () => Promise<unknown>): Promise<void> {
+    setDeletingIds((current) => new Set(current).add(nodeId));
+    try {
+      await run();
+    } finally {
+      setDeletingIds((current) => {
+        const next = new Set(current);
+        next.delete(nodeId);
+        return next;
+      });
+    }
+  }
   // Purge des attentes de convergence satisfaites (état réel constaté au poll) ou expirées.
   useEffect(() => {
     for (const n of data?.nodes ?? []) {
@@ -2884,7 +2903,13 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
                     : {}),
                 }
               : {}),
-            data: { ...n, ...callbacks, ...templateMeta } as unknown as Record<string, unknown>,
+            data: {
+              ...n,
+              ...callbacks,
+              ...templateMeta,
+              deletePending:
+                deletingIds.has(n.id) || nutanixDeletePendingUuid === rawActionId || containerDeletePendingId === rawActionId,
+            } as unknown as Record<string, unknown>,
           };
         });
       // Un nœud par groupe REPLIÉ (voir collapsedMemberIds ci-dessus) — position : celle déjà
@@ -2927,7 +2952,17 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     // Les deux ids "action en cours" invalident le rendu des boutons rapides (voir
     // graphNodePropsEqual#actionPending, topologyGraphShared.tsx) — d'où leur présence ici.
     // `templatesById` : chips des cartes image-template (graphNodePropsEqual borne les re-renders).
-  }, [data, positions, hostTreePositions, nutanixActionPendingUuid, containerActionPendingId, templatesById]);
+  }, [
+    data,
+    positions,
+    hostTreePositions,
+    nutanixActionPendingUuid,
+    containerActionPendingId,
+    templatesById,
+    deletingIds,
+    nutanixDeletePendingUuid,
+    containerDeletePendingId,
+  ]);
 
   /**
    * Cadre décoratif (voir topologyGraphShared.tsx#GroupFrameNode) autour des membres d'un groupe
@@ -3765,7 +3800,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       // n'est plus un nœud du graphe à viser au glisser-déposer — cette action couvre ce cas (et
       // reste disponible aussi pour un network resté un vrai nœud, résultat identique).
       "container-connect-network": () => setNetworkConnectPopover({ containerId: id, x, y }),
-      "container-remove": () => void handleContainerAction(id, node.label, "remove"),
+      "container-remove": () => void withDeleteAnimation(node.id, () => handleContainerAction(id, node.label, "remove")),
       "nutanix-vm-stop": () => void handleNutanixVmAction(id, node.label, "stop"),
       "nutanix-vm-restart": () => void handleNutanixVmAction(id, node.label, "restart"),
       "nutanix-vm-start": () => void handleNutanixVmAction(id, node.label, "start"),
@@ -3774,9 +3809,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       "nutanix-vm-add-nic": () => setNutanixNicPopover({ node, x, y }),
       "nutanix-vm-edit-compute": () => setNutanixComputePopover({ node, x, y }),
       "volume-mount-on-container": () => setMountVolumePopover({ target: { kind: "existing-volume", volumeName: id }, x, y }),
-      "volume-remove": () => void handleRemoveVolume(id),
-      "network-remove": () => void handleRemoveNetwork(id, node.label),
-      "automation-node-remove": () => void handleDeleteAutomationNode(node),
+      "volume-remove": () => void withDeleteAnimation(node.id, () => handleRemoveVolume(id)),
+      "network-remove": () => void withDeleteAnimation(node.id, () => handleRemoveNetwork(id, node.label)),
+      "automation-node-remove": () => void withDeleteAnimation(node.id, () => handleDeleteAutomationNode(node)),
       "container-attach": () => setAttachPicker({ x, y, node }),
       "host-add-environment": () => setRemoteEnvModalOpen(true),
       "host-create-vm": () => {}, // entrée désactivée "bientôt" — aucun backend de création de VM
@@ -3787,7 +3822,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         setDeployVmModal({ templateName: node.label, artifactReference: node.templateArtifactReference ?? "" }),
       "image-template-create-container": () =>
         setPopover({ kind: "container", x, y, ...(node.templateArtifactReference ? { initialImage: node.templateArtifactReference } : {}) }),
-      "image-template-remove": () => void handleDeleteTemplate(id, node.label),
+      "image-template-remove": () => void withDeleteAnimation(node.id, () => handleDeleteTemplate(id, node.label)),
       // HYCU : navigation vers la page Sauvegardes RÉELLE (aucune mutation possible — l'appliance
       // est en lecture seule côté API). "Voir les jobs" ouvre la page directement sur cet onglet.
       "hycu-open-page": () => dispatch(setCurrentView("hycu")),

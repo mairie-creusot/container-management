@@ -836,6 +836,9 @@ export interface GraphNodeCallbacks {
   /** true si une action est déjà en cours sur CE nœud (nutanix.actionPendingUuid /
    * containers.actionPendingId) — désactive les boutons rapides, comparé par graphNodePropsEqual. */
   actionPending?: boolean;
+  /** Suppression en cours sur CE nœud (confirmation comprise) — contour rouge pulsé jusqu'à ce que
+   * le nœud disparaisse réellement du graphe. */
+  deletePending?: boolean;
 }
 
 /** Métadonnées de recette injectées par TopologyGraph.tsx sur `node.data` d'un nœud
@@ -911,6 +914,7 @@ function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
     // Boutons rapides (18/08/2026) : l'état "action en cours" est RENDU (boutons désactivés) —
     // doit invalider le memo, contrairement aux callbacks eux-mêmes (voir JSDoc ci-dessus).
     a.actionPending === b.actionPending &&
+    a.deletePending === b.deletePending &&
     a.label === b.label &&
     a.subtitle === b.subtitle &&
     a.status === b.status &&
@@ -1002,7 +1006,7 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   const isCompact = zoom < ZOOM_DETAIL_THRESHOLD;
   return (
     <div
-      className={`topology-node topology-node--${node.kind}${node.kind === "host" && node.hostKind ? ` topology-node--host-${node.hostKind}` : ""} topology-node--${node.status}${node.orphan ? " topology-node--orphan" : ""}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}${node.actionPending ? " topology-node--pending" : ""}`}
+      className={`topology-node topology-node--${node.kind}${node.kind === "host" && node.hostKind ? ` topology-node--host-${node.hostKind}` : ""} topology-node--${node.status}${node.orphan ? " topology-node--orphan" : ""}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}${node.actionPending ? " topology-node--pending" : ""}${node.deletePending ? " topology-node--deleting" : ""}`}
       title={isCompact ? node.label : undefined}
     >
       {ports.map((port) => (

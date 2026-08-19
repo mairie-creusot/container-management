@@ -146,6 +146,9 @@ interface NutanixState {
   /** uuid de la VM ayant une action de cycle de vie/suppression/migration en cours (désactive ses
    * boutons/le glisser-déposer) — un seul à la fois, même principe que ContainersState#actionPendingId. */
   actionPendingUuid: string | null;
+  /** uuid de la VM en cours de SUPPRESSION (contour rouge pulsé sur sa carte, quelle que soit
+   * l'origine de l'action : graphe ou panneau de détail). */
+  deletePendingUuid: string | null;
   /** Convergence attendue par uuid après un start/stop réussi (stop ACPI = l'OS invité met du
    * temps à s'éteindre) : la carte du graphe reste en "pending" tant que le poll de topologie ne
    * constate pas cet état réel — purgé par TopologyGraph une fois convergé ou expiré. */
@@ -167,6 +170,7 @@ interface NutanixState {
 
 const initialState: NutanixState = {
   actionPendingUuid: null,
+  deletePendingUuid: null,
   convergence: {},
   subnets: [],
   images: [],
@@ -386,12 +390,15 @@ const nutanixSlice = createSlice({
       })
       .addCase(deleteNutanixVm.pending, (state, action) => {
         state.actionPendingUuid = action.meta.arg.uuid;
+        state.deletePendingUuid = action.meta.arg.uuid;
       })
       .addCase(deleteNutanixVm.fulfilled, (state) => {
         state.actionPendingUuid = null;
+        state.deletePendingUuid = null;
       })
       .addCase(deleteNutanixVm.rejected, (state) => {
         state.actionPendingUuid = null;
+        state.deletePendingUuid = null;
       })
       .addCase(migrateNutanixVm.pending, (state, action) => {
         state.actionPendingUuid = action.meta.arg.uuid;

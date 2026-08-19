@@ -39,6 +39,8 @@ interface ContainersState {
   detailStatus: "idle" | "loading" | "ready" | "error";
   /** Id du conteneur ayant une action de cycle de vie en cours (désactive ses boutons). */
   actionPendingId: string | null;
+  /** Id du conteneur en cours de SUPPRESSION (contour rouge pulsé, quelle que soit l'origine). */
+  deletePendingId: string | null;
   /** Convergence attendue par id après un start/stop réussi — même principe que
    * NutanixState#convergence : la carte du graphe reste "pending" jusqu'à l'état réel constaté. */
   convergence: Record<string, { expected: "running" | "stopped"; since: number }>;
@@ -76,6 +78,7 @@ const initialState: ContainersState = {
   detail: null,
   detailStatus: "idle",
   actionPendingId: null,
+  deletePendingId: null,
   convergence: {},
   actionError: null,
   processes: null,
@@ -382,10 +385,12 @@ const containersSlice = createSlice({
       })
       .addCase(runContainerAction.pending, (state, action) => {
         state.actionPendingId = action.meta.arg.id;
+        if (action.meta.arg.action === "remove") state.deletePendingId = action.meta.arg.id;
         state.actionError = null;
       })
       .addCase(runContainerAction.fulfilled, (state, action) => {
         state.actionPendingId = null;
+        state.deletePendingId = null;
         if (action.payload.action === "start") state.convergence[action.payload.id] = { expected: "running", since: Date.now() };
         if (action.payload.action === "stop") state.convergence[action.payload.id] = { expected: "stopped", since: Date.now() };
         state.items = action.payload.containers;
@@ -396,6 +401,7 @@ const containersSlice = createSlice({
       })
       .addCase(runContainerAction.rejected, (state, action) => {
         state.actionPendingId = null;
+        state.deletePendingId = null;
         state.actionError = action.payload ?? "Échec de l'action.";
       })
       .addCase(renameContainer.pending, (state, action) => {
