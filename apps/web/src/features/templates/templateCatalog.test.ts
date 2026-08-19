@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   ARTIFACT_TYPE_LABEL,
+  ISO_OS_FAMILIES,
+  ISO_OS_FAMILY_LABEL,
+  ISO_OS_FAMILY_PACKAGE_DISTRO,
   MKOSI_DEFAULT_RELEASE,
   MKOSI_DISTROS,
   STEP_TYPES,
@@ -14,6 +17,8 @@ import {
   createStep,
   defaultBase,
   isIsoImage,
+  isUnattendedIso,
+  isoInstallMode,
   isAbsolutePosixPath,
   isValidFileMode,
   isValidGuestAccount,
@@ -50,6 +55,10 @@ describe("bases de recette", () => {
     expect(templateBaseLabel({ type: "mkosi", distro: "arch", release: "rolling" })).toBe("mkosi arch rolling");
     expect(templateBaseLabel({ type: "iso", imageUuid: "" })).toBe("ISO (à choisir)");
     expect(templateBaseLabel({ type: "iso", imageUuid: "abc-123" })).toBe("ISO abc-123");
+    expect(templateBaseLabel({ type: "iso", imageUuid: "abc-123", install: "manual" })).toBe("ISO abc-123");
+    expect(templateBaseLabel({ type: "iso", imageUuid: "abc-123", install: "unattended", osFamily: "rhel" })).toBe(
+      "ISO automatisé abc-123 — RHEL / Rocky / Alma",
+    );
   });
 
   it("baseError : distro/version/image/release/imageUuid exigées, imageUrl http(s) si renseignée", () => {
@@ -62,15 +71,41 @@ describe("bases de recette", () => {
     expect(baseError({ type: "mkosi", distro: "debian", release: "" })).not.toBeNull();
     expect(baseError({ type: "iso", imageUuid: "" })).not.toBeNull();
     expect(baseError({ type: "iso", imageUuid: "abc-123" })).toBeNull();
+    // Installation automatisée : la famille d'OS est REQUISE (elle pilote preseed/kickstart).
+    expect(baseError({ type: "iso", imageUuid: "abc-123", install: "unattended" })).not.toBeNull();
+    expect(baseError({ type: "iso", imageUuid: "abc-123", install: "unattended", osFamily: "ubuntu" })).toBeNull();
   });
 
-  it("base iso : jamais de build ni d'étapes de provisioning (l'OS n'est pas encore installé)", () => {
+  it("iso manuel : jamais de build ni d'étapes de provisioning (l'OS n'est pas encore installé)", () => {
+    // `install` absent = "manual" (contrat) : comportement historique strictement inchangé.
+    expect(isoInstallMode({ type: "iso", imageUuid: "abc" })).toBe("manual");
     expect(baseIsBuildable({ type: "iso", imageUuid: "abc" })).toBe(false);
     expect(baseSupportsSteps({ type: "iso", imageUuid: "abc" })).toBe(false);
+    expect(baseIsBuildable({ type: "iso", imageUuid: "abc", install: "manual" })).toBe(false);
+    expect(baseSupportsSteps({ type: "iso", imageUuid: "abc", install: "manual" })).toBe(false);
+    expect(isUnattendedIso({ type: "iso", imageUuid: "abc" })).toBe(false);
     for (const type of ["cloud-image", "container", "mkosi"] as const) {
       expect(baseIsBuildable(defaultBase(type))).toBe(true);
       expect(baseSupportsSteps(defaultBase(type))).toBe(true);
     }
+  });
+
+  it("iso automatisé : étapes et build autorisés, comme une base cloud-image", () => {
+    const unattended = { type: "iso", imageUuid: "abc", install: "unattended", osFamily: "debian" } as const;
+    expect(isoInstallMode(unattended)).toBe("unattended");
+    expect(isUnattendedIso(unattended)).toBe(true);
+    expect(baseIsBuildable(unattended)).toBe(true);
+    expect(baseSupportsSteps(unattended)).toBe(true);
+    // Défaut du studio : mode automatisé (recommandé), ISO encore à choisir donc base invalide.
+    expect(defaultBase("iso")).toEqual({ type: "iso", imageUuid: "", install: "unattended", osFamily: "debian" });
+    expect(baseError(defaultBase("iso"))).not.toBeNull();
+    // Les 3 familles du contrat ont un libellé et une distro de recherche de paquets réellement indexée.
+    expect([...ISO_OS_FAMILIES]).toEqual(["debian", "ubuntu", "rhel"]);
+    for (const f of ISO_OS_FAMILIES) {
+      expect(ISO_OS_FAMILY_LABEL[f]).toBeTruthy();
+      expect(ISO_OS_FAMILY_PACKAGE_DISTRO[f]).toBeTruthy();
+    }
+    expect(ISO_OS_FAMILY_PACKAGE_DISTRO.rhel).toBe("fedora");
   });
 
   it("isIsoImage : imageType contenant ISO (casse ignorée), jamais deviné sans type", () => {
@@ -105,6 +140,7 @@ describe("étapes de recette", () => {
     expect(stepError({ type: "file", path: "/etc/motd", content: "hello", mode: "644" })).toBeNull();
     expect(stepError({ type: "artifact", templateId: "t1", destPath: "/opt/app.tar" })).toBeNull();
     expect(stepError({ type: "user", username: "deploy", sudo: true })).toBeNull();
+    expect(stepError({ type: "user", username: "deploy", sudo: true, passwordSecretName: "vm-root" })).toBeNull();
     expect(stepError({ type: "service", name: "nginx", enable: true })).toBeNull();
   });
 
@@ -127,6 +163,10 @@ describe("étapes de recette", () => {
     expect(stepSummary({ type: "packages", packages: ["python3"] })).toBe("python3");
     expect(stepSummary({ type: "script", content: "#!/bin/sh\napt-get update" })).toBe("#!/bin/sh");
     expect(stepSummary({ type: "user", username: "deploy", sudo: true })).toBe("deploy (sudo)");
+    // Mot de passe : seul le NOM du secret QUAI apparaît, jamais sa valeur.
+    expect(stepSummary({ type: "user", username: "deploy", sudo: true, passwordSecretName: "vm-root" })).toBe(
+      "deploy (sudo) · secret vm-root",
+    );
     expect(recipeSummary([])).toBe("Recette vide (base nue)");
     expect(recipeSummary([{ type: "script", content: "x" }])).toBe("1 étape : script");
     expect(

@@ -881,12 +881,29 @@ export interface IacRunDetail extends IacRun {
 
 /** Base d'une recette : image cloud (build Packer SUR le cluster Nutanix), image conteneur
  * (docker build, "scratch" accepté), OS minimal from-scratch via mkosi (rootfs + noyau), ou ISO
- * du catalogue Prism (rien à construire : la VM vierge s'installe via la console VNC). */
+ * du catalogue Prism.
+ *
+ * Base "iso", deux modes (`install`) :
+ * - absent ou "manual" : comportement historique — rien à construire, `steps` interdites, le
+ *   template est "ready" dès sa création, l'OS s'installe à la main via la console VNC ;
+ * - "unattended" : `osFamily` REQUIS, `steps` autorisées comme sur les autres bases. QUAI génère
+ *   le fichier de réponses de la famille d'OS (autoinstall / preseed / kickstart) sur un second
+ *   CDROM de seed et construit réellement l'image (draft → building → ready, artefact
+ *   `nutanix-image`). Voir services/templates.ts. */
 export type TemplateBase =
   | { type: "cloud-image"; distro: string; version: string; imageUrl?: string }
   | { type: "container"; image: string }
   | { type: "mkosi"; distro: "debian" | "ubuntu" | "fedora" | "arch"; release: string }
-  | { type: "iso"; imageUuid: string };
+  | { type: "iso"; imageUuid: string; install?: IsoInstallMode; osFamily?: IsoOsFamily };
+
+/** "manual" = installation à la main via la console VNC (défaut historique) ; "unattended" =
+ * fichier de réponses généré et build réel. */
+export type IsoInstallMode = "manual" | "unattended";
+
+/** Famille d'OS d'une ISO en installation automatisée — détermine le format du fichier de
+ * réponses : ubuntu → autoinstall (cloud-init/subiquity), debian → preseed (debian-installer),
+ * rhel → kickstart (anaconda ; couvre RHEL, Rocky Linux, AlmaLinux). */
+export type IsoOsFamily = "debian" | "ubuntu" | "rhel";
 
 /** Étape d'une recette — validée par services/templates.ts, jamais interprétée par un shell QUAI
  * (les scripts libres ne s'exécutent QUE dans la VM/l'image de build). */
@@ -895,7 +912,7 @@ export type TemplateStep =
   | { type: "script"; content: string }
   | { type: "file"; path: string; content: string; mode?: string }
   | { type: "artifact"; templateId: string; destPath: string; dockerLoad?: boolean }
-  | { type: "user"; username: string; sudo?: boolean; sshAuthorizedKey?: string }
+  | { type: "user"; username: string; sudo?: boolean; sshAuthorizedKey?: string; passwordSecretName?: string }
   | { type: "service"; name: string; enable: boolean };
 
 /** Sous-type d'un template = type de sa base (nœud "image-template" du graphe de topologie). */

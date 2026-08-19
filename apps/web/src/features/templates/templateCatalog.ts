@@ -3,6 +3,8 @@
 import type {
   ImageTemplateArtifactType,
   ImageTemplateStatus,
+  IsoInstallMode,
+  IsoOsFamily,
   NutanixImageSummary,
   NutanixTaskStatus,
   TemplateBase,
@@ -15,7 +17,7 @@ export const TEMPLATE_BASE_TYPE_LABEL: Record<TemplateBase["type"], string> = {
   "cloud-image": "VM cloud-image",
   container: "Conteneur",
   mkosi: "OS minimal (mkosi)",
-  iso: "ISO (installation manuelle)",
+  iso: "ISO d'installation",
 };
 
 /** Suggestions de saisie — la distro/l'image restent LIBRES (cœur de la demande utilisateur). */
@@ -41,11 +43,37 @@ export const MKOSI_RELEASE_SUGGESTIONS: Record<MkosiDistro, string[]> = {
   arch: ["rolling"],
 };
 
-/** Base par défaut d'un onglet du studio quand on bascule dessus sans recette pré-remplie. */
+// --- Base ISO : installation manuelle (VNC) ou automatisée (recette appliquée au build) --------
+
+export const ISO_OS_FAMILIES = ["debian", "ubuntu", "rhel"] as const;
+
+export const ISO_OS_FAMILY_LABEL: Record<IsoOsFamily, string> = {
+  debian: "Debian",
+  ubuntu: "Ubuntu",
+  rhel: "RHEL / Rocky / Alma",
+};
+
+export const ISO_INSTALL_MODE_LABEL: Record<IsoInstallMode, string> = {
+  manual: "Installation manuelle",
+  unattended: "Installation automatisée",
+};
+
+/** Mode d'installation effectif d'une base ISO — `install` absent = "manual" (contrat). */
+export function isoInstallMode(base: Extract<TemplateBase, { type: "iso" }>): IsoInstallMode {
+  return base.install === "unattended" ? "unattended" : "manual";
+}
+
+/** true si la base est un ISO en installation automatisée (étapes + build autorisés). */
+export function isUnattendedIso(base: TemplateBase): boolean {
+  return base.type === "iso" && isoInstallMode(base) === "unattended";
+}
+
+/** Base par défaut d'un onglet du studio quand on bascule dessus sans recette pré-remplie —
+ * l'ISO démarre en mode automatisé (recommandé), le mode manuel reste à un clic. */
 export function defaultBase(type: TemplateBase["type"]): TemplateBase {
   if (type === "cloud-image") return { type: "cloud-image", distro: "ubuntu", version: "24.04" };
   if (type === "container") return { type: "container", image: "debian:bookworm" };
-  if (type === "iso") return { type: "iso", imageUuid: "" };
+  if (type === "iso") return { type: "iso", imageUuid: "", install: "unattended", osFamily: "debian" };
   return { type: "mkosi", distro: "debian", release: MKOSI_DEFAULT_RELEASE.debian };
 }
 
@@ -53,7 +81,15 @@ export function defaultBase(type: TemplateBase["type"]): TemplateBase {
 export function templateBaseLabel(base: TemplateBase): string {
   if (base.type === "cloud-image") return `VM cloud-image ${base.distro} ${base.version}`.trim();
   if (base.type === "container") return `Conteneur ${base.image}`.trim();
-  if (base.type === "iso") return base.imageUuid === "" ? "ISO (à choisir)" : `ISO ${base.imageUuid}`;
+  if (base.type === "iso") {
+    if (isoInstallMode(base) === "unattended") {
+      const family = base.osFamily ? ISO_OS_FAMILY_LABEL[base.osFamily] : "famille d'OS à choisir";
+      return base.imageUuid === ""
+        ? `ISO automatisé (à choisir) — ${family}`
+        : `ISO automatisé ${base.imageUuid} — ${family}`;
+    }
+    return base.imageUuid === "" ? "ISO (à choisir)" : `ISO ${base.imageUuid}`;
+  }
   return `mkosi ${base.distro} ${base.release}`.trim();
 }
 
@@ -64,18 +100,33 @@ export function templateBaseTarget(base: TemplateBase): "vm" | "container" | "ra
   return "raw-image";
 }
 
-/** Une base ISO ne se construit pas : le template est "ready" dès la création (POST .../build → 400). */
+/** Un ISO en installation MANUELLE ne se construit pas : le template est "ready" dès la création
+ * (POST .../build → 400) ; un ISO automatisé se construit comme une base cloud-image. */
 export function baseIsBuildable(base: TemplateBase): boolean {
-  return base.type !== "iso";
+  return base.type !== "iso" || isUnattendedIso(base);
 }
 
-/** Une base ISO n'accepte aucune étape de provisioning — l'OS n'est pas encore installé. */
+/** Un ISO en installation MANUELLE n'accepte aucune étape — l'OS n'est pas encore installé. */
 export function baseSupportsSteps(base: TemplateBase): boolean {
-  return base.type !== "iso";
+  return base.type !== "iso" || isUnattendedIso(base);
 }
 
 export const ISO_STEPS_DISABLED_MESSAGE =
   "Une base ISO n'a pas d'étapes de provisioning : l'OS n'est pas encore installé — il s'installera à la main via la console VNC après le déploiement en VM.";
+
+export const ISO_UNATTENDED_MESSAGE =
+  "Installation automatisée : le serveur installe l'OS depuis l'ISO sans intervention (preseed/kickstart), applique la recette, puis publie une image Nutanix — le template se construit et se déploie comme une base cloud-image.";
+
+export const ISO_MANUAL_MESSAGE =
+  "Installation manuelle : aucun build, la VM démarre sur l'ISO avec un disque vide et vous installez l'OS vous-même via la console VNC.";
+
+/** Distro de recherche de paquets la plus proche réellement supportée pour chaque famille d'OS —
+ * "rhel" retombe sur fedora (même famille rpm/dnf), affiché tel quel dans le studio. */
+export const ISO_OS_FAMILY_PACKAGE_DISTRO: Record<IsoOsFamily, "debian" | "ubuntu" | "fedora"> = {
+  debian: "debian",
+  ubuntu: "ubuntu",
+  rhel: "fedora",
+};
 
 /** ISO du catalogue Prism : imageType contenant "ISO" (casse ignorée) — jamais deviné sans type. */
 export function isIsoImage(image: NutanixImageSummary): boolean {
@@ -94,6 +145,9 @@ export const STEP_TYPE_LABEL: Record<TemplateStep["type"], string> = {
 };
 
 export const STEP_TYPES: TemplateStep["type"][] = ["packages", "script", "file", "artifact", "user", "service"];
+
+export const USER_PASSWORD_SECRET_HINT =
+  "Sans secret choisi, un mot de passe jetable est généré à la construction : le compte devra être défini au déploiement.";
 
 /** Étape vierge d'un type donné — valeurs neutres, à compléter dans l'éditeur. */
 export function createStep(type: TemplateStep["type"]): TemplateStep {
@@ -126,8 +180,11 @@ export function stepSummary(step: TemplateStep): string {
       return step.path === "" ? "chemin à renseigner" : step.path;
     case "artifact":
       return step.templateId === "" ? "artefact à choisir" : `→ ${step.destPath || "destination à renseigner"}`;
-    case "user":
-      return step.username === "" ? "nom à renseigner" : `${step.username}${step.sudo ? " (sudo)" : ""}`;
+    case "user": {
+      if (step.username === "") return "nom à renseigner";
+      const secret = step.passwordSecretName ? ` · secret ${step.passwordSecretName}` : "";
+      return `${step.username}${step.sudo ? " (sudo)" : ""}${secret}`;
+    }
     case "service":
       return step.name === "" ? "nom à renseigner" : `${step.name} — ${step.enable ? "activé" : "désactivé"}`;
   }
@@ -206,7 +263,10 @@ export function baseError(base: TemplateBase): string | null {
     return base.image.trim() === "" ? "Indiquez une image de base (ex : scratch, debian:bookworm)." : null;
   }
   if (base.type === "iso") {
-    return base.imageUuid === "" ? "Choisissez un ISO du catalogue Prism (ou importez-en un)." : null;
+    if (base.imageUuid === "") return "Choisissez un ISO du catalogue Prism (ou importez-en un).";
+    if (isoInstallMode(base) === "unattended" && base.osFamily === undefined)
+      return "Choisissez la famille d'OS de l'ISO (indispensable pour scripter l'installation).";
+    return null;
   }
   return base.release.trim() === "" ? "Indiquez une release (ex : bookworm, noble)." : null;
 }

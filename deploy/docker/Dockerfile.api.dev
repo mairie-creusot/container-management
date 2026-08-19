@@ -4,7 +4,8 @@
 # Code applicatif bind-monté depuis l'hôte (docker-compose.dev.yml), donc pas de COPY/build
 # ici : ce Dockerfile installe uniquement les outils système dont l'API a besoin à l'exécution
 # (git pour GitOps, OpenTofu/Ansible/Packer pour l'intégration infra-as-code — voir
-# apps/api/src/services/iac/*) sur node:22-slim, une fois pour toutes via le cache de layers
+# apps/api/src/services/iac/* ; xorriso pour l'ISO de seed des templates ISO automatisés, que
+# Packer fabrique lui-même via cd_content) sur node:22-slim, une fois pour toutes via le cache de layers
 # Docker plutôt que réinstallés à chaque démarrage de conteneur (c'était le cas avant, via une
 # commande shell inline dans docker-compose.dev.yml — lent et fragile).
 #
@@ -31,6 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gnupg \
         krb5-user \
         dnsutils \
+        xorriso \
     && rm -rf /var/lib/apt/lists/*
 
 # Ansible : paquet Debian trop ancien pour les modules récents — installé via pip, dans un

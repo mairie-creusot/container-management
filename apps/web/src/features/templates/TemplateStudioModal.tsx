@@ -16,7 +16,12 @@ import {
   ARTIFACT_TYPE_LABEL,
   CLOUD_IMAGE_DISTRO_SUGGESTIONS,
   CONTAINER_IMAGE_SUGGESTIONS,
+  ISO_INSTALL_MODE_LABEL,
+  ISO_MANUAL_MESSAGE,
+  ISO_OS_FAMILIES,
+  ISO_OS_FAMILY_LABEL,
   ISO_STEPS_DISABLED_MESSAGE,
+  ISO_UNATTENDED_MESSAGE,
   MKOSI_DEFAULT_RELEASE,
   MKOSI_DISTROS,
   MKOSI_RELEASE_SUGGESTIONS,
@@ -29,6 +34,7 @@ import {
   createStep,
   defaultBase,
   isIsoImage,
+  isoInstallMode,
   moveStep,
   parsePackagesInput,
   stepError,
@@ -36,6 +42,7 @@ import {
   templateBaseLabel,
   type MkosiDistro,
 } from "@/features/templates/templateCatalog";
+import UserPasswordSecretField from "@/features/templates/UserPasswordSecretField";
 import { KIND_ICON } from "@/components/topologyGraphShared";
 import CodeEditor, { languageForPath } from "@/components/CodeEditor";
 import { LINT_UNAVAILABLE_MESSAGE, lintShell, type ShellLintResult } from "@/features/templates/lintApi";
@@ -187,7 +194,10 @@ export default function TemplateStudioModal({ onClose }: TemplateStudioModalProp
   // consultatif (n'empêche pas la création — le serveur reste juge en dernier ressort).
   const rowIssues = steps.map((s, i) => stepIssues[i] ?? scriptLintIssue(s, shellLint.cache));
   const stepsAllowed = baseSupportsSteps(base);
-  const recipeIssue = !stepsAllowed && steps.length > 0 ? "Supprimez les étapes : une base ISO ne peut pas être provisionnée." : null;
+  const recipeIssue =
+    !stepsAllowed && steps.length > 0
+      ? "Supprimez les étapes, ou passez la base ISO en installation automatisée : une installation manuelle ne peut pas être provisionnée."
+      : null;
   const hasIssues = baseIssue !== null || recipeIssue !== null || stepIssues.some((e) => e !== null);
   const canSubmit = !busy && name.trim() !== "" && !hasIssues;
 
@@ -336,7 +346,10 @@ export default function TemplateStudioModal({ onClose }: TemplateStudioModalProp
                     ))}
                   </div>
                 ) : (
-                  <p className="template-modal__hint">{ISO_STEPS_DISABLED_MESSAGE}</p>
+                  <p className="template-modal__hint">
+                    {ISO_STEPS_DISABLED_MESSAGE} Pour un template déjà prêt (paquets, comptes…), passez la base en «{" "}
+                    {ISO_INSTALL_MODE_LABEL.unattended} ».
+                  </p>
                 )}
                 {recipeIssue && <p className="template-modal__field-error">{recipeIssue}</p>}
               </div>
@@ -378,8 +391,8 @@ export default function TemplateStudioModal({ onClose }: TemplateStudioModalProp
         {stage === "created" && created && !baseIsBuildable(created.base) && (
           <div className="template-modal__body">
             <p className="template-modal__hint">
-              « {created.name} » est créé et directement prêt : une base ISO ne se construit pas. Déployez-le en VM depuis le
-              graphe — la VM démarrera sur l'ISO, l'installation de l'OS se fera à la main via la console VNC.
+              « {created.name} » est créé et directement prêt : un ISO en installation manuelle ne se construit pas. Déployez-le
+              en VM depuis le graphe — la VM démarrera sur l'ISO, l'installation de l'OS se fera à la main via la console VNC.
             </p>
             <div className="template-modal__actions">
               <button type="button" className="btn btn-primary btn-sm" onClick={onClose}>
@@ -421,7 +434,13 @@ function normalizeBase(base: TemplateBase): TemplateBase {
     return imageUrl === "" ? { type: "cloud-image", distro, version } : { type: "cloud-image", distro, version, imageUrl };
   }
   if (base.type === "container") return { type: "container", image: base.image.trim() };
-  if (base.type === "iso") return { type: "iso", imageUuid: base.imageUuid.trim() };
+  if (base.type === "iso") {
+    const imageUuid = base.imageUuid.trim();
+    if (isoInstallMode(base) === "manual") return { type: "iso", imageUuid, install: "manual" };
+    return base.osFamily === undefined
+      ? { type: "iso", imageUuid, install: "unattended" }
+      : { type: "iso", imageUuid, install: "unattended", osFamily: base.osFamily };
+  }
   return { type: "mkosi", distro: base.distro, release: base.release.trim() };
 }
 
@@ -742,9 +761,8 @@ function CloudImageBaseEditor({
   );
 }
 
-/** Base ISO : sélecteur des ISO réels du catalogue Prism (GET /api/nutanix/images, imageType
- * contenant "ISO") + import d'un ISO local avec progression d'envoi réelle, puis re-fetch du
- * catalogue et sélection automatique de l'image envoyée. */
+/** Base ISO : mode d'installation (manuelle via VNC / automatisée scriptée), ISO réels du catalogue
+ * Prism (GET /api/nutanix/images) + import d'un ISO local avec progression d'envoi réelle. */
 function IsoBaseEditor({
   base,
   onChange,
@@ -754,6 +772,7 @@ function IsoBaseEditor({
   onChange: (next: TemplateBase) => void;
   busy: boolean;
 }) {
+  const mode = isoInstallMode(base);
   const dispatch = useAppDispatch();
   const images = useAppSelector((s) => s.nutanix.images);
   const imagesStatus = useAppSelector((s) => s.nutanix.imagesStatus);
@@ -778,7 +797,7 @@ function IsoBaseEditor({
         uuid = refreshed.payload.items.find((i) => i.name === file.name)?.uuid;
       }
       if (uuid) {
-        onChange({ type: "iso", imageUuid: uuid });
+        onChange({ ...base, imageUuid: uuid });
       } else {
         setUploadError("ISO envoyé, mais introuvable dans le catalogue rafraîchi — sélectionnez-le manuellement.");
       }
@@ -795,6 +814,56 @@ function IsoBaseEditor({
 
   return (
     <>
+      <div className="field">
+        <label>Mode d'installation de l'OS</label>
+        <div className="template-studio__tabs" role="radiogroup" aria-label="Mode d'installation de l'OS">
+          <button
+            type="button"
+            role="radio"
+            aria-checked={mode === "unattended"}
+            className={`template-studio__tab${mode === "unattended" ? " is-selected" : ""}`}
+            onClick={() => onChange({ ...base, install: "unattended", osFamily: base.osFamily ?? "debian" })}
+            disabled={busy}
+          >
+            {ISO_INSTALL_MODE_LABEL.unattended} (recommandé)
+          </button>
+          <button
+            type="button"
+            role="radio"
+            aria-checked={mode === "manual"}
+            className={`template-studio__tab${mode === "manual" ? " is-selected" : ""}`}
+            onClick={() => onChange({ type: "iso", imageUuid: base.imageUuid, install: "manual" })}
+            disabled={busy}
+          >
+            {ISO_INSTALL_MODE_LABEL.manual}
+          </button>
+        </div>
+        <span className="template-modal__hint">{mode === "unattended" ? ISO_UNATTENDED_MESSAGE : ISO_MANUAL_MESSAGE}</span>
+      </div>
+
+      {mode === "unattended" && (
+        <div className="field">
+          <label>Famille d'OS de l'ISO</label>
+          <div className="template-studio__tabs">
+            {ISO_OS_FAMILIES.map((family) => (
+              <button
+                key={family}
+                type="button"
+                className={`template-studio__tab${base.osFamily === family ? " is-selected" : ""}`}
+                onClick={() => onChange({ ...base, install: "unattended", osFamily: family })}
+                disabled={busy}
+              >
+                {ISO_OS_FAMILY_LABEL[family]}
+              </button>
+            ))}
+          </div>
+          <span className="template-modal__hint">
+            Détermine le mécanisme d'installation scriptée (preseed Debian/Ubuntu, kickstart RHEL) et la distro utilisée pour
+            la recherche de paquets — RHEL/Rocky/Alma cherche dans Fedora, la plus proche réellement indexée.
+          </span>
+        </div>
+      )}
+
       {(imagesStatus === "idle" || imagesStatus === "loading") && (
         <p className="template-modal__hint">Chargement du catalogue d'images Prism…</p>
       )}
@@ -814,7 +883,7 @@ function IsoBaseEditor({
             <select
               id="studio-iso-image"
               value={base.imageUuid}
-              onChange={(e) => onChange({ type: "iso", imageUuid: e.target.value })}
+              onChange={(e) => onChange({ ...base, imageUuid: e.target.value })}
               disabled={busy || upload !== null}
             >
               <option value="">— sélectionner —</option>
@@ -867,10 +936,20 @@ function IsoBaseEditor({
       />
       {uploadError && <p className="graph-popover__error">{uploadError}</p>}
 
-      <p className="template-modal__hint">
-        Un template ISO est prêt immédiatement (aucun build) : au déploiement, la VM démarre sur l'ISO avec un disque vide —
-        l'installation de l'OS se fait à la main via la console VNC.
-      </p>
+      {mode === "unattended" ? (
+        <>
+          <p className="template-modal__hint">
+            « Créer » puis « Construire » comme une base cloud-image : l'installation scriptée et la recette tournent côté
+            serveur, le template passe en « Prêt » avec une image Nutanix déployable en 2 min.
+          </p>
+          <BuildPlacementSettings busy={busy} />
+        </>
+      ) : (
+        <p className="template-modal__hint">
+          Un template ISO manuel est prêt immédiatement (aucun build) : au déploiement, la VM démarre sur l'ISO avec un disque
+          vide — l'installation de l'OS se fait à la main via la console VNC.
+        </p>
+      )}
     </>
   );
 }
@@ -1013,50 +1092,7 @@ function StepEditor({
         </>
       )}
 
-      {step.type === "user" && (
-        <>
-          <div className="field">
-            <label htmlFor="studio-username">Nom d'utilisateur</label>
-            <input
-              id="studio-username"
-              type="text"
-              className="cell-mono"
-              value={step.username}
-              onChange={(e) => onChange({ ...step, username: e.target.value })}
-              placeholder="ex : deploy"
-              disabled={busy}
-            />
-          </div>
-          <label className="filter-toggle">
-            <input
-              type="checkbox"
-              checked={step.sudo ?? false}
-              onChange={(e) => {
-                const { sudo: _omit, ...rest } = step;
-                onChange(e.target.checked ? { ...rest, sudo: true } : rest);
-              }}
-              disabled={busy}
-            />
-            Droits sudo
-          </label>
-          <div className="field">
-            <label htmlFor="studio-ssh-key">Clé SSH autorisée (optionnel)</label>
-            <input
-              id="studio-ssh-key"
-              type="text"
-              className="cell-mono"
-              value={step.sshAuthorizedKey ?? ""}
-              onChange={(e) => {
-                const v = e.target.value;
-                const { sshAuthorizedKey: _omit, ...rest } = step;
-                onChange(v === "" ? rest : { ...rest, sshAuthorizedKey: v });
-              }}
-              placeholder="ssh-ed25519 AAAA…"
-              disabled={busy}
-            />
-          </div>
-        </>
-      )}
+      {step.type === "user" && <UserStepEditor step={step} busy={busy} onChange={onChange} />}
 
       {step.type === "service" && (
         <>
@@ -1080,6 +1116,63 @@ function StepEditor({
       )}
 
       {issue && <p className="template-modal__field-error">{issue}</p>}
+    </>
+  );
+}
+
+/** Étape utilisateur : compte créé dans l'image, mot de passe référencé par nom de secret QUAI. */
+function UserStepEditor({
+  step,
+  busy,
+  onChange,
+}: {
+  step: Extract<TemplateStep, { type: "user" }>;
+  busy: boolean;
+  onChange: (next: TemplateStep) => void;
+}) {
+  return (
+    <>
+      <div className="field">
+        <label htmlFor="studio-username">Nom d'utilisateur</label>
+        <input
+          id="studio-username"
+          type="text"
+          className="cell-mono"
+          value={step.username}
+          onChange={(e) => onChange({ ...step, username: e.target.value })}
+          placeholder="ex : deploy"
+          disabled={busy}
+        />
+      </div>
+      <label className="filter-toggle">
+        <input
+          type="checkbox"
+          checked={step.sudo ?? false}
+          onChange={(e) => {
+            const { sudo: _omit, ...rest } = step;
+            onChange(e.target.checked ? { ...rest, sudo: true } : rest);
+          }}
+          disabled={busy}
+        />
+        Compte sudo
+      </label>
+      <UserPasswordSecretField id="studio-user-secret" step={step} busy={busy} onChange={onChange} />
+      <div className="field">
+        <label htmlFor="studio-ssh-key">Clé SSH autorisée (optionnel)</label>
+        <input
+          id="studio-ssh-key"
+          type="text"
+          className="cell-mono"
+          value={step.sshAuthorizedKey ?? ""}
+          onChange={(e) => {
+            const v = e.target.value;
+            const { sshAuthorizedKey: _omit, ...rest } = step;
+            onChange(v === "" ? rest : { ...rest, sshAuthorizedKey: v });
+          }}
+          placeholder="ssh-ed25519 AAAA…"
+          disabled={busy}
+        />
+      </div>
     </>
   );
 }

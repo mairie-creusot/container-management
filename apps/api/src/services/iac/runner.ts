@@ -82,6 +82,9 @@ export interface StartRunOptions {
   captureArtifact?: "packer-manifest" | "docker-image" | "mkosi-image";
   /** engine "mkosi" uniquement : chemin relatif (workspace) de l'image disque attendue. */
   mkosiOutputPath?: string;
+  /** Remplace config.iac.runTimeoutMs POUR CE RUN — une installation d'OS depuis une ISO dure
+   * bien plus que les 15 min par défaut (voir services/templates.ts, base iso "unattended"). */
+  timeoutMs?: number;
 }
 
 /** Construit la ou les commandes réelles à exécuter — des binaires déjà installés (voir
@@ -213,6 +216,7 @@ function runChild(
   cwd: string,
   env: NodeJS.ProcessEnv,
   appendToLog: (chunk: Buffer) => void,
+  timeoutMs: number = config.iac.runTimeoutMs,
 ): Promise<ChildResult> {
   return new Promise<ChildResult>((resolve) => {
     const child = spawn(bin, args, { cwd, env });
@@ -222,12 +226,12 @@ function runChild(
     let timedOut = false;
     const timeoutTimer = setTimeout(() => {
       timedOut = true;
-      appendToLog(Buffer.from(`\n[quai] run timed out after ${config.iac.runTimeoutMs}ms, killing process (SIGTERM)\n`));
+      appendToLog(Buffer.from(`\n[quai] run timed out after ${timeoutMs}ms, killing process (SIGTERM)\n`));
       child.kill("SIGTERM");
       setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
       }, 5_000);
-    }, config.iac.runTimeoutMs);
+    }, timeoutMs);
 
     child.on("close", (exitCode) => {
       clearTimeout(timeoutTimer);
@@ -307,7 +311,7 @@ export async function startRun(
     for (let i = 0; i < commands.length; i += 1) {
       const command = commands[i]!;
       if (i > 0) appendToLog(Buffer.from(`\n$ ${command.bin} ${command.args.join(" ")}\n\n`));
-      const result = await runChild(command.bin, command.args, workspaceDir, spawnEnv, appendToLog);
+      const result = await runChild(command.bin, command.args, workspaceDir, spawnEnv, appendToLog, options.timeoutMs);
       exitCode = result.exitCode;
       if (result.timedOut || result.spawnError || result.exitCode !== 0) {
         failed = true;

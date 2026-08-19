@@ -17,6 +17,7 @@ import {
   createTemplate,
   deleteTemplate,
   getTemplate,
+  IsoSeedToolUnavailableError,
   listArtifactSources,
   listTemplateBuilds,
   listTemplates,
@@ -159,6 +160,7 @@ export default async function templatesRoutes(fastify: FastifyInstance): Promise
     } catch (err) {
       if (err instanceof TemplateNotFoundError) return reply.code(404).send({ error: err.message });
       if (err instanceof MkosiUnavailableError) return reply.code(409).send({ error: err.message });
+      if (err instanceof IsoSeedToolUnavailableError) return reply.code(409).send({ error: err.message });
       if (err instanceof NutanixNotConfiguredError) return reply.code(400).send({ error: err.message });
       const message = err instanceof Error ? err.message : String(err);
       return reply.code(400).send({ error: message });

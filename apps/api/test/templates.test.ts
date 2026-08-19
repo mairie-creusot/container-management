@@ -819,3 +819,248 @@ describe("Routes /api/templates — cycle de vie complet (store + workspace rée
     await app.inject({ method: "DELETE", url: `/api/templates/${template.id}`, cookies: cookieFor(["admin"]) });
   });
 });
+
+describe("base ISO — installation automatisée (install: unattended)", () => {
+  const isoUuid = "0366005c-515c-4ee7-ba6e-379da8084255";
+  const unattended = (osFamily: "debian" | "ubuntu" | "rhel"): TemplateBase => ({
+    type: "iso",
+    imageUuid: isoUuid,
+    install: "unattended",
+    osFamily,
+  });
+  const recipeSteps: TemplateStep[] = [
+    { type: "packages", packages: ["git", "qemu-guest-agent"] },
+    { type: "user", username: "root", passwordSecretName: "root-prod" },
+    { type: "user", username: "deploy", sudo: true, sshAuthorizedKey: "ssh-ed25519 AAAAC3Nz demo@host" },
+    { type: "file", path: "/etc/motd", content: "Bienvenue", mode: "644" },
+    { type: "script", content: "#!/bin/bash\necho ok\n" },
+    { type: "service", name: "qemu-guest-agent", enable: true },
+  ];
+
+  it("install absent ou \"manual\" : contrat historique strictement inchangé", () => {
+    for (const base of [
+      { type: "iso", imageUuid: isoUuid } as TemplateBase,
+      { type: "iso", imageUuid: isoUuid, install: "manual" } as TemplateBase,
+    ]) {
+      expect(() => templates.validateCreateInput(recipe(base))).not.toThrow();
+      expect(() => templates.validateCreateInput(recipe(base, [{ type: "script", content: "echo x" }]))).toThrow(
+        templates.TemplateValidationError,
+      );
+      expect(Object.keys(templates.generateTemplateFiles({ id, name: "r", base, steps: [] }))).toEqual(["README.md"]);
+    }
+  });
+
+  it("unattended : osFamily REQUISE, valeurs libres refusées, steps désormais autorisées", () => {
+    expect(() => templates.validateCreateInput(recipe({ type: "iso", imageUuid: isoUuid, install: "unattended" }))).toThrow(
+      /osFamily est requis/,
+    );
+    expect(() =>
+      templates.validateCreateInput(recipe({ type: "iso", imageUuid: isoUuid, install: "unattended", osFamily: "suse" } as never)),
+    ).toThrow(/osFamily inconnue/);
+    expect(() => templates.validateCreateInput(recipe({ type: "iso", imageUuid: isoUuid, install: "bidon" } as never))).toThrow(
+      /install doit valoir/,
+    );
+    for (const osFamily of ["debian", "ubuntu", "rhel"] as const) {
+      expect(() => templates.validateCreateInput(recipe(unattended(osFamily), recipeSteps))).not.toThrow();
+    }
+  });
+
+  it("étapes refusées sur une base ISO : artifact et le nom de compte réservé", () => {
+    expect(() =>
+      templates.validateCreateInput(recipe(unattended("ubuntu"), [{ type: "artifact", templateId: id, destPath: "/opt/a" }])),
+    ).toThrow(/non supportée sur une base ISO/);
+    expect(() =>
+      templates.validateCreateInput(recipe(unattended("ubuntu"), [{ type: "user", username: "quaibuild" }])),
+    ).toThrow(/réservé/);
+  });
+
+  it("passwordSecretName : accepté sur ISO automatisée, refusé partout ailleurs (fuite du hash sur disque)", () => {
+    const step: TemplateStep = { type: "user", username: "deploy", passwordSecretName: "deploy-prod" };
+    expect(() => templates.validateCreateInput(recipe(unattended("rhel"), [step]))).not.toThrow();
+    for (const base of [
+      cloudBase,
+      { type: "container", image: "debian:12" } as TemplateBase,
+      { type: "mkosi", distro: "debian", release: "bookworm" } as TemplateBase,
+    ]) {
+      expect(() => templates.validateCreateInput(recipe(base, [step]))).toThrow(/passwordSecretName/);
+    }
+    // Base ISO manuelle : la recette est refusée plus tôt encore (aucune étape n'y est permise).
+    expect(() => templates.validateCreateInput(recipe({ type: "iso", imageUuid: isoUuid }, [step]))).toThrow(
+      templates.TemplateValidationError,
+    );
+    expect(() =>
+      templates.validateCreateInput(recipe(unattended("rhel"), [{ type: "user", username: "d", passwordSecretName: "a;b" }])),
+    ).toThrow(/passwordSecretName/);
+  });
+
+  it("fichier de réponses : autoinstall / preseed / kickstart réellement alimentés par la recette", () => {
+    const hashes = { root: "$6$sel$hashroot", deploy: "$6$sel$hashdeploy" };
+    const buildHash = "$6$sel$hashbuild";
+    const render = (osFamily: "debian" | "ubuntu" | "rhel") =>
+      templates.renderIsoAnswerFile({ id, name: "Socle", base: unattended(osFamily), steps: recipeSteps }, hashes, buildHash);
+
+    const ubuntu = render("ubuntu");
+    expect(ubuntu.startsWith("#cloud-config\n")).toBe(true);
+    expect(ubuntu).toContain("autoinstall:");
+    expect(ubuntu).toContain("  version: 1");
+    expect(ubuntu).toContain(`password: "${buildHash}"`);
+    expect(ubuntu).toContain("    - cloud-init");
+    expect(ubuntu).toContain("    - qemu-guest-agent");
+    expect(ubuntu).toContain("curtin in-target -- sh -c");
+    expect(ubuntu).not.toContain("--target=/target"); // forme non documentée
+
+    const debian = render("debian");
+    expect(debian).toContain("d-i passwd/user-password-crypted password " + buildHash);
+    expect(debian).toContain("d-i pkgsel/include string cloud-init sudo openssh-server git qemu-guest-agent");
+    expect(debian).toContain("d-i preseed/late_command string");
+    expect(debian).toContain("in-target sh /root/quai-provision.sh");
+
+    const rhel = render("rhel");
+    expect(rhel).toContain(`user --name=quaibuild --groups=wheel --iscrypted --password=${buildHash}`);
+    expect(rhel).toContain("rootpw --lock");
+    expect(rhel).toContain("%packages\n@^minimal-environment\ncloud-init");
+    expect(rhel).toContain("qemu-guest-agent\n%end");
+    expect(rhel).toContain("%post --log=/root/quai-provision.log");
+    expect(rhel).toContain("keyboard --vckeymap=fr --xlayouts=fr");
+
+    // Les 3 familles installent cloud-init : c'est ce qui rend l'override au déploiement possible.
+    for (const content of [ubuntu, debian, rhel]) expect(content).toContain("cloud-init");
+  });
+
+  it("script de provisioning : hashs posés, étapes dans l'ordre, paquets exclus (installés nativement)", () => {
+    const script = templates.isoProvisionScript(
+      { id, name: "Socle", base: unattended("ubuntu"), steps: recipeSteps },
+      { root: "$6$sel$hashroot", deploy: "$6$sel$hashdeploy" },
+    );
+    expect(script).toContain("quaibuild ALL=(ALL) NOPASSWD:ALL");
+    // Un fichier par étape NON-packages, numéroté selon sa position dans la recette.
+    expect(script).toContain("/root/quai-steps/02-user.sh");
+    expect(script).toContain("/root/quai-steps/03-user.sh");
+    expect(script).toContain("/root/quai-steps/04-file.sh");
+    expect(script).toContain("/root/quai-steps/05-script.sh");
+    expect(script).toContain("/root/quai-steps/06-service.sh");
+    expect(script).not.toContain("01-packages");
+    expect(script).toContain(": > /var/lib/quai/provisioned");
+    // Le hash n'est jamais en clair dans le script : il voyage dans le corps base64 de l'étape.
+    expect(script).not.toContain("$6$sel$hashdeploy");
+    const rootStep = Buffer.from(script.match(/echo '([^']+)' \| base64 -d > '\/root\/quai-steps\/02-user\.sh'/)![1]!, "base64").toString();
+    expect(rootStep).toContain("usermod -p '$6$sel$hashroot' 'root'");
+    expect(rootStep).not.toContain("useradd -m -s /bin/sh 'root'"); // root existe déjà
+  });
+
+  it("boot_command : ajouté seulement là où l'installateur l'exige (aucun pour OEMDRV)", () => {
+    expect(templates.isoBootCommand("rhel")).toEqual([]);
+    expect(templates.isoBootCommand("ubuntu").join(" ")).toContain(" autoinstall");
+    const debian = templates.isoBootCommand("debian").join(" ");
+    expect(debian).toContain("preseed/early_command=");
+    expect(debian).toContain("/dev/sr1");
+    // La ligne de commande noyau de d-i est tronquée au-delà de 255 caractères.
+    expect(templates.isoBootCommand("debian").join("").length).toBeLessThan(160);
+  });
+
+  it("POST : build réel (draft), workspace packer complet, aucun hash ni mot de passe sur disque", async () => {
+    app = buildServer();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/templates",
+      cookies: cookieFor(["admin"]),
+      payload: { name: "Socle Ubuntu", base: unattended("ubuntu"), steps: recipeSteps },
+    });
+    expect(created.statusCode).toBe(201);
+    const template = created.json() as ImageTemplate;
+    expect(template.status).toBe("draft"); // et non "ready" : il y a un vrai build à lancer
+    expect(template.steps).toHaveLength(recipeSteps.length);
+
+    const wsDir = workspaceFilesPath(template.workspaceId);
+    const entries = ((await fs.readdir(wsDir, { recursive: true })) as string[]).sort();
+    expect(entries).toContain("template.pkr.hcl");
+    expect(entries).toContain(path.join("seed", "user-data.preview"));
+    expect(entries).toContain(path.join("scripts", "zz-finalize.sh"));
+
+    const pkr = await fs.readFile(path.join(wsDir, "template.pkr.hcl"), "utf-8");
+    expect(pkr).toContain('cd_label = "CIDATA"');
+    expect(pkr).toContain("base64decode(var.quai_seed)");
+    expect(pkr).toContain('image_type        = "ISO_IMAGE"');
+    expect(pkr).toContain(`source_image_uuid = "${isoUuid}"`);
+    expect(pkr).toContain('image_type   = "DISK"');
+    expect(pkr).toContain('boot_priority = "disk"');
+    expect(pkr).toContain("boot_command");
+    // Le fichier de réponses n'est PAS dans le HCL : il arrive par PKR_VAR au lancement du build.
+    expect(pkr).not.toContain("#cloud-config");
+
+    // Aucun secret, aucun hash réel, aucun mot de passe en clair dans le workspace.
+    for (const entry of entries) {
+      const filePath = path.join(wsDir, entry);
+      if (!(await fs.stat(filePath)).isFile()) continue;
+      const content = await fs.readFile(filePath, "utf-8");
+      expect(content).not.toMatch(/\$6\$(?!PREVIEW\$)/);
+      expect(content).not.toMatch(/(nutanix_password|quai_build_password)\s*=\s*"[^"]/);
+    }
+    const index = await fs.readFile(templatesIndexPath, "utf-8");
+    expect(index).not.toMatch(/\$6\$/);
+
+    // Sans Nutanix configuré, le build s'arrête AVANT tout spawn packer (jamais de VM créée en test).
+    const build = await app.inject({ method: "POST", url: `/api/templates/${template.id}/build`, cookies: cookieFor(["admin"]) });
+    expect(build.statusCode).toBe(400);
+    expect((build.json() as { error: string }).error).toContain("Nutanix");
+
+    await app.inject({ method: "DELETE", url: `/api/templates/${template.id}`, cookies: cookieFor(["admin"]) });
+  });
+
+  it("PUT manual -> unattended : mêmes workspace/moteur, fichiers régénérés sans orphelin", async () => {
+    app = buildServer();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/templates",
+      cookies: cookieFor(["operator"]),
+      payload: { name: "Bascule", base: { type: "iso", imageUuid: isoUuid }, steps: [] },
+    });
+    const template = created.json() as ImageTemplate;
+    expect(template.status).toBe("ready");
+
+    const updated = await app.inject({
+      method: "PUT",
+      url: `/api/templates/${template.id}`,
+      cookies: cookieFor(["operator"]),
+      payload: { base: unattended("rhel"), steps: [{ type: "packages", packages: ["htop"] }] },
+    });
+    expect(updated.statusCode).toBe(200);
+    const after = updated.json() as ImageTemplate;
+    expect(after.status).toBe("draft");
+    expect(after.workspaceId).toBe(template.workspaceId); // même moteur packer : pas de recréation
+
+    const wsDir = workspaceFilesPath(after.workspaceId);
+    const ks = await fs.readFile(path.join(wsDir, "seed", "ks.cfg.preview"), "utf-8");
+    expect(ks).toContain("htop");
+    const pkr = await fs.readFile(path.join(wsDir, "template.pkr.hcl"), "utf-8");
+    expect(pkr).toContain('cd_label = "OEMDRV"');
+    expect(pkr).not.toContain("boot_command = ["); // OEMDRV : aucune frappe nécessaire
+
+    // Retour en manuel : le workspace redevient un README seul, aucun fichier de build orphelin.
+    const back = await app.inject({
+      method: "PUT",
+      url: `/api/templates/${template.id}`,
+      cookies: cookieFor(["operator"]),
+      payload: { base: { type: "iso", imageUuid: isoUuid }, steps: [] },
+    });
+    expect(back.statusCode).toBe(200);
+    expect((back.json() as ImageTemplate).status).toBe("ready");
+    expect(((await fs.readdir(wsDir, { recursive: true })) as string[]).sort()).toEqual(["README.md"]);
+
+    await app.inject({ method: "DELETE", url: `/api/templates/${template.id}`, cookies: cookieFor(["operator"]) });
+  });
+
+  it("README : dit la vérité opérationnelle, y compris la limite du chemin Debian", () => {
+    const readme = (osFamily: "debian" | "ubuntu" | "rhel") =>
+      templates.generateTemplateFiles({ id, name: "Socle", base: unattended(osFamily), steps: [] })["README.md"]!;
+    expect(readme("rhel")).toContain("OEMDRV");
+    expect(readme("rhel")).toContain("Aucun `boot_command` n'est donc envoyé");
+    expect(readme("ubuntu")).toContain("Continue with autoinstall?");
+    expect(readme("debian")).toContain("LE CHEMIN LE MOINS GARANTI");
+    expect(readme("debian")).toContain("255 caractères");
+    for (const osFamily of ["debian", "ubuntu", "rhel"] as const) {
+      expect(readme(osFamily)).toContain("xorriso");
+      expect(readme(osFamily)).toContain("guest_customization");
+    }
+  });
+});

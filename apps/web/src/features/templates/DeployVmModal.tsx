@@ -20,12 +20,11 @@ const TASK_POLL_MS = 2000;
 export interface DeployVmModalProps {
   /** Nom du template source — affichage uniquement. */
   templateName: string;
-  /** Référence de l'artifact "nutanix-image" du dernier build (uuid ou nom d'image Prism) —
-   * absent pour un template base "iso". */
+  /** Référence de l'artifact "nutanix-image" du dernier build (uuid ou nom d'image Prism) — utilisée
+   * aussi pour un template base "iso" en installation AUTOMATISÉE (l'image a été construite). */
   artifactReference?: string;
-  /** Template base "iso" : uuid de l'ISO Prism (base.imageUuid). La modale bascule alors en mode
-   * installation manuelle : POST { isoImageUuid, diskSizeMib } sans imageUuid ni guestCustomization
-   * (compte/cloud-init impossibles, l'OS n'est pas encore installé — console VNC après création). */
+  /** Base "iso" en installation MANUELLE uniquement : POST { isoImageUuid, diskSizeMib } sans
+   * imageUuid ni guestCustomization (l'OS n'est pas installé — console VNC après création). */
   isoImageUuid?: string;
   onClose: () => void;
 }
@@ -331,6 +330,9 @@ export default function DeployVmModal({ templateName, artifactReference = "", is
                 disabled={busy}
                 required
               />
+              <span className="template-modal__hint">
+                Créé au premier démarrage via cloud-init — il s'ajoute aux comptes définis dans la recette du template.
+              </span>
             </div>
 
             <div className="field">

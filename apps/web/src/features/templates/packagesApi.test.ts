@@ -26,7 +26,16 @@ describe("packageSearchDistro", () => {
     expect(packageSearchDistro({ type: "mkosi", distro: "fedora", release: "40" })).toBe("fedora");
   });
 
-  it("iso : jamais de recherche", () => {
+  it("iso manuel : jamais de recherche (aucune étape possible)", () => {
     expect(packageSearchDistro({ type: "iso", imageUuid: "abc" })).toBeNull();
+    expect(packageSearchDistro({ type: "iso", imageUuid: "abc", install: "manual" })).toBeNull();
+  });
+
+  it("iso automatisé : distro déduite de osFamily, rhel -> fedora (la plus proche indexée)", () => {
+    expect(packageSearchDistro({ type: "iso", imageUuid: "abc", install: "unattended", osFamily: "debian" })).toBe("debian");
+    expect(packageSearchDistro({ type: "iso", imageUuid: "abc", install: "unattended", osFamily: "ubuntu" })).toBe("ubuntu");
+    expect(packageSearchDistro({ type: "iso", imageUuid: "abc", install: "unattended", osFamily: "rhel" })).toBe("fedora");
+    // Famille pas encore choisie : recherche masquée plutôt qu'une distro devinée.
+    expect(packageSearchDistro({ type: "iso", imageUuid: "abc", install: "unattended" })).toBeNull();
   });
 });

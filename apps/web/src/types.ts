@@ -183,8 +183,10 @@ export interface NutanixImageSummary {
 
 /** POST /api/nutanix/vms — `guestCustomization.password`/`sshAuthorizedKey` sont write-only.
  * Exactement l'un des deux : `imageUuid` (clone d'image disque, déploiement classique) OU
- * `isoImageUuid` (template base "iso" : disque système vide de `diskSizeMib` requis + CD-ROM sur
- * l'ISO, pas de guestCustomization — l'OS n'est pas encore installé). */
+ * `isoImageUuid` (template base "iso" en installation MANUELLE : disque système vide de
+ * `diskSizeMib` requis + CD-ROM sur l'ISO, pas de guestCustomization — l'OS n'est pas encore
+ * installé ; un ISO en installation automatisée se déploie depuis l'image construite via
+ * `imageUuid`). */
 export interface NutanixVmCreateInput {
   name: string;
   imageUuid?: string;
@@ -708,22 +710,26 @@ export interface IacRunDetail extends IacRun {
 // Contrat FIGÉ v2 : les deux backends (templates + topologie) sont développés EN PARALLÈLE contre
 // ces formes exactes — un 404 signifie "backend pas encore là", jamais masqué par de fausses données.
 
-/** Base d'une recette : VM cloud-image, image de conteneur (scratch compris), OS minimal mkosi,
- * ou ISO du catalogue Prism ("iso" : template prêt sans build — POST .../build répond 400 —,
- * installation manuelle de l'OS via la console VNC après déploiement). */
+/** Base d'une recette. ISO, deux modes : `install` absent/"manual" = prêt sans build (POST
+ * .../build → 400), OS installé via la console VNC ; "unattended" = installation scriptée
+ * (`osFamily` REQUIS), build et étapes comme une base cloud-image (artefact nutanix-image). */
 export type TemplateBase =
   | { type: "cloud-image"; distro: string; version: string; imageUrl?: string }
   | { type: "container"; image: string }
   | { type: "mkosi"; distro: "debian" | "ubuntu" | "fedora" | "arch"; release: string }
-  | { type: "iso"; imageUuid: string };
+  | { type: "iso"; imageUuid: string; install?: "manual" | "unattended"; osFamily?: "debian" | "ubuntu" | "rhel" };
 
-/** Une étape ORDONNÉE de la recette — exécutée dans l'ordre du tableau `steps`. */
+export type IsoInstallMode = NonNullable<Extract<TemplateBase, { type: "iso" }>["install"]>;
+export type IsoOsFamily = NonNullable<Extract<TemplateBase, { type: "iso" }>["osFamily"]>;
+
+/** Une étape ORDONNÉE de la recette — exécutée dans l'ordre du tableau `steps`.
+ * `user.passwordSecretName` : NOM d'un secret QUAI existant (jamais sa valeur). */
 export type TemplateStep =
   | { type: "packages"; packages: string[] }
   | { type: "script"; content: string }
   | { type: "file"; path: string; content: string; mode?: string }
   | { type: "artifact"; templateId: string; destPath: string; dockerLoad?: boolean }
-  | { type: "user"; username: string; sudo?: boolean; sshAuthorizedKey?: string }
+  | { type: "user"; username: string; sudo?: boolean; sshAuthorizedKey?: string; passwordSecretName?: string }
   | { type: "service"; name: string; enable: boolean };
 
 export type ImageTemplateStatus = "draft" | "building" | "ready" | "error";
@@ -1654,4 +1660,93 @@ export interface HycuTestResult {
   ok: boolean;
   message: string;
   vmCount?: number;
+}
+
+// --- ExaGrid (appliance de stockage de sauvegarde) — interrogée en SNMP (MIB officielle), pas
+// d'API REST. Tout champ optionnel est ABSENT quand la MIB ne l'a pas renvoyé : ne jamais le
+// remplacer par 0 à l'affichage.
+
+// Valeurs d'énumération EXACTES acceptées par PUT /api/exagrid/config (minuscules — voir
+// EXAGRID_AUTH_PROTOCOLS/EXAGRID_PRIV_PROTOCOLS dans apps/api/src/services/exagrid.ts) : toute
+// autre casse est silencieusement ignorée par le serveur.
+export type ExagridSnmpVersion = "2c" | "3";
+export type ExagridSecurityLevel = "noAuthNoPriv" | "authNoPriv" | "authPriv";
+export type ExagridAuthProtocol = "md5" | "sha" | "sha224" | "sha256" | "sha384" | "sha512";
+export type ExagridPrivProtocol = "des" | "aes" | "aes256b" | "aes256r";
+
+/** Identité NON secrète de l'appliance — jamais community/authKey/privKey. */
+export interface ExagridEndpoint {
+  host: string;
+  port: number;
+  version: ExagridSnmpVersion;
+  username?: string;
+  securityLevel?: ExagridSecurityLevel;
+  authProtocol?: ExagridAuthProtocol;
+  privProtocol?: ExagridPrivProtocol;
+}
+
+/** GET/PUT /api/exagrid/config — `config` n'est présent que si `configured`. */
+export interface ExagridConfigStatus {
+  configured: boolean;
+  config?: ExagridEndpoint;
+}
+
+/** Une zone (atterrissage ou rétention) — `usedBytes`/`usedPct` sont dérivés côté serveur et
+ * absents si l'une des lectures manque. */
+export interface ExagridCapacityZone {
+  configuredBytes?: number;
+  availableBytes?: number;
+  usedBytes?: number;
+  usedPct?: number;
+}
+
+export interface ExagridBackupData {
+  availableForRestoreBytes?: number;
+  retentionConsumedBytes?: number;
+}
+
+/** Volume en attente de traitement + ancienneté de la donnée la plus ancienne de la file. */
+export interface ExagridPendingWork {
+  bytes?: number;
+  ageSeconds?: number;
+}
+
+export type ExagridAlarmState = "ok" | "warning" | "error";
+
+/** `state` n'existe que pour les valeurs définies par la MIB (1/2/3) — toute autre valeur reste
+ * brute dans `raw`, sans étiquette inventée. */
+export interface ExagridAlarm {
+  raw?: number;
+  state?: ExagridAlarmState;
+}
+
+export interface ExagridReadings {
+  landing: ExagridCapacityZone;
+  retention: ExagridCapacityZone;
+  backupData: ExagridBackupData;
+  pendingDeduplication: ExagridPendingWork;
+  pendingReplication: ExagridPendingWork;
+  alarm?: ExagridAlarm;
+}
+
+/** Dernier essai réel de poll SNMP — distingue "valeur absente de la MIB" d'"appliance injoignable". */
+export interface ExagridPollOutcome {
+  reachable: boolean;
+  at: string; // ISO 8601
+}
+
+/** GET /api/exagrid/status */
+export interface ExagridStatusSummary {
+  configured: boolean;
+  reachable?: boolean;
+  endpoint?: ExagridEndpoint;
+  readings?: ExagridReadings;
+  lastPoll?: ExagridPollOutcome;
+}
+
+/** POST /api/exagrid/config/test */
+export interface ExagridTestResult {
+  ok: boolean;
+  message: string;
+  alarm?: ExagridAlarm;
 }
