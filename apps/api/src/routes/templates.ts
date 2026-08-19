@@ -26,9 +26,11 @@ import {
   TemplateBuildInProgressError,
   TemplateNotFoundError,
   TemplateValidationError,
+  resolveBuildPlacement,
   updateTemplate,
   validateTemplate,
 } from "../services/templates.js";
+import { getBuildDefaults, setBuildDefaults } from "../services/templateBuildDefaultsStore.js";
 import type { TemplateBase, TemplateStep } from "../types.js";
 
 interface CreateTemplateBody {
@@ -78,6 +80,29 @@ export default async function templatesRoutes(fastify: FastifyInstance): Promise
       if (err instanceof MkosiUnavailableError) return reply.code(409).send({ error: err.message });
       throw err;
     }
+  });
+
+  // Cluster/subnet de la VM temporaire des builds Packer — valeurs enregistrées + déduction sûre.
+  fastify.get("/api/templates/build-defaults", async (_request, reply) => {
+    const [saved, resolved] = await Promise.all([getBuildDefaults(), resolveBuildPlacement()]);
+    return reply.send({ saved, resolved });
+  });
+
+  fastify.put<{ Body: { clusterName?: unknown; subnetName?: unknown } }>("/api/templates/build-defaults", async (request, reply) => {
+    const { clusterName, subnetName } = request.body ?? {};
+    for (const [field, value] of [
+      ["clusterName", clusterName],
+      ["subnetName", subnetName],
+    ] as const) {
+      if (value !== undefined && value !== null && typeof value !== "string") {
+        return reply.code(400).send({ error: `${field} must be a string` });
+      }
+    }
+    const saved = await setBuildDefaults({
+      ...(typeof clusterName === "string" && clusterName.trim() ? { clusterName: clusterName.trim() } : {}),
+      ...(typeof subnetName === "string" && subnetName.trim() ? { subnetName: subnetName.trim() } : {}),
+    });
+    return reply.send({ saved, resolved: await resolveBuildPlacement() });
   });
 
   fastify.get<{ Params: { id: string } }>("/api/templates/:id", async (request, reply) => {

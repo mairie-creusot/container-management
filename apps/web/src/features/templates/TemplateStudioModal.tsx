@@ -52,6 +52,7 @@ import {
   type CloudImageVersion,
 } from "@/features/templates/cloudImagesApi";
 import RecipeVerification from "@/features/templates/RecipeVerification";
+import BuildPlacementSettings from "@/features/templates/BuildPlacementSettings";
 import type { ImageTemplate, TemplateArtifactSource, TemplateBase, TemplatePreset, TemplateStep } from "@/types";
 
 interface TemplateStudioModalProps {
@@ -735,6 +736,8 @@ function CloudImageBaseEditor({
           </div>
         </>
       )}
+
+      <BuildPlacementSettings busy={busy} />
     </>
   );
 }

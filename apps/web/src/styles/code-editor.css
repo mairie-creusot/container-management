@@ -352,3 +352,43 @@
   border-color: var(--color-critical);
   color: var(--color-text);
 }
+
+/* Placement du build Nutanix (cluster + VLAN de la VM temporaire) — studio, base cloud-image. */
+.build-placement {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface-alt, rgba(255, 255, 255, 0.02));
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.build-placement__title {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+}
+
+.build-placement__hint {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--color-text-muted);
+}
+
+.build-placement__state {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.build-placement__state--ok {
+  color: var(--color-success);
+}
+
+.build-placement__state--warn {
+  color: var(--color-warning);
+}

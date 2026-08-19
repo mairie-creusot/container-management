@@ -10,6 +10,8 @@ import path from "node:path";
 import { getEffectiveNutanixConfig } from "./setupStore.js";
 import { createWorkspace, deleteWorkspace, workspaceFilesPath, writeFile, WorkspaceNotFoundError } from "./iac/workspaces.js";
 import { lintShellScript } from "./iac/lint.js";
+import { getBuildDefaults, type TemplateBuildDefaults } from "./templateBuildDefaultsStore.js";
+import { getNutanixClusters, getNutanixSubnets } from "./nutanix.js";
 import { getEngineStatus } from "./iac/engines.js";
 import { getRun, listRuns, startRun } from "./iac/runner.js";
 import {
@@ -1028,6 +1030,23 @@ async function materializeArtifactSteps(template: ImageTemplate): Promise<void> 
   }
 }
 
+/** Cluster/subnet de la VM temporaire de build : valeurs enregistrées d'abord, sinon déduction
+ * seulement quand elle est certaine (un unique cluster / un unique subnet réel). Rien n'est
+ * inventé : sans valeur, la variable Packer reste vide et le build échoue explicitement. */
+export async function resolveBuildPlacement(): Promise<TemplateBuildDefaults> {
+  const saved = await getBuildDefaults();
+  const resolved: TemplateBuildDefaults = { ...saved };
+  if (!resolved.clusterName) {
+    const clusters = await getNutanixClusters().catch(() => []);
+    if (clusters.length === 1) resolved.clusterName = clusters[0]!.name;
+  }
+  if (!resolved.subnetName) {
+    const subnets = await getNutanixSubnets().catch(() => []);
+    if (subnets.length === 1) resolved.subnetName = subnets[0]!.name;
+  }
+  return resolved;
+}
+
 export async function buildTemplate(id: string, startedBy: string): Promise<ImageTemplate> {
   const template = await getStoredTemplate(id);
   if (!template) throw new TemplateNotFoundError(`Template "${id}" not found`);
@@ -1046,12 +1065,15 @@ export async function buildTemplate(id: string, startedBy: string): Promise<Imag
       }
       await materializeArtifactSteps(template);
       const { endpoint, port } = parsePrismEndpoint(nutanix.prismCentralUrl);
+      const placement = await resolveBuildPlacement();
       run = await startRun(template.workspaceId, "packer", "build", startedBy, {
         extraEnv: {
           PKR_VAR_nutanix_username: nutanix.username,
           PKR_VAR_nutanix_password: nutanix.password,
           PKR_VAR_nutanix_endpoint: endpoint,
           ...(port !== undefined ? { PKR_VAR_nutanix_port: String(port) } : {}),
+          ...(placement.clusterName ? { PKR_VAR_nutanix_cluster: placement.clusterName } : {}),
+          ...(placement.subnetName ? { PKR_VAR_nutanix_subnet: placement.subnetName } : {}),
         },
         packerInitFirst: true,
         captureArtifact: "packer-manifest",

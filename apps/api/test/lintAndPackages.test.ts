@@ -257,3 +257,41 @@ describe("GET /api/cloud-images + /check", () => {
     expect(response.json()).toEqual({ ok: false, status: 404 });
   });
 });
+
+describe("GET/PUT /api/templates/build-defaults", () => {
+  it("sans Nutanix configuré : rien d'enregistré, aucune déduction inventée", async () => {
+    app = buildServer();
+    const response = await app.inject({ method: "GET", url: "/api/templates/build-defaults", cookies: adminCookie() });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ saved: {}, resolved: {} });
+  });
+
+  it("PUT enregistre cluster/subnet et le GET les rend (résolus)", async () => {
+    app = buildServer();
+    const put = await app.inject({
+      method: "PUT",
+      url: "/api/templates/build-defaults",
+      cookies: adminCookie(),
+      payload: { clusterName: " CLUSTER_AHV_HDV ", subnetName: "VLAN 1" },
+    });
+    expect(put.statusCode).toBe(200);
+    expect(put.json().saved).toEqual({ clusterName: "CLUSTER_AHV_HDV", subnetName: "VLAN 1" });
+
+    const get = await app.inject({ method: "GET", url: "/api/templates/build-defaults", cookies: adminCookie() });
+    expect(get.json()).toEqual({
+      saved: { clusterName: "CLUSTER_AHV_HDV", subnetName: "VLAN 1" },
+      resolved: { clusterName: "CLUSTER_AHV_HDV", subnetName: "VLAN 1" },
+    });
+  });
+
+  it("400 si un champ n'est pas une chaîne", async () => {
+    app = buildServer();
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/templates/build-defaults",
+      cookies: adminCookie(),
+      payload: { clusterName: 42 },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+});
