@@ -47,6 +47,7 @@ import { canAdminister, canOperate } from "@/features/auth/authSlice";
 // d'EnvironmentsPage.tsx en composant réutilisable — jamais un formulaire simplifié dupliqué ici,
 // une seule source de vérité (exigence utilisateur explicite de la maquette validée).
 import RemoteEnvironmentCreateModal from "@/features/remoteEnvironments/RemoteEnvironmentCreateModal";
+import { serviceModuleMenuItem, useServiceModuleBindings } from "@/features/serviceModules";
 // "Ajouter Nutanix…" (même menu) : Nutanix se configure via la section dédiée de la page
 // Environnements (EnvironmentsPage.tsx#NutanixConfigSection, seul flux réel existant — test de
 // connexion Prism Central avant persistance) — l'entrée du spotlight NAVIGUE vers cette page
@@ -2627,6 +2628,8 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
   // Suppressions déclenchées ailleurs (panneau de détail d'une VM, page Conteneurs) : la carte
   // pulse quand même, l'état vient des slices.
+  // Modules métier (AD/DNS, 3CX…) liés à un nœud — pastille sur la carte + entrée de menu.
+  const { bindingByNodeId: serviceModuleBindings } = useServiceModuleBindings();
   const nutanixDeletePendingUuid = useAppSelector((s) => s.nutanix.deletePendingUuid);
   const containerDeletePendingId = useAppSelector((s) => s.containers.deletePendingId);
   async function withDeleteAnimation(nodeId: string, run: () => Promise<unknown>): Promise<void> {
@@ -2907,6 +2910,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
               ...n,
               ...callbacks,
               ...templateMeta,
+              ...(serviceModuleBindings.get(n.id) ? { serviceModule: serviceModuleBindings.get(n.id)! } : {}),
               deletePending:
                 deletingIds.has(n.id) || nutanixDeletePendingUuid === rawActionId || containerDeletePendingId === rawActionId,
             } as unknown as Record<string, unknown>,
@@ -2962,6 +2966,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     deletingIds,
     nutanixDeletePendingUuid,
     containerDeletePendingId,
+    serviceModuleBindings,
   ]);
 
   /**
@@ -3768,6 +3773,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       // qui a ouvert CE menu (x, y), pas la position du clic sur l'entrée de menu elle-même.
       { label: "Visualiser les dépendances", onClick: () => openSubGraph(node.id, x, y) },
     ];
+    // "Ouvrir le module <label>" pour un nœud lié à un service métier — null si aucun module.
+    const moduleItem = serviceModuleMenuItem(serviceModuleBindings.get(node.id), () => openSubGraph(node.id, x, y));
+    if (moduleItem) items.push(moduleItem);
     // "Grouper la sélection" (retour utilisateur du 13/08/2026 : "si je fait clic droit jai rien
     // pour creer le groupe") — jusqu'ici cette action n'existait QUE via le bouton flottant en haut
     // à droite du canevas (voir plus bas), jamais accessible depuis le clic droit sur l'un des

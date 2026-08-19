@@ -27,6 +27,7 @@ const EnvironmentsPage = lazy(() => import("@/features/clusters/EnvironmentsPage
 const NotificationsPage = lazy(() => import("@/features/notifications/NotificationsPage"));
 const AuditPage = lazy(() => import("@/features/audit/AuditPage"));
 const HycuPage = lazy(() => import("@/features/hycu/HycuPage"));
+const ExagridPage = lazy(() => import("@/features/exagrid/ExagridPage"));
 
 // Notifications système (watchdog proactif côté API — nouvelle version d'image, intégration
 // devenue injoignable/de nouveau joignable) : câblé ici plutôt que dans une page précise, pour
@@ -76,6 +77,8 @@ function renderView(view: string) {
       return <AuditPage />;
     case "hycu":
       return <HycuPage />;
+    case "exagrid":
+      return <ExagridPage />;
     default:
       return <OverviewPage />;
   }

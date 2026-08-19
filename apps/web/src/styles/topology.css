@@ -3741,3 +3741,231 @@
   border-radius: var(--radius-md);
   padding: 6px;
 }
+
+/* --- Modules métier par nœud (19/08/2026, features/serviceModules/) ---------------------------
+   Vue du SERVICE réel porté par un nœud (Active Directory/DNS, 3CX, DHCP…) — même grammaire
+   visuelle que le reste du graphe (mêmes arêtes, mêmes couleurs d'état), teintée de violet
+   (#a78bfa) pour se distinguer du cyan "template" et du fuchsia "ad-server" sans introduire une
+   seconde identité visuelle. */
+
+/* Pastille discrète "module <label>" d'une carte de nœud lié (voir serviceModuleBadge). */
+.topology-badge--module {
+  background: rgba(167, 139, 250, 0.14);
+  color: #a78bfa;
+}
+
+/* Ports d'une entité de module — même famille que .topology-handle--template. */
+.topology-handle--module.react-flow__handle {
+  border-color: #a78bfa;
+}
+
+.topology-handle--module.react-flow__handle:hover {
+  background: #a78bfa;
+}
+
+.topology-module {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.topology-module__caption {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-muted);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  flex-shrink: 0;
+}
+
+/* Bandeau de synthèse (`summary`) — les quelques chiffres/états qu'on lit en premier. */
+.topology-module__summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.topology-module__summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 110px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+}
+
+.topology-module__summary-label {
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--color-text-faint);
+}
+
+.topology-module__summary-value {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.topology-module__summary-item--ok {
+  border-color: var(--color-success);
+}
+
+.topology-module__summary-item--ok .topology-module__summary-value {
+  color: var(--color-success);
+}
+
+.topology-module__summary-item--warning {
+  border-color: var(--color-warning);
+}
+
+.topology-module__summary-item--warning .topology-module__summary-value {
+  color: var(--color-warning);
+}
+
+.topology-module__summary-item--critical {
+  border-color: var(--color-critical);
+}
+
+.topology-module__summary-item--critical .topology-module__summary-value {
+  color: var(--color-critical);
+}
+
+.topology-module__graph {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.topology-module__graph .react-flow {
+  background: var(--color-surface-1);
+}
+
+.topology-module__footer {
+  font-size: 11px;
+  color: var(--color-text-faint);
+  flex-shrink: 0;
+}
+
+/* Carte d'une ENTITÉ de module (zone DNS, enregistrement, poste téléphonique, file d'attente…) —
+   même famille sobre que .topology-recipe-node/.topology-process-node : ce n'est pas une ressource
+   QUAI pilotable, c'est ce que le service rapporte réellement de lui-même. */
+.topology-module-node {
+  width: 230px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  cursor: default;
+}
+
+.topology-module-node.is-selected {
+  border-color: #a78bfa;
+}
+
+.topology-module-node__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+/* `kind` est une chaîne LIBRE propre au module — affichée telle quelle, jamais traduite ici. */
+.topology-module-node__kind {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #a78bfa;
+}
+
+.topology-module-node__status {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-text-faint);
+  flex-shrink: 0;
+}
+
+.topology-module-node--ok .topology-module-node__status {
+  background: var(--color-success);
+}
+
+.topology-module-node--warning .topology-module-node__status {
+  background: var(--color-warning);
+}
+
+.topology-module-node--critical .topology-module-node__status {
+  background: var(--color-critical);
+}
+
+.topology-module-node--critical {
+  border-color: rgba(239, 68, 68, 0.45);
+}
+
+.topology-module-node--warning {
+  border-color: rgba(245, 165, 36, 0.45);
+}
+
+.topology-module-node__label {
+  margin-top: 3px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topology-module-node__subtitle {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Paires clé/valeur RÉELLES (`details`) — la carte résume, la route porte la donnée complète. */
+.topology-module-node__details {
+  margin: 6px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.topology-module-node__detail {
+  display: flex;
+  gap: 6px;
+  font-size: 10.5px;
+  min-width: 0;
+}
+
+.topology-module-node__detail dt {
+  color: var(--color-text-faint);
+  white-space: nowrap;
+}
+
+.topology-module-node__detail dd {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topology-module-node__detail-more {
+  font-size: 10px;
+  color: var(--color-text-faint);
+}

@@ -1,0 +1,250 @@
+/* Page Stockage de sauvegarde (ExaGrid) — jauges et tuiles à la silhouette de nutanix-stats.css,
+   redéclarées ici pour rester indépendantes du panneau de topologie. */
+
+.exagrid-section-title {
+  margin: 24px 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  letter-spacing: 0.02em;
+}
+
+.exagrid-meters,
+.exagrid-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+/* --- Jauge d'occupation ------------------------------------------------------------------- */
+
+.exagrid-meter {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+  min-width: 0;
+}
+
+.exagrid-meter__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.exagrid-meter__label {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.exagrid-meter__value {
+  color: var(--color-text);
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.exagrid-meter__value.is-missing {
+  color: var(--color-text-faint);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.exagrid-meter__track {
+  position: relative;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--color-surface-3);
+  overflow: hidden;
+}
+
+.exagrid-meter__fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 999px;
+  background: var(--gradient-accent);
+  transition: width 0.4s ease;
+}
+
+.exagrid-meter__fill.is-warning {
+  background: var(--color-warning);
+}
+
+.exagrid-meter__fill.is-critical {
+  background: var(--color-critical);
+}
+
+.exagrid-meter__foot {
+  color: var(--color-text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Tuiles de valeurs -------------------------------------------------------------------- */
+
+.exagrid-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+  min-width: 0;
+}
+
+.exagrid-tile__label {
+  color: var(--color-text-muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.exagrid-tile__value {
+  color: var(--color-text);
+  font-size: 19px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.exagrid-tile__value.is-missing {
+  color: var(--color-text-faint);
+  font-size: 15px;
+  font-weight: 400;
+}
+
+.exagrid-tile__hint {
+  color: var(--color-text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.exagrid-tile__hint.is-warning {
+  color: var(--color-warning);
+}
+
+.exagrid-tile__hint.is-critical {
+  color: var(--color-critical);
+}
+
+/* --- Bandeau d'alarme --------------------------------------------------------------------- */
+
+.exagrid-alarm {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 14px;
+  margin-bottom: 4px;
+  border: 1px solid var(--color-border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+}
+
+.exagrid-alarm__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--color-text-faint);
+}
+
+.exagrid-alarm.is-ok {
+  border-left-color: var(--color-success);
+  background: var(--color-success-bg);
+}
+
+.exagrid-alarm.is-ok .exagrid-alarm__dot {
+  background: var(--color-success);
+}
+
+.exagrid-alarm.is-warning {
+  border-left-color: var(--color-warning);
+  background: var(--color-warning-bg);
+}
+
+.exagrid-alarm.is-warning .exagrid-alarm__dot {
+  background: var(--color-warning);
+}
+
+.exagrid-alarm.is-error {
+  border-left-color: var(--color-critical);
+  background: var(--color-critical-bg);
+}
+
+.exagrid-alarm.is-error .exagrid-alarm__dot {
+  background: var(--color-critical);
+}
+
+.exagrid-alarm.is-unknown {
+  border-left-color: var(--color-text-faint);
+}
+
+.exagrid-alarm__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.exagrid-alarm__title {
+  color: var(--color-text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.exagrid-alarm__text {
+  color: var(--color-text-muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.exagrid-alarm__raw {
+  margin-left: auto;
+  align-self: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--color-surface-3);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* --- Divers -------------------------------------------------------------------------------- */
+
+.exagrid-poll {
+  margin: 16px 0 0;
+  color: var(--color-text-faint);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.exagrid-form-note {
+  margin: 0;
+  color: var(--color-text-faint);
+  font-size: 11.5px;
+}
+
+.exagrid-note {
+  padding: 10px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-1);
+  color: var(--color-text-muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+@media (max-width: 900px) {
+  .exagrid-meters,
+  .exagrid-tiles {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

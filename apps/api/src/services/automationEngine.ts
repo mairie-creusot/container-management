@@ -47,6 +47,8 @@ import { listRoutes, resolveUpstream } from "./reverseProxy.js";
 import { restartContainer, startContainer, stopContainer } from "./docker.js";
 import { CronJobNotFoundError, triggerCronJobRun } from "./cronJobsScheduler.js";
 import { sendChannelNotification } from "./notificationDispatch.js";
+import { asGlpiAutomationAction, runGlpiAutomationAction } from "./glpi.js";
+import type { GlpiAutomationContext } from "./glpi.js";
 
 type ResolvedTriggerState = "ok" | "failing" | "unknown";
 
@@ -102,11 +104,29 @@ async function resolveReverseProxyRouteState(routeId: string): Promise<ResolvedT
   return reachable ? "ok" : "failing";
 }
 
+/** Contexte RÉEL du déclenchement, transmis aux actions qui savent l'exploiter (action GLPI) —
+ * jamais une valeur inventée : `resource` est l'identifiant EXACT câblé dans le déclencheur. */
+function triggerIncidentContext(trigger: AutomationNode): GlpiAutomationContext {
+  const source = trigger.triggerConfig?.source;
+  const resource =
+    source?.kind === "topology-node"
+      ? source.nodeId
+      : source?.kind === "reverse-proxy-route"
+        ? `reverse-proxy-route:${source.routeId}`
+        : `automation-trigger:${trigger.id}`;
+  const alertType = source?.kind === "reverse-proxy-route" ? "upstream-injoignable" : "ressource-en-echec";
+  return { resource, alertType, triggerLabel: trigger.label, occurredAt: new Date().toISOString() };
+}
+
 /** Exécute RÉELLEMENT une action en réutilisant une fonction de service déjà existante — jamais
  * une nouvelle implémentation d'effet de bord (voir en-tête de fichier). */
-async function executeAction(action: AutomationNode): Promise<{ ok: boolean; message?: string }> {
+async function executeAction(action: AutomationNode, context: GlpiAutomationContext): Promise<{ ok: boolean; message?: string }> {
   const cfg = action.actionConfig;
   if (!cfg) return { ok: false, message: `Action "${action.label}" (${action.id}) : aucune configuration` };
+  // Action GLPI : reconnue depuis la valeur brute (son type est déclaré dans services/glpi.ts,
+  // l'union de types.ts n'est pas modifiée par cette intégration).
+  const glpiAction = asGlpiAutomationAction(cfg);
+  if (glpiAction) return await runGlpiAutomationAction(glpiAction, context);
   try {
     if (cfg.kind === "run-cron-job") {
       const run = await triggerCronJobRun(cfg.cronJobId);
@@ -177,10 +197,11 @@ async function fireActionChain(trigger: AutomationNode, allNodes: AutomationNode
     return path;
   }
 
+  const context = triggerIncidentContext(trigger);
   for (const actionId of actionIds) {
     const action = nodeById.get(actionId);
     if (!action) continue;
-    const result = await executeAction(action);
+    const result = await executeAction(action, context);
     await recordAutomationRun({
       triggerNodeId: trigger.id,
       path: reconstructPath(actionId),

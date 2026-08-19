@@ -24,9 +24,12 @@ import containerLogsRoutes from "./routes/containerLogs.js";
 import containersRoutes from "./routes/containers.js";
 import cronJobsRoutes from "./routes/cronJobs.js";
 import environmentsRoutes from "./routes/environments.js";
+import exagridRoutes from "./routes/exagrid.js";
 import githubRoutes from "./routes/github.js";
 import githubWebhookRoutes from "./routes/githubWebhook.js";
 import gitopsRoutes from "./routes/gitops.js";
+import glpiRoutes from "./routes/glpi.js";
+import glpiInventoryRoutes from "./routes/glpiInventory.js";
 import hycuRoutes from "./routes/hycu.js";
 import iacRoutes from "./routes/iac.js";
 import imagesRoutes from "./routes/images.js";
@@ -41,8 +44,10 @@ import remoteEnvironmentsRoutes from "./routes/remoteEnvironments.js";
 import reverseProxyRoutes from "./routes/reverseProxy.js";
 import scanRoutes from "./routes/scan.js";
 import secretsRoutes from "./routes/secrets.js";
+import serviceModulesRoutes from "./routes/serviceModules.js";
 import setupRoutes from "./routes/setup.js";
 import templatesRoutes from "./routes/templates.js";
+import threecxRoutes from "./routes/threecx.js";
 import packagesRoutes from "./routes/packages.js";
 import topologyRoutes from "./routes/topology.js";
 import volumesRoutes from "./routes/volumes.js";
@@ -97,6 +102,10 @@ export function buildServer() {
   void fastify.register(notificationsRoutes);
   void fastify.register(nutanixRoutes);
   void fastify.register(hycuRoutes);
+  void fastify.register(glpiRoutes);
+  void fastify.register(glpiInventoryRoutes);
+  void fastify.register(threecxRoutes);
+  void fastify.register(exagridRoutes);
   void fastify.register(remoteEnvironmentsRoutes);
   void fastify.register(lxcRoutes);
   void fastify.register(reverseProxyRoutes);
@@ -110,6 +119,7 @@ export function buildServer() {
   void fastify.register(cronJobsRoutes);
   void fastify.register(backupsRoutes);
   void fastify.register(automationRoutes);
+  void fastify.register(serviceModulesRoutes);
 
   // /health : chemin attendu par les healthchecks Docker et les probes Kubernetes (voir deploy/).
   // /healthz : alias conservé au cas où un outil externe le suppose (convention courante).

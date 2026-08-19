@@ -19,6 +19,7 @@ import { removeNetwork } from "@/features/networks/networksSlice";
 import { fetchArtifactSources, fetchTemplates, updateTemplate, type StudioListStatus } from "@/features/templates/templatesSlice";
 import { packageSearchDistro, type PackageSearchDistro } from "@/features/templates/packagesApi";
 import PackageSearch from "@/features/templates/PackageSearch";
+import UserPasswordSecretField from "@/features/templates/UserPasswordSecretField";
 import {
   ISO_STEPS_DISABLED_MESSAGE,
   STEP_TYPES,
@@ -30,6 +31,9 @@ import {
   stepError,
 } from "@/features/templates/templateCatalog";
 import { pushNotification } from "@/features/notifications/notificationsSlice";
+// Modules métier par nœud (19/08/2026) — voir features/serviceModules/index.ts : la liaison
+// nœud -> module vient du serveur, le rendu du module est entièrement générique.
+import { ServiceModuleView, serviceModuleMenuItem, useServiceModuleBindings } from "@/features/serviceModules";
 import { createTopologyGroup, fetchTopology } from "@/features/topology/topologySlice";
 import { fetchImageHistory, fetchImages } from "@/features/images/imagesSlice";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
@@ -117,7 +121,7 @@ const PROCESS_POLL_INTERVAL_MS = 2500;
  * suspect, jamais un téléchargement de fichier entier. */
 const HEXDUMP_WINDOW_BYTES = 512;
 
-type ViewMode = "shell" | "logs" | "dependencies" | "interior" | "recipe";
+type ViewMode = "shell" | "logs" | "dependencies" | "interior" | "recipe" | "module";
 
 /** Menu contextuel de la vue "recette" — une cible par rôle de nœud synthétique + le canevas vide. */
 type RecipeMenuTarget =
@@ -266,6 +270,19 @@ export default function TopologySubGraphPanel({
   const [selectionMenu, setSelectionMenu] = useState<{ x: number; y: number } | null>(null);
 
   const [viewMode, setViewMode] = useState<ViewMode>("dependencies");
+  // --- Module métier du nœud racine (19/08/2026) ------------------------------------------------
+  // Les liaisons arrivent en ASYNCHRONE (une requête au montage) : le calcul de vue par défaut plus
+  // bas ne peut donc pas les connaître au moment où il s'exécute pour la première racine ouverte.
+  // `viewModeChosenRef` distingue "l'utilisateur a cliqué un onglet" (à respecter absolument) de
+  // "la vue par défaut n'a pas encore été révisée" — voir l'effet dédié plus bas.
+  const { bindingByNodeId } = useServiceModuleBindings();
+  const viewModeChosenRef = useRef(false);
+  const rootModuleBinding = currentRootId ? bindingByNodeId.get(currentRootId) : undefined;
+  /** Choix d'onglet EXPLICITE de l'utilisateur — jamais écrasé ensuite par une vue par défaut. */
+  function chooseViewMode(mode: ViewMode) {
+    viewModeChosenRef.current = true;
+    setViewMode(mode);
+  }
   // --- Vue "recette" d'un template d'image (18/08/2026) — voir le bloc de rendu plus bas. ---
   const [recipeMenu, setRecipeMenu] = useState<{ x: number; y: number; target: RecipeMenuTarget } | null>(null);
   const [recipeStepPopover, setRecipeStepPopover] = useState<RecipeStepPopoverState | null>(null);
@@ -405,8 +422,20 @@ export default function TopologySubGraphPanel({
     setMultiSelectedIds(new Set());
     setGroupLabelPopover(null);
     setSelectionMenu(null);
+    viewModeChosenRef.current = false;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentRootId]);
+
+  // Un nœud LIÉ à un module s'ouvre directement sur ce module — c'est la destination la plus utile
+  // pour lui (même règle de "destination la plus utile" que le shell d'un conteneur ou la recette
+  // d'un template ci-dessus). Effet SÉPARÉ parce que les liaisons arrivent après le premier rendu :
+  // sans lui, un double-clic sur HDV3CX afficherait brièvement ses dépendances puis y resterait.
+  // Un onglet choisi à la main par l'utilisateur n'est jamais écrasé (voir viewModeChosenRef).
+  useEffect(() => {
+    if (!rootModuleBinding || viewModeChosenRef.current) return;
+    setViewMode("module");
+  }, [rootModuleBinding?.moduleId, currentRootId]);
+
   const rootNode = currentRootId ? nodesById.get(currentRootId) ?? null : null;
   const rawRootId = currentRootId ? idWithoutPrefix(currentRootId) : "";
 
@@ -550,12 +579,16 @@ export default function TopologySubGraphPanel({
             data: {
               ...n,
               ...(brickCallbacks(n.kind)),
+              // Pastille "module <label>" sur les cartes du sous-graphe aussi (voir
+              // topologyGraphShared.tsx#GraphNodeServiceModuleMeta) — absente pour un nœud sans
+              // module, la carte reste alors strictement identique à ce qu'elle était.
+              ...(bindingByNodeId.get(n.id) ? { serviceModule: bindingByNodeId.get(n.id)! } : {}),
             } as unknown as Record<string, unknown>,
           };
         })
         .filter((n): n is Node => !!n),
     );
-  }, [currentRootId, currentGroup, neighborIds, groupInternalEdges, nodesById, groupsById, topology]);
+  }, [currentRootId, currentGroup, neighborIds, groupInternalEdges, nodesById, groupsById, topology, bindingByNodeId]);
 
   // Racine = un GROUPE (13/08/2026, retour utilisateur — voir groupInternalEdges ci-dessus) : les
   // VRAIES arêtes entre membres, plutôt que les traits neutres groupe -> membre d'avant (qui de
@@ -1138,6 +1171,14 @@ export default function TopologySubGraphPanel({
     if (node.id !== currentRootId && nodesById.has(node.id)) {
       items.push({ label: "Visualiser ses dépendances", onClick: () => drillInto(node.id) });
     }
+    // "Ouvrir le module <label>" — seulement pour un nœud RÉELLEMENT lié à un module (jamais une
+    // entrée morte). Recentre le sous-graphe sur ce nœud puis force sa vue module : la liaison est
+    // déjà connue ici, aucune raison de repasser par la vue par défaut.
+    const moduleItem = serviceModuleMenuItem(bindingByNodeId.get(node.id), () => {
+      if (node.id !== currentRootId) drillInto(node.id);
+      chooseViewMode("module");
+    });
+    if (moduleItem) items.push(moduleItem);
     // "Grouper la sélection" (même règle EXACTE que TopologyGraph.tsx#nodeMenuItems) — affiché
     // seulement quand CE nœud fait partie de la sélection multiple en cours (>= 2).
     if (operate && multiSelectedIds.size >= 2 && multiSelectedIds.has(node.id)) {
@@ -1304,6 +1345,31 @@ export default function TopologySubGraphPanel({
           )}
         </div>
         <div className="topology-subgraph-panel__actions">
+          {/* Nœud LIÉ à un module : bascule Module <-> Dépendances, quel que soit son kind (une VM
+              Nutanix, un conteneur, un serveur AD…). Aucun module lié -> aucun onglet ajouté, le
+              comportement du panneau reste strictement celui d'avant. */}
+          {rootModuleBinding && (
+            <div className="topology-subgraph-panel__mode-toggle" role="tablist" aria-label="Vue du module">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewMode === "module"}
+                className={`topology-subgraph-panel__mode-btn${viewMode === "module" ? " is-active" : ""}`}
+                onClick={() => chooseViewMode("module")}
+              >
+                Module {rootModuleBinding.moduleLabel}
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewMode === "dependencies"}
+                className={`topology-subgraph-panel__mode-btn${viewMode === "dependencies" ? " is-active" : ""}`}
+                onClick={() => chooseViewMode("dependencies")}
+              >
+                Dépendances
+              </button>
+            </div>
+          )}
           {isContainerRoot && (
             <div className="topology-subgraph-panel__mode-toggle" role="tablist" aria-label="Vue du sous-graphe">
               <button
@@ -1311,7 +1377,7 @@ export default function TopologySubGraphPanel({
                 role="tab"
                 aria-selected={viewMode === "shell"}
                 className={`topology-subgraph-panel__mode-btn${viewMode === "shell" ? " is-active" : ""}`}
-                onClick={() => setViewMode("shell")}
+                onClick={() => chooseViewMode("shell")}
               >
                 Shell
               </button>
@@ -1320,7 +1386,7 @@ export default function TopologySubGraphPanel({
                 role="tab"
                 aria-selected={viewMode === "logs"}
                 className={`topology-subgraph-panel__mode-btn${viewMode === "logs" ? " is-active" : ""}`}
-                onClick={() => setViewMode("logs")}
+                onClick={() => chooseViewMode("logs")}
               >
                 Logs
               </button>
@@ -1333,7 +1399,7 @@ export default function TopologySubGraphPanel({
                 role="tab"
                 aria-selected={viewMode === "interior"}
                 className={`topology-subgraph-panel__mode-btn${viewMode === "interior" ? " is-active" : ""}`}
-                onClick={() => setViewMode("interior")}
+                onClick={() => chooseViewMode("interior")}
               >
                 Composition interne
               </button>
@@ -1346,7 +1412,7 @@ export default function TopologySubGraphPanel({
                 role="tab"
                 aria-selected={viewMode === "recipe"}
                 className={`topology-subgraph-panel__mode-btn${viewMode === "recipe" ? " is-active" : ""}`}
-                onClick={() => setViewMode("recipe")}
+                onClick={() => chooseViewMode("recipe")}
               >
                 Recette
               </button>
@@ -1355,7 +1421,7 @@ export default function TopologySubGraphPanel({
                 role="tab"
                 aria-selected={viewMode === "dependencies"}
                 className={`topology-subgraph-panel__mode-btn${viewMode === "dependencies" ? " is-active" : ""}`}
-                onClick={() => setViewMode("dependencies")}
+                onClick={() => chooseViewMode("dependencies")}
               >
                 Dépendances
               </button>
@@ -1388,6 +1454,21 @@ export default function TopologySubGraphPanel({
         <div className="topology-subgraph-panel__shell">
           <ContainerLogsBody containerId={rawRootId} containerName={rootNode.label} />
         </div>
+      )}
+
+      {/* Vue "module métier" (19/08/2026) — entièrement générique : ce panneau ne connaît AUCUN
+          module en particulier, il transmet la liaison et laisse features/serviceModules rendre
+          summary/entities/relations. Le sondage court de l'instantané vit dans ce composant, donc
+          uniquement TANT QUE cette vue est montée. */}
+      {viewMode === "module" && rootModuleBinding && (
+        <ServiceModuleView
+          moduleId={rootModuleBinding.moduleId}
+          moduleLabel={rootModuleBinding.moduleLabel}
+          nodeLabel={rootNode?.label ?? currentGroup?.label ?? rootModuleBinding.nodeId}
+          origin={rootModuleBinding.origin}
+          {...(rootModuleBinding.matchedOn ? { matchedOn: rootModuleBinding.matchedOn } : {})}
+          reducedMotion={reducedMotion}
+        />
       )}
 
       {viewMode === "recipe" && isTemplateRoot && (
@@ -2134,6 +2215,7 @@ function TemplateStepPopover({
               />
               Accès sudo
             </label>
+            <UserPasswordSecretField id="recipe-step-user-secret" step={step} busy={busy} onChange={setStep} />
             <div className="field">
               <label htmlFor="recipe-step-user-key">Clé SSH autorisée (optionnel)</label>
               <textarea

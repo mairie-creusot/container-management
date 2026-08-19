@@ -382,6 +382,21 @@ export function IconBackup({ className }: IconProps) {
   );
 }
 
+/** Baie de stockage (plateaux empilés + témoins) — page "Stockage de sauvegarde" (appliance
+ * ExaGrid), distincte de IconBackup (le job de sauvegarde) et de IconServer (rack de calcul). */
+export function IconStorageArray({ className }: IconProps) {
+  return base(
+    <>
+      <rect x="3" y="4" width="18" height="5" rx="1.2" />
+      <rect x="3" y="11" width="18" height="5" rx="1.2" />
+      <path d="M6 19h12" />
+      <circle cx="17.5" cy="6.5" r="0.7" fill="currentColor" stroke="none" />
+      <circle cx="17.5" cy="13.5" r="0.7" fill="currentColor" stroke="none" />
+    </>,
+    className,
+  );
+}
+
 /** Nœud "automation-condition" du graphe de topologie (services/automationStore.ts) — point de
  * décision qui se divise en deux branches, façon organigramme : aucune icône de fourche/branchement
  * n'existait déjà dans ce fichier (IconChevron est un simple chevron directionnel, pas un point de

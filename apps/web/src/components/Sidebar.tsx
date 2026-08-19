@@ -15,6 +15,7 @@ import {
   IconGlobe,
   IconServer,
   IconBackup,
+  IconStorageArray,
 } from "@/components/icons";
 
 const ICONS: Partial<Record<ViewId, (props: { className?: string }) => JSX.Element>> = {
@@ -25,6 +26,7 @@ const ICONS: Partial<Record<ViewId, (props: { className?: string }) => JSX.Eleme
   "reverse-proxy": IconGlobe,
   clusters: IconClusters,
   hycu: IconBackup,
+  exagrid: IconStorageArray,
   notifications: IconBell,
   audit: IconHistory,
 };

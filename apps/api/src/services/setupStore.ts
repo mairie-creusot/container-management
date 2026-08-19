@@ -26,6 +26,9 @@ import { config } from "../config.js";
 import { decryptSecret, encryptSecretIfNeeded, isEncrypted } from "./crypto.js";
 import { writeFileRestricted } from "../utils/secureFile.js";
 import type { RegistryKind, Role } from "../types.js";
+// Types purs (effacés à la compilation) : aucune dépendance runtime vers services/exagrid.ts,
+// qui lui importe RÉELLEMENT ce module.
+import type { ExagridAuthProtocol, ExagridPrivProtocol, ExagridSecurityLevel, ExagridSnmpVersion } from "./exagrid.js";
 
 export interface SetupLdapConfig {
   url: string;
@@ -68,6 +71,59 @@ export interface SetupHycuConfig {
   username: string;
   // password : chiffré au repos (voir encryptSecrets ci-dessous), comme nutanix.password.
   password: string;
+}
+
+/**
+ * GLPI (outil de tickets de la mairie, API REST apirest.php) — même emplacement et même cycle de
+ * vie que SetupHycuConfig ci-dessus (configurable/retirable via /api/glpi/config). L'app_token est
+ * TOUJOURS requis ; l'authentification se fait au choix par user_token OU par login/mot de passe
+ * d'un compte de service. Les trois secrets sont chiffrés au repos et ne ressortent JAMAIS d'une
+ * route (voir routes/glpi.ts#toPublicConfig) — voir services/glpi.ts.
+ */
+export interface SetupGlpiConfig {
+  // URL de l'API (ex: "http://172.16.8.22/apirest.php").
+  apiUrl: string;
+  // appToken/userToken/password : chiffrés au repos (voir encryptSecrets ci-dessous).
+  appToken: string;
+  userToken?: string;
+  username?: string;
+  password?: string;
+}
+
+/**
+ * PBX 3CX (XAPI OData, voir services/threecx.ts) — stocké ICI comme HYCU/Nutanix : une instance
+ * interne unique, même cycle de vie (/api/3cx/config). Authentification OAuth2 client credentials :
+ * clientId = le DN du point de routage créé dans Admin Console → Integrations > API,
+ * clientSecret = la clé remise UNE SEULE FOIS (chiffrée au repos, jamais renvoyée par une route).
+ */
+export interface SetupThreecxConfig {
+  // URL de base du PBX (ex: "https://pbx.exemple.fr:5001") — sans le suffixe /xapi/v1.
+  baseUrl: string;
+  clientId: string;
+  // clientSecret : chiffré au repos (voir encryptSecrets ci-dessous), comme hycu.password.
+  clientSecret: string;
+  // Absent = défaut config.threecx.tlsRejectUnauthorized. Pas un secret.
+  tlsRejectUnauthorized?: boolean;
+}
+
+/**
+ * ExaGrid (appliance de sauvegarde) — stocké ICI comme HYCU/Nutanix : même nature (une appliance
+ * interne unique), même cycle de vie (/api/exagrid/config). Pas d'API REST côté ExaGrid : la
+ * config décrit une session SNMP v2c OU v3 (voir services/exagrid.ts).
+ */
+export interface SetupExagridConfig {
+  host: string;
+  port: number;
+  version: ExagridSnmpVersion;
+  // v2c — community : chiffrée au repos (voir encryptSecrets ci-dessous), jamais renvoyée.
+  community?: string;
+  // v3 — username/securityLevel/protocoles ne sont PAS secrets ; authKey/privKey le sont.
+  username?: string;
+  securityLevel?: ExagridSecurityLevel;
+  authProtocol?: ExagridAuthProtocol;
+  authKey?: string;
+  privProtocol?: ExagridPrivProtocol;
+  privKey?: string;
 }
 
 /**
@@ -122,6 +178,9 @@ export interface SetupConfig {
   kubernetes?: SetupKubernetesConfig;
   nutanix?: SetupNutanixConfig;
   hycu?: SetupHycuConfig;
+  glpi?: SetupGlpiConfig;
+  threecx?: SetupThreecxConfig;
+  exagrid?: SetupExagridConfig;
   registries?: SetupRegistryConfig[];
   adDns?: SetupAdDnsConfig;
 }
@@ -156,6 +215,28 @@ function defaultCandidate(): SetupConfig {
   };
 }
 
+/** Applique `transform` aux SEULS champs secrets d'ExaGrid (community/authKey/privKey) — host,
+ * port, version, username et noms de protocoles ne sont pas des secrets. */
+function mapExagridSecrets(cfg: SetupExagridConfig, transform: (value: string) => string): SetupExagridConfig {
+  return {
+    ...cfg,
+    ...(cfg.community !== undefined ? { community: transform(cfg.community) } : {}),
+    ...(cfg.authKey !== undefined ? { authKey: transform(cfg.authKey) } : {}),
+    ...(cfg.privKey !== undefined ? { privKey: transform(cfg.privKey) } : {}),
+  };
+}
+
+/** Applique `transform` aux SEULS champs secrets de GLPI (appToken/userToken/password) — apiUrl et
+ * username (compte de service) ne sont pas des secrets. */
+function mapGlpiSecrets(cfg: SetupGlpiConfig, transform: (value: string) => string): SetupGlpiConfig {
+  return {
+    ...cfg,
+    appToken: transform(cfg.appToken),
+    ...(cfg.userToken !== undefined ? { userToken: transform(cfg.userToken) } : {}),
+    ...(cfg.password !== undefined ? { password: transform(cfg.password) } : {}),
+  };
+}
+
 /**
  * Chiffre (si besoin) tous les champs secrets d'une config avant écriture disque.
  * Utilise des spreads conditionnels (pas `champ: cfg.champ && {...}`) car exactOptionalPropertyTypes
@@ -177,6 +258,11 @@ function encryptSecrets(cfg: SetupConfig): SetupConfig {
     ...(cfg.hycu?.password
       ? { hycu: { ...cfg.hycu, password: encryptSecretIfNeeded(cfg.hycu.password) } }
       : {}),
+    ...(cfg.glpi ? { glpi: mapGlpiSecrets(cfg.glpi, encryptSecretIfNeeded) } : {}),
+    ...(cfg.threecx?.clientSecret
+      ? { threecx: { ...cfg.threecx, clientSecret: encryptSecretIfNeeded(cfg.threecx.clientSecret) } }
+      : {}),
+    ...(cfg.exagrid ? { exagrid: mapExagridSecrets(cfg.exagrid, encryptSecretIfNeeded) } : {}),
     ...(cfg.adDns?.password
       ? { adDns: { ...cfg.adDns, password: encryptSecretIfNeeded(cfg.adDns.password) } }
       : {}),
@@ -198,6 +284,9 @@ function hasLegacyPlaintextSecret(cfg: SetupConfig): boolean {
   if (cfg.kubernetes?.kubeconfigYaml && !isEncrypted(cfg.kubernetes.kubeconfigYaml)) return true;
   if (cfg.nutanix?.password && !isEncrypted(cfg.nutanix.password)) return true;
   if (cfg.hycu?.password && !isEncrypted(cfg.hycu.password)) return true;
+  if (cfg.glpi && [cfg.glpi.appToken, cfg.glpi.userToken, cfg.glpi.password].some((s) => s && !isEncrypted(s))) return true;
+  if (cfg.threecx?.clientSecret && !isEncrypted(cfg.threecx.clientSecret)) return true;
+  if (cfg.exagrid && [cfg.exagrid.community, cfg.exagrid.authKey, cfg.exagrid.privKey].some((s) => s && !isEncrypted(s))) return true;
   if (cfg.adDns?.password && !isEncrypted(cfg.adDns.password)) return true;
   if (cfg.registries?.some((r) => (r.password && !isEncrypted(r.password)) || (r.token && !isEncrypted(r.token)))) {
     return true;
@@ -486,6 +575,95 @@ export async function setHycuConfig(input: SetupHycuConfig): Promise<SetupConfig
 export async function clearHycuConfig(): Promise<SetupConfig> {
   const current = await getCurrent();
   const { hycu: _removed, ...rest } = current;
+  const next: SetupConfig = rest;
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/** Config GLPI effective (appToken/userToken/password déchiffrés), ou `null` si jamais configurée
+ * — même principe que getEffectiveHycuConfig (aucun bootstrap par variable d'environnement). */
+export async function getEffectiveGlpiConfig(): Promise<SetupGlpiConfig | null> {
+  const current = await getCurrent();
+  if (!current.glpi) return null;
+  return mapGlpiSecrets(current.glpi, decryptSecret);
+}
+
+/** PUT /api/glpi/config — configure/remplace GLPI (secrets chiffrés avant écriture), n'affecte
+ * aucune autre section — même principe que setHycuConfig ci-dessus. */
+export async function setGlpiConfig(input: SetupGlpiConfig): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const next: SetupConfig = encryptSecrets({ ...current, glpi: input });
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/** DELETE /api/glpi/config — retire la configuration GLPI (retour à "jamais configuré", toutes les
+ * routes /api/glpi/* redeviennent non configurées). */
+export async function clearGlpiConfig(): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const { glpi: _removed, ...rest } = current;
+  const next: SetupConfig = rest;
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/** Config 3CX effective (clientSecret déchiffré), ou `null` si jamais configurée — même principe
+ * que getEffectiveHycuConfig (aucun bootstrap par variable d'environnement : l'URL du PBX et la
+ * clé API sont toujours saisies explicitement). */
+export async function getEffectiveThreecxConfig(): Promise<SetupThreecxConfig | null> {
+  const current = await getCurrent();
+  if (!current.threecx) return null;
+  return { ...current.threecx, clientSecret: decryptSecret(current.threecx.clientSecret) };
+}
+
+/** PUT /api/3cx/config — configure/remplace le PBX 3CX (clientSecret chiffré avant écriture),
+ * n'affecte aucune autre section — même principe que setHycuConfig ci-dessus. */
+export async function setThreecxConfig(input: SetupThreecxConfig): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const next: SetupConfig = encryptSecrets({ ...current, threecx: input });
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/** DELETE /api/3cx/config — retire la configuration 3CX (retour à "jamais configuré", toutes les
+ * routes GET /api/3cx/* redeviennent non configurées). */
+export async function clearThreecxConfig(): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const { threecx: _removed, ...rest } = current;
+  const next: SetupConfig = rest;
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/** Config ExaGrid effective (community/authKey/privKey déchiffrés), ou `null` si jamais
+ * configurée — même principe que getEffectiveHycuConfig (aucun bootstrap par variable
+ * d'environnement : hôte et identifiants SNMP sont toujours saisis explicitement). */
+export async function getEffectiveExagridConfig(): Promise<SetupExagridConfig | null> {
+  const current = await getCurrent();
+  if (!current.exagrid) return null;
+  return mapExagridSecrets(current.exagrid, decryptSecret);
+}
+
+/** PUT /api/exagrid/config — configure/remplace ExaGrid (secrets chiffrés avant écriture),
+ * n'affecte aucune autre section — même principe que setHycuConfig ci-dessus. */
+export async function setExagridConfig(input: SetupExagridConfig): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const next: SetupConfig = encryptSecrets({ ...current, exagrid: input });
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/** DELETE /api/exagrid/config — retire la configuration ExaGrid (retour à "jamais configuré",
+ * GET /api/exagrid/status redevient { configured: false }). */
+export async function clearExagridConfig(): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const { exagrid: _removed, ...rest } = current;
   const next: SetupConfig = rest;
   await writeToDisk(next);
   cache = next;

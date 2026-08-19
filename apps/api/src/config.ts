@@ -106,6 +106,32 @@ export const config = {
     tlsRejectUnauthorized: readBoolean("HYCU_TLS_REJECT_UNAUTHORIZED", false),
     requestTimeoutMs: readNumber("HYCU_REQUEST_TIMEOUT_MS", 8000),
   },
+  glpi: {
+    // GLPI (apirest.php) — même principe que hycu.requestTimeoutMs : un serveur muet ne doit
+    // jamais bloquer indéfiniment une route ou un cycle du moteur d'automatisation.
+    requestTimeoutMs: readNumber("GLPI_REQUEST_TIMEOUT_MS", 8000),
+    // URL publique de QUAI, utilisée UNIQUEMENT pour le lien de retour ajouté dans un ticket créé
+    // automatiquement — non définie = aucune ligne de lien dans le ticket, jamais une URL fabriquée.
+    quaiBaseUrl: readOptionalString("QUAI_PUBLIC_URL"),
+  },
+  threecx: {
+    // PBX 3CX (XAPI OData /xapi/v1) — DÉFAUT true, contrairement à Nutanix/HYCU : un 3CX on-prem
+    // est publié sous son FQDN 3CX avec un certificat Let's Encrypt valide. Le drapeau réellement
+    // utilisé est celui de la config chiffrée (setupStore#SetupThreecxConfig.tlsRejectUnauthorized) ;
+    // cette valeur n'est que le défaut quand l'admin ne l'a pas choisi.
+    tlsRejectUnauthorized: readBoolean("THREECX_TLS_REJECT_UNAUTHORIZED", true),
+    requestTimeoutMs: readNumber("THREECX_REQUEST_TIMEOUT_MS", 8000),
+    // Le XAPI n'accepte QU'UN SEUL jeton actif par instance : l'annuaire des postes est mis en
+    // cache pour résoudre les noms des interlocuteurs sans réinterroger /Users à chaque poll.
+    directoryCacheMs: readNumber("THREECX_DIRECTORY_CACHE_MS", 60_000),
+  },
+  exagrid: {
+    // Appliance de sauvegarde ExaGrid : AUCUNE API REST n'existe, l'intégration est SNMP (UDP,
+    // EXAGRID-MIB) — d'où un timeout/retries plutôt qu'un timeout HTTP. UDP ne retransmet pas :
+    // `retries` est le nombre de RENVOIS de la requête après le premier essai (net-snmp).
+    requestTimeoutMs: readNumber("EXAGRID_SNMP_TIMEOUT_MS", 5000),
+    retries: readNumber("EXAGRID_SNMP_RETRIES", 1),
+  },
   registries: {
     requestTimeoutMs: readNumber("REGISTRY_REQUEST_TIMEOUT_MS", 5000),
     dockerhub: {

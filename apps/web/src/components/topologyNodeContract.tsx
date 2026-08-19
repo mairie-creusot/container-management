@@ -337,6 +337,48 @@ export function hycuProtectionBadge(node: TopologyNode): { label: string; tone: 
   }
 }
 
+// --- Module métier porté par un nœud (19/08/2026) ------------------------------------------------
+
+/**
+ * Un "module" est la vue métier du service qui tourne RÉELLEMENT sur un nœud (3CX sur la VM
+ * HDV3CX, Active Directory/DNS sur le contrôleur de domaine, DHCP…) — voir
+ * apps/api/src/services/serviceModules.ts et features/serviceModules/ côté web.
+ *
+ * Volontairement PAS une entrée de NODE_CONTRACT : un module est lié à une INSTANCE de nœud
+ * (telle VM précise), jamais à un `kind` entier — deux VMs Nutanix identiques en tout point n'ont
+ * aucune raison de porter le même service. Le contrat reste donc indexé par kind pour ce qui est
+ * structurel (ports, santé, actions), et ce couple de helpers couvre ce qui est propre à
+ * l'instance, en gardant la déclaration du rendu (badge, entrée de menu) au même endroit que le
+ * reste — même patron exact que hycuProtectionBadge ci-dessus.
+ */
+export interface NodeServiceModuleBinding {
+  /** Libellé HUMAIN du module ("Active Directory / DNS"), jamais son id technique. */
+  moduleLabel: string;
+  /** "automatic" = correspondance VÉRIFIÉE côté serveur (nom/IP réelle du nœud) ; "manual" =
+   * liaison explicitement posée par un operator/admin. */
+  origin: "manual" | "automatic";
+  /** origin "automatic" : la valeur exacte qui a permis la correspondance (preuve affichée en
+   * infobulle — jamais une liaison opaque que l'utilisateur ne pourrait pas vérifier). */
+  matchedOn?: string;
+}
+
+/** Pastille DISCRÈTE "module <label>" d'une carte de nœud lié — `null` pour un nœud sans module
+ * (comportement du graphe strictement inchangé, aucune pastille par défaut). Ton "neutral" :
+ * porter un module n'est ni une alerte ni une réussite, juste une information de nature. */
+export function serviceModuleBadge(
+  binding: NodeServiceModuleBinding | undefined,
+): { label: string; tone: "neutral"; title: string } | null {
+  if (!binding) return null;
+  return {
+    label: `module ${binding.moduleLabel}`,
+    tone: "neutral",
+    title:
+      binding.origin === "automatic"
+        ? `Module ${binding.moduleLabel} — liaison automatique vérifiée${binding.matchedOn ? ` (${binding.matchedOn})` : ""}. Double-clic pour l'ouvrir.`
+        : `Module ${binding.moduleLabel} — liaison posée manuellement. Double-clic pour l'ouvrir.`,
+  };
+}
+
 // --- Alertes de ressources (CPU/mémoire) ---------------------------------------------------------
 
 /** Seuil réel (pourcentage, cohérent avec TopologyNode#cpuPercent) à partir duquel un nœud

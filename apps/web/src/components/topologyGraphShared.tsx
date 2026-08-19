@@ -21,10 +21,12 @@ import {
   hycuProtectionBadge,
   nodeIcon,
   quickLifecycleActions,
+  serviceModuleBadge,
   type AutomationTriggerStatus,
   type CapabilityId,
   type EdgeHealthInfo,
   type EdgeHealthState,
+  type NodeServiceModuleBinding,
   type PortSpec,
   type QuickLifecycleAction,
 } from "@/components/topologyNodeContract";
@@ -56,9 +58,11 @@ export {
   nodeMinimapColor,
   nutanixVmHostEdgeState,
   hycuProtectionEdgeState,
+  serviceModuleBadge,
   type CapabilityDef,
   type CapabilityId,
   type EdgeHealthState,
+  type NodeServiceModuleBinding,
   type PortSpec,
 } from "@/components/topologyNodeContract";
 
@@ -851,6 +855,16 @@ export interface GraphNodeTemplateMeta {
   templateBaseLabel?: string;
 }
 
+/**
+ * Module métier porté par CETTE instance de nœud (voir topologyNodeContract.tsx#
+ * NodeServiceModuleBinding et features/serviceModules/) — injecté sur `node.data` par l'appelant
+ * qui dispose des liaisons (useServiceModuleBindings), jamais lu depuis le graphe lui-même : un
+ * TopologyNode n'a aucune notion de module côté serveur. Absent = carte strictement inchangée.
+ */
+export interface GraphNodeServiceModuleMeta {
+  serviceModule?: NodeServiceModuleBinding;
+}
+
 /** Reconstruit un TopologyNode "synthétique" pour une brique (voir TopologyNode#attachments) —
  * une brique n'a PAS de nœud top-level correspondant dans `topology.nodes` (c'est tout l'objet de
  * son "briquage") : ouvrir son détail nécessite donc de reconstituer un TopologyNode minimal mais
@@ -907,8 +921,8 @@ function domainsEqual(a: string[] | undefined, b: string[] | undefined): boolean
 function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
   if (prev.selected !== next.selected) return false;
   if (prev.data === next.data) return true;
-  const a = prev.data as unknown as TopologyNode & GraphNodeCallbacks & GraphNodeTemplateMeta;
-  const b = next.data as unknown as TopologyNode & GraphNodeCallbacks & GraphNodeTemplateMeta;
+  const a = prev.data as unknown as TopologyNode & GraphNodeCallbacks & GraphNodeTemplateMeta & GraphNodeServiceModuleMeta;
+  const b = next.data as unknown as TopologyNode & GraphNodeCallbacks & GraphNodeTemplateMeta & GraphNodeServiceModuleMeta;
   return (
     a.kind === b.kind &&
     // Boutons rapides (18/08/2026) : l'état "action en cours" est RENDU (boutons désactivés) —
@@ -943,13 +957,16 @@ function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
     // donc comparées, comme le reste des champs affichés.
     a.templateStepCount === b.templateStepCount &&
     a.templateBaseLabel === b.templateBaseLabel &&
+    // Pastille "module <label>" (voir GraphNodeServiceModuleMeta) — réellement rendue, donc comparée.
+    a.serviceModule?.moduleLabel === b.serviceModule?.moduleLabel &&
+    a.serviceModule?.origin === b.serviceModule?.origin &&
     attachmentsEqual(a.attachments, b.attachments) &&
     domainsEqual(a.domains, b.domains)
   );
 }
 
 function GraphNodeImpl({ data, selected }: NodeProps) {
-  const node = data as unknown as TopologyNode & GraphNodeCallbacks & GraphNodeTemplateMeta;
+  const node = data as unknown as TopologyNode & GraphNodeCallbacks & GraphNodeTemplateMeta & GraphNodeServiceModuleMeta;
   const Icon = nodeIcon(node);
   const isContainer = node.kind === "container";
   // Flash bref du point de statut quand le statut constaté change entre deux polls — le `key`
@@ -987,6 +1004,9 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   const isHycuAppliance = node.kind === "hycu-appliance";
   // Badge de protection HYCU (VM Nutanix uniquement) — `null` dès que HYCU ne dit rien de réel.
   const hycuBadge = isNutanixVm ? hycuProtectionBadge(node) : null;
+  // Pastille discrète "module <label>" — `null` pour tout nœud sans module lié (l'immense
+  // majorité) : la carte reste alors strictement identique à ce qu'elle était.
+  const moduleBadge = serviceModuleBadge(node.serviceModule);
   // Répartition des attachments (TopologyNode#attachments — VRAIES données Docker, jamais un
   // nouveau stockage) entre les deux rendus (Phase 2, 17/08/2026, maquette Railway validée par
   // l'utilisateur) : un VOLUME attaché devient un "tiroir" (sous-carte glissée SOUS la carte du
@@ -1105,6 +1125,15 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
         <div className="topology-node__badges">
           <span className={`topology-badge topology-badge--${hycuBadge.tone}`} title={hycuBadge.title}>
             {hycuBadge.label}
+          </span>
+        </div>
+      )}
+      {/* Module métier porté par CE nœud précis (voir GraphNodeServiceModuleMeta) — signale que le
+          double-clic ouvre la vue du service, pas une simple carte de dépendances. */}
+      {moduleBadge && (
+        <div className="topology-node__badges">
+          <span className="topology-badge topology-badge--module" title={moduleBadge.title}>
+            {moduleBadge.label}
           </span>
         </div>
       )}

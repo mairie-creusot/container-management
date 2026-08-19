@@ -35,6 +35,7 @@ import {
 } from "../services/automationStore.js";
 import type { AutomationNode, AutomationNodeKind } from "../services/automationStore.js";
 import { listAutomationRuns } from "../services/automationRunLog.js";
+import { asGlpiAutomationAction } from "../services/glpi.js";
 import type { AutomationActionConfig, AutomationTriggerConfig, AutomationTriggerSource } from "../types.js";
 
 const VALID_NODE_KINDS: AutomationNodeKind[] = ["automation-trigger", "automation-condition", "automation-action"];
@@ -69,6 +70,10 @@ function validateTriggerSource(source: AutomationTriggerSource | undefined): str
 /** `undefined` si valide, sinon le message d'erreur 400 à renvoyer. */
 function validateActionConfig(cfg: AutomationActionConfig | undefined): string | undefined {
   if (!cfg) return "actionConfig is required for an automation-action node";
+  // Action GLPI : son type est déclaré dans services/glpi.ts (hors de l'union de types.ts), d'où
+  // une reconnaissance depuis la valeur brute — le contexte de l'incident est rempli par le
+  // moteur, seul un titre facultatif est configurable ici.
+  if (asGlpiAutomationAction(cfg)) return undefined;
   if (cfg.kind === "run-cron-job") {
     if (!cfg.cronJobId || !cfg.cronJobId.trim()) return "actionConfig.cronJobId is required";
     return undefined;
@@ -85,7 +90,7 @@ function validateActionConfig(cfg: AutomationActionConfig | undefined): string |
     }
     return undefined;
   }
-  return `actionConfig.kind must be one of: run-cron-job, send-notification, container-action`;
+  return `actionConfig.kind must be one of: run-cron-job, send-notification, container-action, create-glpi-ticket`;
 }
 
 /**
