@@ -4,6 +4,7 @@ import type { RootState } from "@/store";
 import type {
   ThreecxAccess,
   ThreecxActiveCall,
+  ThreecxAuthMode,
   ThreecxCallParticipant,
   ThreecxConfigStatus,
   ThreecxExtension,
@@ -17,12 +18,16 @@ import type {
   ThreecxTestResult,
 } from "@/features/threecx/types";
 
-/** Corps de PUT/POST /api/3cx/config — `clientSecret` vide est OMIS, jamais envoyé vide : côté
- * serveur, absent = conserver la clé API existante (même convention que HYCU/ExaGrid). */
+/** Corps de PUT/POST /api/3cx/config — `clientSecret`/`password` vides sont OMIS, jamais envoyés
+ * vides : côté serveur, absent = conserver le secret existant (même convention que HYCU/ExaGrid).
+ * `authMode` est TOUJOURS envoyé : c'est lui que le serveur teste. */
 export interface ThreecxConfigFormInput {
   baseUrl: string;
-  clientId: string;
+  authMode: ThreecxAuthMode;
+  clientId?: string;
   clientSecret?: string;
+  username?: string;
+  password?: string;
   tlsRejectUnauthorized?: boolean;
 }
 
@@ -177,15 +182,22 @@ function normalizeStatus(raw: unknown): ThreecxStatusSummary {
   };
 }
 
+/** Une valeur inconnue ou absente vaut "client-credentials" — c'est le mode d'une config
+ * enregistrée avant l'ajout du choix (le serveur applique la même migration à la lecture). */
+function normalizeAuthMode(value: unknown): ThreecxAuthMode {
+  return value === "user" ? "user" : "client-credentials";
+}
+
 function normalizeConfig(raw: unknown): ThreecxConfigStatus {
   const wire = asRecord(raw);
   const inner = asRecord(wire.config);
   const baseUrl = optString(inner.baseUrl);
-  const clientId = optString(inner.clientId);
-  if (wire.configured !== true || !baseUrl || !clientId) return { configured: wire.configured === true };
+  if (wire.configured !== true || !baseUrl) return { configured: wire.configured === true };
   const config: ThreecxPublicConfig = {
     baseUrl,
-    clientId,
+    authMode: normalizeAuthMode(inner.authMode),
+    ...keep("clientId", optString(inner.clientId)),
+    ...keep("username", optString(inner.username)),
     ...keep("tlsRejectUnauthorized", optBoolean(inner.tlsRejectUnauthorized)),
   };
   return { configured: true, config };

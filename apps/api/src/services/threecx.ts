@@ -1,9 +1,17 @@
 /**
- * Intégration PBX 3CX (VM "HDV3CX") via son XAPI — service OData exposé sous `/xapi/v1`,
- * authentification OAuth2 client credentials sur `{base}/connect/token`.
+ * Intégration PBX 3CX (VM "HDV3CX") via son XAPI — service OData exposé sous `/xapi/v1`. Deux voies
+ * d'authentification, au choix (SetupThreecxConfig.authMode), pour le MÊME en-tête
+ * `Authorization: Bearer` sur `/xapi/v1` :
+ *  - "client-credentials" : OAuth2 client credentials sur `{base}/connect/token` (ClientID = DN d'un
+ *    point de routage créé dans Admin Console → Integrations > API, + clé API).
+ *  - "user" : `POST {base}/webclient/api/Login/GetAccessToken` avec `{ Username, Password,
+ *    SecurityCode }` → `{ Status: "AuthSuccess", Token: { token_type, expires_in, access_token,
+ *    refresh_token } }`. Forme relevée sur les exemples publics luxzg/3CX-XAPI_examples et le fil
+ *    3cx.com/community/threads/help-getting-the-api-token-on-v20-build-1620.125285 — aucun champ
+ *    au-delà n'est supposé, et un `access_token` absent/vide est une ERREUR, jamais un jeton vide.
  *
- * LECTURE SEULE STRICTE : ce module n'émet QUE des GET vers /xapi/v1 (+ le POST /connect/token
- * d'authentification). Le XAPI expose des actions destructrices sur la téléphonie EN SERVICE de
+ * LECTURE SEULE STRICTE : ce module n'émet QUE des GET vers /xapi/v1 (+ le POST d'authentification).
+ * Le XAPI expose des actions destructrices sur la téléphonie EN SERVICE de
  * la mairie — `POST /ActiveCalls({Id})/Pbx.DropCall` (raccrocher), `POST /Users/Pbx.MakeCall`
  * (décrocher/appeler), `POST /Services/Pbx.Stop` (arrêter le PBX) — AUCUNE n'est implémentée ici
  * et aucune ne doit l'être sans mission explicite.
@@ -43,7 +51,7 @@ import { request as httpsRequest } from "node:https";
 import { URL } from "node:url";
 import { config } from "../config.js";
 import { getEffectiveThreecxConfig } from "./setupStore.js";
-import type { SetupThreecxConfig } from "./setupStore.js";
+import type { SetupThreecxConfig, ThreecxAuthMode } from "./setupStore.js";
 
 /** Un interlocuteur d'un appel en cours — dérivé de Pbx.ActiveCall.Caller/Callee (le schéma XAPI
  * n'expose aucun tableau de participants). */
@@ -211,12 +219,20 @@ function tlsRejectUnauthorized(effective: SetupThreecxConfig): boolean {
   return effective.tlsRejectUnauthorized ?? config.threecx.tlsRejectUnauthorized;
 }
 
-/** Retire toute occurrence du secret d'un message avant qu'il ne parte vers une route ou un log —
- * filet de sécurité : aucun message construit ici n'interpole le secret, mais un message renvoyé
+/** Les secrets d'une config, quel que soit son mode — clé API ET mot de passe du compte 3CX. */
+function configSecrets(cfg: { clientSecret?: string; password?: string }): string[] {
+  return [cfg.clientSecret, cfg.password].filter((value): value is string => Boolean(value));
+}
+
+/** Retire toute occurrence des secrets d'un message avant qu'il ne parte vers une route ou un log —
+ * filet de sécurité : aucun message construit ici n'interpole un secret, mais un message renvoyé
  * PAR le PBX pourrait le répéter. */
-function scrubSecret(message: string, secret: string): string {
-  if (!secret) return message;
-  return message.split(secret).join("***");
+function scrubSecrets(message: string, secrets: string[]): string {
+  return secrets.reduce((acc, secret) => (secret ? acc.split(secret).join("***") : acc), message);
+}
+
+function authModeOf(cfg: SetupThreecxConfig): ThreecxAuthMode {
+  return cfg.authMode === "user" ? "user" : "client-credentials";
 }
 
 interface RawHttpResponse {
@@ -278,15 +294,25 @@ interface CachedToken {
   fingerprint: string;
   accessToken: string;
   expiresAtMs: number;
+  /** Uniquement en mode "user" et uniquement si le PBX en a renvoyé un — jamais fabriqué. */
+  refreshToken?: string;
 }
+
+type TokenAttempt =
+  | { ok: true; accessToken: string; expiresInSeconds: number; refreshToken?: string }
+  | { ok: false; message: string; denied: boolean };
 
 let cachedToken: CachedToken | null = null;
 let tokenInFlight: Promise<{ ok: true; accessToken: string } | { ok: false; message: string; denied: boolean }> | null = null;
+/** Passe à false au PREMIER échec d'un renouvellement par refresh_token : aucun point de
+ * renouvellement n'est documenté pour GetAccessToken, inutile d'y revenir à chaque expiration. */
+let refreshTokenUsable = true;
 
-/** Identité de la config (URL + clientId + secret) : changer l'un d'eux invalide le jeton en cache
- * sans jamais comparer les secrets ailleurs. */
+/** Identité de la config (URL + mode + identifiants) : changer l'un d'eux invalide le jeton en
+ * cache sans jamais comparer les secrets ailleurs. */
 function configFingerprint(effective: SetupThreecxConfig): string {
-  return `${effective.baseUrl} ${effective.clientId} ${effective.clientSecret}`;
+  const parts = [effective.baseUrl, authModeOf(effective), effective.clientId, effective.clientSecret, effective.username, effective.password];
+  return parts.map((part) => part ?? "").join(" ");
 }
 
 /** Oublie le jeton en cache (401, changement de config) — la prochaine requête en redemandera un. */
@@ -297,21 +323,33 @@ function clearToken(): void {
 
 interface TokenResponse {
   access_token?: string;
+  refresh_token?: string;
   token_type?: string;
   expires_in?: number;
   error?: string;
   error_description?: string;
 }
 
+/** Réponse de /webclient/api/Login/GetAccessToken — seuls les champs RÉELLEMENT observés y figurent. */
+interface WebclientLoginResponse {
+  Status?: string | null;
+  Token?: TokenResponse | null;
+}
+
+const AUTH_SUCCESS = "AuthSuccess";
+
+function positiveSeconds(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 /** POST {base}/connect/token — client credentials. Ne journalise rien et n'interpole jamais le
  * secret dans un message d'erreur. */
-async function requestToken(
-  effective: SetupThreecxConfig,
-): Promise<{ ok: true; accessToken: string; expiresInSeconds: number } | { ok: false; message: string; denied: boolean }> {
+async function requestClientCredentialsToken(effective: SetupThreecxConfig): Promise<TokenAttempt> {
+  const secrets = configSecrets(effective);
   const target = new URL("connect/token", normalizedBaseUrl(effective.baseUrl));
   const body = new URLSearchParams({
-    client_id: effective.clientId,
-    client_secret: effective.clientSecret,
+    client_id: effective.clientId ?? "",
+    client_secret: effective.clientSecret ?? "",
     grant_type: "client_credentials",
   }).toString();
 
@@ -328,7 +366,7 @@ async function requestToken(
       rejectUnauthorized: tlsRejectUnauthorized(effective),
     });
   } catch (err) {
-    const message = scrubSecret(err instanceof Error ? err.message : String(err), effective.clientSecret);
+    const message = scrubSecrets(err instanceof Error ? err.message : String(err), secrets);
     return { ok: false, message: `PBX 3CX injoignable : ${message}`, denied: false };
   }
 
@@ -338,10 +376,102 @@ async function requestToken(
     const message = detail
       ? `3CX a refusé l'authentification (HTTP ${response.status}) : ${detail}`
       : `3CX a refusé l'authentification (HTTP ${response.status})`;
-    return { ok: false, message: scrubSecret(message, effective.clientSecret), denied: response.status >= 400 && response.status < 500 };
+    return { ok: false, message: scrubSecrets(message, secrets), denied: response.status >= 400 && response.status < 500 };
   }
-  const expiresInSeconds = typeof parsed.expires_in === "number" && parsed.expires_in > 0 ? parsed.expires_in : 3600;
-  return { ok: true, accessToken: parsed.access_token, expiresInSeconds };
+  return { ok: true, accessToken: parsed.access_token, expiresInSeconds: positiveSeconds(parsed.expires_in, 3600) };
+}
+
+/**
+ * POST {base}/webclient/api/Login/GetAccessToken — identifiant + mot de passe d'une extension
+ * disposant des droits propriétaire système. Le mot de passe n'apparaît QUE dans le corps de cette
+ * requête : il n'est ni journalisé, ni interpolé dans un message, et tout message venant du PBX est
+ * nettoyé avant de sortir.
+ */
+async function requestUserToken(effective: SetupThreecxConfig): Promise<TokenAttempt> {
+  const secrets = configSecrets(effective);
+  const target = new URL("webclient/api/Login/GetAccessToken", normalizedBaseUrl(effective.baseUrl));
+  const body = JSON.stringify({ Username: effective.username ?? "", Password: effective.password ?? "", SecurityCode: "" });
+
+  let response: RawHttpResponse;
+  try {
+    response = await rawRequest(target, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "Content-Length": String(Buffer.byteLength(body)),
+      },
+      body,
+      rejectUnauthorized: tlsRejectUnauthorized(effective),
+    });
+  } catch (err) {
+    const message = scrubSecrets(err instanceof Error ? err.message : String(err), secrets);
+    return { ok: false, message: `PBX 3CX injoignable : ${message}`, denied: false };
+  }
+
+  const parsed = parseJson<WebclientLoginResponse>(response.raw);
+  const status = typeof parsed?.Status === "string" ? parsed.Status.trim() : "";
+  const accessToken = typeof parsed?.Token?.access_token === "string" ? parsed.Token.access_token.trim() : "";
+  const httpOk = response.status >= 200 && response.status < 300;
+
+  // Jamais de jeton vide utilisé en silence : HTTP d'échec, Status ≠ AuthSuccess, ou access_token absent = erreur.
+  if (!httpOk || !accessToken || (status !== "" && status !== AUTH_SUCCESS)) {
+    const detail = response.raw.trim().slice(0, 300) || (status ? `Status ${status}` : "");
+    const message = detail
+      ? `3CX a refusé l'authentification par identifiant (HTTP ${response.status}) : ${detail}`
+      : `3CX a refusé l'authentification par identifiant (HTTP ${response.status})`;
+    return { ok: false, message: scrubSecrets(message, secrets), denied: httpOk || (response.status >= 400 && response.status < 500) };
+  }
+
+  const refreshToken = typeof parsed?.Token?.refresh_token === "string" ? parsed.Token.refresh_token.trim() : "";
+  // `expires_in` vaut 60 sur les exemples publics et 3CX parle de « 60 minutes » : lu en SECONDES (OAuth2), sous-estimer est sans risque.
+  return {
+    ok: true,
+    accessToken,
+    expiresInSeconds: positiveSeconds(parsed?.Token?.expires_in, 3600),
+    ...(refreshToken ? { refreshToken } : {}),
+  };
+}
+
+/**
+ * Renouvellement par refresh_token sur le point de terminaison OAuth2 du PBX. Aucun endpoint de
+ * rafraîchissement propre à GetAccessToken n'est documenté : la tentative est faite UNE fois, et
+ * tout échec (réseau, refus, réponse inattendue) renvoie `null` → login complet en repli.
+ */
+async function refreshUserToken(effective: SetupThreecxConfig, refreshToken: string): Promise<TokenAttempt | null> {
+  const target = new URL("connect/token", normalizedBaseUrl(effective.baseUrl));
+  const body = new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken }).toString();
+
+  let response: RawHttpResponse;
+  try {
+    response = await rawRequest(target, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+        "Content-Length": String(Buffer.byteLength(body)),
+      },
+      body,
+      rejectUnauthorized: tlsRejectUnauthorized(effective),
+    });
+  } catch {
+    return null;
+  }
+
+  const parsed = parseJson<TokenResponse>(response.raw);
+  const accessToken = typeof parsed?.access_token === "string" ? parsed.access_token.trim() : "";
+  if (response.status < 200 || response.status >= 300 || !accessToken) return null;
+  const nextRefresh = typeof parsed?.refresh_token === "string" ? parsed.refresh_token.trim() : "";
+  return {
+    ok: true,
+    accessToken,
+    expiresInSeconds: positiveSeconds(parsed?.expires_in, 3600),
+    ...(nextRefresh ? { refreshToken: nextRefresh } : { refreshToken }),
+  };
+}
+
+function requestToken(effective: SetupThreecxConfig): Promise<TokenAttempt> {
+  return authModeOf(effective) === "user" ? requestUserToken(effective) : requestClientCredentialsToken(effective);
 }
 
 /**
@@ -362,13 +492,22 @@ async function getAccessToken(
   }
   if (tokenInFlight) return await tokenInFlight;
 
+  // Jeton périmé conservé le temps du renouvellement : c'est lui qui porte le refresh_token.
+  const expired = cachedToken;
+
   tokenInFlight = (async () => {
-    const result = await requestToken(effective);
+    let result: TokenAttempt | null = null;
+    if (authModeOf(effective) === "user" && expired?.refreshToken && refreshTokenUsable) {
+      result = await refreshUserToken(effective, expired.refreshToken);
+      if (result === null) refreshTokenUsable = false;
+    }
+    if (result === null) result = await requestToken(effective);
     if (!result.ok) return { ok: false as const, message: result.message, denied: result.denied };
     cachedToken = {
       fingerprint,
       accessToken: result.accessToken,
       expiresAtMs: Date.now() + Math.max(result.expiresInSeconds * 1000 - TOKEN_EXPIRY_SKEW_MS, 1000),
+      ...(result.refreshToken ? { refreshToken: result.refreshToken } : {}),
     };
     return { ok: true as const, accessToken: result.accessToken };
   })().finally(() => {
@@ -397,7 +536,7 @@ async function xapiGet<T>(effective: SetupThreecxConfig, resource: string): Prom
         rejectUnauthorized: tlsRejectUnauthorized(effective),
       });
     } catch (err) {
-      const message = scrubSecret(err instanceof Error ? err.message : String(err), effective.clientSecret);
+      const message = scrubSecrets(err instanceof Error ? err.message : String(err), configSecrets(effective));
       return { kind: "unreachable", message: `PBX 3CX injoignable : ${message}` };
     }
 
@@ -407,7 +546,7 @@ async function xapiGet<T>(effective: SetupThreecxConfig, resource: string): Prom
     }
     if (response.status < 200 || response.status >= 300) {
       // 401/403/404 : le PBX a RÉPONDU — un XAPI non licencié (Enterprise) refuse ici. Message brut.
-      return { kind: "denied", message: scrubSecret(pbxErrorMessage(response.status, response.raw), effective.clientSecret) };
+      return { kind: "denied", message: scrubSecrets(pbxErrorMessage(response.status, response.raw), configSecrets(effective)) };
     }
     const data = parseJson<T>(response.raw);
     if (data === null) {
@@ -448,14 +587,20 @@ function recordPoll(reachable: boolean): void {
   lastPollOutcome = { reachable, at: new Date().toISOString() };
 }
 
+/** Une config n'est utilisable que si les identifiants du MODE choisi sont présents. */
+function isThreecxConfigComplete(cfg: SetupThreecxConfig): boolean {
+  if (!cfg.baseUrl) return false;
+  return authModeOf(cfg) === "user" ? Boolean(cfg.username && cfg.password) : Boolean(cfg.clientId && cfg.clientSecret);
+}
+
 /** Config 3CX effective si complète, sinon `null` — garde "jamais configuré". */
 async function loadThreecxConfig(): Promise<SetupThreecxConfig | null> {
   const effective = await getEffectiveThreecxConfig();
-  if (!effective?.baseUrl || !effective.clientId || !effective.clientSecret) return null;
+  if (!effective || !isThreecxConfigComplete(effective)) return null;
   return effective;
 }
 
-/** true si le PBX 3CX a été explicitement configuré (URL + clientId + clé API). */
+/** true si le PBX 3CX a été explicitement configuré (URL + identifiants du mode choisi). */
 export async function isThreecxConfigured(): Promise<boolean> {
   return (await loadThreecxConfig()) !== null;
 }
@@ -554,6 +699,7 @@ let cachedDirectory: CachedDirectory | null = null;
 export function resetThreecxCaches(): void {
   clearToken();
   cachedDirectory = null;
+  refreshTokenUsable = true;
 }
 
 /**
@@ -673,20 +819,35 @@ export async function getThreecxStatus(): Promise<ThreecxStatusSummary> {
   };
 }
 
+/** Config candidate d'un test de connexion — le mode est EXPLICITE, jamais déduit du remplissage. */
+export interface ThreecxConnectionCandidate {
+  baseUrl: string;
+  authMode: ThreecxAuthMode;
+  clientId?: string;
+  clientSecret?: string;
+  username?: string;
+  password?: string;
+  tlsRejectUnauthorized?: boolean;
+}
+
 /**
- * Teste une config candidate SANS rien persister ni muter le PBX : obtention d'un jeton puis
- * GET /xapi/v1/ActiveCalls?$top=1. Ce test demande FORCÉMENT un nouveau jeton (c'est ce qu'il
- * vérifie) et invalide donc celui en cache côté PBX — le cache local est vidé en conséquence.
+ * Teste une config candidate SANS rien persister ni muter le PBX : obtention d'un jeton DANS LE MODE
+ * DEMANDÉ puis GET /xapi/v1/ActiveCalls?$top=1. Ce test demande FORCÉMENT un nouveau jeton (c'est ce
+ * qu'il vérifie) et invalide donc celui en cache côté PBX — le cache local est vidé en conséquence.
+ * Un échec remonte le message du PBX TEL QUEL (identifiants refusés, droits insuffisants, XAPI non
+ * autorisé), seulement débarrassé du secret s'il le répétait.
  */
 export async function testThreecxConnection(
-  baseUrl: string,
-  clientId: string,
-  clientSecret: string,
-  tlsRejectUnauthorizedFlag?: boolean,
+  candidate: ThreecxConnectionCandidate,
 ): Promise<{ ok: boolean; message: string; activeCallCount?: number }> {
-  if (!baseUrl || !clientId || !clientSecret) {
+  const baseUrl = candidate.baseUrl;
+  if (!baseUrl) return { ok: false, message: "L'URL du PBX est requise" };
+  if (candidate.authMode === "user") {
+    if (!candidate.username || !candidate.password) return { ok: false, message: "baseUrl, identifiant et mot de passe sont requis" };
+  } else if (!candidate.clientId || !candidate.clientSecret) {
     return { ok: false, message: "baseUrl, clientId et clientSecret sont requis" };
   }
+
   let parsed: URL;
   try {
     parsed = new URL(baseUrl);
@@ -697,12 +858,7 @@ export async function testThreecxConnection(
     return { ok: false, message: "URL du PBX invalide : protocole http(s) attendu" };
   }
 
-  const candidate: SetupThreecxConfig = {
-    baseUrl,
-    clientId,
-    clientSecret,
-    ...(tlsRejectUnauthorizedFlag !== undefined ? { tlsRejectUnauthorized: tlsRejectUnauthorizedFlag } : {}),
-  };
+  const secrets = configSecrets(candidate);
 
   try {
     const token = await requestToken(candidate);
@@ -716,13 +872,13 @@ export async function testThreecxConnection(
     });
     if (response.status < 200 || response.status >= 300) {
       // Message BRUT du PBX : un XAPI non licencié (Enterprise) refuse ici, l'utilisateur doit le lire.
-      return { ok: false, message: scrubSecret(pbxErrorMessage(response.status, response.raw), clientSecret) };
+      return { ok: false, message: scrubSecrets(pbxErrorMessage(response.status, response.raw), secrets) };
     }
     const data = parseJson<ODataCollection<XapiActiveCall>>(response.raw);
     if (!data) return { ok: false, message: "3CX a renvoyé une réponse illisible sur /xapi/v1/ActiveCalls" };
     return { ok: true, message: "Le PBX 3CX est joignable et le XAPI répond", activeCallCount: data.value?.length ?? 0 };
   } catch (err) {
-    const message = scrubSecret(err instanceof Error ? err.message : String(err), clientSecret);
+    const message = scrubSecrets(err instanceof Error ? err.message : String(err), secrets);
     return { ok: false, message: `PBX 3CX injoignable : ${message}` };
   } finally {
     // Un seul jeton actif par instance : le jeton fraîchement obtenu a invalidé celui du cache.

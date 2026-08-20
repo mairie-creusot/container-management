@@ -99,10 +99,17 @@ export interface ThreecxListState<T> {
   error: string | null;
 }
 
-/** Config publique : la clé API n'en fait JAMAIS partie (l'API ne la renvoie pas, même tronquée). */
+/** Mode d'authentification au XAPI — ClientID + clé API, ou identifiant + mot de passe d'une
+ * extension disposant des droits propriétaire système. */
+export type ThreecxAuthMode = "client-credentials" | "user";
+
+/** Config publique : ni la clé API ni le mot de passe n'en font partie (l'API ne les renvoie pas,
+ * même tronqués). `clientId`/`username` n'existent que dans le mode correspondant. */
 export interface ThreecxPublicConfig {
   baseUrl: string;
-  clientId: string;
+  authMode: ThreecxAuthMode;
+  clientId?: string;
+  username?: string;
   tlsRejectUnauthorized?: boolean;
 }
 

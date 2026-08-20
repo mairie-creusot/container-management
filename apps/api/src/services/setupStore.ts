@@ -92,16 +92,29 @@ export interface SetupGlpiConfig {
 
 /**
  * PBX 3CX (XAPI OData, voir services/threecx.ts) — stocké ICI comme HYCU/Nutanix : une instance
- * interne unique, même cycle de vie (/api/3cx/config). Authentification OAuth2 client credentials :
- * clientId = le DN du point de routage créé dans Admin Console → Integrations > API,
- * clientSecret = la clé remise UNE SEULE FOIS (chiffrée au repos, jamais renvoyée par une route).
+ * interne unique, même cycle de vie (/api/3cx/config). Deux voies d'authentification possibles vers
+ * le MÊME XAPI (`Authorization: Bearer`), au choix de l'admin :
+ *  - "client-credentials" : clientId = DN du point de routage créé dans Admin Console →
+ *    Integrations > API, clientSecret = la clé remise UNE SEULE FOIS, échangés sur /connect/token.
+ *  - "user" : identifiant + mot de passe d'une extension disposant des droits propriétaire système,
+ *    échangés sur /webclient/api/Login/GetAccessToken — seule voie disponible quand l'entrée
+ *    Integrations > API est absente de la console (build/licence).
+ * clientSecret ET password sont chiffrés au repos et ne ressortent JAMAIS d'une route.
  */
+export type ThreecxAuthMode = "client-credentials" | "user";
+
 export interface SetupThreecxConfig {
   // URL de base du PBX (ex: "https://pbx.exemple.fr:5001") — sans le suffixe /xapi/v1.
   baseUrl: string;
-  clientId: string;
+  // Absent dans une config écrite avant l'ajout du mode identifiant : migré en "client-credentials"
+  // à la lecture par getEffectiveThreecxConfig (jamais réécrit en place tant que rien ne change).
+  authMode?: ThreecxAuthMode;
+  clientId?: string;
   // clientSecret : chiffré au repos (voir encryptSecrets ci-dessous), comme hycu.password.
-  clientSecret: string;
+  clientSecret?: string;
+  username?: string;
+  // password : chiffré au repos, exactement comme clientSecret.
+  password?: string;
   // Absent = défaut config.threecx.tlsRejectUnauthorized. Pas un secret.
   tlsRejectUnauthorized?: boolean;
 }
@@ -237,6 +250,16 @@ function mapGlpiSecrets(cfg: SetupGlpiConfig, transform: (value: string) => stri
   };
 }
 
+/** Applique `transform` aux SEULS champs secrets de 3CX (clientSecret/password) — baseUrl, authMode,
+ * clientId et username ne sont pas des secrets. */
+function mapThreecxSecrets(cfg: SetupThreecxConfig, transform: (value: string) => string): SetupThreecxConfig {
+  return {
+    ...cfg,
+    ...(cfg.clientSecret ? { clientSecret: transform(cfg.clientSecret) } : {}),
+    ...(cfg.password ? { password: transform(cfg.password) } : {}),
+  };
+}
+
 /**
  * Chiffre (si besoin) tous les champs secrets d'une config avant écriture disque.
  * Utilise des spreads conditionnels (pas `champ: cfg.champ && {...}`) car exactOptionalPropertyTypes
@@ -259,9 +282,7 @@ function encryptSecrets(cfg: SetupConfig): SetupConfig {
       ? { hycu: { ...cfg.hycu, password: encryptSecretIfNeeded(cfg.hycu.password) } }
       : {}),
     ...(cfg.glpi ? { glpi: mapGlpiSecrets(cfg.glpi, encryptSecretIfNeeded) } : {}),
-    ...(cfg.threecx?.clientSecret
-      ? { threecx: { ...cfg.threecx, clientSecret: encryptSecretIfNeeded(cfg.threecx.clientSecret) } }
-      : {}),
+    ...(cfg.threecx ? { threecx: mapThreecxSecrets(cfg.threecx, encryptSecretIfNeeded) } : {}),
     ...(cfg.exagrid ? { exagrid: mapExagridSecrets(cfg.exagrid, encryptSecretIfNeeded) } : {}),
     ...(cfg.adDns?.password
       ? { adDns: { ...cfg.adDns, password: encryptSecretIfNeeded(cfg.adDns.password) } }
@@ -285,7 +306,7 @@ function hasLegacyPlaintextSecret(cfg: SetupConfig): boolean {
   if (cfg.nutanix?.password && !isEncrypted(cfg.nutanix.password)) return true;
   if (cfg.hycu?.password && !isEncrypted(cfg.hycu.password)) return true;
   if (cfg.glpi && [cfg.glpi.appToken, cfg.glpi.userToken, cfg.glpi.password].some((s) => s && !isEncrypted(s))) return true;
-  if (cfg.threecx?.clientSecret && !isEncrypted(cfg.threecx.clientSecret)) return true;
+  if (cfg.threecx && [cfg.threecx.clientSecret, cfg.threecx.password].some((s) => s && !isEncrypted(s))) return true;
   if (cfg.exagrid && [cfg.exagrid.community, cfg.exagrid.authKey, cfg.exagrid.privKey].some((s) => s && !isEncrypted(s))) return true;
   if (cfg.adDns?.password && !isEncrypted(cfg.adDns.password)) return true;
   if (cfg.registries?.some((r) => (r.password && !isEncrypted(r.password)) || (r.token && !isEncrypted(r.token)))) {
@@ -610,17 +631,18 @@ export async function clearGlpiConfig(): Promise<SetupConfig> {
   return next;
 }
 
-/** Config 3CX effective (clientSecret déchiffré), ou `null` si jamais configurée — même principe
- * que getEffectiveHycuConfig (aucun bootstrap par variable d'environnement : l'URL du PBX et la
- * clé API sont toujours saisies explicitement). */
+/** Config 3CX effective (clientSecret/password déchiffrés), ou `null` si jamais configurée — même
+ * principe que getEffectiveHycuConfig (aucun bootstrap par variable d'environnement : l'URL du PBX
+ * et les identifiants sont toujours saisis explicitement). */
 export async function getEffectiveThreecxConfig(): Promise<SetupThreecxConfig | null> {
   const current = await getCurrent();
   if (!current.threecx) return null;
-  return { ...current.threecx, clientSecret: decryptSecret(current.threecx.clientSecret) };
+  // Migration à la lecture : une config enregistrée avant l'ajout du mode reste en client credentials.
+  return { ...mapThreecxSecrets(current.threecx, decryptSecret), authMode: current.threecx.authMode ?? "client-credentials" };
 }
 
-/** PUT /api/3cx/config — configure/remplace le PBX 3CX (clientSecret chiffré avant écriture),
- * n'affecte aucune autre section — même principe que setHycuConfig ci-dessus. */
+/** PUT /api/3cx/config — configure/remplace le PBX 3CX (clientSecret/password chiffrés avant
+ * écriture), n'affecte aucune autre section — même principe que setHycuConfig ci-dessus. */
 export async function setThreecxConfig(input: SetupThreecxConfig): Promise<SetupConfig> {
   const current = await getCurrent();
   const next: SetupConfig = encryptSecrets({ ...current, threecx: input });

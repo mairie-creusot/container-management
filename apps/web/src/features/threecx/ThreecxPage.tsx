@@ -17,8 +17,10 @@ import type {
   ThreecxAccess,
   ThreecxAccessState,
   ThreecxActiveCall,
+  ThreecxAuthMode,
   ThreecxCallParticipant,
   ThreecxListState,
+  ThreecxPublicConfig,
 } from "@/features/threecx/types";
 import { canAdminister } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
@@ -184,13 +186,38 @@ function ThreecxCallCard({ call, elapsedSeconds }: { call: ThreecxActiveCall; el
 
 interface ThreecxFormState {
   baseUrl: string;
+  authMode: ThreecxAuthMode;
   clientId: string;
   clientSecret: string;
+  username: string;
+  password: string;
   tlsRejectUnauthorized: boolean;
 }
 
 /** Vérification TLS active par défaut — c'est aussi le défaut du serveur (config.threecx). */
-const EMPTY_FORM: ThreecxFormState = { baseUrl: "", clientId: "", clientSecret: "", tlsRejectUnauthorized: true };
+const EMPTY_FORM: ThreecxFormState = {
+  baseUrl: "",
+  authMode: "client-credentials",
+  clientId: "",
+  clientSecret: "",
+  username: "",
+  password: "",
+  tlsRejectUnauthorized: true,
+};
+
+/** Formulaire pré-rempli depuis la config enregistrée — les secrets restent TOUJOURS vides,
+ * l'API ne les renvoie jamais et un champ vide signifie « conserver l'existant ». */
+function formFromConfig(config: ThreecxPublicConfig): ThreecxFormState {
+  return {
+    baseUrl: config.baseUrl,
+    authMode: config.authMode,
+    clientId: config.clientId ?? "",
+    clientSecret: "",
+    username: config.username ?? "",
+    password: "",
+    tlsRejectUnauthorized: config.tlsRejectUnauthorized ?? true,
+  };
+}
 
 function isHttpUrl(value: string): boolean {
   return /^https?:\/\/\S+$/i.test(value);
@@ -206,25 +233,38 @@ function ThreecxConfigSection() {
   const [form, setForm] = useState<ThreecxFormState>(EMPTY_FORM);
 
   useEffect(() => {
-    if (config) {
-      setForm({
-        baseUrl: config.baseUrl,
-        clientId: config.clientId,
-        clientSecret: "",
-        tlsRejectUnauthorized: config.tlsRejectUnauthorized ?? true,
-      });
-    }
+    if (config) setForm(formFromConfig(config));
   }, [config]);
+
+  // Un secret vide = conserver l'existant ; impossible s'il n'y a rien à conserver, ou si le mode
+  // enregistré n'est pas celui qu'on soumet (l'autre mode n'a jamais eu de secret enregistré).
+  const keepsSecret = configured && config?.authMode === form.authMode;
 
   function currentInput(): ThreecxConfigFormInput | null {
     const baseUrl = form.baseUrl.trim();
+    if (!isHttpUrl(baseUrl)) return null;
+
+    if (form.authMode === "user") {
+      const username = form.username.trim();
+      const password = form.password.trim();
+      if (!username) return null;
+      if (!password && !keepsSecret) return null;
+      return {
+        baseUrl,
+        authMode: "user",
+        username,
+        tlsRejectUnauthorized: form.tlsRejectUnauthorized,
+        ...(password ? { password } : {}),
+      };
+    }
+
     const clientId = form.clientId.trim();
     const clientSecret = form.clientSecret.trim();
-    if (!isHttpUrl(baseUrl) || !clientId) return null;
-    // Clé vide = conserver l'existante ; impossible s'il n'y a rien à conserver.
-    if (!clientSecret && !configured) return null;
+    if (!clientId) return null;
+    if (!clientSecret && !keepsSecret) return null;
     return {
       baseUrl,
+      authMode: "client-credentials",
       clientId,
       tlsRejectUnauthorized: form.tlsRejectUnauthorized,
       ...(clientSecret ? { clientSecret } : {}),
@@ -239,16 +279,7 @@ function ThreecxConfigSection() {
   function closeForm() {
     setEditing(false);
     dispatch(clearThreecxTestResult());
-    setForm(
-      config
-        ? {
-            baseUrl: config.baseUrl,
-            clientId: config.clientId,
-            clientSecret: "",
-            tlsRejectUnauthorized: config.tlsRejectUnauthorized ?? true,
-          }
-        : EMPTY_FORM,
-    );
+    setForm(config ? formFromConfig(config) : EMPTY_FORM);
   }
 
   async function handleTest() {
@@ -264,7 +295,7 @@ function ThreecxConfigSection() {
     const result = await dispatch(saveThreecxConfig(input));
     if (saveThreecxConfig.fulfilled.match(result)) {
       setEditing(false);
-      setForm((f) => ({ ...f, clientSecret: "" }));
+      setForm((f) => ({ ...f, clientSecret: "", password: "" }));
       dispatch(clearThreecxTestResult());
     }
   }
@@ -273,7 +304,7 @@ function ThreecxConfigSection() {
     const ok = await confirm({
       title: "Retirer la configuration 3CX ?",
       description:
-        "QUAI n'interrogera plus le PBX : appels en cours, postes et files d'attente disparaîtront de cette page. La clé API enregistrée est effacée. Aucun réglage n'est modifié sur le PBX.",
+        "QUAI n'interrogera plus le PBX : appels en cours, postes et files d'attente disparaîtront de cette page. Les identifiants enregistrés (clé API ou mot de passe) sont effacés. Aucun réglage n'est modifié sur le PBX.",
       confirmLabel: "Retirer",
       variant: "danger",
     });
@@ -292,8 +323,9 @@ function ThreecxConfigSection() {
         <div>
           <h3 style={{ marginBottom: 4 }}>Configuration</h3>
           <p>
-            Accès en LECTURE SEULE au XAPI du PBX 3CX (OAuth2 client credentials). La connexion est réellement
-            testée avant l'enregistrement — jamais persistée à l'aveugle.
+            Accès en LECTURE SEULE au XAPI du PBX 3CX, au choix par ClientID + clé API ou par identifiant et mot
+            de passe. La connexion est réellement testée dans le mode choisi avant l'enregistrement — jamais
+            persistée à l'aveugle.
           </p>
         </div>
         {configured && !editing && (
@@ -343,7 +375,22 @@ function ThreecxConfigSection() {
           <KeyValueList
             rows={[
               { key: "URL du PBX", value: config.baseUrl },
-              { key: "ClientID (DN du point de routage)", value: config.clientId },
+              {
+                key: "Mode d'authentification",
+                value:
+                  config.authMode === "user"
+                    ? "Identifiant et mot de passe (extension propriétaire système)"
+                    : "ClientID et clé API (point de routage)",
+              },
+              ...(config.authMode === "user"
+                ? [
+                    { key: "Identifiant", value: config.username ?? MISSING },
+                    { key: "Mot de passe", value: "Enregistré et chiffré — jamais réaffiché" },
+                  ]
+                : [
+                    { key: "ClientID (DN du point de routage)", value: config.clientId ?? MISSING },
+                    { key: "Clé API", value: "Enregistrée et chiffrée — jamais réaffichée" },
+                  ]),
               {
                 key: "Vérification du certificat TLS",
                 value:
@@ -353,7 +400,6 @@ function ThreecxConfigSection() {
                       ? "Activée"
                       : "Désactivée",
               },
-              { key: "Clé API", value: "Enregistrée et chiffrée — jamais réaffichée" },
             ]}
           />
         </div>
@@ -361,14 +407,6 @@ function ThreecxConfigSection() {
 
       {showForm && (
         <form className="card" style={{ marginBottom: 24, display: "flex", flexDirection: "column", gap: 12 }} onSubmit={handleSave}>
-          <p className="threecx-form-help">
-            Ces identifiants se créent dans la console d'administration du PBX : <strong>Admin Console →
-            Integrations &gt; API</strong>, sur un point de routage dont l'option «&nbsp;XAPI Access Enabled&nbsp;»
-            est activée. Le ClientID est le <strong>DN de ce point de routage</strong> et la clé API n'est affichée
-            qu'une seule fois à sa création. Le XAPI n'est disponible qu'avec une <strong>licence 3CX
-            Enterprise</strong> : sans elle, le PBX répond mais refuse chaque requête.
-          </p>
-
           <div className="field">
             <label htmlFor="threecx-base-url">URL de base du PBX</label>
             <input
@@ -380,34 +418,121 @@ function ThreecxConfigSection() {
               required
             />
             <span className="threecx-field-hint">
-              Adresse du PBX sans le suffixe /xapi/v1 — QUAI l'ajoute lui-même, ainsi que /connect/token.
+              Adresse du PBX sans le suffixe /xapi/v1 — QUAI l'ajoute lui-même, ainsi que le chemin
+              d'authentification.
             </span>
           </div>
 
-          <div className="field">
-            <label htmlFor="threecx-client-id">ClientID — DN du point de routage</label>
-            <input
-              id="threecx-client-id"
-              value={form.clientId}
-              onChange={(event) => setForm((f) => ({ ...f, clientId: event.target.value }))}
-              disabled={configSaving}
-              autoComplete="off"
-              required
-            />
-          </div>
+          <fieldset className="threecx-authmode" disabled={configSaving}>
+            <legend>Comment QUAI s'authentifie auprès du PBX</legend>
+            <label className="threecx-authmode__choice">
+              <input
+                type="radio"
+                name="threecx-auth-mode"
+                value="client-credentials"
+                checked={form.authMode === "client-credentials"}
+                onChange={() => setForm((f) => ({ ...f, authMode: "client-credentials" }))}
+              />
+              <span>
+                ClientID et clé API
+                <span className="threecx-field-hint">
+                  Point de routage créé dans Admin Console → Integrations &gt; API.
+                </span>
+              </span>
+            </label>
+            <label className="threecx-authmode__choice">
+              <input
+                type="radio"
+                name="threecx-auth-mode"
+                value="user"
+                checked={form.authMode === "user"}
+                onChange={() => setForm((f) => ({ ...f, authMode: "user" }))}
+              />
+              <span>
+                Identifiant et mot de passe
+                <span className="threecx-field-hint">
+                  Extension du PBX disposant des droits d'administration système.
+                </span>
+              </span>
+            </label>
+          </fieldset>
 
-          <div className="field">
-            <label htmlFor="threecx-client-secret">Clé API{configured ? " (laisser vide pour conserver l'existante)" : ""}</label>
-            <input
-              id="threecx-client-secret"
-              type="password"
-              value={form.clientSecret}
-              onChange={(event) => setForm((f) => ({ ...f, clientSecret: event.target.value }))}
-              autoComplete="new-password"
-              disabled={configSaving}
-              {...(configured ? {} : { required: true })}
-            />
-          </div>
+          {form.authMode === "user" ? (
+            <>
+              <p className="threecx-form-help">
+                Ce mode existe parce que l'entrée <strong>Intégrations → API</strong> n'est pas disponible sur tous
+                les builds et toutes les licences 3CX : sans elle, aucun ClientID ni aucune clé API ne peut être
+                créé. QUAI s'authentifie alors comme le fait le client web du PBX, avec l'identifiant et le mot de
+                passe d'une <strong>extension disposant des droits propriétaire système</strong> — un compte sans
+                ces droits obtiendra peut-être un jeton, mais le PBX refusera les requêtes XAPI. Le XAPI reste
+                soumis à une <strong>licence 3CX Enterprise</strong>.
+              </p>
+
+              <div className="field">
+                <label htmlFor="threecx-username">Identifiant (extension avec droits propriétaire système)</label>
+                <input
+                  id="threecx-username"
+                  value={form.username}
+                  onChange={(event) => setForm((f) => ({ ...f, username: event.target.value }))}
+                  disabled={configSaving}
+                  autoComplete="off"
+                  required
+                />
+              </div>
+
+              <div className="field">
+                <label htmlFor="threecx-password">
+                  Mot de passe{keepsSecret ? " (laisser vide pour conserver l'existant)" : ""}
+                </label>
+                <input
+                  id="threecx-password"
+                  type="password"
+                  value={form.password}
+                  onChange={(event) => setForm((f) => ({ ...f, password: event.target.value }))}
+                  autoComplete="new-password"
+                  disabled={configSaving}
+                  {...(keepsSecret ? {} : { required: true })}
+                />
+              </div>
+            </>
+          ) : (
+            <>
+              <p className="threecx-form-help">
+                Ces identifiants se créent dans la console d'administration du PBX : <strong>Admin Console →
+                Integrations &gt; API</strong>, sur un point de routage dont l'option «&nbsp;XAPI Access
+                Enabled&nbsp;» est activée. Le ClientID est le <strong>DN de ce point de routage</strong> et la clé
+                API n'est affichée qu'une seule fois à sa création. Le XAPI n'est disponible qu'avec une{" "}
+                <strong>licence 3CX Enterprise</strong> : sans elle, le PBX répond mais refuse chaque requête.
+              </p>
+
+              <div className="field">
+                <label htmlFor="threecx-client-id">ClientID — DN du point de routage</label>
+                <input
+                  id="threecx-client-id"
+                  value={form.clientId}
+                  onChange={(event) => setForm((f) => ({ ...f, clientId: event.target.value }))}
+                  disabled={configSaving}
+                  autoComplete="off"
+                  required
+                />
+              </div>
+
+              <div className="field">
+                <label htmlFor="threecx-client-secret">
+                  Clé API{keepsSecret ? " (laisser vide pour conserver l'existante)" : ""}
+                </label>
+                <input
+                  id="threecx-client-secret"
+                  type="password"
+                  value={form.clientSecret}
+                  onChange={(event) => setForm((f) => ({ ...f, clientSecret: event.target.value }))}
+                  autoComplete="new-password"
+                  disabled={configSaving}
+                  {...(keepsSecret ? {} : { required: true })}
+                />
+              </div>
+            </>
+          )}
 
           <label className="threecx-checkbox" htmlFor="threecx-tls">
             <input
@@ -426,7 +551,11 @@ function ThreecxConfigSection() {
             </span>
           </label>
 
-          <p className="threecx-form-note">La clé API est stockée chiffrée et n'est jamais renvoyée par l'API, même tronquée.</p>
+          <p className="threecx-form-note">
+            {form.authMode === "user"
+              ? "Le mot de passe est stocké chiffré et n'est jamais renvoyé par l'API, même tronqué — ni journalisé, ni repris dans un message d'erreur."
+              : "La clé API est stockée chiffrée et n'est jamais renvoyée par l'API, même tronquée."}
+          </p>
 
           <div style={{ display: "flex", gap: 8 }}>
             <button type="submit" className="btn btn-primary" disabled={configSaving || !valid}>
