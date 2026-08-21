@@ -1,6 +1,9 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost, apiPut } from "@/api/client";
 import type {
+  GlpiAccount,
+  GlpiAccountPage,
+  GlpiBrowseScope,
   GlpiConfigFormInput,
   GlpiConfigStatus,
   GlpiCreateComputerOutcome,
@@ -11,6 +14,7 @@ import type {
   GlpiStatus,
   GlpiTestResult,
   GlpiTicketDetail,
+  GlpiTicketPage,
   GlpiUpdateComputerOutcome,
 } from "@/features/glpi/types";
 
@@ -31,6 +35,10 @@ export type GlpiTicketResult =
   | { kind: "ok"; data: GlpiTicketDetail }
   | { kind: "not-found" }
   | { kind: "error"; message: string };
+
+/** Le backend plafonne une page à 200 (GLPI_PAGE_LIMIT_MAX) : jamais « tout charger ». */
+export const TICKETS_PAGE_SIZE = 50;
+export const ACCOUNTS_PAGE_SIZE = 25;
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : fallback;
@@ -74,6 +82,30 @@ function normalizeMyTickets(raw: unknown): GlpiMyTickets {
     ...(typeof wire.candidateCount === "number" ? { candidateCount: wire.candidateCount } : {}),
     ...(wire.error ? { error: wire.error } : {}),
     tickets: asArray(wire.tickets),
+  };
+}
+
+function normalizeAccountPage(raw: unknown): GlpiAccountPage {
+  const wire = (raw ?? {}) as Partial<GlpiAccountPage>;
+  return {
+    users: asArray<GlpiAccount>(wire.users),
+    offset: typeof wire.offset === "number" ? wire.offset : 0,
+    limit: typeof wire.limit === "number" ? wire.limit : ACCOUNTS_PAGE_SIZE,
+    ...(typeof wire.total === "number" ? { total: wire.total } : {}),
+    ...(wire.error ? { error: wire.error } : {}),
+  };
+}
+
+function normalizeTicketPage(raw: unknown): GlpiTicketPage {
+  const wire = (raw ?? {}) as Partial<GlpiTicketPage>;
+  return {
+    scope: wire.scope === "all" ? "all" : "requester",
+    ...(typeof wire.requesterId === "number" ? { requesterId: wire.requesterId } : {}),
+    tickets: asArray(wire.tickets),
+    offset: typeof wire.offset === "number" ? wire.offset : 0,
+    limit: typeof wire.limit === "number" ? wire.limit : TICKETS_PAGE_SIZE,
+    ...(typeof wire.total === "number" ? { total: wire.total } : {}),
+    ...(wire.error ? { error: wire.error } : {}),
   };
 }
 
@@ -155,6 +187,19 @@ export interface GlpiState {
   followupSaving: boolean;
   followupError: string | null;
 
+  /** `null` = « Mes tickets », le périmètre par défaut. Sinon on consulte quelqu'un d'autre. */
+  browseScope: GlpiBrowseScope | null;
+  browseAccount: GlpiAccount | null;
+  browseOffset: number;
+  browseTickets: GlpiTicketPage | null;
+  browseLoad: LoadStatus;
+  browseError: string | null;
+
+  accountQuery: string;
+  accounts: GlpiAccountPage | null;
+  accountsLoad: LoadStatus;
+  accountsError: string | null;
+
   inventory: GlpiInventoryDiff | null;
   inventoryLoad: LoadStatus;
   inventoryError: string | null;
@@ -194,6 +239,18 @@ const initialState: GlpiState = {
   ticketNotFound: false,
   followupSaving: false,
   followupError: null,
+
+  browseScope: null,
+  browseAccount: null,
+  browseOffset: 0,
+  browseTickets: null,
+  browseLoad: "idle",
+  browseError: null,
+
+  accountQuery: "",
+  accounts: null,
+  accountsLoad: "idle",
+  accountsError: null,
 
   inventory: null,
   inventoryLoad: "idle",
@@ -237,13 +294,55 @@ export const fetchGlpiMyTickets = createAsyncThunk<GlpiFetchResult<GlpiMyTickets
   }
 });
 
-export const fetchGlpiTicket = createAsyncThunk<GlpiTicketResult, number>("glpi/fetchTicket", async (ticketId) => {
+/** `browse: true` passe par la route privilégiée (ticket d'un autre compte) — jamais par défaut. */
+export const fetchGlpiTicket = createAsyncThunk<GlpiTicketResult, { id: number; browse?: boolean }>(
+  "glpi/fetchTicket",
+  async ({ id, browse }) => {
+    const path = browse ? `/glpi/browse/tickets/${id}` : `/glpi/tickets/${id}`;
+    try {
+      const data = await apiGet<GlpiTicketDetail>(path);
+      return { kind: "ok", data: { ...data, followups: asArray(data.followups) } };
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return { kind: "not-found" };
+      return { kind: "error", message: errorMessage(error, `Impossible de lire le ticket ${id}.`) };
+    }
+  },
+);
+
+/** Recherche de comptes GLPI — LECTURE SEULE, réservée par le backend aux rôles operator/admin. */
+export const fetchGlpiAccounts = createAsyncThunk<
+  GlpiFetchResult<GlpiAccountPage>,
+  { query: string; offset?: number; limit?: number }
+>("glpi/fetchAccounts", async ({ query, offset = 0, limit = ACCOUNTS_PAGE_SIZE }) => {
+  const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  if (query.trim()) params.set("q", query.trim());
+  return readOrDescribe(
+    `/glpi/browse/accounts?${params.toString()}`,
+    "Impossible de lire les comptes GLPI.",
+    normalizeAccountPage,
+  );
+});
+
+/** Tickets d'un compte donné (`requesterId`) ou de toute l'instance — même garde côté backend. */
+export const fetchGlpiBrowseTickets = createAsyncThunk<
+  GlpiFetchResult<GlpiTicketPage>,
+  { requesterId?: number; offset?: number; limit?: number }
+>("glpi/fetchBrowseTickets", async ({ requesterId, offset = 0, limit = TICKETS_PAGE_SIZE }) => {
+  const params = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+  if (requesterId !== undefined) params.set("requesterId", String(requesterId));
   try {
-    const data = await apiGet<GlpiTicketDetail>(`/glpi/tickets/${ticketId}`);
-    return { kind: "ok", data: { ...data, followups: asArray(data.followups) } };
+    return { kind: "ok", data: normalizeTicketPage(await apiGet<unknown>(`/glpi/browse/tickets?${params.toString()}`)) };
   } catch (error) {
-    if (error instanceof ApiError && error.status === 404) return { kind: "not-found" };
-    return { kind: "error", message: errorMessage(error, `Impossible de lire le ticket ${ticketId}.`) };
+    if (error instanceof ApiError) {
+      if (error.status === 404) return { kind: "unavailable" };
+      // Un 502 porte le contrat complet : « GLPI injoignable » est un verdict, pas une erreur muette.
+      const body = error.details;
+      if (body && typeof body["configured"] === "boolean") {
+        return { kind: "ok", data: normalizeTicketPage({ ...body, error: error.message }) };
+      }
+      return { kind: "error", message: error.message };
+    }
+    return { kind: "error", message: "Impossible de lire ces tickets GLPI." };
   }
 });
 
@@ -351,6 +450,27 @@ const glpiSlice = createSlice({
       state.followupError = null;
       state.ticketLoad = action.payload === null ? "idle" : "loading";
     },
+    /** Bascule le périmètre consulté. `null` = « Mes tickets » : la liste d'autrui est jetée. */
+    setGlpiBrowseTarget(state, action: PayloadAction<{ scope: GlpiBrowseScope; account?: GlpiAccount } | null>) {
+      state.browseScope = action.payload?.scope ?? null;
+      state.browseAccount = action.payload?.account ?? null;
+      state.browseOffset = 0;
+      state.browseTickets = null;
+      state.browseError = null;
+      // « Un compte GLPI » sans compte encore choisi n'interroge rien : on attend la sélection.
+      state.browseLoad = action.payload?.scope === "all" || action.payload?.account ? "loading" : "idle";
+      state.selectedTicketId = null;
+      state.ticket = null;
+      state.ticketLoad = "idle";
+      state.ticketError = null;
+      state.ticketNotFound = false;
+    },
+    setGlpiBrowseOffset(state, action: PayloadAction<number>) {
+      state.browseOffset = Math.max(0, action.payload);
+    },
+    setGlpiAccountQuery(state, action: PayloadAction<string>) {
+      state.accountQuery = action.payload;
+    },
     clearGlpiTestResult(state) {
       state.testResult = null;
     },
@@ -407,7 +527,7 @@ const glpiSlice = createSlice({
 
       .addCase(fetchGlpiTicket.pending, (state, action) => {
         state.ticketLoad = "loading";
-        state.selectedTicketId = action.meta.arg;
+        state.selectedTicketId = action.meta.arg.id;
         state.ticketError = null;
         state.ticketNotFound = false;
       })
@@ -440,6 +560,52 @@ const glpiSlice = createSlice({
       .addCase(addGlpiFollowup.rejected, (state, action) => {
         state.followupSaving = false;
         state.followupError = action.payload ?? "Impossible d'ajouter ce commentaire au ticket.";
+      })
+
+      .addCase(fetchGlpiAccounts.pending, (state) => {
+        state.accountsLoad = "loading";
+        state.accountsError = null;
+      })
+      .addCase(fetchGlpiAccounts.fulfilled, (state, action) => {
+        const result = action.payload;
+        if (result.kind === "ok") {
+          state.accountsLoad = "ready";
+          state.accounts = result.data;
+          state.accountsError = null;
+          return;
+        }
+        state.accountsLoad = "error";
+        state.accounts = null;
+        state.accountsError =
+          result.kind === "unavailable"
+            ? "Cette API QUAI n'expose pas la recherche de comptes GLPI."
+            : result.message;
+      })
+      .addCase(fetchGlpiAccounts.rejected, (state, action) => {
+        state.accountsLoad = "error";
+        state.accountsError = action.error.message ?? "Impossible de lire les comptes GLPI.";
+      })
+
+      .addCase(fetchGlpiBrowseTickets.pending, (state) => {
+        state.browseLoad = "loading";
+        state.browseError = null;
+      })
+      .addCase(fetchGlpiBrowseTickets.fulfilled, (state, action) => {
+        const result = action.payload;
+        if (result.kind === "ok") {
+          state.browseLoad = "ready";
+          state.browseTickets = result.data;
+          state.browseError = null;
+          return;
+        }
+        state.browseLoad = "error";
+        state.browseTickets = null;
+        if (result.kind === "unavailable") state.backendUnavailable = true;
+        state.browseError = result.kind === "error" ? result.message : null;
+      })
+      .addCase(fetchGlpiBrowseTickets.rejected, (state, action) => {
+        state.browseLoad = "error";
+        state.browseError = action.error.message ?? "Impossible de lire ces tickets GLPI.";
       })
 
       .addCase(fetchGlpiInventoryDiff.pending, (state) => {
@@ -529,6 +695,12 @@ const glpiSlice = createSlice({
         state.ticketsLoad = "idle";
         state.inventoryLoad = "idle";
         state.searchOptions = null;
+        state.browseScope = null;
+        state.browseAccount = null;
+        state.browseTickets = null;
+        state.browseLoad = "idle";
+        state.accounts = null;
+        state.accountsLoad = "idle";
       })
       .addCase(saveGlpiConfig.rejected, (state, action) => {
         state.configSaving = false;
@@ -563,6 +735,12 @@ const glpiSlice = createSlice({
         state.ticketsLoad = "ready";
         state.ticket = null;
         state.selectedTicketId = null;
+        state.browseScope = null;
+        state.browseAccount = null;
+        state.browseTickets = null;
+        state.browseLoad = "idle";
+        state.accounts = null;
+        state.accountsLoad = "idle";
         state.inventory = null;
         state.inventoryLoad = "idle";
         state.searchOptions = null;
@@ -597,7 +775,14 @@ const glpiSlice = createSlice({
   },
 });
 
-export const { selectGlpiTicket, clearGlpiTestResult, clearGlpiInventoryFeedback } = glpiSlice.actions;
+export const {
+  selectGlpiTicket,
+  setGlpiAccountQuery,
+  setGlpiBrowseOffset,
+  setGlpiBrowseTarget,
+  clearGlpiTestResult,
+  clearGlpiInventoryFeedback,
+} = glpiSlice.actions;
 
 /** Sélecteur tolérant au câblage : tant que `glpi` n'est pas monté dans store.ts, la page affiche
  * son état initial au lieu de planter. */

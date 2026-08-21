@@ -28,6 +28,8 @@ export interface GlpiTicketSummary {
   title: string;
   openedAt?: string;
   updatedAt?: string;
+  /** Demandeur libellé par GLPI, seulement s'il est réellement renvoyé. */
+  requesterLabel?: string;
 }
 
 export interface GlpiFollowup {
@@ -43,6 +45,8 @@ export interface GlpiTicketDetail extends GlpiTicketSummary {
   solvedAt?: string;
   closedAt?: string;
   followups: GlpiFollowup[];
+  /** Renseigné uniquement par la lecture privilégiée /api/glpi/browse/tickets/:id. */
+  requesterIds?: number[];
 }
 
 export interface GlpiMyTickets {
@@ -51,6 +55,40 @@ export interface GlpiMyTickets {
   account?: GlpiAccountMatch;
   candidateCount?: number;
   tickets: GlpiTicketSummary[];
+  error?: string;
+}
+
+// --- Consultation des tickets d'un autre compte (rôles operator/admin, LECTURE SEULE) ---
+
+/** Compte GLPI tel que renvoyé par GET /api/glpi/browse/accounts. */
+export interface GlpiAccount {
+  id: number;
+  login: string;
+  firstName?: string;
+  lastName?: string;
+  /** Nom réel si GLPI le communique, sinon l'identifiant — jamais fabriqué côté QUAI. */
+  displayName: string;
+  active?: boolean;
+}
+
+/** `total` absent = GLPI ne l'a pas communiqué : l'interface le dit au lieu de l'estimer. */
+export interface GlpiAccountPage {
+  users: GlpiAccount[];
+  offset: number;
+  limit: number;
+  total?: number;
+  error?: string;
+}
+
+export type GlpiBrowseScope = "requester" | "all";
+
+export interface GlpiTicketPage {
+  scope: GlpiBrowseScope;
+  requesterId?: number;
+  tickets: GlpiTicketSummary[];
+  offset: number;
+  limit: number;
+  total?: number;
   error?: string;
 }
 

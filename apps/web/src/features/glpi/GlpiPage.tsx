@@ -4,10 +4,12 @@ import { canAdminister } from "@/features/auth/authSlice";
 import StatusPill from "@/components/StatusPill";
 import { IconInfo } from "@/components/icons";
 import {
+  fetchGlpiBrowseTickets,
   fetchGlpiInventoryDiff,
   fetchGlpiMyTickets,
   fetchGlpiStatus,
   selectGlpiState,
+  TICKETS_PAGE_SIZE,
 } from "@/features/glpi/glpiSlice";
 import GlpiConfigSection from "@/features/glpi/GlpiConfigSection";
 import GlpiInventoryTab from "@/features/glpi/GlpiInventoryTab";
@@ -23,7 +25,8 @@ const TABS: { id: GlpiTab; label: string }[] = [
 
 export default function GlpiPage() {
   const dispatch = useAppDispatch();
-  const { status, statusLoad, statusError, backendUnavailable, configured } = useAppSelector(selectGlpiState);
+  const { status, statusLoad, statusError, backendUnavailable, configured, browseScope, browseAccount, browseOffset } =
+    useAppSelector(selectGlpiState);
   const session = useAppSelector((s) => s.auth.session);
   const admin = canAdminister(session);
   const [activeTab, setActiveTab] = useState<GlpiTab>("tickets");
@@ -34,8 +37,24 @@ export default function GlpiPage() {
 
   function handleRefresh() {
     dispatch(fetchGlpiStatus());
-    if (activeTab === "tickets") dispatch(fetchGlpiMyTickets());
-    if (activeTab === "inventory") dispatch(fetchGlpiInventoryDiff());
+    if (activeTab === "inventory") {
+      dispatch(fetchGlpiInventoryDiff());
+      return;
+    }
+    // Le périmètre consulté commande ce qu'on relit : « Mes tickets » ne devient jamais implicite.
+    if (browseScope === null) {
+      dispatch(fetchGlpiMyTickets());
+      return;
+    }
+    if (browseScope === "all" || browseAccount) {
+      dispatch(
+        fetchGlpiBrowseTickets({
+          ...(browseAccount ? { requesterId: browseAccount.id } : {}),
+          offset: browseOffset,
+          limit: TICKETS_PAGE_SIZE,
+        }),
+      );
+    }
   }
 
   const unreachable = configured && status?.reachable === false;
@@ -58,8 +77,9 @@ export default function GlpiPage() {
           <div>
             <h2>Assistance GLPI</h2>
             <p>
-              Tickets dont vous êtes demandeur dans GLPI, et réconciliation entre l'inventaire réel connu de QUAI et
-              la CMDB GLPI. QUAI n'affiche que ce que l'instance renvoie réellement.
+              Tickets dont vous êtes demandeur dans GLPI — et, pour les rôles opérateur et administrateur, ceux de
+              n'importe quel autre compte GLPI en lecture seule. Plus la réconciliation entre l'inventaire réel connu
+              de QUAI et la CMDB GLPI. QUAI n'affiche que ce que l'instance renvoie réellement.
             </p>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>

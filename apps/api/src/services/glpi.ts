@@ -7,7 +7,9 @@
  * PÉRIMÈTRE D'ÉCRITURE STRICT (autorisé par l'utilisateur, borné ici) : créer un ticket, ajouter
  * un suivi (ITILFollowup), passer un ticket en résolu. Aucune suppression, et la seule mutation
  * d'un ticket existant est `{ status: SOLVED }` — updateTicketStatusSolved n'accepte aucun autre
- * champ, il n'existe donc pas de chemin de code capable de modifier autre chose.
+ * champ, il n'existe donc pas de chemin de code capable de modifier autre chose. La consultation
+ * des comptes (searchGlpiUsers) et des tickets d'autrui (listGlpiTicketsPage / getGlpiTicket) est
+ * strictement en LECTURE.
  *
  * Formes d'API — sources explicites (doc officielle glpi-project/glpi/apirest.md, consultée le
  * 19/08/2026), confirmé vs supposé :
@@ -54,6 +56,8 @@ export interface GlpiTicketSummary {
   statusLabel?: string;
   openedAt?: string;
   updatedAt?: string;
+  /** Demandeur tel que libellé par GLPI, seulement s'il est réellement renvoyé. */
+  requesterLabel?: string;
 }
 
 export interface GlpiFollowup {
@@ -69,6 +73,34 @@ export interface GlpiTicketDetail extends GlpiTicketSummary {
   solvedAt?: string;
   closedAt?: string;
   followups: GlpiFollowup[];
+  /** Demandeurs GLPI — renseigné UNIQUEMENT pour une lecture privilégiée (voir getGlpiTicket). */
+  requesterIds?: number[];
+}
+
+/** Compte GLPI en LECTURE SEULE — projection minimale, jamais l'objet /User brut. */
+export interface GlpiUserSummary {
+  id: number;
+  login: string;
+  firstName?: string;
+  lastName?: string;
+  /** Nom réel si GLPI le communique, sinon l'identifiant — jamais fabriqué. */
+  displayName: string;
+  active?: boolean;
+}
+
+/** Page de résultats : `total` absent = l'instance ne l'a pas communiqué, jamais estimé. */
+export interface GlpiUserPage {
+  users: GlpiUserSummary[];
+  offset: number;
+  limit: number;
+  total?: number;
+}
+
+export interface GlpiTicketPage {
+  tickets: GlpiTicketSummary[];
+  offset: number;
+  limit: number;
+  total?: number;
 }
 
 /** Rapprochement du compte GLPI d'un utilisateur QUAI (authentifié en AD/LDAP) par le champ
@@ -179,6 +211,29 @@ const USER_SEARCH_OPTION = {
 
 const MAX_TICKETS_RANGE = 200;
 
+/** Plafond dur d'une page (tickets comme comptes) : une collectivité a des milliers de tickets,
+ * aucun appelant ne peut demander à tout charger d'un coup. */
+export const GLPI_PAGE_LIMIT_MAX = 200;
+export const GLPI_PAGE_LIMIT_DEFAULT = 50;
+
+function clampPage(offset?: number, limit?: number): { offset: number; limit: number } {
+  const start = Number.isSafeInteger(offset) && (offset as number) >= 0 ? (offset as number) : 0;
+  const size =
+    Number.isSafeInteger(limit) && (limit as number) > 0
+      ? Math.min(limit as number, GLPI_PAGE_LIMIT_MAX)
+      : GLPI_PAGE_LIMIT_DEFAULT;
+  return { offset: start, limit: size };
+}
+
+/** `Content-Range: 0-24/1234` (apirest.md, `GET /:itemtype`) — `undefined` si absent ou illisible. */
+function parseContentRangeTotal(header: string | null): number | undefined {
+  if (!header) return undefined;
+  const match = /\/\s*(\d+)\s*$/.exec(header);
+  if (!match) return undefined;
+  const total = Number(match[1]);
+  return Number.isSafeInteger(total) ? total : undefined;
+}
+
 // --- Accès HTTP ---
 
 function loadConfigOrNull(cfg: SetupGlpiConfig | null): SetupGlpiConfig | null {
@@ -211,6 +266,8 @@ interface GlpiHttpResult {
   status: number;
   raw: string;
   data: unknown;
+  /** `Content-Range: 0-24/1234` de `GET /:itemtype` — seule source du total, jamais déduit. */
+  contentRange: string | null;
 }
 
 /** Un appel HTTP vers apirest.php — `fetch` + AbortSignal (même patron que services/registries/
@@ -245,7 +302,7 @@ async function glpiFetch(
         data = null;
       }
     }
-    return { status: response.status, raw, data };
+    return { status: response.status, raw, data, contentRange: response.headers.get("Content-Range") };
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
       throw new GlpiError(`GLPI n'a pas répondu à ${method} ${path} en moins de ${config.glpi.requestTimeoutMs}ms`);
@@ -488,7 +545,8 @@ interface SearchCriterion {
 function buildSearchQuery(criteria: SearchCriterion[], forcedisplay: number[], range: string): string {
   const params = new URLSearchParams();
   criteria.forEach((criterion, index) => {
-    if (criterion.link) params.append(`criteria[${index}][link]`, criterion.link);
+    // `link` n'a de sens qu'entre deux critères : jamais sur le premier.
+    if (criterion.link && index > 0) params.append(`criteria[${index}][link]`, criterion.link);
     params.append(`criteria[${index}][field]`, String(criterion.field));
     params.append(`criteria[${index}][searchtype]`, criterion.searchtype);
     params.append(`criteria[${index}][value]`, criterion.value);
@@ -525,7 +583,49 @@ function rowString(row: Record<string, unknown>, option: number): string | undef
   return undefined;
 }
 
-async function searchTickets(cfg: SetupGlpiConfig, criteria: SearchCriterion[], limit: number): Promise<GlpiTicketSummary[]> {
+/** Libellé d'une cellule de recherche : GLPI renvoie selon les cas une chaîne, un nombre, un
+ * tableau (plusieurs acteurs) ou un objet `{ name }` — aucune de ces formes n'est inventée ici. */
+function rowLabel(row: Record<string, unknown>, option: number): string | undefined {
+  const value = row[String(option)];
+  const one = (entry: unknown): string => {
+    if (typeof entry === "string") return entry.trim();
+    if (typeof entry === "number") return String(entry);
+    if (typeof entry === "object" && entry !== null) {
+      const name = (entry as { name?: unknown }).name;
+      if (typeof name === "string") return name.trim();
+    }
+    return "";
+  };
+  const parts = (Array.isArray(value) ? value : [value]).map(one).filter((part) => part !== "");
+  return parts.length > 0 ? parts.join(", ") : undefined;
+}
+
+function toTicketSummary(key: string | null, row: Record<string, unknown>): GlpiTicketSummary | null {
+  const id = rowNumber(row, TICKET_SEARCH_OPTION.id, key);
+  if (id === undefined) return null;
+  const status = rowNumber(row, TICKET_SEARCH_OPTION.status);
+  const openedAt = rowString(row, TICKET_SEARCH_OPTION.openDate);
+  const updatedAt = rowString(row, TICKET_SEARCH_OPTION.lastUpdate);
+  const requesterLabel = rowLabel(row, TICKET_SEARCH_OPTION.requester);
+  return {
+    id,
+    title: rowString(row, TICKET_SEARCH_OPTION.title) ?? `Ticket ${id}`,
+    ...(status !== undefined ? { status } : {}),
+    ...(status !== undefined && STATUS_LABELS[status] ? { statusLabel: STATUS_LABELS[status] } : {}),
+    ...(openedAt ? { openedAt } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
+    ...(requesterLabel ? { requesterLabel } : {}),
+  };
+}
+
+/** Une PAGE de `/search/Ticket` : `range` borne toujours la requête, `totalcount` donne le volume
+ * réel côté GLPI (jamais la longueur de la page). */
+async function searchTicketsPage(
+  cfg: SetupGlpiConfig,
+  criteria: SearchCriterion[],
+  offset: number,
+  limit: number,
+): Promise<{ tickets: GlpiTicketSummary[]; total?: number }> {
   const query = buildSearchQuery(
     criteria,
     [
@@ -534,32 +634,27 @@ async function searchTickets(cfg: SetupGlpiConfig, criteria: SearchCriterion[], 
       TICKET_SEARCH_OPTION.status,
       TICKET_SEARCH_OPTION.openDate,
       TICKET_SEARCH_OPTION.lastUpdate,
+      TICKET_SEARCH_OPTION.requester,
     ],
-    `0-${Math.max(0, limit - 1)}`,
+    `${offset}-${offset + Math.max(1, limit) - 1}`,
   );
   const result = await glpiCall(cfg, "GET", `search/Ticket?${query}`);
   // Une recherche sans résultat peut répondre ERROR_RANGE_EXCEED_TOTAL (apirest.md) : c'est
   // "aucun ticket", jamais une panne.
-  if (glpiErrorCode(result) === "ERROR_RANGE_EXCEED_TOTAL") return [];
+  if (glpiErrorCode(result) === "ERROR_RANGE_EXCEED_TOTAL") return { tickets: [] };
   if (result.status < 200 || result.status >= 300) {
     throw new GlpiError(describeGlpiError(cfg, result, "la recherche de tickets"), result.status);
   }
-  return searchRows(result.data as GlpiSearchResponse | null)
-    .map(({ key, row }) => {
-      const id = rowNumber(row, TICKET_SEARCH_OPTION.id, key);
-      if (id === undefined) return null;
-      const status = rowNumber(row, TICKET_SEARCH_OPTION.status);
-      const summary: GlpiTicketSummary = {
-        id,
-        title: rowString(row, TICKET_SEARCH_OPTION.title) ?? `Ticket ${id}`,
-        ...(status !== undefined ? { status } : {}),
-        ...(status !== undefined && STATUS_LABELS[status] ? { statusLabel: STATUS_LABELS[status] } : {}),
-        ...(rowString(row, TICKET_SEARCH_OPTION.openDate) ? { openedAt: rowString(row, TICKET_SEARCH_OPTION.openDate)! } : {}),
-        ...(rowString(row, TICKET_SEARCH_OPTION.lastUpdate) ? { updatedAt: rowString(row, TICKET_SEARCH_OPTION.lastUpdate)! } : {}),
-      };
-      return summary;
-    })
+  const payload = result.data as GlpiSearchResponse | null;
+  const total = typeof payload?.totalcount === "number" ? payload.totalcount : undefined;
+  const tickets = searchRows(payload)
+    .map(({ key, row }) => toTicketSummary(key, row))
     .filter((t): t is GlpiTicketSummary => t !== null);
+  return { tickets, ...(total !== undefined ? { total } : {}) };
+}
+
+async function searchTickets(cfg: SetupGlpiConfig, criteria: SearchCriterion[], limit: number): Promise<GlpiTicketSummary[]> {
+  return (await searchTicketsPage(cfg, criteria, 0, limit)).tickets;
 }
 
 // --- Rapprochement d'utilisateur (AD/LDAP -> compte GLPI) ---
@@ -614,6 +709,82 @@ export async function resolveGlpiUserByLogin(login: string): Promise<GlpiUserMat
   return { outcome: "found", userId: retained[0]!.id, login: normalized };
 }
 
+// --- Annuaire des comptes GLPI (LECTURE SEULE) ---
+
+interface GlpiUserItem {
+  id?: number | string;
+  name?: string;
+  realname?: string | null;
+  firstname?: string | null;
+  is_active?: number | boolean;
+}
+
+function nonEmpty(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : undefined;
+}
+
+/** Projection minimale d'un /User : jamais l'objet brut (qui porte des champs sans rapport). Un
+ * compte dont GLPI ne renvoie ni id ni identifiant est écarté plutôt qu'affiché à moitié. */
+function toUserSummary(item: GlpiUserItem): GlpiUserSummary | null {
+  const id = toNumber(item.id);
+  const login = nonEmpty(item.name);
+  if (id === undefined || !login) return null;
+  const firstName = nonEmpty(item.firstname);
+  const lastName = nonEmpty(item.realname);
+  const realName = [firstName, lastName].filter((part) => part).join(" ");
+  return {
+    id,
+    login,
+    ...(firstName ? { firstName } : {}),
+    ...(lastName ? { lastName } : {}),
+    displayName: realName || login,
+    ...(item.is_active !== undefined ? { active: Boolean(Number(item.is_active)) } : {}),
+  };
+}
+
+/**
+ * Comptes GLPI, page par page (`GET /User?range=&searchText[name]=`, apirest.md `getItems`) —
+ * LECTURE SEULE. `getItems` renvoie des objets aux champs NOMMÉS (name/realname/firstname) : aucun
+ * numéro d'option de recherche n'est supposé ici, et le total vient de l'en-tête Content-Range.
+ * `searchText[name]` filtre sur l'identifiant de connexion, celui-là même que résout
+ * resolveGlpiUserByLogin.
+ */
+export async function searchGlpiUsers(
+  query: string,
+  options: { offset?: number; limit?: number } = {},
+): Promise<GlpiUserPage> {
+  const cfg = await loadGlpiConfig();
+  if (!cfg) throw new GlpiNotConfiguredError();
+  const { offset, limit } = clampPage(options.offset, options.limit);
+  const params = new URLSearchParams();
+  params.append("range", `${offset}-${offset + limit - 1}`);
+  const term = query.trim();
+  if (term) params.append("searchText[name]", term);
+
+  try {
+    const result = await glpiCall(cfg, "GET", `User?${params.toString()}`);
+    if (glpiErrorCode(result) === "ERROR_RANGE_EXCEED_TOTAL") {
+      recordPoll(true);
+      return { users: [], offset, limit };
+    }
+    if (result.status < 200 || result.status >= 300) {
+      throw new GlpiError(describeGlpiError(cfg, result, "la recherche de comptes GLPI"), result.status);
+    }
+    recordPoll(true);
+    const rows = Array.isArray(result.data) ? (result.data as GlpiUserItem[]) : [];
+    const total = parseContentRangeTotal(result.contentRange);
+    return {
+      users: rows.map(toUserSummary).filter((u): u is GlpiUserSummary => u !== null),
+      offset,
+      limit,
+      ...(total !== undefined ? { total } : {}),
+    };
+  } catch (err) {
+    recordPoll(false);
+    throw err;
+  }
+}
+
 // --- Lecture des tickets ---
 
 function openStatusCriteria(): SearchCriterion[] {
@@ -635,6 +806,33 @@ export async function listGlpiTicketsForUser(userId: number, options: { openOnly
     const tickets = await searchTickets(cfg, criteria, MAX_TICKETS_RANGE);
     recordPoll(true);
     return tickets;
+  } catch (err) {
+    recordPoll(false);
+    throw err;
+  }
+}
+
+/**
+ * Page de tickets — `requesterId` fourni : ceux dont ce compte est DEMANDEUR ; absent : tous ceux
+ * que le compte de service QUAI voit dans GLPI (l'instance applique ses propres droits et entités).
+ * Le contrôle d'accès QUAI est fait par l'appelant (routes/glpi.ts), jamais ici.
+ */
+export async function listGlpiTicketsPage(
+  options: { requesterId?: number; openOnly?: boolean; offset?: number; limit?: number } = {},
+): Promise<GlpiTicketPage> {
+  const cfg = await loadGlpiConfig();
+  if (!cfg) throw new GlpiNotConfiguredError();
+  const { offset, limit } = clampPage(options.offset, options.limit);
+  const criteria: SearchCriterion[] = [
+    ...(options.requesterId !== undefined
+      ? [{ field: TICKET_SEARCH_OPTION.requester, searchtype: "equals", value: String(options.requesterId) }]
+      : []),
+    ...(options.openOnly ? openStatusCriteria() : []),
+  ];
+  try {
+    const page = await searchTicketsPage(cfg, criteria, offset, limit);
+    recordPoll(true);
+    return { tickets: page.tickets, offset, limit, ...(page.total !== undefined ? { total: page.total } : {}) };
   } catch (err) {
     recordPoll(false);
     throw err;
@@ -681,26 +879,42 @@ function toNumber(value: unknown): number | undefined {
 }
 
 /**
- * Détail d'un ticket + ses suivis, RÉSERVÉ à un demandeur : `userId` doit figurer parmi les
- * acteurs de type REQUESTER côté GLPI, sinon `null` (l'appelant répond 404 sans révéler
- * l'existence du ticket).
+ * Détail d'un ticket + ses suivis. `requiredRequesterId` fourni : le ticket n'est rendu que si ce
+ * compte figure parmi les acteurs REQUESTER côté GLPI, sinon `null` (l'appelant répond 404 sans
+ * révéler l'existence du ticket). Absent : lecture PRIVILÉGIÉE, sans restriction de demandeur —
+ * le contrôle d'accès QUAI incombe alors entièrement à l'appelant (routes/glpi.ts).
  */
-export async function getGlpiTicketForUser(userId: number, ticketId: number): Promise<GlpiTicketDetail | null> {
+export async function getGlpiTicket(
+  ticketId: number,
+  access: { requiredRequesterId?: number } = {},
+): Promise<GlpiTicketDetail | null> {
   const cfg = await loadGlpiConfig();
   if (!cfg) throw new GlpiNotConfiguredError();
+  const restricted = access.requiredRequesterId !== undefined;
   try {
-    const requesterIds = await getTicketRequesterIds(cfg, ticketId);
-    if (!requesterIds.includes(userId)) {
+    if (restricted) {
+      const requesterIds = await getTicketRequesterIds(cfg, ticketId);
+      if (!requesterIds.includes(access.requiredRequesterId!)) {
+        recordPoll(true);
+        return null;
+      }
+    }
+
+    const ticketResult = await glpiCall(cfg, "GET", `Ticket/${ticketId}`);
+    if (!restricted && (ticketResult.status === 404 || glpiErrorCode(ticketResult) === "ERROR_ITEM_NOT_FOUND")) {
       recordPoll(true);
       return null;
     }
-    const [ticketData, followupData] = await Promise.all([
-      glpiCallOk(cfg, "GET", `Ticket/${ticketId}`, "la lecture du ticket"),
-      glpiCallOk(cfg, "GET", `Ticket/${ticketId}/ITILFollowup`, "la lecture des suivis du ticket"),
-    ]);
+    if (ticketResult.status < 200 || ticketResult.status >= 300) {
+      throw new GlpiError(describeGlpiError(cfg, ticketResult, "la lecture du ticket"), ticketResult.status);
+    }
+    const followupData = await glpiCallOk(cfg, "GET", `Ticket/${ticketId}/ITILFollowup`, "la lecture des suivis du ticket");
+    // Les demandeurs ne sont exposés qu'en lecture privilégiée : un utilisateur qui consulte son
+    // propre ticket n'a pas à récupérer l'identifiant GLPI de ses co-demandeurs.
+    const requesterIds = restricted ? null : await getTicketRequesterIds(cfg, ticketId);
     recordPoll(true);
 
-    const ticket = (ticketData ?? {}) as GlpiTicketItem;
+    const ticket = (ticketResult.data ?? {}) as GlpiTicketItem;
     const status = toNumber(ticket.status);
     const followups: GlpiFollowup[] = (Array.isArray(followupData) ? (followupData as GlpiFollowupItem[]) : [])
       .filter((f) => typeof f.id === "number")
@@ -722,6 +936,7 @@ export async function getGlpiTicketForUser(userId: number, ticketId: number): Pr
       ...(ticket.date_mod ? { updatedAt: ticket.date_mod } : {}),
       ...(ticket.solvedate ? { solvedAt: ticket.solvedate } : {}),
       ...(ticket.closedate ? { closedAt: ticket.closedate } : {}),
+      ...(requesterIds ? { requesterIds } : {}),
       followups,
     };
   } catch (err) {
@@ -729,6 +944,11 @@ export async function getGlpiTicketForUser(userId: number, ticketId: number): Pr
     recordPoll(false);
     throw err;
   }
+}
+
+/** Détail d'un ticket RÉSERVÉ à son demandeur — chemin de `/api/glpi/tickets/:id`, inchangé. */
+export async function getGlpiTicketForUser(userId: number, ticketId: number): Promise<GlpiTicketDetail | null> {
+  return getGlpiTicket(ticketId, { requiredRequesterId: userId });
 }
 
 // --- Écriture (périmètre strict : créer / suivre / résoudre) ---

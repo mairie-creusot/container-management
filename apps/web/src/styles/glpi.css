@@ -51,7 +51,7 @@
   font-size: 11.5px;
 }
 
-/* --- Mes tickets ---------------------------------------------------------------------------- */
+/* --- Tickets : liste (DataTable) + détail ---------------------------------------------------- */
 
 .glpi-split {
   display: grid;
@@ -60,58 +60,168 @@
   align-items: start;
 }
 
-.glpi-ticket-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
+/* La liste est un DataTable (tri, pagination, recherche) : elle a besoin de toute la largeur, le
+   détail passe dessous. */
+.glpi-split--wide {
+  grid-template-columns: minmax(0, 1fr);
 }
 
-.glpi-ticket-row {
+/* --- Périmètre consulté (operator/admin) ----------------------------------------------------- */
+
+.glpi-scope {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.glpi-scope__label {
+  color: var(--color-text-faint);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-right: 2px;
+}
+
+.glpi-scope__btn {
+  background: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.glpi-scope__btn:hover {
+  border-color: var(--color-text-faint);
+}
+
+.glpi-scope__btn.is-active {
+  background: var(--color-surface-3);
+  color: var(--color-text);
+  border-color: var(--color-text-faint);
+}
+
+/* Rappel permanent : ces tickets ne sont pas les vôtres. */
+.glpi-foreign {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 10px 12px;
+  padding: 10px 14px;
+  margin-bottom: 12px;
+  border: 1px solid var(--color-warning);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  background: var(--color-warning-bg);
+}
+
+.glpi-foreign__title {
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.glpi-foreign__text {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.glpi-foreign__actions {
+  margin-bottom: 12px;
+}
+
+/* --- Sélecteur de compte GLPI ---------------------------------------------------------------- */
+
+.glpi-account-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 640px;
+}
+
+.glpi-account-picker__field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+  color: var(--color-text-faint);
+}
+
+.glpi-account-picker__field input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 13px;
+  outline: none;
+}
+
+.glpi-account-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 380px;
+  overflow-y: auto;
+}
+
+.glpi-account {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
   background: var(--color-surface-1);
   text-align: left;
   cursor: pointer;
-  min-width: 0;
 }
 
-.glpi-ticket-row:hover {
+.glpi-account:hover {
   border-color: var(--color-text-faint);
-}
-
-.glpi-ticket-row.is-active {
   background: var(--color-surface-3);
-  border-color: var(--color-text-faint);
 }
 
-.glpi-ticket-row__head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+.glpi-account__name {
+  color: var(--color-text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
-.glpi-ticket-row__id {
+.glpi-account__login {
   color: var(--color-text-faint);
   font-family: var(--font-mono);
   font-size: 11px;
 }
 
-.glpi-ticket-row__title {
-  color: var(--color-text);
-  font-size: 13px;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-}
-
-.glpi-ticket-row__meta {
+.glpi-account__inactive {
+  margin-left: auto;
   color: var(--color-text-faint);
   font-size: 11px;
+}
+
+/* --- Pagination côté GLPI --------------------------------------------------------------------- */
+
+.glpi-pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.glpi-pager__range {
+  color: var(--color-text-muted);
+  font-size: 11.5px;
 }
 
 .glpi-detail {

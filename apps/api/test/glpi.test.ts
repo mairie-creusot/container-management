@@ -36,13 +36,19 @@ interface RecordedCall {
   body: unknown;
 }
 
-const calls: RecordedCall[] = [];
-const queuesByKey = new Map<string, Array<{ status: number; body: unknown }>>();
-const lastByKey = new Map<string, { status: number; body: unknown }>();
+interface MockResponse {
+  status: number;
+  body: unknown;
+  headers?: Record<string, string>;
+}
 
-function queue(key: string, body: unknown, status = 200): void {
+const calls: RecordedCall[] = [];
+const queuesByKey = new Map<string, MockResponse[]>();
+const lastByKey = new Map<string, MockResponse>();
+
+function queue(key: string, body: unknown, status = 200, headers?: Record<string, string>): void {
   const list = queuesByKey.get(key) ?? [];
-  list.push({ status, body });
+  list.push({ status, body, ...(headers ? { headers } : {}) });
   queuesByKey.set(key, list);
 }
 
@@ -62,9 +68,12 @@ const fetchMock = vi.fn(async (url: string, init: RequestInit = {}) => {
     headers: (init.headers ?? {}) as Record<string, string>,
     body: typeof init.body === "string" ? JSON.parse(init.body) : null,
   });
-  const found = queuesByKey.get(key)?.shift() ?? lastByKey.get(key) ?? { status: 200, body: {} };
+  const found: MockResponse = queuesByKey.get(key)?.shift() ?? lastByKey.get(key) ?? { status: 200, body: {} };
   lastByKey.set(key, found);
-  return new Response(found.body === null ? "" : JSON.stringify(found.body), { status: found.status });
+  return new Response(found.body === null ? "" : JSON.stringify(found.body), {
+    status: found.status,
+    ...(found.headers ? { headers: found.headers } : {}),
+  });
 });
 
 vi.stubGlobal("fetch", fetchMock);
@@ -73,6 +82,7 @@ const { buildServer } = await import("../src/index.js");
 const { config } = await import("../src/config.js");
 const { signSessionToken } = await import("../src/services/session.js");
 const { setGlpiConfig, clearGlpiConfig } = await import("../src/services/setupStore.js");
+const { listAuditEvents } = await import("../src/services/auditLog.js");
 const glpi = await import("../src/services/glpi.js");
 
 afterAll(async () => {
@@ -124,6 +134,44 @@ async function seedCredentialsConfig(): Promise<void> {
 /** Ligne de résultat /search/Ticket : clé = id d'item, sous-clés = numéros d'options. */
 function ticketRow(id: number, title: string, status = 2) {
   return { [String(id)]: { "2": id, "1": title, "12": status, "15": "2026-08-19 09:00:00", "19": "2026-08-19 09:30:00" } };
+}
+
+/** Même ligne, avec le demandeur (option 4) tel que GLPI le renvoie en `forcedisplay`. */
+function ticketRowWithRequester(id: number, title: string, requester: unknown, status = 2) {
+  return {
+    [String(id)]: { "2": id, "1": title, "12": status, "15": "2026-08-19 09:00:00", "19": "2026-08-19 09:30:00", "4": requester },
+  };
+}
+
+/** Objet /User tel que renvoyé par `GET /User` (getItems : champs NOMMÉS, pas d'options). */
+function userItem(id: number, name: string, firstname?: string, realname?: string) {
+  return { id, name, firstname: firstname ?? null, realname: realname ?? null, is_active: 1 };
+}
+
+function searchOf(key: string, index = 0): string {
+  return decodeURIComponent(callsTo(key)[index]!.search);
+}
+
+/** Ids d'audit déjà présents : le journal est un fichier partagé et persiste entre les exécutions. */
+async function auditIds(): Promise<Set<string>> {
+  return new Set((await listAuditEvents()).map((event) => event.id));
+}
+
+/**
+ * Le journal est un fichier PARTAGÉ par toutes les suites (même dossier que CONFIG_PATH) et le hook
+ * onResponse écrit après que app.inject() a rendu la main : on ne garde que les lignes /browse/ et
+ * on laisse le temps à l'écriture d'arriver, plutôt que de lire une seule fois au hasard.
+ */
+async function browseAuditEvents(before: Set<string>, expected: number) {
+  let events = [] as Awaited<ReturnType<typeof listAuditEvents>>;
+  for (let attempt = 0; attempt < 60; attempt++) {
+    events = (await listAuditEvents()).filter(
+      (event) => !before.has(event.id) && event.path.startsWith("/api/glpi/browse/"),
+    );
+    if (events.length >= expected) return events;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return events;
 }
 
 describe("GLPI — cycle de session", () => {
@@ -567,6 +615,275 @@ describe("GLPI — routes", () => {
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toContain("appToken");
+  });
+});
+
+describe("GLPI — consultation des tickets d'autrui (/api/glpi/browse/*)", () => {
+  const BROWSE_ROUTES = [
+    "/api/glpi/browse/accounts",
+    "/api/glpi/browse/accounts?q=ybanas",
+    "/api/glpi/browse/tickets",
+    "/api/glpi/browse/tickets?requesterId=7",
+    "/api/glpi/browse/tickets/42",
+  ] as const;
+
+  it("un viewer reçoit 403 sur TOUTES les routes browse, sans qu'aucun appel GLPI ne parte", async () => {
+    await seedUserTokenConfig();
+    app = buildServer();
+    for (const url of BROWSE_ROUTES) {
+      const res = await app.inject({ method: "GET", url, cookies: viewerCookie() });
+      expect(res.statusCode, url).toBe(403);
+      expect(res.json().error).toContain("operator or admin");
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("operator et admin y ont accès (rôles élevés du projet, cf. PRIVILEGED_ROLES)", async () => {
+    await seedUserTokenConfig();
+    lastByKey.set("GET User", { status: 200, body: [userItem(7, "ybanas", "Yann", "Banas")] });
+    app = buildServer();
+    for (const cookies of [operatorCookie(), adminCookie()]) {
+      const res = await app.inject({ method: "GET", url: "/api/glpi/browse/accounts?q=yb", cookies });
+      expect(res.statusCode).toBe(200);
+    }
+  });
+
+  it("recherche de comptes : filtre sur l'identifiant, nom réel affiché, total réel de GLPI", async () => {
+    await seedUserTokenConfig();
+    queue(
+      "GET User",
+      [userItem(7, "ybanas", "Yann", "Banas"), userItem(9, "mdupont", "Marie", "Dupont"), { id: 11, name: "" }],
+      200,
+      { "Content-Range": "0-1/312" },
+    );
+
+    app = buildServer();
+    const res = await app.inject({ method: "GET", url: "/api/glpi/browse/accounts?q=ban&limit=2", cookies: operatorCookie() });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ configured: true, reachable: true, offset: 0, limit: 2, total: 312 });
+    // Le compte sans identifiant exploitable est écarté, jamais affiché à moitié.
+    expect(res.json().users).toEqual([
+      { id: 7, login: "ybanas", firstName: "Yann", lastName: "Banas", displayName: "Yann Banas", active: true },
+      { id: 9, login: "mdupont", firstName: "Marie", lastName: "Dupont", displayName: "Marie Dupont", active: true },
+    ]);
+    const search = searchOf("GET User");
+    expect(search).toContain("searchText[name]=ban");
+    expect(search).toContain("range=0-1");
+  });
+
+  it("recherche de comptes : sans nom réel, l'identifiant fait office de libellé (rien n'est inventé)", async () => {
+    await seedUserTokenConfig();
+    queue("GET User", [userItem(7, "ybanas")]);
+    app = buildServer();
+    const res = await app.inject({ method: "GET", url: "/api/glpi/browse/accounts", cookies: adminCookie() });
+    expect(res.json().users).toEqual([{ id: 7, login: "ybanas", displayName: "ybanas", active: true }]);
+    // Aucun total inventé quand GLPI ne renvoie pas de Content-Range.
+    expect(res.json().total).toBeUndefined();
+  });
+
+  it("pagination RÉELLE des comptes : offset/limit deviennent le range GLPI", async () => {
+    await seedUserTokenConfig();
+    queue("GET User", [userItem(60, "user60")], 200, { "Content-Range": "50-50/312" });
+    app = buildServer();
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/glpi/browse/accounts?offset=50&limit=25",
+      cookies: adminCookie(),
+    });
+    expect(res.json()).toMatchObject({ offset: 50, limit: 25, total: 312 });
+    expect(searchOf("GET User")).toContain("range=50-74");
+  });
+
+  it("une page hors bornes (ERROR_RANGE_EXCEED_TOTAL) est une page vide, jamais une panne", async () => {
+    await seedUserTokenConfig();
+    queue("GET User", ["ERROR_RANGE_EXCEED_TOTAL", "hors bornes"], 400);
+    app = buildServer();
+    const res = await app.inject({ method: "GET", url: "/api/glpi/browse/accounts?offset=9000", cookies: adminCookie() });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ users: [], offset: 9000 });
+  });
+
+  it("offset/limit invalides ou hors plafond -> 400 avant tout appel GLPI", async () => {
+    await seedUserTokenConfig();
+    app = buildServer();
+    for (const url of [
+      "/api/glpi/browse/accounts?limit=201",
+      "/api/glpi/browse/accounts?limit=abc",
+      "/api/glpi/browse/accounts?offset=-1",
+      "/api/glpi/browse/tickets?limit=5000",
+      "/api/glpi/browse/tickets?requesterId=abc",
+      "/api/glpi/browse/tickets?requesterId=0",
+      "/api/glpi/browse/tickets/abc",
+    ]) {
+      const res = await app.inject({ method: "GET", url, cookies: adminCookie() });
+      expect(res.statusCode, url).toBe(400);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("tickets d'un compte donné : critère demandeur = l'id demandé, pagination et total réels", async () => {
+    await seedUserTokenConfig();
+    queue("GET search/Ticket", {
+      totalcount: 137,
+      count: 2,
+      data: {
+        ...ticketRowWithRequester(42, "Imprimante HS", "Marie Dupont"),
+        ...ticketRowWithRequester(43, "VPN lent", ["Marie Dupont", "Jean Martin"]),
+      },
+    });
+
+    app = buildServer();
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/glpi/browse/tickets?requesterId=9&offset=25&limit=25",
+      cookies: operatorCookie(),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ scope: "requester", requesterId: 9, offset: 25, limit: 25, total: 137 });
+    expect(res.json().tickets[0]).toMatchObject({ id: 42, title: "Imprimante HS", requesterLabel: "Marie Dupont" });
+    // Plusieurs demandeurs : GLPI renvoie un tableau, repris tel quel sans en choisir un.
+    expect(res.json().tickets[1].requesterLabel).toBe("Marie Dupont, Jean Martin");
+
+    const search = searchOf("GET search/Ticket");
+    expect(search).toContain("criteria[0][field]=4");
+    expect(search).toContain("criteria[0][searchtype]=equals");
+    expect(search).toContain("criteria[0][value]=9");
+    expect(search).toContain("range=25-49");
+  });
+
+  it("tous les tickets : aucun critère de demandeur, mais toujours un range borné", async () => {
+    await seedUserTokenConfig();
+    queue("GET search/Ticket", { totalcount: 3412, count: 1, data: ticketRow(1, "Doléance") });
+
+    app = buildServer();
+    const res = await app.inject({ method: "GET", url: "/api/glpi/browse/tickets?limit=50", cookies: adminCookie() });
+    expect(res.json()).toMatchObject({ scope: "all", offset: 0, limit: 50, total: 3412 });
+    expect(res.json().requesterId).toBeUndefined();
+
+    const search = searchOf("GET search/Ticket");
+    expect(search).not.toContain("criteria[0]");
+    expect(search).toContain("range=0-49");
+    // Le demandeur est demandé en affichage pour que la vue globale reste lisible.
+    expect(search).toContain("forcedisplay");
+    expect(search).toContain("=4");
+  });
+
+  it("détail d'un ticket d'autrui : lu sans restriction de demandeur, demandeurs exposés", async () => {
+    await seedUserTokenConfig();
+    queue("GET Ticket/42", { id: 42, name: "Imprimante HS", content: "bourrage", status: 2, date: "2026-08-19 09:00:00" });
+    queue("GET Ticket/42/ITILFollowup", [{ id: 5, content: "pris en charge", date: "2026-08-19 10:00:00", users_id: 3 }]);
+    queue("GET Ticket/42/Ticket_User", [
+      { tickets_id: 42, users_id: 9, type: 1 },
+      { tickets_id: 42, users_id: 3, type: 2 },
+    ]);
+
+    app = buildServer();
+    const res = await app.inject({ method: "GET", url: "/api/glpi/browse/tickets/42", cookies: operatorCookie() });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ id: 42, title: "Imprimante HS", content: "bourrage", requesterIds: [9] });
+    // Aucun rapprochement du compte QUAI n'est nécessaire : on ne cherche pas l'utilisateur connecté.
+    expect(callsTo("GET search/User")).toHaveLength(0);
+  });
+
+  it("détail : un ticket inconnu de GLPI -> 404, jamais 502", async () => {
+    await seedUserTokenConfig();
+    queue("GET Ticket/9999", ["ERROR_ITEM_NOT_FOUND", "Item not found"], 404);
+    app = buildServer();
+    const res = await app.inject({ method: "GET", url: "/api/glpi/browse/tickets/9999", cookies: adminCookie() });
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("aucune écriture : parcourir comptes, tickets et détail ne produit que des GET", async () => {
+    await seedUserTokenConfig();
+    lastByKey.set("GET User", { status: 200, body: [userItem(9, "mdupont", "Marie", "Dupont")] });
+    lastByKey.set("GET search/Ticket", { status: 200, body: { totalcount: 1, count: 1, data: ticketRow(42, "Imprimante HS") } });
+    lastByKey.set("GET Ticket/42", { status: 200, body: { id: 42, name: "Imprimante HS", content: "bourrage" } });
+    lastByKey.set("GET Ticket/42/ITILFollowup", { status: 200, body: [] });
+    lastByKey.set("GET Ticket/42/Ticket_User", { status: 200, body: [{ users_id: 9, type: 1 }] });
+
+    app = buildServer();
+    for (const url of ["/api/glpi/browse/accounts?q=du", "/api/glpi/browse/tickets?requesterId=9", "/api/glpi/browse/tickets/42"]) {
+      expect((await app.inject({ method: "GET", url, cookies: adminCookie() })).statusCode).toBe(200);
+    }
+    expect(calls.filter((c) => c.method !== "GET")).toEqual([]);
+  });
+
+  it("GLPI non configuré -> 503 sans aucun appel réseau", async () => {
+    app = buildServer();
+    for (const url of BROWSE_ROUTES) {
+      const res = await app.inject({ method: "GET", url, cookies: adminCookie() });
+      expect(res.statusCode, url).toBe(503);
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it("GLPI injoignable -> 502 portant reachable:false, jamais une liste vide trompeuse", async () => {
+    await seedUserTokenConfig();
+    lastByKey.set("GET initSession", { status: 500, body: ["ERROR", "boom"] });
+    app = buildServer();
+
+    const accounts = await app.inject({ method: "GET", url: "/api/glpi/browse/accounts", cookies: adminCookie() });
+    expect(accounts.statusCode).toBe(502);
+    expect(accounts.json()).toMatchObject({ configured: true, reachable: false, users: [] });
+
+    const tickets = await app.inject({ method: "GET", url: "/api/glpi/browse/tickets?requesterId=9", cookies: adminCookie() });
+    expect(tickets.statusCode).toBe(502);
+    expect(tickets.json()).toMatchObject({ configured: true, reachable: false, tickets: [] });
+
+    const detail = await app.inject({ method: "GET", url: "/api/glpi/browse/tickets/42", cookies: adminCookie() });
+    expect(detail.statusCode).toBe(502);
+  });
+
+  it("l'accès aux tickets d'un tiers est journalisé — succès comme refus", async () => {
+    await seedUserTokenConfig();
+    lastByKey.set("GET search/Ticket", { status: 200, body: { totalcount: 0, count: 0, data: [] } });
+    lastByKey.set("GET User", { status: 200, body: [] });
+    app = buildServer();
+
+    const before = await auditIds();
+    await app.inject({ method: "GET", url: "/api/glpi/browse/tickets?requesterId=9", cookies: adminCookie() });
+    await app.inject({ method: "GET", url: "/api/glpi/browse/tickets", cookies: adminCookie() });
+    await app.inject({ method: "GET", url: "/api/glpi/browse/tickets/42", cookies: viewerCookie() });
+    await app.inject({ method: "GET", url: "/api/glpi/browse/accounts", cookies: adminCookie() });
+    const events = await browseAuditEvents(before, 3);
+
+    // La recherche de comptes n'est pas dans la liste : seul l'accès aux TICKETS d'un tiers l'est.
+    expect(events.map((e) => `${e.actor} ${e.path} ${e.statusCode}`).sort()).toEqual([
+      "viewer /api/glpi/browse/tickets/42 403",
+      "ybanas /api/glpi/browse/tickets?requesterId=9 200",
+      "ybanas /api/glpi/browse/tickets?scope=all 200",
+    ]);
+  });
+
+  it("/my-tickets ignore TOUT identifiant fourni par le client, y compris requesterId", async () => {
+    await seedUserTokenConfig();
+    queue("GET search/User", { totalcount: 1, count: 1, data: { "7": { "2": 7, "1": "ybanas" } } });
+    queue("GET search/Ticket", { totalcount: 1, count: 1, data: ticketRow(42, "Imprimante HS") });
+
+    app = buildServer();
+    const res = await app.inject({
+      method: "GET",
+      url: "/api/glpi/my-tickets?requesterId=9&userId=9&username=mdupont&scope=all",
+      cookies: adminCookie(),
+    });
+    expect(res.statusCode).toBe(200);
+    // Le login cherché est celui de la SESSION, et le demandeur est l'id qui en découle.
+    expect(searchOf("GET search/User")).toContain("criteria[0][value]=ybanas");
+    const ticketSearch = searchOf("GET search/Ticket");
+    expect(ticketSearch).toContain("criteria[0][value]=7");
+    expect(ticketSearch).not.toContain("criteria[0][value]=9");
+  });
+
+  it("un viewer garde ses propres tickets : /my-tickets et /tickets/:id lui restent ouverts", async () => {
+    await seedUserTokenConfig();
+    queue("GET search/User", { totalcount: 1, count: 1, data: { "3": { "2": 3, "1": "viewer" } } });
+    queue("GET search/Ticket", { totalcount: 1, count: 1, data: ticketRow(11, "Souris HS") });
+
+    app = buildServer();
+    const res = await app.inject({ method: "GET", url: "/api/glpi/my-tickets", cookies: viewerCookie() });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ account: "found" });
+    expect(searchOf("GET search/Ticket")).toContain("criteria[0][value]=3");
   });
 });
 
