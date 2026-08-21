@@ -15,13 +15,13 @@ import {
 } from "@/features/threecx/threecxSlice";
 import type {
   ThreecxAccess,
-  ThreecxAccessState,
   ThreecxActiveCall,
   ThreecxAuthMode,
   ThreecxCallParticipant,
   ThreecxListState,
   ThreecxPublicConfig,
 } from "@/features/threecx/types";
+import { accessStateOf, pbxErrorHint } from "@/features/threecx/access";
 import { canAdminister } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import StatusPill from "@/components/StatusPill";
@@ -74,29 +74,34 @@ function formatCount(value: number | undefined, singular: string, plural: string
   return `${value.toLocaleString("fr-FR")} ${value > 1 ? plural : singular}`;
 }
 
-/**
- * Les QUATRE états distingués par le backend, jamais confondus : jamais configuré, PBX injoignable,
- * accès refusé par le PBX (`accessError`), et réponse réelle (dont une liste réellement vide).
- */
-function accessStateOf(access: ThreecxAccess): ThreecxAccessState {
-  if (!access.configured) return "unconfigured";
-  if (access.reachable === false) return "unreachable";
-  if (access.accessError) return "denied";
-  if (access.reachable === true) return "ok";
-  return "unknown";
-}
-
-/** Refus du PBX — le message est affiché BRUT, tel que le PBX l'écrit. */
+/** Refus d'ACCÈS (401/403, authentification rejetée) — le seul cas où la licence est en cause. */
 function ThreecxDeniedNotice({ message, subject }: { message: string; subject: string }) {
   return (
     <div className="threecx-denied">
       <strong className="threecx-denied__title">Le PBX 3CX a refusé l'accès au XAPI</strong>
       <span className="threecx-denied__text">
-        Impossible de lire {subject} : le PBX a répondu, mais il rejette la requête. Le XAPI n'est ouvert qu'avec
+        Impossible de lire {subject} : le PBX a répondu, mais il rejette l'accès. Le XAPI n'est ouvert qu'avec
         une licence 3CX Enterprise et un point de routage autorisé («&nbsp;XAPI Access Enabled&nbsp;»). Message
         renvoyé par le PBX, tel quel :
       </span>
       <code className="threecx-denied__raw">{message}</code>
+    </div>
+  );
+}
+
+/** Erreur renvoyée par le PBX qui n'est PAS un refus d'accès : cadre neutre, message brut, aucune
+ * mention de licence ni de droits. */
+function ThreecxPbxErrorNotice({ message, subject }: { message: string; subject: string }) {
+  const hint = pbxErrorHint(message);
+  return (
+    <div className="threecx-pbx-error">
+      <strong className="threecx-pbx-error__title">Le PBX a rejeté la requête</strong>
+      <span className="threecx-pbx-error__text">
+        L'accès au XAPI fonctionne, mais le PBX a répondu par une erreur en tentant de lire {subject}. Message
+        renvoyé par le PBX, tel quel :
+      </span>
+      <code className="threecx-pbx-error__raw">{message}</code>
+      {hint && <span className="threecx-pbx-error__hint">{hint}</span>}
     </div>
   );
 }
@@ -124,6 +129,10 @@ function ThreecxListNotice<T>({ list, subject, emptyLabel }: { list: ThreecxList
   if (state === "denied") {
     const message = list.access.accessError ?? "";
     return <ThreecxDeniedNotice message={message} subject={subject} />;
+  }
+  if (state === "pbx-error") {
+    const message = list.access.pbxError ?? "";
+    return <ThreecxPbxErrorNotice message={message} subject={subject} />;
   }
   if (list.load === "ready" && list.items.length === 0) return <div className="empty-state">{emptyLabel}</div>;
   return null;
@@ -669,9 +678,11 @@ export default function ThreecxPage() {
           ? { status: "crit", label: "Injoignable" }
           : pageState === "denied"
             ? { status: "warn", label: "Accès refusé par le PBX" }
-            : pageState === "ok"
-              ? { status: "connected" }
-              : { status: "unknown", label: "État inconnu" };
+            : pageState === "pbx-error"
+              ? { status: "warn", label: "Requête rejetée par le PBX" }
+              : pageState === "ok"
+                ? { status: "connected" }
+                : { status: "unknown", label: "État inconnu" };
 
   const system = status?.system;
 
@@ -736,6 +747,12 @@ export default function ThreecxPage() {
         {!backendUnavailable && pageState === "denied" && status?.accessError && (
           <div style={{ marginBottom: 16 }}>
             <ThreecxDeniedNotice message={status.accessError} subject="les données du PBX" />
+          </div>
+        )}
+
+        {!backendUnavailable && pageState === "pbx-error" && status?.pbxError && (
+          <div style={{ marginBottom: 16 }}>
+            <ThreecxPbxErrorNotice message={status.pbxError} subject="les données du PBX" />
           </div>
         )}
 

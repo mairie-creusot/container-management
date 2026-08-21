@@ -39,6 +39,8 @@ const lastByKey = new Map<string, MockResponse>();
 const callsByKey = new Map<string, number>();
 const bodiesByKey = new Map<string, string[]>();
 const authHeadersByKey = new Map<string, string[]>();
+/** Chaînes de requête réellement envoyées au PBX — le XAPI plafonne `$top` à 100. */
+const queriesByKey = new Map<string, string[]>();
 
 function queueResponse(key: string, body: unknown, status = 200): void {
   const list = queuesByKey.get(key) ?? [];
@@ -71,6 +73,7 @@ vi.mock("node:https", () => ({
     callsByKey.set(key, (callsByKey.get(key) ?? 0) + 1);
     const auth = options.headers?.Authorization;
     if (auth !== undefined) authHeadersByKey.set(key, [...(authHeadersByKey.get(key) ?? []), auth]);
+    queriesByKey.set(key, [...(queriesByKey.get(key) ?? []), target.search]);
     req.write = (body: string) => {
       bodiesByKey.set(key, [...(bodiesByKey.get(key) ?? []), body]);
     };
@@ -110,6 +113,7 @@ afterEach(async () => {
   callsByKey.clear();
   bodiesByKey.clear();
   authHeadersByKey.clear();
+  queriesByKey.clear();
   resetThreecxCaches();
   await clearThreecxConfig();
 });
@@ -347,10 +351,12 @@ describe("Service 3CX — jeton client credentials", () => {
     app = buildServer();
 
     const response = await app.inject({ method: "GET", url: "/api/3cx/active-calls", cookies: viewerCookie() });
-    const body = response.json() as { configured: boolean; reachable?: boolean; accessError?: string; calls: unknown[] };
+    const body = response.json() as { configured: boolean; reachable?: boolean; accessError?: string; pbxError?: string; calls: unknown[] };
     expect(body.configured).toBe(true);
     expect(body.reachable).toBe(true);
+    // Un 401 qui persiste est un REFUS D'ACCÈS : jamais dégradé en simple erreur du PBX.
     expect(body.accessError).toContain("Token rejected");
+    expect(body.pbxError).toBeUndefined();
     expect(body.calls).toEqual([]);
     expect(callCount(ACTIVE_CALLS_KEY)).toBe(2);
     expect(callCount(TOKEN_KEY)).toBe(2);
@@ -753,13 +759,15 @@ describe("Service 3CX — licence Enterprise absente et PBX injoignable", () => 
     app = buildServer();
 
     const response = await app.inject({ method: "GET", url: "/api/3cx/active-calls", cookies: viewerCookie() });
-    const body = response.json() as { configured: boolean; reachable?: boolean; accessError?: string; calls: unknown[] };
+    const body = response.json() as { configured: boolean; reachable?: boolean; accessError?: string; pbxError?: string; calls: unknown[] };
     expect(body).toMatchObject({ configured: true, reachable: true, calls: [] });
     expect(body.accessError).toContain("XAPI access requires a 3CX Enterprise license");
     expect(body.accessError).toContain("Forbidden");
+    expect(body.pbxError).toBeUndefined();
 
     const status = await getThreecxStatus();
     expect(status.accessError).toContain("XAPI access requires a 3CX Enterprise license");
+    expect(status.pbxError).toBeUndefined();
   });
 
   it("PBX injoignable : reachable=false, aucun accessError inventé, lastPoll négatif", async () => {
@@ -781,6 +789,122 @@ describe("Service 3CX — licence Enterprise absente et PBX injoignable", () => 
     expect(result).toMatchObject({ configured: true, reachable: true, items: [] });
     expect(result.accessError).toContain("Client authentication failed");
     expect(JSON.stringify(result)).not.toContain(CLIENT_SECRET);
+  });
+});
+
+/**
+ * Message RÉEL renvoyé par le PBX de la mairie le 21/08/2026 quand QUAI demandait `$top=500` —
+ * copié TEL QUEL. C'est une erreur de PAGINATION : l'authentification fonctionnait, le XAPI était
+ * ouvert. Elle a pourtant été présentée à l'utilisateur comme un défaut de licence Enterprise.
+ */
+const ODATA_TOP_LIMIT_MESSAGE =
+  "The query specified in the URI is not valid. The limit of '100' for Top query has been exceeded. The value from the incoming request is '500'.";
+
+describe("Service 3CX — erreur RENVOYÉE par le PBX ≠ refus d'accès", () => {
+  it("400 de validation OData : pbxError avec le message brut, JAMAIS accessError", async () => {
+    await seedThreecxConfig();
+    seedToken();
+    queueResponse(ACTIVE_CALLS_KEY, { error: { code: "", message: ODATA_TOP_LIMIT_MESSAGE } }, 400);
+    app = buildServer();
+
+    const response = await app.inject({ method: "GET", url: "/api/3cx/active-calls", cookies: viewerCookie() });
+    const body = response.json() as { configured: boolean; reachable?: boolean; accessError?: string; pbxError?: string; calls: unknown[] };
+    expect(body).toMatchObject({ configured: true, reachable: true, calls: [] });
+    // LE point de la correction : une pagination refusée n'est pas un problème de licence.
+    expect(body.accessError).toBeUndefined();
+    expect(body.pbxError).toContain(ODATA_TOP_LIMIT_MESSAGE);
+    expect(body.pbxError).toContain("HTTP 400");
+    // Un 400 n'entraîne aucun renouvellement de jeton : rien à réauthentifier.
+    expect(callCount(TOKEN_KEY)).toBe(1);
+    expect(callCount(ACTIVE_CALLS_KEY)).toBe(1);
+  });
+
+  it("le résumé distingue lui aussi : pbxError renseigné, accessError absent", async () => {
+    await seedThreecxConfig();
+    seedToken();
+    queueResponse(ACTIVE_CALLS_KEY, { error: { code: "", message: ODATA_TOP_LIMIT_MESSAGE } }, 400);
+    queueResponse(USERS_KEY, { error: { code: "", message: ODATA_TOP_LIMIT_MESSAGE } }, 400);
+    queueResponse(QUEUES_KEY, { error: { code: "", message: ODATA_TOP_LIMIT_MESSAGE } }, 400);
+    app = buildServer();
+
+    const status = await getThreecxStatus();
+    expect(status).toMatchObject({ configured: true, reachable: true });
+    expect(status.accessError).toBeUndefined();
+    expect(status.pbxError).toContain(ODATA_TOP_LIMIT_MESSAGE);
+    expect(status.activeCallCount).toBeUndefined();
+    expect(lastKnownThreecxPoll()).toMatchObject({ reachable: true });
+  });
+
+  it("404 et 5xx du PBX : erreurs du PBX, jamais un refus d'accès", async () => {
+    await seedThreecxConfig();
+    seedToken();
+    app = buildServer();
+
+    for (const [status, message] of [
+      [404, "Resource not found"],
+      [500, "Internal server error"],
+      [503, "Service unavailable"],
+    ] as const) {
+      queueResponse(ACTIVE_CALLS_KEY, { error: { code: String(status), message } }, status);
+      const result = await getThreecxActiveCalls();
+      expect(result.accessError, message).toBeUndefined();
+      expect(result.pbxError, message).toContain(message);
+    }
+  });
+
+  it("réponse 2xx illisible : erreur du PBX, pas un refus d'accès", async () => {
+    await seedThreecxConfig();
+    seedToken();
+    queueResponse(ACTIVE_CALLS_KEY, "<html>proxy</html>", 200);
+    app = buildServer();
+
+    const result = await getThreecxActiveCalls();
+    expect(result.accessError).toBeUndefined();
+    expect(result.pbxError).toContain("réponse illisible");
+  });
+
+  it("un vrai refus (403) l'emporte sur une erreur de requête dans le résumé", async () => {
+    await seedThreecxConfig();
+    seedToken();
+    queueResponse(ACTIVE_CALLS_KEY, { error: { code: "", message: ODATA_TOP_LIMIT_MESSAGE } }, 400);
+    queueResponse(USERS_KEY, { error: { code: "Forbidden", message: "XAPI access requires a 3CX Enterprise license" } }, 403);
+    queueResponse(QUEUES_KEY, { value: [] });
+    app = buildServer();
+
+    const status = await getThreecxStatus();
+    expect(status.accessError).toContain("XAPI access requires a 3CX Enterprise license");
+    expect(status.pbxError).toBeUndefined();
+  });
+
+  it("aucune requête ne demande plus de 100 éléments : le PBX plafonne $top à 100", async () => {
+    await seedThreecxConfig();
+    seedToken();
+    seedActiveCalls();
+    seedUsers();
+    seedQueues();
+    seedSystemStatus();
+    app = buildServer();
+
+    for (const url of ["/api/3cx/status", "/api/3cx/active-calls", "/api/3cx/extensions", "/api/3cx/queues"]) {
+      await app.inject({ method: "GET", url, cookies: viewerCookie() });
+    }
+    await app.inject({
+      method: "POST",
+      url: "/api/3cx/config/test",
+      cookies: adminCookie(),
+      payload: { baseUrl: "https://pbx.exemple.fr:5001", clientId: "quai-xapi" },
+    });
+
+    const searches = [...queriesByKey.entries()].filter(([key]) => key.startsWith("GET /xapi/v1/")).flatMap(([, list]) => list);
+    expect(searches.length).toBeGreaterThan(0);
+    let seenTop = 0;
+    for (const search of searches) {
+      const top = new URLSearchParams(search).get("$top");
+      if (top === null) continue;
+      seenTop += 1;
+      expect(Number(top), search).toBeLessThanOrEqual(100);
+    }
+    expect(seenTop).toBeGreaterThan(0);
   });
 });
 

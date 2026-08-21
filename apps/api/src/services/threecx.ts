@@ -42,8 +42,12 @@
  * Deux appels concurrents partagent la même demande de jeton en vol (sinon le second invaliderait
  * le premier).
  *
- * Le XAPI exige une licence 3CX Enterprise : si le PBX refuse l'accès (403 / erreur OData), le
- * message du PBX est remonté TEL QUEL (`accessError`), jamais masqué ni transformé en liste vide.
+ * Deux échecs qui n'ont RIEN à voir sont distingués et ne doivent jamais être confondus :
+ *  - REFUS D'ACCÈS (`accessError`) : 401/403, jeton rejeté, authentification refusée. C'est le seul
+ *    cas qui relève d'une licence 3CX Enterprise absente ou de droits insuffisants.
+ *  - ERREUR RENVOYÉE PAR LE PBX (`pbxError`) : 400 de validation OData, 404, 5xx, réponse illisible.
+ *    Le PBX a traité la requête et l'a rejetée sur son contenu — aucun rapport avec la licence.
+ * Dans les deux cas le message du PBX est remonté TEL QUEL, jamais reformulé ni masqué.
  */
 
 import { request as httpRequest } from "node:http";
@@ -122,10 +126,13 @@ export interface ThreecxStatusSummary {
   configured: boolean;
   /** Absent si jamais configuré. false = PBX injoignable (réseau/TLS/timeout). */
   reachable?: boolean;
-  /** Message BRUT du PBX quand il a répondu mais refusé l'accès XAPI (licence Enterprise absente,
-   * droits du point de routage insuffisants). Jamais masqué. */
+  /** Message BRUT du PBX quand il a REFUSÉ L'ACCÈS (401/403, jeton rejeté, authentification
+   * refusée) — le seul cas qui relève de la licence Enterprise ou des droits. Jamais masqué. */
   accessError?: string;
-  /** Résumé pour la carte du nœud — absents si injoignable/refusé, jamais des zéros de remplissage. */
+  /** Message BRUT du PBX quand il a répondu une ERREUR sans refuser l'accès (400 de validation
+   * OData, 404, 5xx, réponse illisible). N'a AUCUN rapport avec la licence. */
+  pbxError?: string;
+  /** Résumé pour la carte du nœud — absents si injoignable/refusé/en erreur, jamais des zéros. */
   activeCallCount?: number;
   reachableExtensionCount?: number;
   extensionCount?: number;
@@ -134,17 +141,24 @@ export interface ThreecxStatusSummary {
 }
 
 /** Enveloppe commune des routes de lecture — distingue "jamais configuré", "injoignable",
- * "refusé par le PBX" et "réellement vide". */
+ * "accès refusé", "erreur renvoyée par le PBX" et "réellement vide". */
 export interface ThreecxReadResult<T> {
   configured: boolean;
   reachable?: boolean;
+  /** Refus d'accès UNIQUEMENT (401/403, authentification refusée). */
   accessError?: string;
+  /** Erreur renvoyée par le PBX qui n'est pas un refus d'accès (400 OData, 404, 5xx, illisible). */
+  pbxError?: string;
   items: T[];
 }
 
-/** Résultat interne d'un GET XAPI : soit des données, soit un refus explicite du PBX, soit une
- * panne de transport. */
-type XapiOutcome<T> = { kind: "ok"; data: T } | { kind: "denied"; message: string } | { kind: "unreachable"; message: string };
+/** Résultat interne d'un GET XAPI. `denied` est RÉSERVÉ au refus d'accès ; une erreur que le PBX
+ * renvoie après avoir accepté la requête est un `pbx-error`, jamais un refus. */
+type XapiOutcome<T> =
+  | { kind: "ok"; data: T }
+  | { kind: "denied"; message: string }
+  | { kind: "pbx-error"; message: string }
+  | { kind: "unreachable"; message: string };
 
 interface ODataCollection<E> {
   value?: E[];
@@ -205,7 +219,9 @@ const USER_SELECT = "Id,Number,DisplayName,FirstName,LastName,IsRegistered,Enabl
 const QUEUE_SELECT = "Id,Number,Name,IsRegistered,PollingStrategy,MaxCallersInQueue";
 /** Pbx.SystemStatus expose LicenseKey/ProductCode/ResellerName : jamais demandés. */
 const SYSTEM_STATUS_SELECT = "Version,FQDN,Activated,CallsActive,MaxSimCalls,ExtensionsRegistered,ExtensionsTotal,TrunksRegistered,TrunksTotal";
-const PAGE_SIZE = 500;
+/** 100 et pas plus : le PBX rejette en 400 tout $top supérieur ("The limit of '100' for Top query
+ * has been exceeded" — constaté en conditions réelles le 21/08/2026 sur ville-lecreusot.on3cx.fr). */
+const PAGE_SIZE = 100;
 const MAX_PAGES = 20;
 /** Marge avant expiration : le jeton est renouvelé un peu avant l'heure pour ne jamais l'utiliser
  * pendant qu'il expire côté PBX. */
@@ -517,6 +533,12 @@ async function getAccessToken(
   return await tokenInFlight;
 }
 
+/** Un refus d'ACCÈS, et rien d'autre : le PBX rejette le porteur du jeton. Tout autre code renvoyé
+ * par le PBX (400 de validation, 404, 5xx) est une erreur de requête, pas un problème de droits. */
+function isAccessDenialStatus(status: number): boolean {
+  return status === 401 || status === 403;
+}
+
 /** GET /xapi/v1/<resource> avec le jeton en cache ; un 401 déclenche UN renouvellement puis UN
  * seul réessai (jamais de boucle). */
 async function xapiGet<T>(effective: SetupThreecxConfig, resource: string): Promise<XapiOutcome<T>> {
@@ -545,12 +567,14 @@ async function xapiGet<T>(effective: SetupThreecxConfig, resource: string): Prom
       continue;
     }
     if (response.status < 200 || response.status >= 300) {
-      // 401/403/404 : le PBX a RÉPONDU — un XAPI non licencié (Enterprise) refuse ici. Message brut.
-      return { kind: "denied", message: scrubSecrets(pbxErrorMessage(response.status, response.raw), configSecrets(effective)) };
+      // Message brut du PBX dans les deux cas ; seul 401/403 est un refus d'accès (licence, droits).
+      const message = scrubSecrets(pbxErrorMessage(response.status, response.raw), configSecrets(effective));
+      return isAccessDenialStatus(response.status) ? { kind: "denied", message } : { kind: "pbx-error", message };
     }
     const data = parseJson<T>(response.raw);
     if (data === null) {
-      return { kind: "denied", message: `3CX a renvoyé une réponse illisible pour GET /xapi/v1/${resource}` };
+      // Le PBX a accepté la requête et répondu 2xx : illisible n'est pas un refus d'accès.
+      return { kind: "pbx-error", message: `3CX a renvoyé une réponse illisible pour GET /xapi/v1/${resource}` };
     }
     return { kind: "ok", data };
   }
@@ -733,9 +757,14 @@ function fromOutcome<E, T>(outcome: XapiOutcome<E>, map: (data: E) => T[]): Thre
     return { configured: true, reachable: false, items: [] };
   }
   if (outcome.kind === "denied") {
-    // Le PBX a répondu : joignable, mais il refuse — message brut (licence Enterprise, droits).
+    // Le PBX a répondu : joignable, mais il refuse l'ACCÈS — message brut (licence, droits).
     recordPoll(true);
     return { configured: true, reachable: true, accessError: outcome.message, items: [] };
+  }
+  if (outcome.kind === "pbx-error") {
+    // Le PBX a traité la requête et l'a rejetée sur son contenu : ce n'est PAS un refus d'accès.
+    recordPoll(true);
+    return { configured: true, reachable: true, pbxError: outcome.message, items: [] };
   }
   recordPoll(true);
   return { configured: true, reachable: true, items: map(outcome.data) };
@@ -773,8 +802,8 @@ export async function getThreecxQueues(): Promise<ThreecxReadResult<ThreecxQueue
 
 /**
  * Résumé pour la carte du nœud : appels en cours + postes joignables (IsRegistered), avec les
- * compteurs système du PBX si /SystemStatus est accessible. Un refus explicite (licence Enterprise
- * absente) ressort dans `accessError` avec le message du PBX, jamais des compteurs à zéro.
+ * compteurs système du PBX si /SystemStatus est accessible. Un refus d'accès ressort dans
+ * `accessError`, une erreur renvoyée par le PBX dans `pbxError` — jamais des compteurs à zéro.
  */
 export async function getThreecxStatus(): Promise<ThreecxStatusSummary> {
   const effective = await loadThreecxConfig();
@@ -799,6 +828,12 @@ export async function getThreecxStatus(): Promise<ThreecxStatusSummary> {
     if (outcome.kind === "denied") {
       recordPoll(true);
       return { configured: true, reachable: true, accessError: outcome.message };
+    }
+  }
+  for (const outcome of outcomes) {
+    if (outcome.kind === "pbx-error") {
+      recordPoll(true);
+      return { configured: true, reachable: true, pbxError: outcome.message };
     }
   }
   if (calls.kind !== "ok" || users.kind !== "ok" || queues.kind !== "ok") {

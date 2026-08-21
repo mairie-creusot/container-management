@@ -65,14 +65,15 @@ function keep<T>(key: string, value: T | undefined): Record<string, T> {
   return value === undefined ? {} : { [key]: value };
 }
 
-/** Enveloppe commune { configured, reachable?, accessError? } — les quatre états du backend
- * dépendent entièrement de ces trois champs, jamais de la longueur de la liste. */
+/** Enveloppe commune { configured, reachable?, accessError?, pbxError? } — les cinq états du
+ * backend dépendent entièrement de ces champs, jamais de la longueur de la liste. */
 function normalizeAccess(raw: unknown): ThreecxAccess {
   const wire = asRecord(raw);
   return {
     configured: wire.configured === true,
     ...keep("reachable", optBoolean(wire.reachable)),
     ...keep("accessError", optString(wire.accessError)),
+    ...keep("pbxError", optString(wire.pbxError)),
   };
 }
 

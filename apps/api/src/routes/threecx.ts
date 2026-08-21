@@ -8,9 +8,11 @@
  * GET    /api/3cx/active-calls — appels en cours normalisés.
  * GET    /api/3cx/extensions   — postes + présence (enregistré, profil courant, statut de file).
  * GET    /api/3cx/queues       — files d'attente.
- * Les trois listes renvoient une enveloppe { configured, reachable?, accessError?, items } : le
- * XAPI exige une licence 3CX Enterprise, et un refus du PBX ressort dans `accessError` avec SON
- * message, jamais camouflé en liste vide.
+ * Les trois listes renvoient une enveloppe { configured, reachable?, accessError?, pbxError?,
+ * items }. `accessError` est RÉSERVÉ au refus d'accès (401/403, authentification refusée) — le seul
+ * cas qui relève de la licence Enterprise ; toute autre erreur renvoyée par le PBX (400 de
+ * validation OData, 404, 5xx) ressort dans `pbxError`. Message du PBX brut, jamais une liste vide
+ * silencieuse.
  * Lecture pour tout rôle authentifié (session exigée par la garde globale plugins/auth.ts).
  *
  * GET    /api/3cx/config      — config courante REDACTÉE (jamais la clé API ni le mot de passe).

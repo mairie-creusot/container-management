@@ -71,8 +71,11 @@ export interface ThreecxPollOutcome {
 export interface ThreecxStatusSummary {
   configured: boolean;
   reachable?: boolean;
-  /** Message BRUT du PBX quand il répond mais refuse le XAPI (licence Enterprise, droits). */
+  /** Message BRUT du PBX quand il REFUSE L'ACCÈS (401/403, authentification rejetée) — le seul cas
+   * qui relève de la licence Enterprise ou des droits. */
   accessError?: string;
+  /** Message BRUT d'une erreur renvoyée par le PBX sans refus d'accès (400 OData, 404, 5xx). */
+  pbxError?: string;
   activeCallCount?: number;
   extensionCount?: number;
   reachableExtensionCount?: number;
@@ -85,11 +88,14 @@ export interface ThreecxStatusSummary {
 export interface ThreecxAccess {
   configured: boolean;
   reachable?: boolean;
+  /** Refus d'accès UNIQUEMENT — jamais une erreur de requête renvoyée par le PBX. */
   accessError?: string;
+  /** Erreur renvoyée par le PBX sans refus d'accès (400 OData, 404, 5xx, réponse illisible). */
+  pbxError?: string;
 }
 
-/** Les quatre états que le backend distingue, plus "en attente d'une réponse". */
-export type ThreecxAccessState = "unconfigured" | "unreachable" | "denied" | "ok" | "unknown";
+/** Les cinq états que le backend distingue, plus "en attente d'une réponse". */
+export type ThreecxAccessState = "unconfigured" | "unreachable" | "denied" | "pbx-error" | "ok" | "unknown";
 
 /** Liste + son enveloppe : une liste vide n'a de sens que si l'état d'accès est "ok". */
 export interface ThreecxListState<T> {

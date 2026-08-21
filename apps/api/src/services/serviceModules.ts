@@ -458,13 +458,15 @@ async function buildThreecxSnapshot(): Promise<ServiceModuleSnapshot> {
       relations: [],
     };
   }
-  if (status.reachable === false || status.accessError) {
+  // `pbxError` compte autant qu'un refus d'accès : sans lui, une erreur de requête donnerait un
+  // module "prêt" avec zéro entité — exactement l'affichage silencieux qu'on refuse.
+  if (status.reachable === false || status.accessError || status.pbxError) {
     return {
       moduleId: "3cx",
       generatedAt,
       status: "unreachable",
-      // Message BRUT du PBX (typiquement un refus faute de licence Enterprise) — jamais reformulé.
-      message: status.accessError ?? "PBX 3CX injoignable au dernier relevé.",
+      // Message BRUT du PBX — jamais reformulé.
+      message: status.accessError ?? status.pbxError ?? "PBX 3CX injoignable au dernier relevé.",
       summary: [],
       entities: [],
       relations: [],
