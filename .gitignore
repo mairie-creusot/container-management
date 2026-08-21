@@ -8,6 +8,9 @@ coverage/
 .env
 .env.*
 !.env.example
+# Les gabarits *.example ne contiennent jamais de secret et doivent rester versionnés (le motif
+# .env.* ci-dessus les excluait, ex: deploy/compose/.env.prod.example).
+!*.example
 .DS_Store
 
 # données de dev locales (config assistant, clone GitOps)
