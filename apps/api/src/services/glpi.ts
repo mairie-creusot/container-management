@@ -566,9 +566,15 @@ async function searchTickets(cfg: SetupGlpiConfig, criteria: SearchCriterion[], 
 
 /**
  * Les utilisateurs QUAI s'authentifient en AD/LDAP ; GLPI stocke le même identifiant de connexion
- * dans le champ `name` de /User. On cherche donc en `equals` sur ce champ et on retient le
- * résultat SEULEMENT s'il est unique : 0 -> "not-found", >1 -> "ambiguous" (jamais un
- * rapprochement approximatif silencieux, jamais un "premier de la liste").
+ * dans le champ `name` de /User (option de recherche 1 « Identifiant », confirmé sur l'instance
+ * réelle via /listSearchOptions/User).
+ *
+ * `searchtype: "contains"` et NON `"equals"` : vérifié en conditions réelles le 21/08/2026 sur
+ * l'instance de la mairie — `equals` sur ce champ texte renvoie 0 résultat alors que le compte
+ * existe, `contains` le trouve. Le filtrage EXACT est donc fait côté QUAI juste après (comparaison
+ * insensible à la casse sur la chaîne ENTIÈRE) : un login qui n'est qu'une sous-chaîne d'un autre
+ * compte n'est jamais retenu, et sans correspondance exacte on répond "not-found" plutôt que de
+ * choisir un compte approchant.
  */
 export async function resolveGlpiUserByLogin(login: string): Promise<GlpiUserMatch> {
   const cfg = await loadGlpiConfig();
@@ -577,7 +583,7 @@ export async function resolveGlpiUserByLogin(login: string): Promise<GlpiUserMat
   if (!normalized) return { outcome: "not-found", login };
 
   const query = buildSearchQuery(
-    [{ field: USER_SEARCH_OPTION.login, searchtype: "equals", value: normalized }],
+    [{ field: USER_SEARCH_OPTION.login, searchtype: "contains", value: normalized }],
     [USER_SEARCH_OPTION.id, USER_SEARCH_OPTION.login],
     "0-49",
   );
@@ -591,18 +597,18 @@ export async function resolveGlpiUserByLogin(login: string): Promise<GlpiUserMat
   }
   recordPoll(true);
 
-  // `equals` sur le login peut rester insensible à la casse côté SQL : on ne garde que les
-  // correspondances EXACTES sur le login renvoyé quand il l'est, sinon on reste honnête et on
-  // signale l'ambiguïté plutôt que de choisir.
+  // `contains` ramène aussi des sur-chaînes (chercher "banas" renvoie aussi "adminbanas") : seule
+  // une égalité de la chaîne ENTIÈRE est retenue. Un candidat dont le login n'est pas renvoyé est
+  // écarté — impossible de prouver l'égalité, donc on ne l'accepte pas.
   const candidates = searchRows(result.data as GlpiSearchResponse | null)
     .map(({ key, row }) => ({
       id: rowNumber(row, USER_SEARCH_OPTION.id, key),
       name: rowString(row, USER_SEARCH_OPTION.login),
     }))
-    .filter((c): c is { id: number; name: string | undefined } => c.id !== undefined);
+    .filter((c): c is { id: number; name: string } => c.id !== undefined && c.name !== undefined);
 
-  const exact = candidates.filter((c) => c.name === undefined || c.name === normalized);
-  const retained = exact.length > 0 ? exact : candidates;
+  const target = normalized.toLowerCase();
+  const retained = candidates.filter((c) => c.name.toLowerCase() === target);
   if (retained.length === 0) return { outcome: "not-found", login: normalized };
   if (retained.length > 1) return { outcome: "ambiguous", login: normalized, candidateIds: retained.map((c) => c.id) };
   return { outcome: "found", userId: retained[0]!.id, login: normalized };

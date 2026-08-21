@@ -209,6 +209,43 @@ describe("GLPI — rapprochement du compte utilisateur (AD/LDAP -> /User.name)",
     expect(match.outcome).toBe("ambiguous");
     expect(match).toMatchObject({ candidateIds: [7, 9] });
   });
+
+  // Vérifié sur l'instance réelle le 21/08/2026 : `equals` sur l'option 1 renvoie 0 résultat alors
+  // que le compte existe ; `contains` le trouve. Le filtrage exact se fait ensuite côté QUAI.
+  it("interroge GLPI en 'contains' — 'equals' ne matche pas ce champ texte", async () => {
+    await seedUserTokenConfig();
+    queue("GET search/User", { totalcount: 1, count: 1, data: { "7": { "2": 7, "1": "ybanas" } } });
+    await glpi.resolveGlpiUserByLogin("ybanas");
+    const search = decodeURIComponent(callsTo("GET search/User")[0]!.search);
+    expect(search).toContain("contains");
+    expect(search).not.toContain("searchtype]=equals");
+  });
+
+  it("une sur-chaîne renvoyée par 'contains' n'est jamais retenue", async () => {
+    await seedUserTokenConfig();
+    queue("GET search/User", {
+      totalcount: 2,
+      count: 2,
+      data: { "587": { "2": 587, "1": "adminbanas" }, "319": { "2": 319, "1": "ybanas" } },
+    });
+    expect(await glpi.resolveGlpiUserByLogin("ybanas")).toEqual({ outcome: "found", userId: 319, login: "ybanas" });
+  });
+
+  it("aucune égalité exacte parmi les sur-chaînes -> not-found, jamais un compte approchant", async () => {
+    await seedUserTokenConfig();
+    queue("GET search/User", {
+      totalcount: 2,
+      count: 2,
+      data: { "587": { "2": 587, "1": "adminbanas" }, "319": { "2": 319, "1": "ybanas" } },
+    });
+    expect(await glpi.resolveGlpiUserByLogin("banas")).toEqual({ outcome: "not-found", login: "banas" });
+  });
+
+  it("égalité insensible à la casse (GLPI peut renvoyer une casse différente de la saisie)", async () => {
+    await seedUserTokenConfig();
+    queue("GET search/User", { totalcount: 1, count: 1, data: { "7": { "2": 7, "1": "ybanas" } } });
+    expect(await glpi.resolveGlpiUserByLogin("YBanas")).toEqual({ outcome: "found", userId: 7, login: "YBanas" });
+  });
 });
 
 describe("GLPI — anti-doublon par empreinte d'incident", () => {
