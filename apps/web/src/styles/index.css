@@ -2,6 +2,7 @@
 @import "./base.css";
 @import "./layout.css";
 @import "./components.css";
+@import "./data-table.css";
 @import "./modal.css";
 @import "./setup.css";
 @import "./topology.css";

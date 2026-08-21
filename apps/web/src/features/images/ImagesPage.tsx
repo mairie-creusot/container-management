@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import {
   deleteImage,
@@ -14,15 +14,14 @@ import {
   type ImageStatusFilter,
 } from "@/features/images/imagesSlice";
 import { canOperate } from "@/features/auth/authSlice";
+import { setSearchQuery } from "@/features/ui/uiSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
-import { usePagination } from "@/hooks/usePagination";
 import Inspector from "@/components/Inspector";
 import StatusPill from "@/components/StatusPill";
 import RegistryBadge from "@/components/RegistryBadge";
 import KeyValueList from "@/components/KeyValueList";
-import Pagination from "@/components/Pagination";
-import { SkeletonTable } from "@/components/Skeleton";
-import type { ScannerId, ScanResult, ScanStatus, VulnSeverity } from "@/types";
+import DataTable, { type DataTableColumn } from "@/components/DataTable";
+import type { ImageRef, ScannerId, ScanResult, ScanStatus, VulnSeverity } from "@/types";
 
 const FILTERS: { id: ImageStatusFilter; label: string }[] = [
   { id: "all", label: "Toutes" },
@@ -69,6 +68,11 @@ function scanTriggerLabel(trigger: ScanResult["trigger"]): string {
 }
 
 const SCAN_POLL_MS = 2000;
+
+const IMAGE_STATUS_LABEL: Record<ImageRef["status"], string> = {
+  uptodate: "À jour",
+  update: "Mise à jour dispo",
+};
 
 function formatBytes(bytes: number): string {
   if (bytes <= 0) return "0 Mo";
@@ -149,14 +153,76 @@ export default function ImagesPage() {
 
   const selectedEnvironmentName = environments.find((e) => e.id === selectedEnvironmentId)?.name;
 
-  const visible = items.filter((image) => {
-    if (selectedEnvironmentName && image.environment !== selectedEnvironmentName) return false;
-    if (searchQuery && !image.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
-    return true;
-  });
+  const visible = useMemo(
+    () =>
+      selectedEnvironmentName
+        ? items.filter((image) => image.environment === selectedEnvironmentName)
+        : items,
+    [items, selectedEnvironmentName],
+  );
 
   const selected = items.find((image) => image.id === selectedId) ?? null;
-  const { page, totalPages, pageItems, setPage, pageSize, setPageSize } = usePagination(visible, 10);
+
+  const columns = useMemo<DataTableColumn<ImageRef>[]>(
+    () => [
+      {
+        key: "image",
+        label: "Image",
+        accessor: (image) => image.name,
+        aliases: ["nom"],
+        className: "cell-primary cell-mono",
+      },
+      {
+        key: "registry",
+        label: "Registry",
+        accessor: (image) => image.registry,
+        render: (image) => <RegistryBadge kind={image.registry} />,
+        values: ["dockerhub", "ghcr", "gitlab", "harbor"],
+      },
+      {
+        key: "tag",
+        label: "Tag courant",
+        accessor: (image) => image.currentTag,
+        className: "cell-mono",
+      },
+      {
+        key: "dernierTag",
+        label: "Dernier tag",
+        accessor: (image) => image.latestTag,
+        className: "cell-mono",
+      },
+      {
+        key: "environnement",
+        label: "Environnement",
+        accessor: (image) => image.environment,
+        aliases: ["env"],
+      },
+      {
+        key: "taille",
+        label: "Taille",
+        accessor: (image) => Math.round(image.sizeBytes / (1024 * 1024)),
+        kind: "number",
+        align: "right",
+        render: (image) => formatBytes(image.sizeBytes),
+        hint: "Taille en Mo — ex : taille:>500",
+      },
+      {
+        key: "couches",
+        label: "Couches",
+        accessor: (image) => image.layers,
+        kind: "number",
+        align: "right",
+      },
+      {
+        key: "statut",
+        label: "Statut",
+        accessor: (image) => IMAGE_STATUS_LABEL[image.status],
+        render: (image) => <StatusPill status={image.status} />,
+        values: Object.values(IMAGE_STATUS_LABEL),
+      },
+    ],
+    [],
+  );
 
   const currentScan = selected ? scansByImageId[selected.id]?.[0] ?? null : null;
 
@@ -208,72 +274,37 @@ export default function ImagesPage() {
 
         {pullStatus === "error" && pullError && <div className="error-banner">{pullError}</div>}
 
-        <div className="chip-row">
-          {FILTERS.map((f) => (
-            <button
-              key={f.id}
-              type="button"
-              className={`chip${filter === f.id ? " is-active" : ""}`}
-              onClick={() => dispatch(setImageFilter(f.id))}
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
-
-        {error && <div className="error-banner">{error}</div>}
-        {status === "loading" && items.length === 0 && (
-          <SkeletonTable columns={["Image", "Registry", "Tag courant", "Dernier tag", "Environnement", "Statut"]} rows={8} />
-        )}
-
-        {status !== "loading" && visible.length === 0 && !error && (
-          <div className="empty-state">Aucune image ne correspond aux critères.</div>
-        )}
-
-        {visible.length > 0 && (
-          <div className="data-table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Image</th>
-                  <th>Registry</th>
-                  <th>Tag courant</th>
-                  <th>Dernier tag</th>
-                  <th>Environnement</th>
-                  <th>Statut</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pageItems.map((image) => (
-                  <tr
-                    key={image.id}
-                    className={image.id === selectedId ? "is-selected" : ""}
-                    onClick={() => dispatch(selectImage(image.id))}
-                  >
-                    <td className="cell-primary cell-mono">{image.name}</td>
-                    <td>
-                      <RegistryBadge kind={image.registry} />
-                    </td>
-                    <td className="cell-mono">{image.currentTag}</td>
-                    <td className="cell-mono">{image.latestTag}</td>
-                    <td>{image.environment}</td>
-                    <td>
-                      <StatusPill status={image.status} />
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        <Pagination
-          page={page}
-          totalPages={totalPages}
-          totalItems={visible.length}
-          pageSize={pageSize}
-          onPageChange={setPage}
-          onPageSizeChange={setPageSize}
+        <DataTable
+          rows={visible}
+          columns={columns}
+          rowKey={(image) => image.id}
+          loading={status === "loading"}
+          error={error}
+          onRetry={() => dispatch(fetchImages(filter))}
+          query={searchQuery}
+          onQueryChange={(next) => dispatch(setSearchQuery(next))}
+          searchPlaceholder="Rechercher…  (ex : registry:ghcr taille:>500 -alpine)"
+          defaultSort={{ key: "image", direction: "asc" }}
+          storageKey="images"
+          itemsLabel="images"
+          emptyLabel="Aucune image sur cet hôte Docker."
+          noResultsLabel="Aucune image ne correspond aux critères."
+          onRowClick={(image) => dispatch(selectImage(image.id))}
+          isRowSelected={(image) => image.id === selectedId}
+          toolbarExtra={
+            <div className="chip-row" style={{ marginBottom: 0 }}>
+              {FILTERS.map((f) => (
+                <button
+                  key={f.id}
+                  type="button"
+                  className={`chip${filter === f.id ? " is-active" : ""}`}
+                  onClick={() => dispatch(setImageFilter(f.id))}
+                >
+                  {f.label}
+                </button>
+              ))}
+            </div>
+          }
         />
       </div>
 

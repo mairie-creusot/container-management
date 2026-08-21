@@ -1,0 +1,419 @@
+/* DataTable générique : barre de recherche avancée, tri, pagination (components/DataTable.tsx). */
+
+.dt {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dt--refreshing .data-table-wrap {
+  opacity: 0.6;
+  transition: opacity 0.2s ease;
+}
+
+/* Barre d'outils */
+.dt__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.dt__search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 320px;
+  min-width: 240px;
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0 8px 0 10px;
+  height: 34px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.dt__search:focus-within {
+  border-color: var(--accent-start);
+  box-shadow: 0 0 0 3px rgba(59, 111, 239, 0.16);
+}
+
+.dt__search-icon {
+  color: var(--color-text-faint);
+  flex-shrink: 0;
+}
+
+.dt__search-input {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--color-text);
+  font-size: 13px;
+  font-family: var(--font-sans);
+  height: 100%;
+}
+
+.dt__search-input::placeholder {
+  color: var(--color-text-faint);
+}
+
+.dt__kbd {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-faint);
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  background: var(--color-surface-2);
+}
+
+.dt__search-clear {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-faint);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.dt__search-clear:hover {
+  background: var(--color-surface-3);
+  color: var(--color-text);
+}
+
+/* Suggestions de complétion */
+.dt__suggestions {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.45);
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.dt__suggestion {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  text-align: left;
+  color: var(--color-text-muted);
+}
+
+.dt__suggestion.is-active {
+  background: var(--color-surface-3);
+  color: var(--color-text);
+}
+
+.dt__suggestion-insert {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--accent-end);
+}
+
+.dt__suggestion-hint {
+  font-size: 11.5px;
+  color: var(--color-text-faint);
+  white-space: nowrap;
+}
+
+/* Aide contextuelle */
+.dt__help-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-1);
+  color: var(--color-text-muted);
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.dt__help-toggle:hover,
+.dt__help-toggle.is-active {
+  color: var(--color-text);
+  border-color: var(--accent-start);
+}
+
+.dt__help {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(260px, 1fr);
+  gap: 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+}
+
+.dt__help-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-text-faint);
+  margin-bottom: 8px;
+}
+
+.dt__help-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dt__help-field {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 9px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--color-text-faint);
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.dt__help-field:hover {
+  border-color: var(--accent-start);
+  color: var(--color-text);
+}
+
+.dt__help-field code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--accent-end);
+}
+
+.dt__help-ops {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.dt__help-ops code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--accent-end);
+  background: var(--color-surface-2);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+.dt__notice {
+  font-size: 12px;
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
+  border: 1px solid var(--color-warning);
+  border-radius: var(--radius-sm);
+  padding: 7px 12px;
+}
+
+.dt__notice code {
+  font-family: var(--font-mono);
+}
+
+.dt__count {
+  font-size: 12px;
+  color: var(--color-text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.dt__error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+/* Tableau */
+.dt__table--static tbody tr {
+  cursor: default;
+}
+
+/* L'en-tête ne porte plus le padding : il passe sur le bouton de tri (ou sur .dt__label pour
+   une colonne non triable) pour que toute la surface de l'en-tête reste cliquable. */
+.data-table thead th.dt__th {
+  padding: 0;
+}
+
+.data-table thead th.dt__th--right {
+  text-align: right;
+}
+
+.data-table thead th.dt__th--center {
+  text-align: center;
+}
+
+.dt__label {
+  display: inline-block;
+  padding: 10px 16px;
+}
+
+.dt__sort {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  padding: 10px 16px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.dt__th--right .dt__sort {
+  justify-content: flex-end;
+}
+
+.dt__th--center .dt__sort {
+  justify-content: center;
+}
+
+.dt__sort:hover {
+  color: var(--color-text);
+}
+
+.dt__th.is-sorted .dt__sort {
+  color: var(--color-text);
+}
+
+/* Indicateur de tri : invisible au repos, révélé au survol de l'en-tête, orienté quand actif. */
+.dt__sort-arrow {
+  display: inline-flex;
+  opacity: 0;
+  transform: rotate(90deg);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+.dt__sort-arrow svg {
+  width: 13px;
+  height: 13px;
+}
+
+.dt__sort:hover .dt__sort-arrow {
+  opacity: 0.45;
+}
+
+.dt__sort-arrow.is-asc,
+.dt__sort-arrow.is-desc {
+  opacity: 1;
+  color: var(--accent-end);
+}
+
+.dt__sort-arrow.is-asc {
+  transform: rotate(-90deg);
+}
+
+.dt__sort-arrow.is-desc {
+  transform: rotate(90deg);
+}
+
+.data-table tbody td.dt__td--right {
+  text-align: right;
+}
+
+.data-table tbody td.dt__td--center {
+  text-align: center;
+}
+
+/* Pied de tableau */
+.dt__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 2px 2px 4px;
+}
+
+.dt__range,
+.dt__page {
+  font-size: 12.5px;
+  color: var(--color-text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.dt__pager {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dt__chevron--flip {
+  transform: rotate(180deg);
+}
+
+.dt__size {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dt__size-label {
+  font-size: 12.5px;
+  color: var(--color-text-faint);
+}
+
+@media (max-width: 720px) {
+  .dt__help {
+    grid-template-columns: 1fr;
+  }
+
+  .dt__footer {
+    justify-content: center;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dt--refreshing .data-table-wrap,
+  .dt__search,
+  .dt__search-clear,
+  .dt__help-toggle,
+  .dt__help-field,
+  .dt__sort,
+  .dt__sort-arrow {
+    transition: none;
+  }
+
+  .dt__sort-arrow {
+    opacity: 0.45;
+  }
+}

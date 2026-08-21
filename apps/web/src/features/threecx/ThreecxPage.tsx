@@ -18,6 +18,7 @@ import type {
   ThreecxActiveCall,
   ThreecxAuthMode,
   ThreecxCallParticipant,
+  ThreecxExtension,
   ThreecxListState,
   ThreecxPublicConfig,
 } from "@/features/threecx/types";
@@ -25,6 +26,7 @@ import { accessStateOf, pbxErrorHint } from "@/features/threecx/access";
 import { canAdminister } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import StatusPill from "@/components/StatusPill";
+import DataTable, { type DataTableColumn } from "@/components/DataTable";
 import KeyValueList from "@/components/KeyValueList";
 import { IconCheck, IconServer } from "@/components/icons";
 
@@ -593,8 +595,6 @@ export default function ThreecxPage() {
   const admin = canAdminister(session);
 
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
-  const [extensionQuery, setExtensionQuery] = useState("");
-  const [onlyReachable, setOnlyReachable] = useState(false);
   const tickRef = useRef(0);
 
   useEffect(() => {
@@ -653,18 +653,56 @@ export default function ThreecxPage() {
   const pageAccess: ThreecxAccess = status ?? { configured };
   const pageState = accessStateOf(pageAccess);
 
-  const filteredExtensions = useMemo(() => {
-    const needle = extensionQuery.trim().toLowerCase();
-    return extensions.items.filter((extension) => {
-      if (onlyReachable && extension.registered !== true) return false;
-      if (!needle) return true;
-      return (
-        extension.number.toLowerCase().includes(needle) ||
-        (extension.displayName ?? "").toLowerCase().includes(needle) ||
-        (extension.currentProfileName ?? "").toLowerCase().includes(needle)
-      );
-    });
-  }, [extensions.items, extensionQuery, onlyReachable]);
+  // Colonnes du tableau générique (tri, pagination, recherche par champ) — `values` alimente la
+  // complétion de `presence:` avec les profils réellement présents sur le PBX.
+  const extensionColumns = useMemo<DataTableColumn<ThreecxExtension>[]>(
+    () => [
+      {
+        key: "numero",
+        label: "Numéro",
+        accessor: (e) => e.number,
+        kind: "number",
+        aliases: ["num", "ext"],
+        className: "cell-mono",
+      },
+      {
+        key: "nom",
+        label: "Nom",
+        accessor: (e) => e.displayName ?? "",
+        className: "cell-primary",
+        render: (e) => e.displayName ?? MISSING,
+      },
+      {
+        key: "joignable",
+        label: "Joignable",
+        accessor: (e) => e.registered ?? null,
+        kind: "boolean",
+        render: (e) =>
+          e.registered === undefined ? (
+            MISSING
+          ) : e.registered ? (
+            <StatusPill status="ok" label="Enregistré" />
+          ) : (
+            <StatusPill status="crit" label="Non enregistré" />
+          ),
+      },
+      {
+        key: "presence",
+        label: "Présence",
+        accessor: (e) => e.currentProfileName ?? "",
+        render: (e) => e.currentProfileName ?? MISSING,
+        values: [...new Set(extensions.items.map((e) => e.currentProfileName).filter(Boolean))] as string[],
+      },
+      {
+        key: "file",
+        label: "File d'attente",
+        accessor: (e) => e.queueStatus ?? "",
+        aliases: ["queue"],
+        render: (e) => e.queueStatus ?? MISSING,
+      },
+    ],
+    [extensions.items],
+  );
 
   const connectionPill = backendUnavailable
     ? { status: "unavailable", label: "Indisponible" }
@@ -810,62 +848,20 @@ export default function ThreecxPage() {
               </div>
             )}
 
-            <div className="threecx-section-head">
-              <h3 className="threecx-section-title">Postes</h3>
-              {extensions.items.length > 0 && (
-                <div className="threecx-filters">
-                  <input
-                    type="search"
-                    value={extensionQuery}
-                    onChange={(event) => setExtensionQuery(event.target.value)}
-                    placeholder="Filtrer par numéro, nom ou présence"
-                    aria-label="Filtrer les postes"
-                  />
-                  <label className="threecx-checkbox threecx-checkbox--inline">
-                    <input type="checkbox" checked={onlyReachable} onChange={(event) => setOnlyReachable(event.target.checked)} />
-                    <span>Joignables uniquement</span>
-                  </label>
-                  <span className="threecx-count">
-                    {filteredExtensions.length} / {extensions.items.length}
-                  </span>
-                </div>
-              )}
-            </div>
+            <h3 className="threecx-section-title">Postes</h3>
             <ThreecxListNotice list={extensions} subject="les postes" emptyLabel="Aucun poste déclaré sur le PBX." />
             {extensions.items.length > 0 && (
-              <div className="data-table-wrap">
-                <table className="data-table">
-                  <thead>
-                    <tr>
-                      <th>Numéro</th>
-                      <th>Nom</th>
-                      <th>Joignable</th>
-                      <th>Présence</th>
-                      <th>File d'attente</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredExtensions.map((extension) => (
-                      <tr key={extension.id}>
-                        <td className="cell-mono">{extension.number}</td>
-                        <td className="cell-primary">{extension.displayName ?? MISSING}</td>
-                        <td>
-                          {extension.registered === undefined ? (
-                            MISSING
-                          ) : extension.registered ? (
-                            <StatusPill status="ok" label="Enregistré" />
-                          ) : (
-                            <StatusPill status="crit" label="Non enregistré" />
-                          )}
-                        </td>
-                        <td>{extension.currentProfileName ?? MISSING}</td>
-                        <td>{extension.queueStatus ?? MISSING}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {filteredExtensions.length === 0 && <div className="empty-state">Aucun poste ne correspond au filtre.</div>}
-              </div>
+              <DataTable
+                rows={extensions.items}
+                columns={extensionColumns}
+                rowKey={(extension) => String(extension.id)}
+                storageKey="threecx-extensions"
+                itemsLabel="postes"
+                defaultSort={{ key: "numero", direction: "asc" }}
+                emptyLabel="Aucun poste déclaré sur le PBX."
+                noResultsLabel="Aucun poste ne correspond à la recherche."
+                searchPlaceholder="Rechercher…  (ex : numero:57 presence:available joignable:oui)"
+              />
             )}
 
             <h3 className="threecx-section-title">Files d'attente</h3>
