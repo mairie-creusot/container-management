@@ -13,6 +13,37 @@ export interface AdDnsFormInput {
   targetIp: string;
 }
 
+/** État d'un compte tel que l'annuaire le laisse lire ; `null` = attribut non lisible par le compte de service. */
+export interface LdapAccountState {
+  readable: boolean;
+  disabled: boolean | null;
+  locked: boolean | null;
+  passwordExpired: boolean | null;
+  mustChangePassword: boolean | null;
+  accountExpired: boolean | null;
+}
+
+/** Réponse de POST /api/auth/ldap-diagnose (admins uniquement, lecture seule, sans mot de passe). */
+export interface LdapAccountDiagnosis {
+  username: string;
+  searchBase: string;
+  searchFilter: string;
+  found: boolean;
+  matchCount: number;
+  matchedDns: string[];
+  dn: string | null;
+  dnHasNonAscii: boolean;
+  displayName: string | null;
+  identifiers: { sAMAccountName: string | null; userPrincipalName: string | null; cn: string | null };
+  memberOfPresent: boolean;
+  groupsResolved: number;
+  roles: string[] | null;
+  accountState: LdapAccountState;
+  excludedByFilter: boolean;
+  verdict: string;
+  notes: string[];
+}
+
 interface AdDnsState {
   status: "idle" | "loading" | "ready" | "error";
   error: string | null;
@@ -23,6 +54,9 @@ interface AdDnsState {
   clearing: boolean;
   testing: boolean;
   testResult: AdDnsTestResult | null;
+  diagnosing: boolean;
+  diagnosis: LdapAccountDiagnosis | null;
+  diagnosisError: string | null;
 }
 
 const initialState: AdDnsState = {
@@ -35,6 +69,9 @@ const initialState: AdDnsState = {
   clearing: false,
   testing: false,
   testResult: null,
+  diagnosing: false,
+  diagnosis: null,
+  diagnosisError: null,
 };
 
 export const fetchAdDnsStatus = createAsyncThunk<AdDnsStatus>("adDns/fetchStatus", async () =>
@@ -77,12 +114,33 @@ export const testAdDnsConfig = createAsyncThunk<AdDnsTestResult, AdDnsFormInput,
   },
 );
 
+/**
+ * Diagnostic d'un compte de l'annuaire — aucun mot de passe n'est envoyé et le serveur ne tente
+ * aucun bind utilisateur (qui incrémenterait le compteur de verrouillage AD) : uniquement des
+ * recherches en lecture seule avec le compte de service déjà configuré.
+ */
+export const diagnoseLdapAccount = createAsyncThunk<LdapAccountDiagnosis, string, { rejectValue: string }>(
+  "adDns/diagnoseLdapAccount",
+  async (username, { rejectWithValue }) => {
+    try {
+      return await apiPost<LdapAccountDiagnosis>("/auth/ldap-diagnose", { username });
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : "Diagnostic impossible.";
+      return rejectWithValue(message);
+    }
+  },
+);
+
 const adDnsSlice = createSlice({
   name: "adDns",
   initialState,
   reducers: {
     clearAdDnsTestResult(state) {
       state.testResult = null;
+    },
+    clearLdapDiagnosis(state) {
+      state.diagnosis = null;
+      state.diagnosisError = null;
     },
   },
   extraReducers: (builder) => {
@@ -138,9 +196,22 @@ const adDnsSlice = createSlice({
       .addCase(testAdDnsConfig.rejected, (state, action) => {
         state.testing = false;
         state.testResult = { ok: false, message: action.payload ?? "Impossible de tester la configuration DNS AD." };
+      })
+      .addCase(diagnoseLdapAccount.pending, (state) => {
+        state.diagnosing = true;
+        state.diagnosis = null;
+        state.diagnosisError = null;
+      })
+      .addCase(diagnoseLdapAccount.fulfilled, (state, action) => {
+        state.diagnosing = false;
+        state.diagnosis = action.payload;
+      })
+      .addCase(diagnoseLdapAccount.rejected, (state, action) => {
+        state.diagnosing = false;
+        state.diagnosisError = action.payload ?? "Diagnostic impossible.";
       });
   },
 });
 
-export const { clearAdDnsTestResult } = adDnsSlice.actions;
+export const { clearAdDnsTestResult, clearLdapDiagnosis } = adDnsSlice.actions;
 export default adDnsSlice.reducer;

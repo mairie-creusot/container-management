@@ -2,11 +2,14 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import {
   clearAdDnsTestResult,
+  clearLdapDiagnosis,
+  diagnoseLdapAccount,
   disableAdDns,
   fetchAdDnsStatus,
   saveAdDnsConfig,
   testAdDnsConfig,
   type AdDnsFormInput,
+  type LdapAccountDiagnosis,
 } from "@/features/adDns/adDnsSlice";
 import { canAdminister } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
@@ -20,6 +23,91 @@ function formatSyncDate(iso: string): string {
   return new Date(iso).toLocaleString("fr-FR");
 }
 
+function ternaryLabel(value: boolean | null, whenTrue: string, whenFalse: string): string {
+  if (value === null) return "non lisible";
+  return value ? whenTrue : whenFalse;
+}
+
+/** Le verdict est bloquant dès que l'annuaire empêche le compte de se connecter. */
+function isBlocking(diagnosis: LdapAccountDiagnosis): boolean {
+  const s = diagnosis.accountState;
+  return (
+    !diagnosis.found ||
+    diagnosis.matchCount > 1 ||
+    s.disabled === true ||
+    s.locked === true ||
+    s.mustChangePassword === true ||
+    s.passwordExpired === true ||
+    s.accountExpired === true
+  );
+}
+
+/**
+ * Résultat du diagnostic d'un compte annuaire. Volontairement détaillé : cet écran est réservé
+ * aux administrateurs (POST /api/auth/ldap-diagnose exige le rôle admin) — l'écran de connexion,
+ * lui, reste vague et ne révèle jamais si un compte existe.
+ */
+function DiagnosisReport({ diagnosis }: { diagnosis: LdapAccountDiagnosis }) {
+  const state = diagnosis.accountState;
+  const blocking = isBlocking(diagnosis);
+
+  const rows = [
+    { key: "Trouvé par le filtre configuré", value: diagnosis.found ? "oui" : "non" },
+    { key: "Entrées correspondantes", value: String(diagnosis.matchCount) },
+    { key: "DN", value: diagnosis.dn ?? "—" },
+    { key: "Nom affiché", value: diagnosis.displayName ?? "—" },
+    { key: "sAMAccountName", value: diagnosis.identifiers.sAMAccountName ?? "—" },
+    { key: "userPrincipalName", value: diagnosis.identifiers.userPrincipalName ?? "—" },
+    { key: "Attribut memberOf", value: diagnosis.memberOfPresent ? "présent" : "absent (repli par requête inverse)" },
+    { key: "Groupes résolus", value: String(diagnosis.groupsResolved) },
+    { key: "Rôles qui seraient attribués", value: diagnosis.roles?.join(", ") || "—" },
+    { key: "Base de recherche", value: diagnosis.searchBase },
+    { key: "Filtre de recherche", value: diagnosis.searchFilter },
+  ];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div className={blocking ? "error-banner" : "success-banner"}>
+        {blocking ? null : <IconCheck />} {diagnosis.verdict}
+      </div>
+
+      <div className="chip-row" style={{ marginBottom: 0 }}>
+        <span className={`chip${state.disabled === true ? " chip--danger" : state.disabled === null ? " chip--muted" : ""}`}>
+          {ternaryLabel(state.disabled, "Désactivé", "Activé")}
+        </span>
+        <span className={`chip${state.locked === true ? " chip--danger" : state.locked === null ? " chip--muted" : ""}`}>
+          {ternaryLabel(state.locked, "Verrouillé", "Non verrouillé")}
+        </span>
+        <span className={`chip${state.mustChangePassword === true ? " chip--danger" : state.mustChangePassword === null ? " chip--muted" : ""}`}>
+          {ternaryLabel(state.mustChangePassword, "Doit changer son mot de passe", "Mot de passe non forcé")}
+        </span>
+        <span className={`chip${state.passwordExpired === true ? " chip--danger" : state.passwordExpired === null ? " chip--muted" : ""}`}>
+          {ternaryLabel(state.passwordExpired, "Mot de passe expiré", "Mot de passe valide")}
+        </span>
+        <span className={`chip${state.accountExpired === true ? " chip--danger" : state.accountExpired === null ? " chip--muted" : ""}`}>
+          {ternaryLabel(state.accountExpired, "Compte expiré", "Compte non expiré")}
+        </span>
+      </div>
+
+      <KeyValueList rows={rows} />
+
+      {diagnosis.matchCount > 1 && (
+        <div className="error-banner">
+          Plusieurs entrées portent cet identifiant : {diagnosis.matchedDns.join(" — ")}
+        </div>
+      )}
+
+      {diagnosis.notes.length > 0 && (
+        <ul className="create-container-hint" style={{ margin: 0, paddingLeft: 18 }}>
+          {diagnosis.notes.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 /**
  * Configuration de la synchronisation DNS Active Directory (RFC 2136 + GSS-TSIG, voir
  * apps/api/src/services/adDns.ts) — quand elle est activée, chaque route de reverse proxy créée
@@ -29,15 +117,27 @@ function formatSyncDate(iso: string): string {
  */
 export default function AdDnsPage() {
   const dispatch = useAppDispatch();
-  const { status, error, configured, config, lastSync, saving, clearing, testing, testResult } = useAppSelector(
-    (s) => s.adDns,
-  );
+  const {
+    status,
+    error,
+    configured,
+    config,
+    lastSync,
+    saving,
+    clearing,
+    testing,
+    testResult,
+    diagnosing,
+    diagnosis,
+    diagnosisError,
+  } = useAppSelector((s) => s.adDns);
   const session = useAppSelector((s) => s.auth.session);
   const admin = canAdminister(session);
   const confirm = useConfirm();
 
   const [form, setForm] = useState<AdDnsFormInput>(EMPTY_FORM);
   const [editing, setEditing] = useState(false);
+  const [diagnoseUsername, setDiagnoseUsername] = useState("");
 
   useEffect(() => {
     dispatch(fetchAdDnsStatus());
@@ -103,6 +203,18 @@ export default function AdDnsPage() {
     if (!ok) return;
     await dispatch(disableAdDns());
     setForm(EMPTY_FORM);
+  }
+
+  async function handleDiagnose(event: FormEvent) {
+    event.preventDefault();
+    const username = diagnoseUsername.trim();
+    if (!username) return;
+    await dispatch(diagnoseLdapAccount(username));
+  }
+
+  function handleDiagnoseReset() {
+    setDiagnoseUsername("");
+    dispatch(clearLdapDiagnosis());
   }
 
   const showForm = editing || !configured;
@@ -271,6 +383,42 @@ export default function AdDnsPage() {
 
         {!admin && !configured && (
           <div className="empty-state">Seul un administrateur peut configurer la synchronisation DNS AD.</div>
+        )}
+
+        {admin && (
+          <form className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }} onSubmit={handleDiagnose}>
+            <div>
+              <h3 style={{ margin: 0 }}>Diagnostiquer un compte</h3>
+              <p className="create-container-hint" style={{ marginTop: 4 }}>
+                Explique pourquoi un compte de l'annuaire n'arrive pas à se connecter : présence dans la base de
+                recherche, DN réel, groupes, rôles qui lui seraient attribués et état du compte (désactivé, verrouillé,
+                mot de passe expiré ou à changer). Lecture seule, aucun mot de passe demandé — aucune tentative de
+                connexion n'est faite, le compteur de verrouillage Active Directory n'est jamais incrémenté.
+              </p>
+            </div>
+            <div className="field">
+              <label htmlFor="ldap-diagnose-username">Identifiant (sAMAccountName ou userPrincipalName)</label>
+              <input
+                id="ldap-diagnose-username"
+                value={diagnoseUsername}
+                onChange={(event) => setDiagnoseUsername(event.target.value)}
+                placeholder="prenom.nom ou pnom@lecreusot.priv"
+                autoComplete="off"
+              />
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="submit" className="btn btn-primary" disabled={diagnosing || !diagnoseUsername.trim()}>
+                {diagnosing ? "Diagnostic en cours…" : "Diagnostiquer"}
+              </button>
+              {(diagnosis || diagnosisError) && (
+                <button type="button" className="btn btn-ghost" onClick={handleDiagnoseReset}>
+                  Effacer
+                </button>
+              )}
+            </div>
+            {diagnosisError && <div className="error-banner">{diagnosisError}</div>}
+            {diagnosis && <DiagnosisReport diagnosis={diagnosis} />}
+          </form>
         )}
       </div>
     </div>
