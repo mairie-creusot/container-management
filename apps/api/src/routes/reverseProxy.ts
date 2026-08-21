@@ -16,8 +16,11 @@
  * POST   /api/reverse-proxy/push        — repousse la config complète vers Caddy sans rien
  *                                          changer côté QUAI (utile après un redémarrage de
  *                                          Caddy) — operator/admin.
- * GET    /api/reverse-proxy/status         — Caddy joignable ou non, même pattern que
- *                                             GET /api/scanners/status (routes/scan.ts).
+ * GET    /api/reverse-proxy/status         — Caddy joignable ou non (+ `reconciliation` : état de
+ *                                             la boucle qui republie la config perdue à chaque
+ *                                             redémarrage de Caddy, voir
+ *                                             services/reverseProxyReconciler.ts), même pattern
+ *                                             que GET /api/scanners/status (routes/scan.ts).
  * GET    /api/reverse-proxy/ca-certificate — certificat racine (PEM) de l'autorité TLS interne de
  *                                             Caddy, à installer manuellement une fois côté poste
  *                                             client pour que les certificats HTTPS émis pour
@@ -48,6 +51,7 @@ import {
   resyncDns,
   SubdomainConflictError,
 } from "../services/reverseProxy.js";
+import { getReverseProxyReconciliationStatus } from "../services/reverseProxyReconciler.js";
 
 interface CreateRouteBody {
   subdomain?: string;
@@ -157,7 +161,9 @@ export default async function reverseProxyRoutes(fastify: FastifyInstance): Prom
   });
 
   fastify.get("/api/reverse-proxy/status", async (_request, reply) => {
-    return reply.send(await getReverseProxyStatus());
+    // `reconciliation` est en mémoire process : tant qu'aucun cycle n'a tourné (boucle démarrée
+    // depuis index.ts#main() uniquement), ses champs valent null plutôt qu'une valeur inventée.
+    return reply.send({ ...(await getReverseProxyStatus()), reconciliation: getReverseProxyReconciliationStatus() });
   });
 
   fastify.get("/api/reverse-proxy/ca-certificate", async (_request, reply) => {

@@ -56,6 +56,7 @@ import { startBackupScheduler } from "./services/backupScheduler.js";
 import { startCronJobsScheduler } from "./services/cronJobsScheduler.js";
 import { startGitopsReconciler } from "./services/gitopsReconciler.js";
 import { startMetricsCollector } from "./services/metricsCollector.js";
+import { startReverseProxyReconciler } from "./services/reverseProxyReconciler.js";
 import { startScanScheduler } from "./services/scanScheduler.js";
 import { startWatchdog } from "./services/watchdog.js";
 
@@ -150,6 +151,11 @@ async function main(): Promise<void> {
   // démarré seulement ici pour ne jamais taper le disque/réseau pendant les tests.
   const stopGitopsReconciler = startGitopsReconciler();
 
+  // Republication de la config du reverse proxy au démarrage (Caddy peut démarrer après l'API,
+  // d'où les réessais) puis réconciliation périodique — la config de Caddy ne vit qu'en mémoire
+  // et disparaît à chaque redémarrage de celui-ci (voir services/reverseProxyReconciler.ts).
+  const stopReverseProxyReconciler = startReverseProxyReconciler();
+
   // Scan automatique en tâche de fond des images RÉELLEMENT déployées (conteneurs running) qui
   // n'ont jamais été scannées ou dont le dernier scan réussi est trop ancien (voir
   // services/scanScheduler.ts — cron de rafraîchissement périodique, PAS un edge-triggered comme
@@ -190,6 +196,7 @@ async function main(): Promise<void> {
     fastify.log.info(`${signal} received, closing server`);
     stopWatchdog();
     stopGitopsReconciler();
+    stopReverseProxyReconciler();
     stopScanScheduler();
     stopMetricsCollector();
     stopCronJobsScheduler();

@@ -7,7 +7,9 @@
  * OpenTofu/Ansible/Packer/Grype/OSV-Scanner déjà intégrés dans ce projet. PAS de génération de
  * Caddyfile ni de `caddy reload` : la configuration complète est reconstruite et poussée en
  * mémoire, atomiquement, à chaque mutation (voir pushConfigToCaddy() ci-dessous), et rechargeable
- * manuellement à tout moment (utile après un redémarrage de Caddy).
+ * manuellement à tout moment. Cette config ne vivant QU'en mémoire côté Caddy, un redémarrage de
+ * Caddy la perd entièrement : services/reverseProxyReconciler.ts la republie au démarrage de l'API
+ * puis périodiquement, en comparant d'abord ce que Caddy sert réellement (fetchServedCaddyState()).
  *
  * Persistance JSON sur disque (`REVERSE_PROXY_PATH`, défaut `./data/reverse-proxy.json` en dev),
  * même répertoire et même pattern que `secrets.json` (secretsStore.ts) : cache mémoire process
@@ -361,12 +363,29 @@ export async function resolveUpstream(route: ReverseProxyRoute): Promise<string 
   return null;
 }
 
+/** Adresses d'écoute du serveur "quai" — comparées telles quelles par le réconciliateur. */
+const QUAI_SERVER_LISTEN = [":80", ":443"];
+
+interface CaddyLoadBody {
+  admin: { listen: string; origins: string[] };
+  apps: {
+    tls: { automation: { policies: [{ subjects: string[]; issuers: [{ module: "internal" }] }] } };
+    http: { servers: { quai: { listen: string[]; routes: CaddyRoute[] } } };
+  };
+}
+
+/** Ce que QUAI attend que Caddy serve : la config à pousser + sa forme comparable (voir services/reverseProxyReconciler.ts). */
+export interface DesiredCaddyConfig {
+  body: CaddyLoadBody;
+  subdomains: string[];
+  listen: string[];
+}
+
 /**
- * Reconstruit la configuration Caddy complète (un serveur HTTP "quai" sur `:80`, une route par
- * sous-domaine dont la cible a pu être résolue) et la pousse en une fois via `POST /load` (voir
- * https://caddyserver.com/docs/api#post-load). Réutilisable manuellement (ex: après un
- * redémarrage de Caddy qui serait reparti du Caddyfile de bootstrap, sans plus aucune route
- * applicative).
+ * Reconstruit la configuration Caddy complète (un serveur HTTP "quai" sur `:80`/`:443`, une route
+ * par sous-domaine dont la cible a pu être résolue) SANS la pousser — séparé du push pour que la
+ * boucle de réconciliation puisse comparer avant de décider de republier (voir
+ * services/reverseProxyReconciler.ts), sans résoudre deux fois les upstreams.
  *
  * Le bloc `admin` est explicitement réinclus à chaque appel : `/load` remplace la config
  * ENTIÈRE, y compris `admin` — l'omettre ferait retomber Caddy sur son admin par défaut
@@ -376,13 +395,11 @@ export async function resolveUpstream(route: ReverseProxyRoute): Promise<string 
  * cela, Caddy rejette en 403 toute requête d'admin dont l'en-tête Host ne correspond pas à sa
  * liste blanche par défaut (qui ne connaît que localhost/127.0.0.1/::1, jamais un nom de service
  * docker-compose) — vérifié en conditions réelles lors du développement de cette fonctionnalité.
- *
- * Échoue EXPLICITEMENT (l'erreur, jamais avalée) si Caddy ne répond pas ou répond en erreur —
- * voir createRoute()/deleteRoute() ci-dessus pour ce que l'appelant en fait.
  */
-export async function pushConfigToCaddy(): Promise<void> {
+export async function buildDesiredCaddyConfig(): Promise<DesiredCaddyConfig> {
   const routes = await getAll();
   const caddyRoutes: CaddyRoute[] = [];
+  const subdomains: string[] = [];
   const tlsSubjects = new Set<string>(["localhost"]); // "localhost" toujours couvert : voir le
   // commentaire sur `apps.tls` ci-dessous — permet de vérifier que le TLS interne fonctionne
   // (https://localhost) même sans aucune route *.lecreusot.priv encore configurée.
@@ -393,6 +410,7 @@ export async function pushConfigToCaddy(): Promise<void> {
       match: [{ host: [route.subdomain] }],
       handle: [{ handler: "reverse_proxy", upstreams: [{ dial: upstream }] }],
     });
+    subdomains.push(route.subdomain);
     tlsSubjects.add(route.subdomain);
   }
   // Toujours en dernier (voir CaddyFallbackRoute ci-dessus) : un Host qui ne correspond à
@@ -417,7 +435,7 @@ export async function pushConfigToCaddy(): Promise<void> {
   const adminAuthority = new URL(config.reverseProxy.caddyAdminUrl).host;
   const adminOrigins = Array.from(new Set([adminAuthority, "localhost:2019", "127.0.0.1:2019", "[::1]:2019"]));
 
-  const body = {
+  const body: CaddyLoadBody = {
     admin: { listen: "0.0.0.0:2019", origins: adminOrigins },
     apps: {
       // Émission de certificat par l'AUTORITÉ INTERNE de Caddy (jamais ACME/Let's Encrypt — voir
@@ -436,12 +454,24 @@ export async function pushConfigToCaddy(): Promise<void> {
           // :443 en plus de :80 (existant, inchangé) — les DEUX servent les mêmes routes, aucune
           // redirection HTTP -> HTTPS forcée pour ne rien casser de ce qui dépend déjà du HTTP
           // (ex: tests/scripts déjà écrits en http:// dans les lots précédents).
-          quai: { listen: [":80", ":443"], routes: caddyRoutes },
+          quai: { listen: [...QUAI_SERVER_LISTEN], routes: caddyRoutes },
         },
       },
     },
   };
 
+  return { body, subdomains, listen: [...QUAI_SERVER_LISTEN] };
+}
+
+/**
+ * Pousse une configuration déjà construite via `POST /load` (voir
+ * https://caddyserver.com/docs/api#post-load) — remplace toute la config en mémoire de Caddy,
+ * atomiquement. Échoue EXPLICITEMENT (l'erreur, jamais avalée) si Caddy ne répond pas ou répond
+ * en erreur — voir createRoute()/deleteRoute() ci-dessus pour ce que l'appelant en fait.
+ */
+export async function pushDesiredCaddyConfig(desired: DesiredCaddyConfig): Promise<void> {
+  const adminAuthority = new URL(config.reverseProxy.caddyAdminUrl).host;
+  const body = desired.body;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.reverseProxy.requestTimeoutMs);
   let response: Response;
@@ -472,27 +502,90 @@ export async function pushConfigToCaddy(): Promise<void> {
   }
 }
 
-/** GET /api/reverse-proxy/status — Caddy joignable ou non, même pattern que GET /api/scanners/status. */
-export async function getReverseProxyStatus(): Promise<ReverseProxyStatus> {
+/** Reconstruit ET pousse la config complète — POST /api/reverse-proxy/push, createRoute(), deleteRoute(). */
+export async function pushConfigToCaddy(): Promise<void> {
+  await pushDesiredCaddyConfig(await buildDesiredCaddyConfig());
+}
+
+/** Ce que Caddy sert RÉELLEMENT, lu sur son API d'admin (GET /config/). */
+export interface ServedCaddyState {
+  /** Hôtes réellement matchés par une route servie, toutes routes/serveurs confondus. */
+  subdomains: string[];
+  /** Adresses d'écoute réellement configurées (ex: [":80", ":443"]). */
+  listen: string[];
+}
+
+interface CaddyServedConfig {
+  apps?: {
+    http?: {
+      servers?: Record<string, { listen?: string[]; routes?: { match?: { host?: string[] }[] }[] }>;
+    };
+  };
+}
+
+/**
+ * Lit la configuration RÉELLEMENT servie par Caddy (GET /config/, même en-tête Origin que le push
+ * — voir deploy/compose/caddy/Caddyfile) et n'en garde que la forme comparable à
+ * buildDesiredCaddyConfig(). Lève si Caddy est injoignable ou répond en erreur : c'est ce qui
+ * distingue "Caddy pas encore démarré" d'une vraie dérive de configuration.
+ */
+export async function fetchServedCaddyState(): Promise<ServedCaddyState> {
+  const adminAuthority = new URL(config.reverseProxy.caddyAdminUrl).host;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.reverseProxy.requestTimeoutMs);
+  let response: Response;
   try {
-    const adminAuthority = new URL(config.reverseProxy.caddyAdminUrl).host;
-    const response = await fetch(`${config.reverseProxy.caddyAdminUrl}/config/`, {
+    response = await fetch(`${config.reverseProxy.caddyAdminUrl}/config/`, {
       headers: { Origin: `http://${adminAuthority}` },
       signal: controller.signal,
     });
-    // httpsEnabled : "on sait que Caddy est joignable" != "on sait que le TLS interne est
-    // effectivement configuré" (un Caddy tout juste redémarré, reparti du Caddyfile de bootstrap,
-    // n'a plus que :80 tant qu'aucun /load n'a encore été repoussé) — mais push_ConfigToCaddy()
-    // est appelé à chaque mutation de route ET peut être redéclenché manuellement (POST
-    // /api/reverse-proxy/push, déjà existant), donc "joignable" est une approximation honnête
-    // suffisante pour ce premier lot plutôt qu'un vrai GET /config/apps/tls coûteux à interpréter.
-    return { reachable: response.ok, adminUrl: config.reverseProxy.caddyAdminUrl, httpsEnabled: response.ok };
-  } catch {
-    return { reachable: false, adminUrl: config.reverseProxy.caddyAdminUrl, httpsEnabled: false };
+  } catch (err) {
+    const reason =
+      err instanceof Error && err.name === "AbortError"
+        ? `timed out after ${config.reverseProxy.requestTimeoutMs}ms`
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    throw new Error(`Caddy admin API unreachable (${config.reverseProxy.caddyAdminUrl}): ${reason}`);
   } finally {
     clearTimeout(timeout);
+  }
+
+  if (!response.ok) {
+    throw new Error(`Caddy admin API responded ${response.status} for /config/`);
+  }
+
+  // Un Caddy tout juste démarré peut répondre `null` (aucune config chargée) : pas une erreur.
+  const parsed = (await response.json().catch(() => null)) as CaddyServedConfig | null;
+  const servers = Object.values(parsed?.apps?.http?.servers ?? {});
+  const subdomains = new Set<string>();
+  const listen = new Set<string>();
+  for (const server of servers) {
+    for (const address of server.listen ?? []) listen.add(address);
+    for (const route of server.routes ?? []) {
+      for (const matcher of route.match ?? []) {
+        for (const host of matcher.host ?? []) subdomains.add(host.toLowerCase());
+      }
+    }
+  }
+  return { subdomains: [...subdomains].sort(), listen: [...listen].sort() };
+}
+
+/** GET /api/reverse-proxy/status — Caddy joignable ou non, même pattern que GET /api/scanners/status. */
+export async function getReverseProxyStatus(): Promise<ReverseProxyStatus> {
+  try {
+    // httpsEnabled reflète l'écoute :443 RÉELLEMENT servie, plus une simple déduction de
+    // joignabilité : un Caddy redémarré reparti du Caddyfile de bootstrap est joignable tout en
+    // n'ayant plus aucune route ni :443 — c'est exactement la panne que la boucle de
+    // réconciliation (services/reverseProxyReconciler.ts) corrige.
+    const served = await fetchServedCaddyState();
+    return {
+      reachable: true,
+      adminUrl: config.reverseProxy.caddyAdminUrl,
+      httpsEnabled: served.listen.some((address) => address.endsWith(":443")),
+    };
+  } catch {
+    return { reachable: false, adminUrl: config.reverseProxy.caddyAdminUrl, httpsEnabled: false };
   }
 }
 

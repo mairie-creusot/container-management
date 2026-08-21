@@ -195,6 +195,9 @@ export const config = {
     // l'hôte — jointe par son nom de service docker-compose (voir deploy/compose/docker-compose.dev.yml).
     caddyAdminUrl: readString("CADDY_ADMIN_URL", "http://caddy:2019"),
     requestTimeoutMs: readNumber("CADDY_REQUEST_TIMEOUT_MS", 5000),
+    // Intervalle de la boucle qui compare ce que Caddy sert réellement à ce que QUAI attend et
+    // republie en cas de dérive seulement (voir services/reverseProxyReconciler.ts).
+    reconcileIntervalMs: readNumber("REVERSE_PROXY_RECONCILE_INTERVAL_MS", 60_000),
   },
   adDns: {
     // Mise à jour dynamique sécurisée du DNS Active Directory (RFC 2136 + GSS-TSIG, cf.
