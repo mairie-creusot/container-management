@@ -62,8 +62,6 @@ export default function LoginScreen() {
         <button type="submit" className="btn btn-primary" disabled={submitting}>
           {submitting ? "Connexion…" : "Se connecter"}
         </button>
-
-        <p className="login-card__footer">Identifiants de l'annuaire de la mairie.</p>
       </form>
     </div>
   );

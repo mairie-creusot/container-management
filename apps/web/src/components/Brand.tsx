@@ -1,7 +1,7 @@
 interface BrandProps {
   /** "sm" pour la sidebar, "lg" pour les écrans plein écran (login, assistant de configuration). */
   size?: "sm" | "lg";
-  /** Affiche la légende "Console conteneurs" sous le nom — réservé aux tailles "lg". */
+  /** Affiche la légende "Gestion du parc virtuel" sous le nom — réservé aux tailles "lg". */
   withCaption?: boolean;
 }
 
@@ -22,7 +22,7 @@ export default function Brand({ size = "sm", withCaption = false }: BrandProps) 
       </span>
       <span className="brand__text">
         <span className="brand__name">QUAI</span>
-        {withCaption && size === "lg" && <span className="brand__caption">Console conteneurs</span>}
+        {withCaption && size === "lg" && <span className="brand__caption">Gestion du parc virtuel</span>}
       </span>
     </div>
   );
