@@ -100,4 +100,49 @@ describe("setup wizard (/api/setup/*)", () => {
 
     await app.close();
   });
+
+  // Cas réel du 24/08/2026 : corriger un mapping de rôle imposait de rejouer tout l'assistant, dont
+  // POST /complete REMPLACE la configuration entière — les intégrations déjà configurées auraient
+  // été effacées. PUT /api/setup/ldap ne touche QUE l'annuaire.
+  it("PUT /api/setup/ldap ne modifie que l'annuaire et laisse les autres intégrations intactes", async () => {
+    const { setNutanixConfig, getCurrent } = await import("../src/services/setupStore.js");
+    await setNutanixConfig({ prismCentralUrl: "https://prism.test:9440", username: "svc", password: "secret-prism" });
+
+    const app = buildServer();
+    const adminToken = signSessionToken({ username: "admin", displayName: "Admin", roles: ["admin"] });
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/setup/ldap",
+      cookies: { [config.session.cookieName]: adminToken },
+      payload: {
+        url: "ldap://annuaire.test:389",
+        bindDn: "CN=svc,DC=test",
+        searchBase: "DC=test",
+        searchFilter: "(sAMAccountName={{username}})",
+        groupRoleMap: { "OU=Informatique,DC=test": "admin" },
+        defaultRole: "viewer",
+      },
+    });
+    // L'annuaire de test n'existe pas : la route DOIT refuser d'enregistrer plutôt que de persister
+    // une configuration non vérifiée — même règle que toutes les autres intégrations.
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toMatch(/rien n'a été enregistré/i);
+
+    // Et surtout : Nutanix est toujours là, la configuration n'a pas été remplacée.
+    expect((await getCurrent()).nutanix).toMatchObject({ prismCentralUrl: "https://prism.test:9440" });
+    await app.close();
+  });
+
+  it("PUT /api/setup/ldap est refusé à un viewer", async () => {
+    const app = buildServer();
+    const viewerToken = signSessionToken({ username: "viewer", displayName: "Viewer", roles: ["viewer"] });
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/setup/ldap",
+      cookies: { [config.session.cookieName]: viewerToken },
+      payload: { url: "ldap://x", bindDn: "y", searchBase: "z", searchFilter: "(uid={{username}})" },
+    });
+    expect(response.statusCode).toBe(403);
+    await app.close();
+  });
 });

@@ -3,6 +3,7 @@
  *
  * GET  /api/setup/status         — état courant (completed + ce qui est déjà configuré).
  * POST /api/setup/test/ldap      — teste une config LDAP candidate (body, pas persisté).
+ * PUT  /api/setup/ldap           — corrige l'annuaire APRÈS l'assistant, sans toucher au reste.
  * POST /api/setup/test/docker    — teste un hôte Docker candidat.
  * POST /api/setup/test/kubernetes— teste un kubeconfig candidat (contenu YAML collé).
  * POST /api/setup/test/nutanix   — teste une config Prism Central candidate (URL + identifiants).
@@ -21,7 +22,8 @@ import { testKubernetesConnection } from "../services/kubernetes.js";
 import { testLdapConnection } from "../services/ldap.js";
 import { testNutanixConnection } from "../services/nutanix.js";
 import { testRegistryConnection } from "../services/registries/index.js";
-import { completeSetup, getCurrent, resetSetup } from "../services/setupStore.js";
+import { completeSetup, getCurrent, getEffectiveLdapConfig, resetSetup, setLdapConfig } from "../services/setupStore.js";
+import type { SetupLdapConfig } from "../services/setupStore.js";
 import type { SetupCandidate } from "../services/setupStore.js";
 import type { RegistryKind } from "../types.js";
 
@@ -127,6 +129,42 @@ export default async function setupRoutes(fastify: FastifyInstance): Promise<voi
     }
     const result = await testRegistryConnection(kind as RegistryKind, url, token);
     return reply.send(result);
+  });
+
+  /**
+   * Corrige l'annuaire APRÈS l'assistant sans toucher au reste — indispensable pour changer un
+   * mapping de rôle : `POST /api/setup/complete` REMPLACE toute la configuration et effacerait les
+   * intégrations déjà en place (Nutanix, registries…). La connexion est réellement testée avant
+   * d'être persistée, comme pour toutes les autres intégrations. Mot de passe vide = on garde
+   * l'existant.
+   */
+  fastify.put<{ Body: Partial<SetupLdapConfig> }>("/api/setup/ldap", async (request, reply) => {
+    const body = request.body ?? {};
+    const missing = (["url", "bindDn", "searchBase", "searchFilter"] as const).filter((k) => !body[k]?.trim());
+    if (missing.length > 0) {
+      return reply.code(400).send({ error: `Champs requis manquants : ${missing.join(", ")}` });
+    }
+    const current = await getCurrent();
+    if (!body.bindPassword?.trim() && !current.ldap?.bindPassword) {
+      return reply.code(400).send({ error: "bindPassword is required (aucun mot de passe déjà enregistré)" });
+    }
+    const candidate: SetupLdapConfig = {
+      url: body.url!.trim(),
+      bindDn: body.bindDn!.trim(),
+      bindPassword: body.bindPassword?.trim() ? body.bindPassword : "",
+      searchBase: body.searchBase!.trim(),
+      searchFilter: body.searchFilter!.trim(),
+      groupRoleMap: body.groupRoleMap ?? {},
+      defaultRole: body.defaultRole ?? "viewer",
+    };
+    // Test réel avec le mot de passe effectif (celui fourni, sinon celui déjà enregistré).
+    const effective = await getEffectiveLdapConfig();
+    const test = await testLdapConnection({ ...candidate, bindPassword: candidate.bindPassword || effective.bindPassword });
+    if (!test.ok) {
+      return reply.code(400).send({ error: `Connexion LDAP refusée, rien n'a été enregistré : ${test.message}` });
+    }
+    await setLdapConfig(candidate);
+    return reply.send({ ok: true, message: test.message });
   });
 
   fastify.post<{ Body: SetupCandidate }>("/api/setup/complete", async (request, reply) => {

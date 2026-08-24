@@ -588,6 +588,20 @@ export async function getEffectiveNutanixConfig(): Promise<SetupNutanixConfig | 
  * (qui rouvre TOUT l'assistant, LDAP compris). Même principe que setAdDnsConfig ci-dessous :
  * n'affecte aucune autre section de la config.
  */
+/** PUT /api/setup/ldap — corrige la configuration de l'annuaire APRÈS l'assistant, sans toucher au
+ * reste (Nutanix, registries, HYCU…). Sans cette route, la seule façon de changer un mapping de
+ * rôle était de rejouer tout l'assistant, dont `completeSetup` REMPLACE la configuration entière :
+ * un oubli y effaçait les intégrations déjà configurées (cas réel du 24/08/2026). Mot de passe
+ * vide = on conserve celui déjà enregistré, comme les autres intégrations. */
+export async function setLdapConfig(input: SetupLdapConfig): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const bindPassword = input.bindPassword?.trim() ? input.bindPassword : (current.ldap?.bindPassword ?? "");
+  const next: SetupConfig = encryptSecrets({ ...current, ldap: { ...input, bindPassword } });
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
 export async function setNutanixConfig(input: SetupNutanixConfig): Promise<SetupConfig> {
   const current = await getCurrent();
   const next: SetupConfig = encryptSecrets({ ...current, nutanix: input });
