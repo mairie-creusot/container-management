@@ -84,6 +84,10 @@ controle:api:
   interruptible: true
   cache: *cache_pnpm
   script:
+    # openssl : test/certificates.test.ts fabrique une autorité de test avec le binaire openssl
+    # (node:crypto ne sait pas générer de X.509). node:22-slim embarque la bibliothèque mais PAS la
+    # ligne de commande — d'où « spawnSync openssl ENOENT » en CI alors que tout passe en local.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends openssl >/dev/null
     - *bloc_outils_node
     - pnpm --filter @quai/api typecheck
     - pnpm --filter @quai/api test
