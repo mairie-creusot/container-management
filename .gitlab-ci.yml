@@ -121,9 +121,11 @@ deploiement:production:
   environment:
     name: production
     url: $QUAI_PUBLIC_URL
+  # Déploiement automatique sur main : ne démarre QUE si les deux contrôles de l'étape précédente
+  # sont verts (compilation + suites de tests), jamais sur une autre branche.
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      when: manual
+      when: on_success
       allow_failure: false
   script:
     - |
