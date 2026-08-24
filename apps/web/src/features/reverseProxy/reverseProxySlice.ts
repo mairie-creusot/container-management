@@ -6,8 +6,24 @@ export interface NewRouteInput {
   subdomain: string;
   targetContainerId?: string;
   targetHost?: string;
-  targetPort: number;
+  /** Omis pour une cible conteneur : l'API déduit le port du conteneur réel (voir
+   * services/reverseProxy.ts#detectContainerTargetPort) — obligatoire pour une cible host:port. */
+  targetPort?: number;
 }
+
+/** Résultat de l'émission AD CS déclenchée par la création de la route (voir
+ * services/certificatesReconciler.ts#issueCertificateForSubdomain côté API). */
+export interface RouteCertificateOutcome {
+  subject: string;
+  status: "not-configured" | "auto-enroll-disabled" | "already-valid" | "issued" | "failed";
+  at: string;
+  message?: string;
+}
+
+export type CreatedRoute = ReverseProxyRoute & {
+  caddyPushError?: string;
+  certificate?: RouteCertificateOutcome;
+};
 
 interface ReverseProxyState {
   items: ReverseProxyRoute[];
@@ -41,19 +57,19 @@ export const fetchCaddyStatus = createAsyncThunk<ReverseProxyStatus>("reversePro
 
 /** Réponse 201 même en cas d'échec du push vers Caddy (voir routes/reverseProxy.ts côté API) —
  * `caddyPushError` signale que la route est bien créée côté QUAI mais pas encore reflétée par
- * Caddy (retentable via POST /reverse-proxy/push, pas câblé ici pour rester simple). */
-export const createRoute = createAsyncThunk<
-  ReverseProxyRoute & { caddyPushError?: string },
-  NewRouteInput,
-  { rejectValue: string }
->("reverseProxy/createRoute", async (input, { rejectWithValue }) => {
-  try {
-    return await apiPost<ReverseProxyRoute & { caddyPushError?: string }>("/reverse-proxy/routes", input);
-  } catch (error) {
-    const message = error instanceof ApiError ? error.message : "Impossible de créer cette route.";
-    return rejectWithValue(message);
-  }
-});
+ * Caddy (retentable via POST /reverse-proxy/push, pas câblé ici pour rester simple). `certificate`
+ * porte le résultat de l'émission AD CS déclenchée dans la foulée. */
+export const createRoute = createAsyncThunk<CreatedRoute, NewRouteInput, { rejectValue: string }>(
+  "reverseProxy/createRoute",
+  async (input, { rejectWithValue }) => {
+    try {
+      return await apiPost<CreatedRoute>("/reverse-proxy/routes", input);
+    } catch (error) {
+      const message = error instanceof ApiError ? error.message : "Impossible de créer cette route.";
+      return rejectWithValue(message);
+    }
+  },
+);
 
 export const deleteRoute = createAsyncThunk<string, string, { rejectValue: string }>(
   "reverseProxy/deleteRoute",

@@ -324,6 +324,13 @@ export default function CertificatesPage() {
                 dernier renouvellement le {formatDateTime(reconciliation.lastRenewalAt)}
               </span>
             )}
+            {reconciliation.lastOnDemandIssuance && (
+              <span className="certificates-reconciliation__hint">
+                {reconciliation.lastOnDemandIssuance.status === "issued"
+                  ? `émission déclenchée par une route : ${reconciliation.lastOnDemandIssuance.subject}, le ${formatDateTime(reconciliation.lastOnDemandIssuance.at)}`
+                  : `émission déclenchée par une route ÉCHOUÉE : ${reconciliation.lastOnDemandIssuance.subject}, le ${formatDateTime(reconciliation.lastOnDemandIssuance.at)} — ${reconciliation.lastOnDemandIssuance.message ?? "raison inconnue"}`}
+              </span>
+            )}
             {reconciliation.lastError && <div className="error-banner">{reconciliation.lastError}</div>}
           </div>
         )}

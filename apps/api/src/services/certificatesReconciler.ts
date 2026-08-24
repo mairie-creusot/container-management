@@ -2,6 +2,8 @@
  * Renouvellement automatique des certificats AD CS avant expiration, et première émission pour les
  * sous-domaines du reverse proxy qui n'en ont pas encore. Démarrée depuis index.ts#main()
  * seulement, jamais depuis buildServer() — même câblage que reverseProxyReconciler.ts.
+ * La création d'une route déclenche EN PLUS une émission immédiate (issueCertificateForSubdomain),
+ * sans attendre le prochain cycle.
  *
  * Règle absolue : une autorité injoignable ne casse JAMAIS TLS. Un échec est enregistré et visible,
  * le certificat en place reste stocké et servi jusqu'à sa vraie expiration.
@@ -29,6 +31,22 @@ export type CertificatesReconcileOutcome =
   | "cycle-failed"
   | "busy";
 
+/** Résultat d'une émission déclenchée à la création d'une route (voir issueCertificateForSubdomain). */
+export type OnDemandIssuanceStatus =
+  | "not-configured"
+  | "auto-enroll-disabled"
+  | "already-valid"
+  | "issued"
+  | "failed";
+
+export interface OnDemandIssuance {
+  subject: string;
+  status: OnDemandIssuanceStatus;
+  at: string;
+  /** Détail d'un échec, ou d'une republication Caddy manquée après une émission réussie. */
+  message?: string;
+}
+
 export interface CertificatesReconciliationStatus {
   intervalMs: number;
   lastCheckAt: string | null;
@@ -39,6 +57,9 @@ export interface CertificatesReconciliationStatus {
   /** Sujets dont la (ré)émission a échoué au dernier cycle — jamais masqués. */
   lastFailedSubjects: string[];
   lastError: string | null;
+  /** Dernière émission déclenchée par une création de route, succès ou échec — `null` tant qu'aucune
+   * tentative n'a eu lieu (installation sans AD CS : jamais renseigné, aucun appel n'est fait). */
+  lastOnDemandIssuance: OnDemandIssuance | null;
 }
 
 const state: CertificatesReconciliationStatus = {
@@ -49,6 +70,7 @@ const state: CertificatesReconciliationStatus = {
   lastRenewedSubjects: [],
   lastFailedSubjects: [],
   lastError: null,
+  lastOnDemandIssuance: null,
 };
 
 export function getCertificatesReconciliationStatus(): CertificatesReconciliationStatus {
@@ -155,6 +177,56 @@ export async function runCertificatesReconcileCycle(): Promise<CertificatesRecon
   } finally {
     cycleInFlight = false;
   }
+}
+
+/**
+ * Émission IMMÉDIATE pour un sous-domaine dont la route vient d'être créée (déploiement GitHub ou
+ * création manuelle) — sans attendre le prochain cycle. Ne lève JAMAIS : la route reste servie par
+ * l'autorité interne de Caddy et le cycle réessaiera, un échec ici ne doit casser ni le déploiement
+ * ni la création de route. Sans AD CS configuré : retour immédiat, AUCUN appel réseau ni écriture.
+ */
+export async function issueCertificateForSubdomain(subject: string): Promise<OnDemandIssuance> {
+  const normalized = subject.trim().toLowerCase();
+  const outcome = (status: OnDemandIssuanceStatus, message?: string): OnDemandIssuance => ({
+    subject: normalized,
+    status,
+    at: new Date().toISOString(),
+    ...(message ? { message } : {}),
+  });
+
+  const cfg = await getEffectiveCertificatesConfig();
+  if (!cfg) return outcome("not-configured");
+  if (cfg.autoEnroll === false) return outcome("auto-enroll-disabled");
+  if (!normalized) return outcome("failed", "Sujet vide : aucune émission possible.");
+
+  // Certificat déjà détenu et hors fenêtre de renouvellement : l'autorité n'est pas sollicitée à
+  // chaque redéploiement du même sous-domaine (la route est recréée, pas le certificat).
+  const known = (await knownSubjects()).map((value) => value.toLowerCase());
+  const due = (await subjectsDueForRenewal()).map((value) => value.toLowerCase());
+  if (known.includes(normalized) && !due.includes(normalized)) return outcome("already-valid");
+
+  try {
+    await issueCertificate(normalized);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    // Le certificat déjà en place (s'il y en a un) reste intact et servi — sans entrée existante,
+    // c'est un no-op : l'échec reste visible via `lastOnDemandIssuance` et le journal appelant.
+    await recordRenewalFailure(normalized, message);
+    state.lastOnDemandIssuance = outcome("failed", message);
+    // eslint-disable-next-line no-console
+    console.warn(`[certificates] émission immédiate échouée pour ${normalized} : ${message}`);
+    return state.lastOnDemandIssuance;
+  }
+
+  let warning: string | undefined;
+  try {
+    // Republie pour que Caddy serve le certificat tout de suite (POST /load remplace tout).
+    await pushConfigToCaddy();
+  } catch (err) {
+    warning = `certificat émis mais republication Caddy échouée : ${err instanceof Error ? err.message : String(err)}`;
+  }
+  state.lastOnDemandIssuance = outcome("issued", warning);
+  return state.lastOnDemandIssuance;
 }
 
 /** Renouvellement manuel d'un sujet (POST /api/certificates/issue) — republie Caddy. Appelé depuis

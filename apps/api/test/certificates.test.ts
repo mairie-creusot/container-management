@@ -172,7 +172,9 @@ const {
   scrubSecrets,
   windowsIdentifierFromBindDn,
 } = await import("../src/services/certificates.js");
-const { runCertificatesReconcileCycle, planCertificateWork } = await import("../src/services/certificatesReconciler.js");
+const { issueCertificateForSubdomain, runCertificatesReconcileCycle, planCertificateWork } = await import(
+  "../src/services/certificatesReconciler.js"
+);
 const { buildDesiredCaddyConfig, createRoute, deleteRoute, listRoutes } = await import("../src/services/reverseProxy.js");
 
 afterAll(async () => {
@@ -844,6 +846,98 @@ describe("Renouvellement automatique", () => {
     await createRoute({ subdomain: "interne.lecreusot.priv", targetHost: "10.1.2.3", targetPort: 8080 });
     expect(await runCertificatesReconcileCycle()).toBe("not-configured");
     expect(await getServableCertificates()).toEqual([]);
+  });
+});
+
+describe("Émission déclenchée par la création d'une route (déploiement ou manuelle)", () => {
+  it("AD CS configuré : le certificat est émis DANS LA FOULÉE, sans attendre le réconciliateur", async () => {
+    await seedCertificatesConfig();
+    app = buildServer();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/reverse-proxy/routes",
+      cookies: operatorCookie(),
+      payload: { subdomain: "immediat.lecreusot.priv", targetHost: "10.1.2.7", targetPort: 8080 },
+    });
+    expect(response.statusCode).toBe(201);
+    expect(response.json().certificate).toMatchObject({ status: "issued", subject: "immediat.lecreusot.priv" });
+
+    // Certificat réellement détenu ET réellement servi par Caddy pour ce seul sujet.
+    const status = await getCertificatesStatus();
+    expect(status.certificates.map((certificate) => certificate.subject)).toEqual(["immediat.lecreusot.priv"]);
+    const desired = await buildDesiredCaddyConfig();
+    expect(desired.adcsSubjects).toEqual(["immediat.lecreusot.priv"]);
+    // Le cycle suivant n'a donc plus rien à faire pour ce sous-domaine.
+    expect(await runCertificatesReconcileCycle()).toBe("nothing-to-do");
+  });
+
+  it("sans AD CS configuré : AUCUN appel réseau, route créée exactement comme avant", async () => {
+    app = buildServer();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/reverse-proxy/routes",
+      cookies: operatorCookie(),
+      payload: { subdomain: "sansadcs.lecreusot.priv", targetHost: "10.1.2.8", targetPort: 8080 },
+    });
+    expect(response.statusCode).toBe(201);
+    expect(response.json().certificate).toMatchObject({ status: "not-configured" });
+    expect(seenAccounts).toHaveLength(0);
+
+    expect(await getServableCertificates()).toEqual([]);
+    const desired = await buildDesiredCaddyConfig();
+    expect(desired.adcsSubjects).toEqual([]);
+    expect(desired.body.apps.tls.automation?.policies[0]!.subjects).toContain("sansadcs.lecreusot.priv");
+  });
+
+  it("échec d'émission : la route reste créée et servie par l'autorité interne, l'échec reste visible", async () => {
+    await seedCertificatesConfig();
+    caReachable = false;
+    app = buildServer();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/reverse-proxy/routes",
+      cookies: operatorCookie(),
+      payload: { subdomain: "echec.lecreusot.priv", targetHost: "10.1.2.10", targetPort: 8080 },
+    });
+    // La route est bel et bien créée : un échec de certificat ne la fait JAMAIS échouer.
+    expect(response.statusCode).toBe(201);
+    expect(response.json().certificate).toMatchObject({ status: "failed" });
+    expect(response.json().certificate.message).toContain("injoignable");
+    expect(response.body).not.toContain(CA_PASSWORD);
+    expect((await listRoutes()).map((route) => route.subdomain)).toEqual(["echec.lecreusot.priv"]);
+
+    // Le sous-domaine reste servi par l'autorité interne de Caddy, comme avant l'intégration AD CS.
+    const desired = await buildDesiredCaddyConfig();
+    expect(desired.adcsSubjects).toEqual([]);
+    expect(desired.body.apps.tls.automation?.policies[0]!.subjects).toContain("echec.lecreusot.priv");
+
+    // ... et l'échec est visible sur la page Certificats (GET /api/certificates).
+    const overview = await app.inject({ method: "GET", url: "/api/certificates", cookies: viewerCookie() });
+    expect(overview.json().reconciliation.lastOnDemandIssuance).toMatchObject({
+      subject: "echec.lecreusot.priv",
+      status: "failed",
+    });
+    expect(overview.body).not.toContain(LDAP_BIND_PASSWORD);
+  });
+
+  it("sous-domaine dont le certificat est déjà valide : l'autorité n'est pas resollicitée", async () => {
+    await seedCertificatesConfig();
+    expect((await issueCertificateForSubdomain("stable.lecreusot.priv")).status).toBe("issued");
+    const attempts = seenCertAttribs.length;
+
+    // Un redéploiement recrée la route, jamais le certificat.
+    expect((await issueCertificateForSubdomain("stable.lecreusot.priv")).status).toBe("already-valid");
+    expect(seenCertAttribs).toHaveLength(attempts);
+  });
+
+  it("émission automatique désactivée : aucune demande, aucun appel réseau", async () => {
+    await seedCertificatesConfig({ autoEnroll: false });
+
+    expect((await issueCertificateForSubdomain("desactive.lecreusot.priv")).status).toBe("auto-enroll-disabled");
+    expect(seenCertAttribs).toHaveLength(0);
   });
 });
 

@@ -902,6 +902,13 @@ export interface ReverseProxyRoute {
   /** Résultat du dernier essai de synchronisation DNS AD pour cette route (voir services/adDns.ts
    * côté API) — absent si l'intégration AD DNS n'a jamais été configurée. */
   dnsSync?: AdDnsSyncResult;
+  /** Présent UNIQUEMENT quand `targetPort` a été déduit du conteneur réel faute de port saisi
+   * (services/reverseProxy.ts#detectContainerTargetPort) — absent = port saisi à la main. */
+  portDetection?: {
+    rule: "single" | "preferred" | "lowest";
+    candidates: number[];
+    source: "exposed" | "published";
+  };
 }
 
 /** GET /api/reverse-proxy/status — Caddy joignable ou non, même pattern que ScannerStatus. */

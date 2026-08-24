@@ -35,6 +35,14 @@ export interface CertificateSummary {
   lastRenewalError?: string;
 }
 
+/** Émission déclenchée par une création de route (voir certificatesReconciler.ts côté API). */
+export interface OnDemandIssuance {
+  subject: string;
+  status: "not-configured" | "auto-enroll-disabled" | "already-valid" | "issued" | "failed";
+  at: string;
+  message?: string;
+}
+
 export interface CertificatesReconciliationStatus {
   intervalMs: number;
   lastCheckAt: string | null;
@@ -43,6 +51,8 @@ export interface CertificatesReconciliationStatus {
   lastRenewedSubjects: string[];
   lastFailedSubjects: string[];
   lastError: string | null;
+  /** `null` tant qu'aucune route n'a déclenché d'émission dans ce process. */
+  lastOnDemandIssuance: OnDemandIssuance | null;
 }
 
 export interface CertificatesOverview {

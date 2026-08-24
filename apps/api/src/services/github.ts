@@ -39,7 +39,17 @@ import {
   readDeploymentLog,
   updateDeploymentRecord,
 } from "./githubDeployments.js";
-import { CaddyPushFailedError, createRoute, deleteRoute, listRoutes, SubdomainConflictError } from "./reverseProxy.js";
+import {
+  CaddyPushFailedError,
+  chooseTargetPort,
+  createRoute,
+  deleteRoute,
+  describeTargetPortDetection,
+  detectContainerTargetPort,
+  listRoutes,
+  SubdomainConflictError,
+} from "./reverseProxy.js";
+import { issueCertificateForSubdomain } from "./certificatesReconciler.js";
 import { RegistryCredentialsMissingError, RegistryHttpError } from "./registries/http.js";
 import {
   createSecret,
@@ -1322,6 +1332,50 @@ function sanitizeDockerName(raw: string): string {
 }
 
 /**
+ * Port de routage déduit du conteneur RÉELLEMENT démarré quand aucun n'a été saisi ni lu dans le
+ * Dockerfile — `null` (échec déjà journalisé de façon actionnable) plutôt qu'un port inventé.
+ */
+async function detectTargetPortForDeployment(
+  deploymentId: string,
+  subdomain: string,
+  containerId: string,
+  docker: Docker,
+): Promise<number | null> {
+  try {
+    const detection = await detectContainerTargetPort(containerId, docker);
+    await appendDeploymentLog(
+      deploymentId,
+      `Port cible détecté automatiquement sur le conteneur : ${describeTargetPortDetection(detection)} — précisez un port dans "Options avancées" si ce n'est pas le bon.\n`,
+    );
+    return detection.port;
+  } catch (err) {
+    await appendDeploymentLog(
+      deploymentId,
+      `Sous-domaine "${subdomain}" demandé mais aucun port n'a pu être déterminé : ${err instanceof Error ? err.message : String(err)} — route reverse-proxy NON créée (voir "Options avancées" pour préciser un port).\n`,
+    );
+    return null;
+  }
+}
+
+/**
+ * Émission AD CS pour le sous-domaine tout juste routé — best-effort ABSOLU : ne lève jamais (voir
+ * certificatesReconciler.ts#issueCertificateForSubdomain), un échec laisse la route servie par
+ * l'autorité interne de Caddy et le réconciliateur réessaiera. Le résultat est journalisé dans le
+ * déploiement, quel qu'il soit.
+ */
+async function issueCertificateForDeployedSubdomain(deploymentId: string, subdomain: string): Promise<void> {
+  const outcome = await issueCertificateForSubdomain(subdomain);
+  const lines: Record<typeof outcome.status, string> = {
+    "not-configured": `Autorité AD CS non configurée : "${subdomain}" reste servi par le certificat interne de Caddy (cadenas non reconnu tant que sa racine n'est pas installée).`,
+    "auto-enroll-disabled": `Émission automatique désactivée dans la configuration Certificats : aucun certificat AD CS demandé pour "${subdomain}".`,
+    "already-valid": `Certificat AD CS déjà valide pour "${subdomain}" — aucune réémission demandée.`,
+    issued: `Certificat AD CS émis pour "${subdomain}"${outcome.message ? ` (${outcome.message})` : ""}.`,
+    failed: `Émission du certificat AD CS échouée pour "${subdomain}" : ${outcome.message ?? "raison inconnue"} — la route reste active (certificat interne de Caddy), un nouvel essai aura lieu automatiquement.`,
+  };
+  await appendDeploymentLog(deploymentId, `${lines[outcome.status]}\n`);
+}
+
+/**
  * Crée réellement la route reverse-proxy vers `containerId` pour `subdomain` et journalise/persiste
  * le résultat — factorisé entre deployViaDockerBuild (conteneur unique) et deployViaDockerCompose
  * (service choisi/déduit), même comportement pour les deux : jamais un second système de suivi
@@ -1344,6 +1398,7 @@ async function createSubdomainRouteForDeployment(
     const route = await createRoute({ subdomain, targetContainerId: containerId, targetPort });
     await appendDeploymentLog(deploymentId, `Route reverse-proxy créée : https://${subdomain} -> ${containerLabel}:${targetPort}\n`);
     await updateDeploymentRecord(deploymentId, { reverseProxyRouteId: route.id });
+    await issueCertificateForDeployedSubdomain(deploymentId, subdomain);
   } catch (err) {
     // Un redéploiement (même sous-domaine que la fois précédente) peut retomber sur une route
     // encore enregistrée sous l'ANCIEN conteneur/projet compose déjà supprimé entre-temps (le
@@ -1373,6 +1428,7 @@ async function createSubdomainRouteForDeployment(
         `Route reverse-proxy créée (https://${subdomain} -> ${containerLabel}:${targetPort}) mais Caddy injoignable pour l'instant : ${err.message} — un re-push (POST /api/reverse-proxy/push) suffira.\n`,
       );
       await updateDeploymentRecord(deploymentId, { reverseProxyRouteId: err.route.id });
+      await issueCertificateForDeployedSubdomain(deploymentId, subdomain);
     } else {
       // Best-effort, jamais bloquant : le déploiement Docker a réussi, seule la route échoue.
       await appendDeploymentLog(deploymentId, `Échec de la création de la route reverse-proxy pour "${subdomain}" : ${err instanceof Error ? err.message : String(err)}\n`);
@@ -1461,19 +1517,19 @@ async function deployViaDockerBuild(
   // Sous-domaine demandé (dérivé du nom du repo ou choisi explicitement, voir
   // GitHubDeployPage.tsx) : crée réellement la route reverse-proxy vers ce conteneur, port
   // interne = celui fourni explicitement, sinon le dernier EXPOSE réellement lu dans LE VRAI
-  // Dockerfile cloné (vérité terrain, pas la détection GitHub API qui n'est qu'un aperçu).
+  // Dockerfile cloné (vérité terrain, pas la détection GitHub API qui n'est qu'un aperçu), sinon
+  // déduit du conteneur RÉELLEMENT démarré (dockerode, voir detectContainerTargetPort).
   if (subdomain) {
     const dockerfilePort = await fs
       .readFile(path.join(cloneDir, "Dockerfile"), "utf-8")
       .then(parseExposedPort)
       .catch(() => undefined);
-    const targetPort = portOverride ?? dockerfilePort;
-    if (!targetPort) {
-      await appendDeploymentLog(
-        deploymentId,
-        `Sous-domaine "${subdomain}" demandé mais aucun port EXPOSE détecté dans le Dockerfile ni fourni explicitement — route reverse-proxy NON créée (voir "Options avancées" pour préciser un port).\n`,
-      );
-      return;
+    let targetPort = portOverride ?? dockerfilePort;
+    if (targetPort === undefined) {
+      // Même client que le build/run ci-dessus : un hôte Docker distant reste inspecté chez lui.
+      const detected = await detectTargetPortForDeployment(deploymentId, subdomain, container.id, docker);
+      if (detected === null) return;
+      targetPort = detected;
     }
     // replaceExisting=true : un redéploiement du même repo/sous-domaine (bouton "Redéployer",
     // TopologyNodeDetailPanel.tsx) crée un TOUT NOUVEAU conteneur (comportement historique
@@ -2232,7 +2288,26 @@ async function deployViaDockerCompose(
   }
 
   if (chosen) {
-    const targetPort = chosen.Ports!.find((p) => typeof p.PrivatePort === "number")!.PrivatePort;
+    // Même règle de choix que la détection sur conteneur unique (voir chooseTargetPort) : un seul
+    // port -> celui-là, plusieurs -> ports HTTP usuels d'abord, choix journalisé pour correction.
+    const candidatePorts = (chosen.Ports ?? [])
+      .filter((p) => typeof p.PrivatePort === "number" && p.Type !== "udp")
+      .map((p) => p.PrivatePort);
+    const choice = chooseTargetPort(candidatePorts);
+    if (!choice) {
+      await appendDeploymentLog(
+        deploymentId,
+        `Service retenu pour "${subdomain}" mais aucun port TCP réellement exposé — route reverse-proxy NON créée.\n`,
+      );
+      return;
+    }
+    const targetPort = choice.port;
+    if (choice.rule !== "single") {
+      await appendDeploymentLog(
+        deploymentId,
+        `Port cible détecté automatiquement sur le service exposé : ${describeTargetPortDetection({ ...choice, candidates: [...new Set(candidatePorts)].sort((a, b) => a - b), source: "exposed" })}.\n`,
+      );
+    }
     const label = chosen.Labels?.["com.docker.compose.service"] ?? chosen.Names?.[0]?.replace(/^\//, "") ?? chosen.Id.slice(0, 12);
     await updateDeploymentRecord(deploymentId, { containerId: chosen.Id, containerName: label });
     // replaceExisting=true : voir le commentaire équivalent dans deployViaDockerBuild — un

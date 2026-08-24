@@ -2,6 +2,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import { apiUrl } from "@/api/client";
 import { createRoute, deleteRoute, fetchCaddyStatus, fetchRoutes, resyncRouteDns } from "@/features/reverseProxy/reverseProxySlice";
+import type { CreatedRoute } from "@/features/reverseProxy/reverseProxySlice";
 import { fetchContainers } from "@/features/containers/containersSlice";
 import { canOperate } from "@/features/auth/authSlice";
 import { setUnsavedFormActive } from "@/features/ui/uiSlice";
@@ -28,6 +29,34 @@ function targetLabel(route: ReverseProxyRoute, containerNameById: Map<string, st
     return `${containerNameById.get(route.targetContainerId) ?? route.targetContainerId.slice(0, 12)} : ${route.targetPort}`;
   }
   return `${route.targetHost} : ${route.targetPort}`;
+}
+
+/** Port déduit du conteneur réel faute de saisie (voir ReverseProxyRoute#portDetection) — explique
+ * POURQUOI ce port a été retenu, pour que l'utilisateur puisse recréer la route avec un autre. */
+function portDetectionHint(route: ReverseProxyRoute): string | null {
+  const detection = route.portDetection;
+  if (!detection) return null;
+  const origin = detection.source === "exposed" ? "exposés par le conteneur" : "publiés par le conteneur";
+  if (detection.rule === "single") return `Port ${route.targetPort} détecté automatiquement (seul port TCP du conteneur).`;
+  if (detection.rule === "preferred") {
+    return `Port ${route.targetPort} détecté automatiquement parmi les ports ${origin} (${detection.candidates.join(", ")}) — port HTTP usuel prioritaire.`;
+  }
+  return `Port ${route.targetPort} détecté automatiquement parmi les ports ${origin} (${detection.candidates.join(", ")}) — aucun port HTTP usuel, le plus petit a été retenu.`;
+}
+
+/** Message affiché après création : le port RÉELLEMENT retenu, et l'état du certificat AD CS. */
+function createdRouteSummary(route: CreatedRoute): string {
+  const detail = portDetectionHint(route);
+  const port = detail ?? `Port ${route.targetPort} (saisi).`;
+  const certificate =
+    route.certificate?.status === "issued"
+      ? " Certificat AD CS émis pour ce sous-domaine."
+      : route.certificate?.status === "already-valid"
+        ? " Certificat AD CS déjà valide pour ce sous-domaine."
+        : route.certificate?.status === "failed"
+          ? ` Émission du certificat AD CS échouée (${route.certificate.message ?? "raison inconnue"}) — la route reste active avec le certificat interne de Caddy, un nouvel essai aura lieu automatiquement.`
+          : "";
+  return `Route "${route.subdomain}" créée. ${port}${certificate}`;
 }
 
 /** Statut DNS AD de la route (voir services/adDns.ts côté API) — absent = intégration jamais
@@ -61,6 +90,9 @@ export default function ReverseProxyPage() {
   const [targetMode, setTargetMode] = useState<TargetMode>("container");
   const [form, setForm] = useState({ subdomain: "", targetContainerId: "", targetHost: "", targetPort: "" });
   const [createError, setCreateError] = useState<string | null>(null);
+  /** Résultat de la DERNIÈRE création réussie (port réellement retenu + certificat) — jamais un
+   * résumé inventé : construit à partir de la route renvoyée par l'API. */
+  const [createdSummary, setCreatedSummary] = useState<string | null>(null);
 
   const isDirty = showForm && form.subdomain.trim() !== "";
 
@@ -85,26 +117,36 @@ export default function ReverseProxyPage() {
     (route) => !searchQuery || route.subdomain.toLowerCase().includes(searchQuery.toLowerCase()),
   );
 
-  function resetForm() {
+  /** `clearFeedback` false après une création réussie : le message de résultat (port retenu,
+   * certificat, échec de push Caddy) doit survivre à la fermeture du formulaire. */
+  function resetForm(clearFeedback = true) {
     setShowForm(false);
     setTargetMode("container");
     setForm({ subdomain: "", targetContainerId: "", targetHost: "", targetPort: "" });
-    setCreateError(null);
+    if (clearFeedback) {
+      setCreateError(null);
+      setCreatedSummary(null);
+    }
   }
 
   function handleCreate(event: FormEvent) {
     event.preventDefault();
     const subdomain = form.subdomain.trim();
-    const targetPort = Number(form.targetPort);
-    if (!subdomain || !Number.isInteger(targetPort) || targetPort <= 0 || targetPort > 65535) return;
+    // Port facultatif pour un conteneur (déduit du conteneur réel côté API) ; toujours requis pour
+    // une cible host:port arbitraire, qui n'est pas inspectable.
+    const rawPort = form.targetPort.trim();
+    const targetPort = rawPort ? Number(rawPort) : undefined;
+    if (!subdomain) return;
+    if (targetPort !== undefined && (!Number.isInteger(targetPort) || targetPort <= 0 || targetPort > 65535)) return;
     if (targetMode === "container" && !form.targetContainerId) return;
-    if (targetMode === "manual" && !form.targetHost.trim()) return;
+    if (targetMode === "manual" && (!form.targetHost.trim() || targetPort === undefined)) return;
 
     setCreateError(null);
+    setCreatedSummary(null);
     dispatch(
       createRoute({
         subdomain,
-        targetPort,
+        ...(targetPort !== undefined ? { targetPort } : {}),
         ...(targetMode === "container"
           ? { targetContainerId: form.targetContainerId }
           : { targetHost: form.targetHost.trim() }),
@@ -116,7 +158,8 @@ export default function ReverseProxyPage() {
             `Route créée mais pas encore active sur Caddy : ${action.payload.caddyPushError}. Réessayez le push depuis le statut ci-dessus une fois Caddy joignable.`,
           );
         }
-        resetForm();
+        setCreatedSummary(createdRouteSummary(action.payload));
+        resetForm(false);
         dispatch(fetchCaddyStatus());
       } else {
         setCreateError(action.payload ?? "Impossible de créer cette route.");
@@ -292,7 +335,9 @@ export default function ReverseProxyPage() {
             )}
 
             <div className="field">
-              <label htmlFor="route-port">Port cible</label>
+              <label htmlFor="route-port">
+                {targetMode === "container" ? "Port cible (laisser vide pour détecter automatiquement)" : "Port cible"}
+              </label>
               <input
                 id="route-port"
                 type="number"
@@ -300,10 +345,17 @@ export default function ReverseProxyPage() {
                 max={65535}
                 value={form.targetPort}
                 onChange={(event) => setForm((f) => ({ ...f, targetPort: event.target.value }))}
-                placeholder="ex : 8080"
+                placeholder={targetMode === "container" ? "laisser vide : détecté sur le conteneur" : "ex : 8080"}
                 disabled={creating}
-                required
+                required={targetMode === "manual"}
               />
+              {targetMode === "container" && (
+                <span style={{ fontSize: 12, color: "var(--color-text-muted)" }}>
+                  Vide : QUAI inspecte le conteneur et retient son seul port TCP exposé, ou — s'il y en a plusieurs —
+                  le premier des ports HTTP usuels (80, 8080, 8000, 3000, 5000), sinon le plus petit. Aucun port
+                  exposé : la création échoue explicitement, jamais un port inventé.
+                </span>
+              )}
             </div>
 
             {createError && <p className="graph-popover__error">{createError}</p>}
@@ -314,8 +366,7 @@ export default function ReverseProxyPage() {
                 disabled={
                   creating ||
                   !form.subdomain.trim() ||
-                  !form.targetPort ||
-                  (targetMode === "container" ? !form.targetContainerId : !form.targetHost.trim())
+                  (targetMode === "container" ? !form.targetContainerId : !form.targetHost.trim() || !form.targetPort.trim())
                 }
               >
                 {creating ? "Création…" : "Créer"}
@@ -327,6 +378,12 @@ export default function ReverseProxyPage() {
           </form>
         )}
 
+        {createdSummary && !showForm && (
+          <div className="card" style={{ marginBottom: 16, fontSize: 13 }}>
+            {createdSummary}
+          </div>
+        )}
+        {createError && !showForm && <div className="error-banner">{createError}</div>}
         {error && <div className="error-banner">{error}</div>}
         {status === "loading" && items.length === 0 && (
           <SkeletonTable columns={["Sous-domaine", "Cible", "Créée le", ""]} rows={6} />
@@ -354,7 +411,12 @@ export default function ReverseProxyPage() {
                 {visible.map((route) => (
                   <tr key={route.id}>
                     <td className="cell-primary cell-mono">{route.subdomain}</td>
-                    <td className="cell-mono">{targetLabel(route, containerNameById)}</td>
+                    <td className="cell-mono" {...(portDetectionHint(route) ? { title: portDetectionHint(route)! } : {})}>
+                      {targetLabel(route, containerNameById)}
+                      {route.portDetection && (
+                        <span style={{ marginLeft: 6, fontSize: 11.5, color: "var(--color-text-muted)" }}>port auto</span>
+                      )}
+                    </td>
                     <td {...(route.dnsSync?.message ? { title: route.dnsSync.message } : {})}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         {dnsStatusPill(route)}

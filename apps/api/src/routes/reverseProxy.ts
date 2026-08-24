@@ -1,7 +1,12 @@
 /**
  * GET    /api/reverse-proxy/routes      — liste des routes actives, ouvert à toute session
  *                                          authentifiée (cf. plugins/auth.ts).
- * POST   /api/reverse-proxy/routes      — { subdomain, targetContainerId? | targetHost?, targetPort }
+ * POST   /api/reverse-proxy/routes      — { subdomain, targetContainerId? | targetHost?, targetPort? }
+ *                                          — `targetPort` facultatif pour une cible conteneur
+ *                                          (déduit du conteneur réel, voir services/reverseProxy.ts
+ *                                          #detectContainerTargetPort ; 400 explicite si aucun port
+ *                                          n'est déductible) ; la réponse porte `certificate`,
+ *                                          résultat de l'émission AD CS déclenchée dans la foulée
  *                                          — operator/admin (hook global, aucune restriction de
  *                                          rôle supplémentaire ici contrairement à /api/secrets/*
  *                                          : `targetHost` arbitraire reste une fonctionnalité
@@ -50,18 +55,31 @@ import {
   pushConfigToCaddy,
   resyncDns,
   SubdomainConflictError,
+  TargetPortDetectionError,
 } from "../services/reverseProxy.js";
 import { getReverseProxyReconciliationStatus } from "../services/reverseProxyReconciler.js";
+import { issueCertificateForSubdomain } from "../services/certificatesReconciler.js";
+import type { OnDemandIssuance } from "../services/certificatesReconciler.js";
+import type { ReverseProxyRoute } from "../types.js";
 
 interface CreateRouteBody {
   subdomain?: string;
   targetContainerId?: string;
   targetHost?: string;
+  /** Facultatif pour une cible conteneur : déduit du conteneur réel (voir services/reverseProxy.ts). */
   targetPort?: number;
 }
 
 function isValidPort(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 65535;
+}
+
+/** Émission AD CS pour une route qui vient d'être créée — attendue (quelques secondes au pire, voir
+ * config.certificates.requestTimeoutMs) pour que la réponse dise la vérité sur le certificat, et
+ * jamais bloquante : `issueCertificateForSubdomain` ne lève pas. */
+async function certificateFor(route: ReverseProxyRoute | undefined): Promise<OnDemandIssuance | undefined> {
+  if (!route) return undefined;
+  return issueCertificateForSubdomain(route.subdomain);
 }
 
 export default async function reverseProxyRoutes(fastify: FastifyInstance): Promise<void> {
@@ -99,8 +117,15 @@ export default async function reverseProxyRoutes(fastify: FastifyInstance): Prom
         error: `"${targetHost}" is not allowed as a reverse-proxy target (loopback/link-local addresses and the Caddy admin API itself are blocked)`,
       });
     }
-    if (!isValidPort(targetPort)) {
+    // `targetPort` est désormais FACULTATIF pour une cible conteneur (déduit du conteneur réel,
+    // voir services/reverseProxy.ts#detectContainerTargetPort) — validé seulement s'il est fourni.
+    if (targetPort !== undefined && !isValidPort(targetPort)) {
       return reply.code(400).send({ error: "targetPort must be a valid port number (1-65535)" });
+    }
+    if (targetPort === undefined && !targetContainerId) {
+      return reply.code(400).send({
+        error: "targetPort is required for a host:port target (no container to inspect to detect it)",
+      });
     }
 
     try {
@@ -108,9 +133,12 @@ export default async function reverseProxyRoutes(fastify: FastifyInstance): Prom
         subdomain,
         ...(targetContainerId ? { targetContainerId } : {}),
         ...(targetHost ? { targetHost } : {}),
-        targetPort,
+        ...(targetPort !== undefined ? { targetPort } : {}),
       });
-      return reply.code(201).send(created);
+      // Certificat AD CS émis dans la foulée quand l'autorité est configurée — sinon `certificate`
+      // vaut simplement { status: "not-configured" } et la route reste servie par l'autorité
+      // interne de Caddy, exactement comme avant.
+      return reply.code(201).send({ ...created, certificate: await certificateFor(created) });
     } catch (err) {
       if (err instanceof SubdomainConflictError) {
         return reply.code(409).send({ error: err.message });
@@ -121,8 +149,18 @@ export default async function reverseProxyRoutes(fastify: FastifyInstance): Prom
       if (err instanceof ForbiddenProxyTargetError) {
         return reply.code(400).send({ error: err.message });
       }
+      // Port ni saisi ni déductible : 400 explicite demandant de le saisir, jamais un port inventé.
+      if (err instanceof TargetPortDetectionError) {
+        return reply.code(400).send({ error: err.message });
+      }
       if (err instanceof CaddyPushFailedError) {
-        return reply.code(201).send({ ...err.route, caddyPushError: err.message });
+        // La route EST créée côté QUAI : le certificat est demandé quand même (le réconciliateur
+        // republiera la config vers Caddy dès qu'il sera de nouveau joignable).
+        return reply.code(201).send({
+          ...err.route,
+          caddyPushError: err.message,
+          certificate: await certificateFor(err.route),
+        });
       }
       throw err;
     }

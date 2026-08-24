@@ -544,6 +544,14 @@ export interface ReverseProxyRoute {
    * `subdomain` résout réellement via le DNS AD de la mairie, sans intervention côté poste client.
    */
   dnsSync?: AdDnsSyncResult;
+  /** Présent UNIQUEMENT quand `targetPort` a été déduit du conteneur réel faute de port saisi —
+   * voir services/reverseProxy.ts#detectContainerTargetPort (absent = port saisi à la main). */
+  portDetection?: {
+    rule: "single" | "preferred" | "lowest";
+    /** Tous les ports TCP réellement trouvés sur le conteneur. */
+    candidates: number[];
+    source: "exposed" | "published";
+  };
 }
 
 /** GET /api/reverse-proxy/status — Caddy joignable ou non, même pattern que ScannerStatus. */

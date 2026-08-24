@@ -801,7 +801,10 @@ export default function GitHubDeployPage() {
                               )}
                               {canDeployDockerfile && !canDeployCompose && (
                                 <div className="field">
-                                  <label htmlFor="gh-port">Port du conteneur (pour le sous-domaine)</label>
+                                  <label htmlFor="gh-port">
+                                    Port du conteneur (pour le sous-domaine) — laisser vide pour détecter
+                                    automatiquement
+                                  </label>
                                   <input
                                     id="gh-port"
                                     type="number"
@@ -810,9 +813,18 @@ export default function GitHubDeployPage() {
                                     value={portInput}
                                     onChange={(e) => setPortInput(e.target.value)}
                                     placeholder={
-                                      detection.exposedPort ? String(detection.exposedPort) : "détecté automatiquement (EXPOSE)"
+                                      detection.exposedPort
+                                        ? String(detection.exposedPort)
+                                        : "laisser vide : détecté automatiquement"
                                     }
                                   />
+                                  <p className="create-container-hint">
+                                    Vide : QUAI retient le port EXPOSE du Dockerfile cloné, sinon inspecte le conteneur
+                                    réellement démarré (seul port TCP exposé, sinon le premier des ports HTTP usuels 80,
+                                    8080, 8000, 3000, 5000, sinon le plus petit). Le choix est écrit dans le journal du
+                                    déploiement ; si aucun port n'est exposé, la route n'est pas créée et le journal le
+                                    dit — jamais un port inventé.
+                                  </p>
                                 </div>
                               )}
                             </div>

@@ -75,8 +75,9 @@ import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { isIPv4 } from "node:net";
 import path from "node:path";
+import type Docker from "dockerode";
 import { config } from "../config.js";
-import { getContainerNetworkAddress } from "./docker.js";
+import { getClient, getContainerNetworkAddress } from "./docker.js";
 import { pushDnsRecord, removeDnsRecord } from "./adDns.js";
 import { getServableCertificates, type ServableCertificate } from "./certificates.js";
 import { getEffectiveAdDnsConfig } from "./setupStore.js";
@@ -89,6 +90,12 @@ export class InvalidSubdomainError extends Error {}
 
 /** `targetHost` refusé : cible interne évidemment dangereuse (voir isForbiddenProxyTarget ci-dessous). */
 export class ForbiddenProxyTargetError extends Error {}
+
+/**
+ * `targetPort` n'a pas été saisi ET n'a pas pu être déduit du conteneur réel : ÉCHEC EXPLICITE,
+ * jamais un port inventé au hasard (voir detectContainerTargetPort ci-dessous).
+ */
+export class TargetPortDetectionError extends Error {}
 
 /**
  * Le push vers l'API d'admin Caddy a échoué (Caddy pas encore démarré, réseau...) : ÉCHEC
@@ -178,7 +185,9 @@ export interface CreateRouteInput {
   subdomain: string;
   targetContainerId?: string;
   targetHost?: string;
-  targetPort: number;
+  /** Facultatif pour une cible conteneur : déduit du conteneur RÉEL quand il est absent (voir
+   * detectContainerTargetPort). Un port saisi reste TOUJOURS prioritaire. */
+  targetPort?: number;
 }
 
 function normalizeSubdomain(raw: string): string {
@@ -234,11 +243,119 @@ export function isForbiddenProxyTarget(targetHost: string): boolean {
   return host === caddyAuthority;
 }
 
+// --- Détection automatique du port cible (dockerode) --------------------------------------------
+// Règles (une ligne chacune, voir chooseTargetPort/detectContainerTargetPort ci-dessous) :
+//  - port saisi à la main : TOUJOURS prioritaire, aucune inspection ;
+//  - un seul port TCP exposé : on le prend ;
+//  - plusieurs : 80, 8080, 8000, 3000, 5000 dans cet ordre, sinon le plus petit — choix JOURNALISÉ ;
+//  - aucun port exposé : échec explicite demandant de le saisir, jamais un port inventé.
+
+/** Ports HTTP usuels, dans l'ordre de préférence, quand un conteneur en expose plusieurs. */
+export const TARGET_PORT_PREFERENCE = [80, 8080, 8000, 3000, 5000] as const;
+
+export type TargetPortRule = "single" | "preferred" | "lowest";
+
+export interface TargetPortDetection {
+  port: number;
+  rule: TargetPortRule;
+  /** TOUS les ports TCP réellement trouvés sur le conteneur, triés — jamais une liste tronquée. */
+  candidates: number[];
+  /** `exposed` : `Config.ExposedPorts` de l'image/conteneur. `published` : ports réellement publiés. */
+  source: "exposed" | "published";
+}
+
+/** Forme (réduite à ce qui sert ici) d'un `docker inspect` — voir dockerode ContainerInspectInfo. */
+export interface InspectedContainerPorts {
+  Config?: { ExposedPorts?: Record<string, unknown> | null } | null;
+  NetworkSettings?: { Ports?: Record<string, unknown> | null } | null;
+  HostConfig?: { PortBindings?: Record<string, unknown> | null } | null;
+}
+
+/** Clés Docker de port ("8080/tcp") -> numéros TCP triés ; UDP ignoré (jamais un upstream HTTP). */
+function tcpPortsFromSpec(spec: Record<string, unknown> | null | undefined, requireBinding: boolean): number[] {
+  const ports = new Set<number>();
+  for (const [key, value] of Object.entries(spec ?? {})) {
+    const match = /^(\d{1,5})\/(tcp|udp)$/.exec(key);
+    if (!match || match[2] !== "tcp") continue;
+    if (requireBinding && !(Array.isArray(value) && value.length > 0)) continue;
+    const port = Number(match[1]);
+    if (Number.isInteger(port) && port > 0 && port <= 65535) ports.add(port);
+  }
+  return [...ports].sort((a, b) => a - b);
+}
+
+/**
+ * Ports TCP candidats d'un conteneur inspecté : `Config.ExposedPorts` d'abord (ce que l'image/le
+ * conteneur déclare réellement), à défaut les ports PUBLIÉS (mappings actifs, sinon `PortBindings`).
+ */
+export function containerPortCandidates(inspected: InspectedContainerPorts): {
+  ports: number[];
+  source: "exposed" | "published";
+} {
+  const exposed = tcpPortsFromSpec(inspected.Config?.ExposedPorts, false);
+  if (exposed.length > 0) return { ports: exposed, source: "exposed" };
+  const bound = tcpPortsFromSpec(inspected.NetworkSettings?.Ports, true);
+  if (bound.length > 0) return { ports: bound, source: "published" };
+  return { ports: tcpPortsFromSpec(inspected.HostConfig?.PortBindings, false), source: "published" };
+}
+
+/** Applique la règle de choix à des ports DÉJÀ constatés — `null` si la liste est vide. */
+export function chooseTargetPort(candidates: readonly number[]): { port: number; rule: TargetPortRule } | null {
+  const sorted = [...new Set(candidates)].sort((a, b) => a - b);
+  const smallest = sorted[0];
+  if (smallest === undefined) return null;
+  if (sorted.length === 1) return { port: smallest, rule: "single" };
+  const preferred = TARGET_PORT_PREFERENCE.find((port) => sorted.includes(port));
+  return preferred !== undefined ? { port: preferred, rule: "preferred" } : { port: smallest, rule: "lowest" };
+}
+
+/** Phrase journalisée telle quelle (journal de déploiement, réponse d'API) pour que l'utilisateur
+ * puisse corriger un choix automatique — jamais un port annoncé sans son origine. */
+export function describeTargetPortDetection(detection: TargetPortDetection): string {
+  if (detection.rule === "single") return `port ${detection.port} (seul port TCP du conteneur)`;
+  const list = detection.candidates.join(", ");
+  if (detection.rule === "preferred") {
+    return `port ${detection.port} parmi ${list} (ports HTTP usuels prioritaires : ${TARGET_PORT_PREFERENCE.join(", ")})`;
+  }
+  return `port ${detection.port} parmi ${list} (aucun port HTTP usuel exposé : le plus petit est retenu)`;
+}
+
+/**
+ * Déduit le port de routage du conteneur RÉEL (dockerode `inspect`) — `docker` permet de réutiliser
+ * le client déjà construit par l'appelant (déploiement sur un hôte Docker distant, voir
+ * services/github.ts) plutôt que de retomber sur le démon local. Lève TargetPortDetectionError si
+ * le conteneur est inintrospectable ou n'expose aucun port TCP : jamais un port deviné.
+ */
+export async function detectContainerTargetPort(containerId: string, docker?: Docker): Promise<TargetPortDetection> {
+  const short = containerId.slice(0, 12);
+  let inspected: InspectedContainerPorts;
+  try {
+    const client = docker ?? (await getClient());
+    inspected = (await client.getContainer(containerId).inspect()) as unknown as InspectedContainerPorts;
+  } catch (err) {
+    throw new TargetPortDetectionError(
+      `Impossible d'inspecter le conteneur ${short} pour déduire son port : ${err instanceof Error ? err.message : String(err)} — saisissez le port cible explicitement.`,
+    );
+  }
+  const { ports, source } = containerPortCandidates(inspected);
+  const choice = chooseTargetPort(ports);
+  if (!choice) {
+    throw new TargetPortDetectionError(
+      `Le conteneur ${short} n'expose aucun port TCP (ni dans sa configuration, ni publié) — saisissez le port cible explicitement, aucun port ne peut être déduit.`,
+    );
+  }
+  return { ...choice, candidates: ports, source };
+}
+
 /**
  * POST /api/reverse-proxy/routes — `subdomain` doit être unique (409 via SubdomainConflictError
  * sinon). Persiste d'abord, pousse ensuite la config complète vers Caddy : si ce push échoue, la
  * route reste malgré tout créée (voir CaddyPushFailedError ci-dessus) — un re-push peut être
  * retenté (pushConfigToCaddy() est réutilisable, voir POST /api/reverse-proxy/push).
+ *
+ * `targetPort` absent (cible conteneur) : déduit du conteneur réel juste avant la persistance, et
+ * conservé sur la route (`portDetection`) pour rester visible/corrigeable — voir
+ * detectContainerTargetPort ci-dessus.
  */
 export async function createRoute(input: CreateRouteInput): Promise<ReverseProxyRoute> {
   const all = await getAll();
@@ -261,6 +378,20 @@ export async function createRoute(input: CreateRouteInput): Promise<ReverseProxy
     throw new SubdomainConflictError(`A route for "${subdomain}" already exists`);
   }
 
+  // Port facultatif : déduit du conteneur réel, jamais inventé (un `targetHost` arbitraire n'est
+  // pas inspectable — son port reste obligatoire).
+  let targetPort = input.targetPort;
+  let portDetection: TargetPortDetection | undefined;
+  if (targetPort === undefined) {
+    if (!input.targetContainerId) {
+      throw new TargetPortDetectionError(
+        "targetPort est requis pour une cible host:port : aucun conteneur à inspecter pour le déduire.",
+      );
+    }
+    portDetection = await detectContainerTargetPort(input.targetContainerId);
+    targetPort = portDetection.port;
+  }
+
   // Avant la persistance : si AD DNS est configuré, tente de pousser l'enregistrement DNS pour
   // que `dnsSync` fasse partie de la route dès sa création (une seule écriture disque, pas deux).
   const dnsSync = await tryPushDns(subdomain);
@@ -270,9 +401,13 @@ export async function createRoute(input: CreateRouteInput): Promise<ReverseProxy
     subdomain,
     ...(input.targetContainerId ? { targetContainerId: input.targetContainerId } : {}),
     ...(input.targetHost ? { targetHost: input.targetHost } : {}),
-    targetPort: input.targetPort,
+    targetPort,
     createdAt: new Date().toISOString(),
     ...(dnsSync ? { dnsSync } : {}),
+    // `port` n'est pas repris ici : c'est déjà `targetPort` ci-dessus, jamais deux sources de vérité.
+    ...(portDetection
+      ? { portDetection: { rule: portDetection.rule, candidates: portDetection.candidates, source: portDetection.source } }
+      : {}),
   };
   const next = [...all, created];
   await writeToDisk(next);
