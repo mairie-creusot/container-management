@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from "react";
 import {
   ReactFlow,
   Background,
@@ -2616,10 +2616,21 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   // NetworkConnectPopover ci-dessus : SEUL chemin de rattachement depuis que les réseaux ne sont
   // plus des nœuds du graphe (plus rien à viser au glisser-déposer).
   const [networkConnectPopover, setNetworkConnectPopover] = useState<{ containerId: string; x: number; y: number } | null>(null);
-  // Réseau actuellement survolé sur un tiroir (voir GraphNodeCallbacks#onAttachmentHover) — son
-  // `networkId` met en évidence TOUS les nœuds qui y sont réellement rattachés, ce que montrait
-  // d'un coup d'œil l'ancien nœud réseau. `null` dès que le pointeur quitte le tiroir.
-  const [hoveredNetworkId, setHoveredNetworkId] = useState<string | null>(null);
+  // Mise en évidence des nœuds partageant le réseau survolé — ce que montrait d'un coup d'œil
+  // l'ancien nœud réseau. Appliquée directement au DOM, JAMAIS par un état React : reconstruire
+  // les nœuds à chaque survol faisait réordonner le DOM par React Flow sous le curseur, ce qui
+  // relançait un survol, en boucle (clignotement signalé le 24/08/2026).
+  const hoveredNetworkRef = useRef<string | null>(null);
+  const highlightNetworkPeers = useCallback((networkId: string | null) => {
+    hoveredNetworkRef.current = networkId;
+    for (const el of document.querySelectorAll(".topology-node--net-highlight")) {
+      el.classList.remove("topology-node--net-highlight");
+    }
+    if (!networkId) return;
+    for (const el of document.querySelectorAll(`.topology-node[data-networks~="${CSS.escape(networkId)}"]`)) {
+      el.classList.add("topology-node--net-highlight");
+    }
+  }, []);
   // Popover de montage (voir MountVolumePopover : deux cibles, volume existant ou volume neuf).
   const [mountVolumePopover, setMountVolumePopover] = useState<{ target: MountPopoverTarget; x: number; y: number } | null>(null);
   // Picker "Attacher" (bouton ＋ au survol d'une carte conteneur, ou entrée du clic droit).
@@ -2688,6 +2699,10 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   // "Ajouter un environnement…" depuis un nœud cluster Nutanix — même modale réelle que le spotlight.
   const [remoteEnvModalOpen, setRemoteEnvModalOpen] = useState(false);
   const [flowNodes, setFlowNodes] = useState<Node[]>([]);
+  // Un rafraîchissement pendant le survol réécrit les cartes : on repose la mise en évidence.
+  useEffect(() => {
+    if (hoveredNetworkRef.current) highlightNetworkPeers(hoveredNetworkRef.current);
+  }, [flowNodes, highlightNetworkPeers]);
   // Panneau de détail complet, ancré en overlay sur le canevas (clic droit sur un nœud ou une
   // brique -> "Voir le détail") — voir TopologyNodeDetailPanel.tsx. Distincte de `selectedId`
   // (simple surbrillance visuelle du nœud, conservée) : ce n'est plus l'Inspector latéral (retiré
@@ -2899,7 +2914,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
             ? {
                 onOpenAttachment: (attachment) => handleOpenAttachment(n, attachment),
                 onAttachmentContextMenu: (event, attachment) => handleAttachmentContextMenu(event, n.id, attachment),
-                onAttachmentHover: (attachment) => setHoveredNetworkId(attachment?.networkId ?? null),
+                onAttachmentHover: (attachment) => highlightNetworkPeers(attachment?.networkId ?? null),
               }
             : {};
           const callbacks: GraphNodeCallbacks =
@@ -2932,11 +2947,6 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
                       : {}),
                   }
                 : {};
-          // Mise en évidence "même réseau que le tiroir survolé" — compense la disparition du nœud
-          // réseau (qui montrait d'un coup d'œil qui le partageait). Comparaison sur le `networkId`
-          // RÉEL porté par l'attachment : jamais un rapprochement par nom.
-          const networkHighlight =
-            !!hoveredNetworkId && (n.attachments ?? []).some((a) => a.kind === "network" && a.networkId === hoveredNetworkId);
           // Chips "appliance repliée" d'un nœud template (voir templatesById) — absentes tant que
           // la liste de templates n'est pas chargée, jamais un compte inventé.
           const template = n.kind === "image-template" ? templatesById.get(rawActionId) : undefined;
@@ -2959,7 +2969,6 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
               ...n,
               ...callbacks,
               ...templateMeta,
-              ...(networkHighlight ? { networkHighlight: true } : {}),
               ...(serviceModuleBindings.get(n.id) ? { serviceModule: serviceModuleBindings.get(n.id)! } : {}),
               deletePending:
                 deletingIds.has(n.id) || nutanixDeletePendingUuid === rawActionId || containerDeletePendingId === rawActionId,
@@ -3018,8 +3027,6 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     containerDeletePendingId,
     serviceModuleBindings,
     // Survol d'un tiroir réseau : seuls les nœuds du MÊME réseau changent réellement de rendu
-    // (graphNodePropsEqual#networkHighlight borne le re-render aux cartes concernées).
-    hoveredNetworkId,
   ]);
 
   /**

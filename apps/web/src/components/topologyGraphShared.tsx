@@ -787,9 +787,6 @@ export interface GraphNodeCallbacks {
    * montrait d'un coup d'œil qui partageait un réseau : l'appelant s'en sert pour mettre en
    * évidence les autres nœuds réellement rattachés au même `networkId`. */
   onAttachmentHover?: (attachment: TopologyNodeAttachment | null) => void;
-  /** Ce nœud est rattaché au réseau actuellement survolé ailleurs (voir onAttachmentHover) —
-   * posé par l'appelant, jamais dérivé ici (GraphNode ne voit qu'un seul nœud à la fois). */
-  networkHighlight?: boolean;
   /** Bouton ＋ au survol d'une carte conteneur OU VM Nutanix (picker contextuel par kind :
    * conteneur -> Stockage/Variable ; VM -> Disque/Carte réseau/vCPU-Mémoire) — injecté par
    * TopologyGraph.tsx uniquement pour un rôle operator+ ; absent = bouton non rendu. */
@@ -894,7 +891,6 @@ function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
     a.actionPending === b.actionPending &&
     a.deletePending === b.deletePending &&
     // Mise en évidence "même réseau que le tiroir survolé" — réellement rendue (classe CSS).
-    a.networkHighlight === b.networkHighlight &&
     a.label === b.label &&
     a.subtitle === b.subtitle &&
     a.status === b.status &&
@@ -993,9 +989,14 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   // l'icône + le point de statut — évite un canevas illisible une fois dézoomé sur toute l'infra.
   const zoom = useStore(zoomSelector);
   const isCompact = zoom < ZOOM_DETAIL_THRESHOLD;
+  const networkIds = (node.attachments ?? [])
+    .filter((a) => a.kind === "network" && a.networkId)
+    .map((a) => a.networkId!)
+    .join(" ");
   return (
     <div
-      className={`topology-node topology-node--${node.kind}${node.kind === "host" && node.hostKind ? ` topology-node--host-${node.hostKind}` : ""} topology-node--${node.status}${node.orphan ? " topology-node--orphan" : ""}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}${node.actionPending ? " topology-node--pending" : ""}${node.deletePending ? " topology-node--deleting" : ""}${node.networkHighlight ? " topology-node--net-highlight" : ""}`}
+      className={`topology-node topology-node--${node.kind}${node.kind === "host" && node.hostKind ? ` topology-node--host-${node.hostKind}` : ""} topology-node--${node.status}${node.orphan ? " topology-node--orphan" : ""}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}${node.actionPending ? " topology-node--pending" : ""}${node.deletePending ? " topology-node--deleting" : ""}`}
+      data-networks={networkIds}
       title={isCompact ? node.label : undefined}
     >
       {ports.map((port) => (
@@ -1402,6 +1403,10 @@ function GroupNodeImpl({ data, selected }: NodeProps) {
   // .topology-node__label/__subtitle) : aucune règle CSS dédiée nécessaire.
   const zoom = useStore(zoomSelector);
   const isCompact = zoom < ZOOM_DETAIL_THRESHOLD;
+  const networkIds = (node.attachments ?? [])
+    .filter((a) => a.kind === "network" && a.networkId)
+    .map((a) => a.networkId!)
+    .join(" ");
   return (
     <div
       className={`topology-node topology-group-node${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}`}
