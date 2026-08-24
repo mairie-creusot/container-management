@@ -42,7 +42,7 @@
  *
  * Nœud "hycu-appliance" (voir getHycuTopologyParts ci-dessous) : le contrôleur de sauvegarde HYCU
  * réel — aucun nœud tant qu'il n'a jamais été configuré, LECTURE SEULE stricte. Seul émetteur
- * d'arêtes `kind: "protects"` vers les VMs Nutanix qu'il sauvegarde vraiment.
+ * d'arêtes `kind: "protects"` allant des VMs Nutanix réellement sauvegardées vers lui.
  *
  * Nœuds "host" (kind "host", champ `hostKind` — voir getNutanixTopologyParts/
  * getRemoteDockerHostNodes/getLxcHostNodes ci-dessous) : une machine/cluster HÔTE réelle, PAS une
@@ -434,7 +434,7 @@ function uuidFromNutanixVmNodeId(nodeId: string): string {
 }
 
 /**
- * Nœud "hycu-appliance" + arêtes "protects" HYCU -> VM Nutanix + annotation de protection posée
+ * Nœud "hycu-appliance" + arêtes "protects" VM Nutanix -> HYCU + annotation de protection posée
  * SUR les nœuds VM déjà construits (même mécanique que les `attachments` posés plus bas sur les
  * nœuds conteneur — une seule source de vérité par nœud, pas de table parallèle à recroiser côté
  * frontend). Aucun nœud tant que HYCU n'a jamais été configuré (`null` du snapshot) ; nœud
@@ -500,7 +500,7 @@ async function getHycuTopologyParts(nutanixVmNodes: TopologyNode[]): Promise<{ n
     // Arête UNIQUEMENT pour une VM réellement assignée à une policy : une VM connue de HYCU mais
     // non protégée porte son badge, jamais un lien de sauvegarde qui n'existe pas.
     if (vm.protectionGroupUuid) {
-      edges.push({ id: `protects:${vm.uuid}:${vmNode.id}`, source: HYCU_NODE_ID, target: vmNode.id, kind: "protects" });
+      edges.push({ id: `protects:${vm.uuid}:${vmNode.id}`, source: vmNode.id, target: HYCU_NODE_ID, kind: "protects" });
     }
   }
   return { nodes: [node], edges };

@@ -1384,7 +1384,7 @@ export interface TopologyEdge {
   /** "uses-artifact" : template B consomme l'artefact du template A (étape "artifact" réelle de sa
    * recette) — source = template producteur, target = consommateur. Jamais construite si le
    * template source n'existe plus. */
-  /** "protects" : l'appliance HYCU (source) sauvegarde RÉELLEMENT cette VM Nutanix (target) — VM
+  /** "protects" : cette VM Nutanix (source) est RÉELLEMENT sauvegardée vers l'appliance HYCU (target) — VM
    * assignée à une policy HYCU ET rapprochée du graphe par une clé fiable (uuid, sinon nom exact
    * non ambigu — voir services/topology.ts#getHycuTopologyParts). Jamais construite sur un
    * rapprochement douteux. */

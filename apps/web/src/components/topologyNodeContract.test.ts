@@ -98,16 +98,21 @@ describe("NODE_CONTRACT — totalité et conventions transverses", () => {
     expect(NODE_CONTRACT["automation-condition"].ports.map((p) => p.id)).toEqual(["automation-out", "automation-in"]);
   });
 
-  it("nutanix-vm porte ses deux ports cibles (\"hosted-by\" + \"protected-by\" HYCU) et host ses deux ports (bug réel du 14/08/2026 : ports absents = arêtes invisibles)", () => {
-    expect(NODE_CONTRACT["nutanix-vm"].ports.map((p) => p.id)).toEqual(["hosted-by", "protected-by"]);
+  it("nutanix-vm : entrée d'hébergement à GAUCHE, sortie de sauvegarde à DROITE (le lien part de la VM vers HYCU)", () => {
+    expect(NODE_CONTRACT["nutanix-vm"].ports.map((p) => ({ id: p.id, handleType: p.handleType, position: p.position }))).toEqual([
+      { id: "hosted-by", handleType: "target", position: Position.Left },
+      { id: "protection-out", handleType: "source", position: Position.Right },
+    ]);
     expect(NODE_CONTRACT.host.ports.map((p) => p.id)).toEqual(["hosted-by", "hosts"]);
   });
 
-  it("hycu-appliance : cible du rattachement au master + source des arêtes \"protects\", jamais l'inverse", () => {
-    expect(NODE_CONTRACT["hycu-appliance"].ports.map((p) => ({ id: p.id, handleType: p.handleType }))).toEqual([
+  it("hycu-appliance : uniquement des ENTRÉES à gauche — l'appliance reçoit les sauvegardes, elle n'en émet pas", () => {
+    const ports = NODE_CONTRACT["hycu-appliance"].ports;
+    expect(ports.map((p) => ({ id: p.id, handleType: p.handleType }))).toEqual([
       { id: "hosted-by", handleType: "target" },
-      { id: "protection-out", handleType: "source" },
+      { id: "protected-by", handleType: "target" },
     ]);
+    expect(ports.every((p) => p.position === Position.Left)).toBe(true);
   });
 
   it("HYCU est en LECTURE SEULE : ses ports ne sont jamais interactifs et son menu ne propose aucune mutation", () => {
@@ -138,14 +143,14 @@ describe("NODE_CONTRACT — totalité et conventions transverses", () => {
     expect(hycuProtectionBadge(node("nutanix-vm", { hycuProtection: "unprotected" }))?.label).toBe("Non protégée");
   });
 
-  it("arête \"protects\" : ancrée sur protection-out/protected-by, couleur portée par la VM cible (palette partagée)", () => {
+  it("arête \"protects\" : part de la VM (droite) vers HYCU (gauche), couleur portée par la VM source", () => {
     const hycu = node("hycu-appliance", { id: "hycu-appliance:main" });
     const vm = node("nutanix-vm", { id: "nutanix-vm:uuid-1", hycuProtection: "protected" });
     const nodesById = new Map([
       [hycu.id, hycu],
       [vm.id, vm],
     ]);
-    const edges: TopologyEdge[] = [{ id: "protects:h1:nutanix-vm:uuid-1", source: hycu.id, target: vm.id, kind: "protects" }];
+    const edges: TopologyEdge[] = [{ id: "protects:h1:nutanix-vm:uuid-1", source: vm.id, target: hycu.id, kind: "protects" }];
     const [edge] = buildTopologyEdges(edges, nodesById);
     expect(edge).toMatchObject({ sourceHandle: "protection-out", targetHandle: "protected-by" });
     expect(edge?.data?.state).toBe("healthy");
@@ -161,7 +166,7 @@ describe("NODE_CONTRACT — totalité et conventions transverses", () => {
       [vm.id, vm],
     ]);
     const [edge] = buildTopologyEdges(
-      [{ id: "protects:h2:nutanix-vm:uuid-2", source: hycu.id, target: vm.id, kind: "protects" }],
+      [{ id: "protects:h2:nutanix-vm:uuid-2", source: vm.id, target: hycu.id, kind: "protects" }],
       nodesById,
     );
     expect(edge?.data?.state).toBe("starting");

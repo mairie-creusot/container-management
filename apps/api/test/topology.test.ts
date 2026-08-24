@@ -842,7 +842,8 @@ describe("getTopology — appliance HYCU et arêtes de sauvegarde", () => {
     const vm = topology.nodes.find((n) => n.kind === "nutanix-vm");
 
     expect(topology.edges).toContainEqual(
-      expect.objectContaining({ kind: "protects", source: "hycu-appliance:main", target: `nutanix-vm:${VM_UUID}` }),
+      // Sens RÉEL depuis le 24/08/2026 : la sauvegarde remonte de la VM vers l'appliance.
+      expect.objectContaining({ kind: "protects", source: `nutanix-vm:${VM_UUID}`, target: "hycu-appliance:main" }),
     );
     expect(vm).toMatchObject({
       hycuProtection: "protected",
@@ -874,7 +875,7 @@ describe("getTopology — appliance HYCU et arêtes de sauvegarde", () => {
     const protects = topology.edges.filter((e) => e.kind === "protects");
 
     expect(protects).toHaveLength(1);
-    expect(protects[0]).toMatchObject({ target: "nutanix-vm:uuid-a" });
+    expect(protects[0]).toMatchObject({ source: "nutanix-vm:uuid-a", target: "hycu-appliance:main" });
     expect(topology.nodes.find((n) => n.id === "nutanix-vm:uuid-a")?.hycuProtection).toBe("protected");
     // Homonymes : ni arête, ni protection affichée — jamais un rapprochement au hasard.
     expect(topology.nodes.find((n) => n.id === "nutanix-vm:uuid-b")?.hycuProtection).toBeUndefined();
