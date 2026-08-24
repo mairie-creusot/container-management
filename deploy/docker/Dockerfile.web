@@ -8,6 +8,14 @@
 # Construire depuis la racine du repo :
 #   docker build -f deploy/docker/Dockerfile.web -t quai-web .
 #
+# La config nginx est INTÉGRÉE À L'IMAGE (jamais bind-montée) : avec un runner GitLab en
+# exécuteur Docker branché sur le socket de l'hôte, un `volumes: ./fichier:/chemin` serait résolu
+# sur l'HÔTE, où le fichier du dépôt n'existe pas -> montage vide et nginx cassé. WEB_NGINX_CONF
+# choisit le fichier à copier, chemin relatif à la racine du repo :
+#   docker build -f deploy/docker/Dockerfile.web \
+#     --build-arg WEB_NGINX_CONF=deploy/compose/nginx.prod.conf -t quai-web .
+ARG WEB_NGINX_CONF=deploy/docker/nginx.web.conf
+
 # ---------------------------------------------------------------------------
 # Stage 1 : install workspace pnpm + build Vite de @quai/web
 # ---------------------------------------------------------------------------
@@ -36,11 +44,15 @@ RUN pnpm --filter @quai/web... build
 # ---------------------------------------------------------------------------
 FROM nginx:1.27-alpine AS runtime
 
+# Redéclaration obligatoire : un ARG global n'est pas visible dans un stage sans ça (la valeur
+# par défaut définie plus haut reste appliquée).
+ARG WEB_NGINX_CONF
+
 # Choix : nginx écoute sur le port 8080 en tant qu'utilisateur non-root
 # "nginx" (déjà présent dans l'image officielle, uid 101), plutôt que sur le
 # port 80 en root. Cela évite CAP_NET_BIND_SERVICE et s'aligne avec les
 # contraintes runAsNonRoot habituelles des orchestrateurs (K8s/Swarm).
-COPY deploy/docker/nginx.web.conf /etc/nginx/conf.d/default.conf
+COPY ${WEB_NGINX_CONF} /etc/nginx/conf.d/default.conf
 
 COPY --from=build /workspace/apps/web/dist /usr/share/nginx/html
 

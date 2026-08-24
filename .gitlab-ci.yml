@@ -1,0 +1,238 @@
+# Pipeline QUAI pour le GitLab interne de la mairie (https://172.16.13.2:4443/).
+#
+# Deux étapes : « controle » (tsc + tests des deux applications) puis « deploiement » (construction
+# des images de production et docker compose up sur l'hôte). Le déploiement est MANUEL et limité à
+# la branche par défaut. Aucun secret n'est écrit ici : tout vient des variables CI/CD du projet
+# (Settings > CI/CD > Variables), protégées et masquées. Marche à suivre : deploy/README.md.
+#
+# GitHub reste en secours : .github/workflows/build.yml n'est pas remplacé par ce fichier.
+
+stages:
+  - controle
+  - deploiement
+
+variables:
+  NODE_IMAGE: "node:22-slim"
+  # Image du client Docker utilisée par le job de déploiement. Elle parle au démon de l'HÔTE via le
+  # socket monté par le runner — surtout pas de service dind ici.
+  DOCKER_CLI_IMAGE: "docker:29-cli"
+  PNPM_VERSION: "9.1.0"
+  # Le cache GitLab n'accepte que des chemins internes au répertoire du projet.
+  PNPM_STORE_DIR: "$CI_PROJECT_DIR/.pnpm-store"
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
+  COMPOSE_PROD_FILE: "deploy/compose/docker-compose.prod.yml"
+  COMPOSE_PROJECT: "quai"
+  # Généré à la volée par le job de déploiement, jamais versionné (.gitignore couvre « .env.* »).
+  COMPOSE_ENV_FILE: "$CI_PROJECT_DIR/.env.deploiement"
+  GIT_DEPTH: "20"
+
+# Un seul pipeline par changement : pipeline de merge request s'il y en a une ouverte, sinon
+# pipeline de branche.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+# Clé ignorée par GitLab (commence par un point) : sert uniquement de réserve d'ancres YAML.
+.blocs:
+  cache_pnpm: &cache_pnpm
+    key:
+      files:
+        - pnpm-lock.yaml
+    paths:
+      - .pnpm-store/
+
+  # Certificat auto-signé du GitLab de la mairie. Deux solutions existent, voir deploy/README.md :
+  # celle-ci (approuver le certificat) conserve la vérification TLS, contrairement à
+  # GIT_SSL_NO_VERIFY qui la désactive purement et simplement.
+  certificat: &bloc_certificat |
+    CA="${QUAI_GITLAB_CA_PEM:-${CI_SERVER_TLS_CA_FILE:-}}"
+    if [ -n "$CA" ] && [ -f "$CA" ]; then
+      mkdir -p /usr/local/share/ca-certificates
+      cp "$CA" /usr/local/share/ca-certificates/gitlab-interne.crt
+      update-ca-certificates >/dev/null 2>&1 \
+        || echo "Avertissement : update-ca-certificates absent de cette image, seul git utilisera le certificat."
+      GIT_SSL_CAINFO="$CA"
+      export GIT_SSL_CAINFO
+      echo "Certificat du GitLab interne approuvé pour ce job."
+    else
+      echo "Aucun certificat GitLab fourni (ni CI_SERVER_TLS_CA_FILE, ni QUAI_GITLAB_CA_PEM)."
+      echo "Normal si le runner a été enregistré avec --tls-ca-file ; sinon voir deploy/README.md."
+    fi
+
+  outils_node: &bloc_outils_node |
+    set -e
+    corepack enable
+    corepack prepare "pnpm@$PNPM_VERSION" --activate
+    pnpm config set store-dir "$PNPM_STORE_DIR" --global
+    pnpm install --frozen-lockfile
+
+default:
+  before_script:
+    - *bloc_certificat
+
+# packages/wasm-core (Rust) est volontairement absent des jobs de contrôle : ils tournent dans une
+# image Node sans toolchain Rust ni wasm-pack. Le binding est compilé ailleurs, dans le stage
+# « rust-builder » de deploy/docker/Dockerfile.api — exactement le découpage de la CI GitHub.
+# @quai/api importe @quai/wasm-core dynamiquement avec un repli JS et fournit une déclaration
+# ambiante (src/types/wasm-core.d.ts), donc tsc et vitest passent sans le paquet compilé.
+controle:api:
+  stage: controle
+  image: $NODE_IMAGE
+  interruptible: true
+  cache: *cache_pnpm
+  script:
+    - *bloc_outils_node
+    - pnpm --filter @quai/api typecheck
+    - pnpm --filter @quai/api test
+
+controle:web:
+  stage: controle
+  image: $NODE_IMAGE
+  interruptible: true
+  cache: *cache_pnpm
+  script:
+    - *bloc_outils_node
+    - pnpm --filter @quai/web lint
+    - pnpm --filter @quai/web test
+
+# Construit les images de production puis les démarre sur la machine qui héberge GitLab.
+# Le client docker tourne dans ce conteneur, le démon est celui de l'hôte : les images et les
+# conteneurs créés ici sont ceux de l'hôte, et le contexte de build est envoyé depuis le job.
+deploiement:production:
+  stage: deploiement
+  image: $DOCKER_CLI_IMAGE
+  # Le runner doit porter cette étiquette ET monter /var/run/docker.sock (voir deploy/README.md).
+  # Supprimer ces deux lignes si l'instance n'a qu'un seul runner, sans étiquette.
+  tags:
+    - quai-hote
+  # Empêche deux déploiements simultanés de se marcher dessus.
+  resource_group: production
+  # Dockerfile.api compile packages/wasm-core en Rust : le premier build dépasse souvent une heure.
+  timeout: 2h
+  variables:
+    DOCKER_HOST: "unix:///var/run/docker.sock"
+  environment:
+    name: production
+    url: $QUAI_PUBLIC_URL
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+      allow_failure: false
+  script:
+    - |
+      set -e
+      echo "=== 1/5 — Accès au démon Docker de l'hôte ==="
+      if [ ! -S /var/run/docker.sock ]; then
+        echo "ÉCHEC : /var/run/docker.sock est absent du conteneur de ce job."
+        echo "Le runner doit monter le socket Docker de l'hôte. Sur la machine du runner, dans"
+        echo "/etc/gitlab-runner/config.toml, section [runners.docker] du runner utilisé ici :"
+        echo '    volumes = ["/var/run/docker.sock:/var/run/docker.sock", "/cache"]'
+        echo "puis : sudo systemctl restart gitlab-runner"
+        echo "Aucun déploiement n'a été lancé, rien n'a été modifié sur l'hôte."
+        exit 1
+      fi
+      if ! docker version >/dev/null 2>&1; then
+        echo "ÉCHEC : le socket existe mais le démon Docker ne répond pas."
+        echo "Causes habituelles : démon arrêté sur l'hôte, ou droits insuffisants sur le socket."
+        echo "Vérifier sur l'hôte : systemctl status docker && ls -l /var/run/docker.sock"
+        echo "Aucun déploiement n'a été lancé, rien n'a été modifié sur l'hôte."
+        exit 1
+      fi
+      docker version --format 'Client {{.Client.Version}} — démon de l hôte {{.Server.Version}}'
+      if ! docker compose version >/dev/null 2>&1; then
+        echo "ÉCHEC : le greffon « docker compose » est absent de l'image $DOCKER_CLI_IMAGE."
+        echo "Choisir une image qui l'embarque via la variable CI/CD DOCKER_CLI_IMAGE."
+        exit 1
+      fi
+    - |
+      set -e
+      echo "=== 2/5 — Variables CI/CD obligatoires ==="
+      manquantes=""
+      for nom in QUAI_PUBLIC_URL JWT_SECRET CONFIG_ENCRYPTION_KEY LDAP_URL LDAP_BIND_DN LDAP_BIND_PASSWORD LDAP_SEARCH_BASE; do
+        eval "valeur=\${$nom:-}"
+        if [ -z "$valeur" ]; then manquantes="$manquantes $nom"; fi
+      done
+      if [ -n "$manquantes" ]; then
+        echo "ÉCHEC : variables CI/CD absentes ou vides :$manquantes"
+        echo "À créer dans Settings > CI/CD > Variables (Protected + Masked pour les secrets)."
+        echo "Piège fréquent : une variable « Protected » n'est visible que sur une branche protégée."
+        echo "Liste exacte et contenu attendu : deploy/README.md."
+        exit 1
+      fi
+      echo "Toutes les variables obligatoires sont présentes."
+    - |
+      set -e
+      echo "=== 3/5 — Génération du fichier d'environnement du compose ==="
+      # umask 077 : le fichier n'est lisible que par l'utilisateur du job. Il n'est jamais affiché.
+      umask 077
+      role_map="${LDAP_GROUP_ROLE_MAP:-}"
+      if [ -z "$role_map" ]; then role_map='{}'; fi
+      filtre="${LDAP_SEARCH_FILTER:-}"
+      if [ -z "$filtre" ]; then
+        filtre='(&(objectClass=user)(|(sAMAccountName={{username}})(userPrincipalName={{username}})))'
+      fi
+      {
+        printf 'QUAI_PUBLIC_URL=%s\n' "$QUAI_PUBLIC_URL"
+        printf 'QUAI_HTTP_PORT=%s\n' "${QUAI_HTTP_PORT:-8080}"
+        printf 'QUAI_PROXY_HTTP_PORT=%s\n' "${QUAI_PROXY_HTTP_PORT:-80}"
+        printf 'QUAI_PROXY_HTTPS_PORT=%s\n' "${QUAI_PROXY_HTTPS_PORT:-443}"
+        printf 'JWT_SECRET=%s\n' "$JWT_SECRET"
+        printf 'COOKIE_SECURE=%s\n' "${COOKIE_SECURE:-true}"
+        printf 'CONFIG_ENCRYPTION_KEY=%s\n' "$CONFIG_ENCRYPTION_KEY"
+        printf 'LDAP_URL=%s\n' "$LDAP_URL"
+        printf 'LDAP_BIND_DN=%s\n' "$LDAP_BIND_DN"
+        printf 'LDAP_BIND_PASSWORD=%s\n' "$LDAP_BIND_PASSWORD"
+        printf 'LDAP_SEARCH_BASE=%s\n' "$LDAP_SEARCH_BASE"
+        printf 'LDAP_SEARCH_FILTER=%s\n' "$filtre"
+        printf 'LDAP_GROUP_ROLE_MAP=%s\n' "$role_map"
+        printf 'LDAP_DEFAULT_ROLE=%s\n' "${LDAP_DEFAULT_ROLE:-viewer}"
+      } > "$COMPOSE_ENV_FILE"
+      chmod 600 "$COMPOSE_ENV_FILE"
+      echo "$(wc -l < "$COMPOSE_ENV_FILE") variables écrites dans un fichier temporaire du job."
+      echo "Contenu volontairement non affiché ; le fichier est supprimé en fin de job."
+    - |
+      set -e
+      echo "=== 4/5 — Construction des images de production ==="
+      # Le contexte de build est envoyé depuis CE conteneur vers le démon de l'hôte : les fichiers
+      # du dépôt sont donc bien lus ici. Ce qui ne marcherait PAS, ce sont les bind mounts de
+      # fichiers du dépôt dans le compose — il n'y en a plus aucun, tout est intégré aux images.
+      # Pas de --pull : sur ce réseau, un Docker Hub momentanément injoignable ferait échouer un
+      # build par ailleurs possible avec les images de base déjà présentes sur l'hôte.
+      docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_PROD_FILE" --env-file "$COMPOSE_ENV_FILE" build
+    - |
+      set -e
+      echo "=== 5/5 — Démarrage et vérification de l'état des services ==="
+      docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_PROD_FILE" --env-file "$COMPOSE_ENV_FILE" up -d --remove-orphans
+      restant=36
+      while [ "$restant" -gt 0 ]; do
+        pas_prets=""
+        for cid in $(docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_PROD_FILE" --env-file "$COMPOSE_ENV_FILE" ps -q); do
+          nom=$(docker inspect -f '{{.Name}}' "$cid")
+          etat=$(docker inspect -f '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$cid")
+          case "$etat" in
+            healthy|running) ;;
+            *) pas_prets="$pas_prets $nom($etat)" ;;
+          esac
+        done
+        if [ -z "$pas_prets" ]; then break; fi
+        restant=$((restant - 1))
+        if [ "$restant" -eq 0 ]; then
+          echo "ÉCHEC : services toujours pas opérationnels après 3 minutes :$pas_prets"
+          echo "Journaux : docker compose -p $COMPOSE_PROJECT logs --tail=100"
+          exit 1
+        fi
+        sleep 5
+      done
+      docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_PROD_FILE" --env-file "$COMPOSE_ENV_FILE" ps
+      echo "Déploiement terminé. QUAI est joignable sur $QUAI_PUBLIC_URL"
+  after_script:
+    - |
+      rm -f "$COMPOSE_ENV_FILE"
+      if [ "$CI_JOB_STATUS" != "success" ]; then
+        echo "État des conteneurs QUAI sur l'hôte après échec :"
+        docker compose -p "$COMPOSE_PROJECT" ps 2>/dev/null || true
+        echo "Pour les journaux : docker compose -p $COMPOSE_PROJECT logs --tail=100"
+      fi

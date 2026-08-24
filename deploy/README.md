@@ -6,12 +6,17 @@ Contrat de référence : voir `ARCHITECTURE.md` à la racine du repo
 
 ```
 deploy/
-  docker/     Dockerfile.api, Dockerfile.web, nginx.web.conf
-  compose/    docker-compose.dev.yml (+ ldap/bootstrap.ldif)
+  docker/     Dockerfile.api, Dockerfile.web, Dockerfile.caddy, nginx.web.conf
+  compose/    docker-compose.dev.yml, docker-compose.prod.yml, nginx.prod.conf,
+              .env.prod.example (+ ldap/bootstrap.ldif, caddy/Caddyfile)
   k8s/        manifestes Kubernetes d'exemple
   swarm/      stack.yml Docker Swarm d'exemple
-.github/workflows/build.yml   CI : build + push GHCR
+.gitlab-ci.yml                GitLab interne (dépôt principal) : contrôle + déploiement — § 6
+.github/workflows/build.yml   GitHub (secours) : build + push GHCR — § 5
 ```
+
+**Dépôt principal : le GitLab de la mairie** (`https://172.16.13.2:4443/`). GitHub reste en
+secours, son workflow est toujours valide et n'a pas été touché.
 
 ## 0. Piloter Docker : socket local vs Docker distant (TLS)
 
@@ -109,7 +114,7 @@ Avant application : remplacer `ghcr.io/OWNER/quai-api` /
 préférer le créer hors dépôt (`kubectl create secret ...`) ou via un
 gestionnaire externe (Sealed Secrets, External Secrets Operator, Vault…).
 
-## 5. CI/CD — `.github/workflows/build.yml`
+## 5. CI/CD GitHub (secours) — `.github/workflows/build.yml`
 
 - Déclenché sur push vers `main` et sur tags `v*`.
 - Job matriciel `build` (api / web), permissions `contents: read` +
@@ -131,6 +136,264 @@ Aucun secret à configurer manuellement pour la CI (le `GITHUB_TOKEN`
 suffit pour pousser vers GHCR sur ce même repo). Les secrets LDAP/JWT ne
 sont nécessaires qu'au déploiement (Swarm : `docker secret create...` ;
 Kubernetes : `deploy/k8s/secret.yaml` ou équivalent).
+
+## 6. CI/CD GitLab interne (dépôt principal) — `.gitlab-ci.yml`
+
+C'est le chemin de déploiement réel de QUAI à la mairie. QUAI tourne **sur la machine qui héberge
+GitLab** (172.16.13.2) : le runner y construit les images et démarre les conteneurs directement sur
+le démon Docker de cette machine.
+
+Le pipeline a deux étapes :
+
+| Étape | Job | Ce qu'il fait | Quand |
+| --- | --- | --- | --- |
+| `controle` | `controle:api` | `tsc --noEmit` puis `vitest run` sur `@quai/api` | à chaque push / merge request |
+| `controle` | `controle:web` | `tsc --noEmit` puis `vitest run` sur `@quai/web` | à chaque push / merge request |
+| `deploiement` | `deploiement:production` | construit les images de prod et `docker compose up -d` sur l'hôte | branche par défaut uniquement, **bouton manuel** |
+
+`packages/wasm-core` (Rust) n'est pas testé dans l'étape de contrôle : ces jobs tournent dans une
+image Node sans toolchain Rust. Son binding est compilé dans le stage `rust-builder` de
+`Dockerfile.api` au moment du déploiement — même découpage que la CI GitHub. `@quai/api` importe
+`@quai/wasm-core` dynamiquement avec un repli JS, donc `tsc` et `vitest` passent sans lui.
+
+### 6.1 Le piège Docker-outside-of-Docker (déjà rencontré sur ce projet)
+
+Avec un runner en exécuteur Docker et le socket de l'hôte monté, le client `docker` s'exécute
+**dans le conteneur du job**, mais le démon qui exécute les ordres est celui de **l'hôte**.
+Conséquence : un `volumes: ./fichier:/chemin` dans le compose est résolu **sur l'hôte**, où le dépôt
+n'est pas déployé. Docker y crée alors un répertoire vide et le monte à la place du fichier attendu
+— sans le moindre message d'erreur. C'est exactement ce qui avait cassé le déploiement GitHub.
+
+Correction appliquée : **plus aucun bind mount de fichier du dépôt dans
+`docker-compose.prod.yml`**. Toute configuration est intégrée aux images au build :
+
+- `deploy/docker/Dockerfile.web` accepte `--build-arg WEB_NGINX_CONF=<chemin depuis la racine>` et
+  copie ce fichier dans l'image. Défaut inchangé : `deploy/docker/nginx.web.conf` (Kubernetes et
+  Swarm ne changent pas). Le compose de production passe `deploy/compose/nginx.prod.conf`.
+- `deploy/docker/Dockerfile.caddy` (nouveau) copie `deploy/compose/caddy/Caddyfile` dans l'image
+  Caddy, et valide le fichier au build.
+
+Le seul montage restant est `/var/run/docker.sock` sur le service `api` : c'est une vraie ressource
+de l'hôte, pas un fichier du dépôt — il est correct et nécessaire.
+
+Le contexte de build, lui, fonctionne sans rien de particulier : il est envoyé depuis le conteneur
+du job vers le démon de l'hôte, donc les fichiers du dépôt sont bien lus au bon endroit.
+
+Vérification après un déploiement, sur l'hôte :
+
+```bash
+docker exec quai-web-1 head -1 /etc/nginx/conf.d/default.conf
+# doit afficher la première ligne de nginx.prod.conf ("Config nginx de PRODUCTION (compose) ...")
+docker exec quai-web-1 grep -c 'proxy_pass http://api:3000' /etc/nginx/conf.d/default.conf   # -> 1
+```
+
+### 6.2 Créer le projet et pousser le dépôt
+
+1. Sur `https://172.16.13.2:4443/`, **New project > Create blank project**, nom `quai`, visibilité
+   *Private*, et **décocher « Initialize repository with a README »** (le dépôt existe déjà).
+2. Sur le poste, faire de GitLab le dépôt principal et garder GitHub en secours :
+
+```bash
+cd /chemin/vers/container-management
+git remote rename origin github
+git remote add origin https://172.16.13.2:4443/<groupe>/quai.git
+git remote -v            # origin = GitLab, github = secours
+```
+
+3. Certificat auto-signé : voir 6.3 avant de pousser, sinon `git push` échoue sur
+   `SSL certificate problem: self-signed certificate`.
+4. Pousser :
+
+```bash
+git push -u origin main
+```
+
+Par la suite, pousser sur les deux quand c'est utile : `git push origin main && git push github main`.
+
+### 6.3 Certificat auto-signé du GitLab de la mairie
+
+Deux solutions existent, elles ne se valent pas.
+
+**A. Approuver le certificat (retenue).** On récupère le certificat du serveur et on l'installe
+comme autorité de confiance. La vérification TLS reste active : une interception ou une usurpation
+de `172.16.13.2` est toujours détectée. Un peu plus long à mettre en place, c'est le seul
+inconvénient.
+
+Récupérer le certificat depuis n'importe quelle machine du réseau :
+
+```bash
+openssl s_client -showcerts -connect 172.16.13.2:4443 </dev/null 2>/dev/null \
+  | openssl x509 -outform PEM > gitlab-mairie.crt
+```
+
+Côté poste de développement (pour `git clone` / `git push`) :
+
+```bash
+sudo cp gitlab-mairie.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates
+# ou, sans toucher au système :
+git config --global http."https://172.16.13.2:4443/".sslCAInfo /chemin/absolu/gitlab-mairie.crt
+```
+
+Côté runner, au moment de l'enregistrement : `--tls-ca-file /etc/gitlab-runner/certs/gitlab-mairie.crt`
+(voir 6.5). Le runner transmet alors le certificat aux jobs dans la variable
+`CI_SERVER_TLS_CA_FILE`, que `.gitlab-ci.yml` installe automatiquement dans le magasin de
+certificats de chaque job. Rien d'autre à faire.
+
+Si l'enregistrement du runner ne peut pas être refait, créer à la place une variable CI/CD de type
+**File** nommée `QUAI_GITLAB_CA_PEM` contenant le certificat : le pipeline l'utilise de la même
+façon.
+
+**B. Désactiver la vérification (`GIT_SSL_NO_VERIFY=true`), à éviter.** Il suffit de créer une
+variable CI/CD `GIT_SSL_NO_VERIFY` = `true`. C'est une ligne, ça marche tout de suite — et ça
+supprime toute vérification d'identité du serveur pour tous les jobs : n'importe quelle machine
+capable de se faire passer pour 172.16.13.2 (ARP, DNS interne) recevrait le trafic Git du runner,
+jetons de job compris, sans qu'aucun avertissement n'apparaisse. Acceptable au plus comme
+dépannage ponctuel sur un réseau maîtrisé, jamais comme configuration définitive. `.gitlab-ci.yml`
+ne l'active pas.
+
+Note pour plus tard : si vous utilisez un jour le **registre d'images** de ce GitLab, c'est le
+démon Docker de l'hôte qui devra faire confiance au certificat, pas le job — copier le fichier dans
+`/etc/docker/certs.d/172.16.13.2:4443/ca.crt` puis `sudo systemctl restart docker`.
+
+### 6.4 Variables CI/CD à créer
+
+**Settings > CI/CD > Variables > Add variable.** Type *Variable* sauf mention contraire.
+
+*Protected* = la variable n'est fournie qu'aux jobs des branches et tags protégés. `main` étant
+protégée par défaut, et le déploiement ne tournant que sur la branche par défaut, cochez-la partout.
+*Masked* = la valeur est remplacée par `[MASKED]` dans les journaux ; GitLab ne l'accepte que si la
+valeur fait au moins 8 caractères, tient sur une ligne et ne contient ni espace ni caractère exotique
+— d'où les « non » ci-dessous, qui ne concernent que des valeurs non secrètes.
+
+Obligatoires — le job de déploiement s'arrête net, avant toute modification de l'hôte, si l'une
+manque :
+
+| Variable | Contenu attendu | Protected | Masked |
+| --- | --- | --- | --- |
+| `QUAI_PUBLIC_URL` | URL par laquelle les navigateurs joignent QUAI, ex. `https://quai.lecreusot.priv` (sert aussi d'origine CORS et de lien de retour dans les tickets GLPI) | oui | non (contient `://`) |
+| `JWT_SECRET` | secret de signature des sessions — `openssl rand -hex 32` | oui | oui |
+| `CONFIG_ENCRYPTION_KEY` | clé de chiffrement de `config.json` — `openssl rand -hex 32`. **À sauvegarder hors de la machine** : sans elle, les configurations Nutanix/HYCU/GLPI/3CX/ExaGrid sont irrécupérables | oui | oui |
+| `LDAP_URL` | annuaire réel, ex. `ldaps://dc01.lecreusot.priv:636` | oui | non (contient `://`) |
+| `LDAP_BIND_DN` | compte de service **en lecture seule**, ex. `CN=svc-quai,OU=Services,OU=ville-du-Creusot,DC=lecreusot,DC=priv` | oui | non (contient `=` et `,`) |
+| `LDAP_BIND_PASSWORD` | mot de passe de ce compte | oui | oui |
+| `LDAP_SEARCH_BASE` | racine de recherche couvrant **toutes** les OU d'utilisateurs autorisés, ex. `OU=ville-du-Creusot,DC=lecreusot,DC=priv` — une OU oubliée donne « identifiants invalides » sans autre explication | oui | non |
+
+Optionnelles — une valeur par défaut raisonnable est appliquée si vous ne les créez pas :
+
+| Variable | Défaut | Quand la créer |
+| --- | --- | --- |
+| `LDAP_SEARCH_FILTER` | `(&(objectClass=user)(\|(sAMAccountName={{username}})(userPrincipalName={{username}})))` | annuaire non standard |
+| `LDAP_GROUP_ROLE_MAP` | `{}` | pour donner les rôles `admin`/`operator`, ex. `{"CN=QUAI-Admins,OU=Groupes,DC=lecreusot,DC=priv":"admin"}` |
+| `LDAP_DEFAULT_ROLE` | `viewer` | rôle des utilisateurs ne correspondant à aucun groupe |
+| `COOKIE_SECURE` | `true` | `false` **uniquement** si QUAI est servi en HTTP simple, sinon le navigateur refuse le cookie de session et la connexion échoue silencieusement |
+| `QUAI_HTTP_PORT` | `8080` | si 8080 est déjà pris sur l'hôte |
+| `QUAI_PROXY_HTTP_PORT` | `80` | **à prévoir** : GitLab occupe généralement déjà 80 sur cette machine — mettre par exemple `8081`, sinon le démarrage échoue sur « port is already allocated » |
+| `QUAI_PROXY_HTTPS_PORT` | `443` | idem, par exemple `8443` |
+| `QUAI_GITLAB_CA_PEM` | — | type **File**, certificat du GitLab interne (voir 6.3, solution A) |
+| `NODE_IMAGE` / `DOCKER_CLI_IMAGE` | `node:22-slim` / `docker:29-cli` | pour pointer vers un miroir interne d'images |
+
+Deux remarques :
+
+- Le job **écrit** ces variables dans un fichier `.env` temporaire, dans son propre répertoire de
+  travail, avec `umask 077`, sans jamais l'afficher, et le supprime en fin de job (y compris en
+  cas d'échec). Rien n'est écrit dans le dépôt.
+- Évitez le caractère `$` dans les mots de passe : Docker Compose l'interprète dans un fichier
+  `.env`. Si c'est inévitable, doublez-le (`$$`).
+
+### 6.5 Configuration du runner
+
+Le runner doit tourner **sur la machine 172.16.13.2**, en exécuteur Docker, avec le socket Docker de
+l'hôte monté dans les conteneurs de job. Sans ce montage, le job de déploiement s'arrête
+immédiatement avec un message expliquant exactement quoi ajouter — rien n'est déployé à moitié.
+
+Récupérer le jeton dans **Settings > CI/CD > Runners > New project runner** (cocher « Run untagged
+jobs », étiquette `quai-hote`), puis :
+
+```bash
+sudo gitlab-runner register \
+  --non-interactive \
+  --url https://172.16.13.2:4443/ \
+  --token <jeton affiché par GitLab> \
+  --executor docker \
+  --docker-image docker:29-cli \
+  --docker-volumes /var/run/docker.sock:/var/run/docker.sock \
+  --docker-volumes /cache \
+  --tag-list quai-hote \
+  --run-untagged=true \
+  --tls-ca-file /etc/gitlab-runner/certs/gitlab-mairie.crt
+```
+
+Résultat attendu dans `/etc/gitlab-runner/config.toml` :
+
+```toml
+concurrent = 2
+
+[[runners]]
+  name = "quai-hote"
+  url = "https://172.16.13.2:4443/"
+  executor = "docker"
+  tls_ca_file = "/etc/gitlab-runner/certs/gitlab-mairie.crt"
+  [runners.docker]
+    image = "docker:29-cli"
+    privileged = false
+    volumes = ["/var/run/docker.sock:/var/run/docker.sock", "/cache"]
+```
+
+Après toute modification manuelle du fichier : `sudo systemctl restart gitlab-runner`.
+
+Points à ne pas manquer :
+
+- `privileged = false` et **aucun service `dind`** : on utilise le démon de l'hôte, pas un Docker
+  imbriqué. C'est voulu — c'est ce qui permet aux conteneurs QUAI de survivre à la fin du job.
+- L'étiquette `quai-hote` est exigée par le job de déploiement (`tags:` dans `.gitlab-ci.yml`).
+  Si vous préférez un runner sans étiquette, supprimez les deux lignes `tags:` du fichier.
+- « Run untagged jobs » doit rester coché, sinon les jobs de contrôle (sans étiquette) restent en
+  attente indéfiniment.
+- Monter le socket Docker revient à donner un accès root sur l'hôte à tout job de ce runner :
+  réservez ce runner au projet QUAI, ne le partagez pas à l'instance entière.
+
+### 6.6 Déployer et vérifier
+
+1. Pousser sur `main`. Le pipeline démarre : `controle:api` et `controle:web` doivent passer au vert.
+2. Ouvrir **Build > Pipelines**, cliquer sur le pipeline, puis sur le bouton ▶ du job
+   `deploiement:production`. Rien ne part sans cette action.
+3. Suivre le journal, il annonce ses cinq étapes : accès au démon Docker, variables obligatoires,
+   génération du fichier d'environnement, construction des images, démarrage et attente de l'état
+   « healthy » (3 minutes maximum, sinon le job échoue).
+
+Vérifier ensuite, **sur l'hôte 172.16.13.2** :
+
+```bash
+docker compose -p quai ps          # api, web et caddy en "running (healthy)"
+curl -I http://127.0.0.1:8080/healthz
+docker compose -p quai logs --tail=50 api
+```
+
+`docker compose -p quai <commande>` fonctionne sans `-f` : Compose retrouve le projet grâce aux
+libellés des conteneurs. Puis ouvrir `QUAI_PUBLIC_URL` dans un navigateur et se connecter avec un
+compte de l'annuaire.
+
+Les données persistent dans le volume Docker `quai_quai_data` (config chiffrée, secrets, journal
+d'audit, catalogue de templates, positions du graphe) — un redéploiement ne les efface pas.
+`docker compose -p quai down -v` les détruirait : à ne jamais taper sur cette machine.
+
+### 6.7 Si ça ne marche pas
+
+| Symptôme | Cause probable |
+| --- | --- |
+| Le job reste « pending » | Aucun runner ne porte l'étiquette `quai-hote`, ou « Run untagged jobs » est décoché pour les jobs de contrôle |
+| `ÉCHEC : /var/run/docker.sock est absent` | `volumes = [...]` manquant dans `config.toml` (voir 6.5), ou runner non redémarré |
+| `ÉCHEC : variables CI/CD absentes ou vides` | Variable non créée, ou cochée *Protected* alors que la branche ne l'est pas |
+| `port is already allocated` | GitLab occupe 80/443 : définir `QUAI_PROXY_HTTP_PORT` / `QUAI_PROXY_HTTPS_PORT` |
+| `SSL certificate problem: self-signed certificate` au clonage | Certificat non fourni au runner (6.3, solution A) |
+| Connexion LDAP qui échoue sans message | `COOKIE_SECURE=true` alors que QUAI est servi en HTTP, ou `LDAP_SEARCH_BASE` trop étroite |
+
+Déploiement manuel de secours, directement sur l'hôte, sans passer par GitLab :
+
+```bash
+cp deploy/compose/.env.prod.example deploy/compose/.env.prod   # puis renseigner les vraies valeurs
+docker compose -f deploy/compose/docker-compose.prod.yml --env-file deploy/compose/.env.prod up -d --build
+```
 
 ## Portée de ce dossier
 

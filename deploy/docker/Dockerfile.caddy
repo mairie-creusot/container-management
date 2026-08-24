@@ -1,0 +1,24 @@
+# syntax=docker/dockerfile:1
+#
+# Image du reverse proxy interne de QUAI : caddy officiel + le Caddyfile de bootstrap INTÉGRÉ.
+#
+# Pourquoi une image plutôt que `image: caddy:2-alpine` + bind mount du Caddyfile : avec un runner
+# GitLab en exécuteur Docker branché sur le socket de l'hôte, `docker compose` s'exécute dans le
+# conteneur du job mais le démon est celui de l'HÔTE — un `volumes: ./caddy/Caddyfile:...` est donc
+# résolu sur l'hôte, où ce fichier n'existe pas : Docker y crée un répertoire vide et Caddy démarre
+# sans sa configuration d'administration. Copier le fichier dans l'image supprime le problème.
+#
+# Contexte de build : la RACINE DU MONOREPO, comme Dockerfile.api et Dockerfile.web :
+#   docker build -f deploy/docker/Dockerfile.caddy -t quai-caddy .
+ARG CADDY_CONF=deploy/compose/caddy/Caddyfile
+
+FROM caddy:2-alpine AS runtime
+
+ARG CADDY_CONF
+
+COPY ${CADDY_CONF} /etc/caddy/Caddyfile
+
+# Échoue le build si le Caddyfile est invalide, plutôt qu'au démarrage en production.
+RUN caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+EXPOSE 80 443 2019

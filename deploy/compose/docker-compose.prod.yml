@@ -11,6 +11,13 @@
 #
 # Mise à jour : rejouer la même commande (les images sont reconstruites, les données persistent
 # dans le volume quai_data).
+#
+# RÈGLE À NE PAS CASSER : aucun bind mount d'un fichier DU DÉPÔT ici. Ce fichier est aussi joué par
+# la CI GitLab, dont le job tourne dans un conteneur alors que le démon Docker est celui de l'hôte :
+# un chemin `./quelque-chose` serait résolu sur l'HÔTE, où le dépôt n'est pas déployé — Docker y
+# créerait un répertoire vide, monté à la place du fichier attendu, sans message d'erreur. Toute
+# configuration (nginx, Caddyfile) est donc intégrée aux images via des ARG de build. Seul
+# /var/run/docker.sock reste monté : c'est une vraie ressource de l'hôte, pas un fichier du dépôt.
 
 name: quai
 
@@ -63,11 +70,12 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.web
+      args:
+        # Config nginx COPIÉE dans l'image (voir Dockerfile.web) : ajoute le relais /api -> api:3000
+        # (même origine) et le passage des WebSockets (console VNC des VMs, logs en direct). Le
+        # défaut du Dockerfile reste deploy/docker/nginx.web.conf, pour Kubernetes/Swarm.
+        WEB_NGINX_CONF: deploy/compose/nginx.prod.conf
     restart: unless-stopped
-    volumes:
-      # Remplace la config nginx de l'image : ajoute le relais /api -> api:3000 (même origine) et
-      # le passage des WebSockets (console VNC des VMs, logs en direct). Voir nginx.prod.conf.
-      - ./nginx.prod.conf:/etc/nginx/conf.d/default.conf:ro
     ports:
       - "${QUAI_HTTP_PORT:-8080}:8080"
     depends_on:
@@ -88,15 +96,21 @@ services:
   # process avec cette API joignable depuis le réseau interne ; n'y écrivez aucune route à la
   # main, elle serait effacée au premier push (POST /load remplace toute la configuration).
   caddy:
-    image: caddy:2-alpine
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.caddy
+      args:
+        CADDY_CONF: deploy/compose/caddy/Caddyfile
     restart: unless-stopped
     volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+    # Ports paramétrables : sur la machine qui héberge aussi GitLab, 80 et 443 sont souvent déjà
+    # pris — `docker compose up` échouerait alors sur « port is already allocated ». Choisir par
+    # exemple 8081/8443 dans le .env de production dans ce cas.
     ports:
-      - "80:80"
-      - "443:443"
+      - "${QUAI_PROXY_HTTP_PORT:-80}:80"
+      - "${QUAI_PROXY_HTTPS_PORT:-443}:443"
     networks:
       - quai
     healthcheck:

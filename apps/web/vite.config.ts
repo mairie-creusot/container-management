@@ -22,6 +22,14 @@ export default defineConfig({
     // la cible globale de tout le pré-bundling pour un seul paquet.
     exclude: ["@novnc/novnc"],
   },
+  build: {
+    // Même cause que l'exclusion ci-dessus, mais pour `vite build` : l'exclusion du pré-bundling ne
+    // vaut QUE pour le serveur de dev. À la construction, @novnc/novnc est bien transpilé et sa
+    // cible par défaut (es2020/chrome87...) refuse son `await` de haut niveau — la construction de
+    // production échouait donc, y compris en CI (constaté le 24/08/2026). es2022 le supporte
+    // nativement et reste très en deçà des navigateurs réellement utilisés ici.
+    target: "es2022",
+  },
   server: {
     port: 5173,
     // Bind mount Windows -> conteneur Docker (docker-compose.dev.yml) : les événements fs
