@@ -352,10 +352,11 @@ export interface AuditEvent {
 // apps/api/src/types.ts pour la doc complète) — `status` dérivé de la dernière exécution réelle
 // connue (neutral = jamais exécuté, restarting = en cours, running = dernier succès, stopped =
 // dernier échec), jamais inventé.
+// Pas de kind "network" (retiré le 24/08/2026) : un réseau est un "tiroir" sous la carte du nœud
+// qui y est rattaché (TopologyNodeAttachment), jamais un nœud du graphe.
 export type TopologyNodeKind =
   | "container"
   | "volume"
-  | "network"
   | "nutanix-vm"
   | "host"
   | "cron-job"
@@ -466,12 +467,10 @@ export interface TopologyNode {
    */
   createdAt?: string;
   /**
-   * Conteneurs uniquement : volumes/networks montés sur CE conteneur et rattachés à AUCUN AUTRE
-   * (voir apps/api/src/services/topology.ts § "Briques") — rendus par GraphNode
-   * (topologyGraphShared.tsx) comme des "briques" cliquables directement sous la carte du
-   * conteneur, façon Railway, plutôt que comme des nœuds/arêtes séparés du graphe. Une ressource
-   * partagée par ≥2 conteneurs, ou un network Docker par défaut (bridge/host/none), reste un vrai
-   * TopologyNode top-level et n'apparaît donc jamais ici.
+   * Conteneurs et VMs Nutanix : ressources rendues par GraphNode (topologyGraphShared.tsx) comme
+   * des "tiroirs" sous la carte du nœud, façon Railway, plutôt que comme des nœuds/arêtes séparés.
+   * Volumes : ceux montés par CE SEUL conteneur (un volume partagé par ≥2 conteneurs reste un vrai
+   * nœud). Réseaux : TOUS (un réseau n'est plus jamais un nœud du graphe).
    */
   attachments?: TopologyNodeAttachment[];
   /**
@@ -481,6 +480,12 @@ export interface TopologyNode {
    * aucune route ne cible ce conteneur — jamais un domaine inventé.
    */
   domains?: string[];
+  /**
+   * Ports réellement publiés sur l'hôte (TCP), les ports HTTP usuels d'abord — renseigné
+   * UNIQUEMENT quand aucun sous-domaine ne sert déjà ce conteneur, pour proposer un lien direct
+   * sur la carte. Absent s'il n'y a rien de joignable : jamais un port inventé.
+   */
+  publishedPorts?: number[];
   /**
    * Nœuds "host" uniquement : sous-type explicite (cluster Nutanix physique, environnement Docker
    * distant, hôte LXD) — voir apps/api/src/services/topology.ts et topologyGraphShared.tsx#KIND_ICON.
@@ -591,20 +596,21 @@ export interface AutomationRunLogEntry {
 /** Voir TopologyNode#attachments ci-dessus — même forme que apps/api/src/types.ts#TopologyNodeAttachment. */
 export interface TopologyNodeAttachment {
   kind: "volume" | "network";
-  /** Id qu'aurait porté le TopologyNode top-level équivalent ("volume:<nom>" / "network:<id>") —
-   * utilisé tel quel pour ouvrir son panneau de détail (mêmes routes/reducers qu'un vrai nœud). */
+  /** Volume : id qu'aurait porté le nœud top-level équivalent ("volume:<nom>"), utilisé tel quel
+   * pour ouvrir son panneau de détail. Réseau : id unique au sein du nœud porteur uniquement. */
   id: string;
   label: string;
+  /** Driver Docker, ou "VLAN <n>" pour une carte réseau Nutanix — "" si inconnu. */
   subtitle: string;
   destination?: string;
   readOnly?: boolean;
-}
-
-/** Port réellement publié par un conteneur — voir TopologyEdge#ports ci-dessous. */
-export interface TopologyEdgePort {
-  protocol: "tcp" | "udp";
-  privatePort: number;
-  publicPort?: number;
+  /** Réseaux : identité stable du réseau lui-même, partagée par tous les nœuds qui y sont rattachés
+   * (mise en évidence au survol du tiroir) — absente si la source ne l'a pas renvoyée. */
+  networkId?: string;
+  /** Réseaux : IP RÉELLEMENT attribuée sur ce réseau — absente tant qu'aucune ne l'est. */
+  ipAddress?: string;
+  /** Cartes réseau Nutanix : VLAN réel du subnet. */
+  vlanId?: number;
 }
 
 export interface TopologyEdge {
@@ -619,14 +625,7 @@ export interface TopologyEdge {
    * étape "artifact" réelle de la recette — voir apps/api/src/types.ts. */
   /** "protects" : appliance HYCU (source) -> VM Nutanix qu'elle sauvegarde RÉELLEMENT (target),
    * rapprochement par uuid ou nom exact non ambigu — voir apps/api/src/types.ts. */
-  kind: "mount" | "network" | "hosts" | "automation-flow" | "uses-artifact" | "protects";
-  /** "network" uniquement : ports réellement publiés par le conteneur à l'une des deux extrémités
-   * (voir doc complète côté apps/api/src/types.ts). */
-  ports?: TopologyEdgePort[];
-  /** "network" uniquement : Internal réel du network Docker ("Private" façon Railway si true). */
-  private?: boolean;
-  /** "network" uniquement, overlay seulement : chiffrement natif Docker au niveau network. */
-  encrypted?: boolean;
+  kind: "mount" | "hosts" | "automation-flow" | "uses-artifact" | "protects";
   /** "mount" uniquement : lecture seule réelle du montage. */
   readOnly?: boolean;
 }

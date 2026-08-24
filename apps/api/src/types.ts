@@ -989,10 +989,11 @@ export interface TemplateArtifactSource {
 //  - dernière exécution "running" -> "restarting" (exécution en cours) ;
 //  - dernière exécution "success" -> "running" ;
 //  - dernière exécution "failed" -> "stopped".
+// Pas de kind "network" (retiré le 24/08/2026) : un réseau n'est plus un nœud du graphe mais un
+// "tiroir" sous la carte du nœud qui y est réellement rattaché — voir TopologyNodeAttachment.
 export type TopologyNodeKind =
   | "container"
   | "volume"
-  | "network"
   | "nutanix-vm"
   | "host"
   | "cron-job"
@@ -1163,14 +1164,12 @@ export interface TopologyNode {
    */
   createdAt?: string;
   /**
-   * Conteneurs uniquement : volumes/networks montés sur CE conteneur et rattachés à AUCUN AUTRE
-   * (voir services/topology.ts § "briques") — rendus par le frontend comme des "briques"
-   * cliquables directement sous la carte du conteneur (façon Railway), PAS comme des nœuds/arêtes
-   * séparés du graphe. Un réseau/volume partagé par ≥2 conteneurs, ou un network Docker par défaut
-   * (bridge/host/none, partagé par nature), reste un vrai TopologyNode top-level avec ses arêtes —
-   * seule la ressource à usage exclusif d'un unique conteneur devient une brique. `[]`/absent si ce
-   * conteneur n'a aucune ressource "bricable" (tout ce qu'il monte est soit orphelin d'aucun autre
-   * lien soit partagé, soit il ne monte rien).
+   * Conteneurs et VMs Nutanix : ressources rendues par le frontend comme des "tiroirs" sous la
+   * carte du nœud (façon Railway), PAS comme des nœuds/arêtes séparés — voir
+   * TopologyNodeAttachment. Volumes : uniquement ceux montés par CE SEUL conteneur (un volume
+   * partagé par ≥2 conteneurs reste un vrai nœud + arêtes "mount"). Réseaux : TOUS, sans exception
+   * (un réseau n'est plus jamais un nœud du graphe depuis le 24/08/2026). `[]`/absent si le nœud
+   * n'a ni volume dédié ni réseau.
    */
   attachments?: TopologyNodeAttachment[];
   /**
@@ -1181,6 +1180,12 @@ export interface TopologyNode {
    * aucune route ne cible ce conteneur — jamais un domaine inventé.
    */
   domains?: string[];
+  /**
+   * Ports réellement publiés sur l'hôte (TCP), les ports HTTP usuels d'abord — renseigné
+   * UNIQUEMENT quand aucun sous-domaine ne sert déjà ce conteneur, pour proposer un lien direct
+   * sur la carte. Absent s'il n'y a rien de joignable : jamais un port inventé.
+   */
+  publishedPorts?: number[];
   /**
    * Nœuds "host" uniquement (voir services/topology.ts) : sous-type explicite d'hôte — cluster
    * Nutanix physique, environnement Docker distant (SSH/TCP+TLS, remoteDockerStore.ts) ou hôte LXD
@@ -1321,29 +1326,42 @@ export interface AutomationRunLogEntry {
 }
 
 /**
- * Une ressource (volume ou network) montée EXCLUSIVEMENT par un seul conteneur — voir
- * TopologyNode#attachments ci-dessus et services/topology.ts. `id` reprend le format qu'aurait eu
- * le TopologyNode top-level équivalent (`volume:<nom>` / `network:<id>`) : le frontend l'utilise
- * tel quel pour ouvrir le panneau de détail de cette ressource (mêmes routes GET /api/volumes,
- * GET /api/networks que pour un vrai nœud), sans dupliquer la logique de lookup.
+ * Une ressource rattachée à UN nœud précis et rendue comme un "tiroir" sous sa carte (jamais comme
+ * un nœud du graphe) — voir TopologyNode#attachments ci-dessus et services/topology.ts.
+ *
+ * kind "volume" : volume Docker monté par CE SEUL conteneur (un volume partagé par ≥2 conteneurs
+ * reste un vrai nœud + arêtes "mount"). `id` reprend le format du nœud équivalent (`volume:<nom>`)
+ * pour ouvrir son détail réel (GET /api/volumes) sans logique de lookup dupliquée.
+ *
+ * kind "network" : réseau rattaché au nœud — TOUS les réseaux d'un conteneur Docker (partagés,
+ * par défaut ou dédiés : depuis le 24/08/2026 un réseau n'est PLUS jamais un nœud du graphe) ET
+ * chaque carte réseau réelle d'une VM Nutanix (NutanixVmNetwork). Le nœud porteur lève l'ambiguïté
+ * entre les deux (conteneur -> réseau Docker détachable, VM -> NIC AHV).
  */
 export interface TopologyNodeAttachment {
   kind: "volume" | "network";
   id: string;
   label: string;
-  subtitle: string; // driver
+  /** Driver Docker (volume/réseau) ou "VLAN <n>" pour une carte réseau Nutanix — "" si inconnu. */
+  subtitle: string;
   /** Volumes uniquement : point de montage réel dans le conteneur. */
   destination?: string;
   /** Volumes uniquement : monté en lecture seule. */
   readOnly?: boolean;
-}
-
-/** Port réellement publié par un conteneur (docker.listContainers()[].Ports — sous-ensemble déjà
- * inclus dans le résumé, pas d'inspect() séparé) — voir TopologyEdge#ports ci-dessous. */
-export interface TopologyEdgePort {
-  protocol: "tcp" | "udp";
-  privatePort: number;
-  publicPort?: number;
+  /**
+   * Réseaux uniquement : identité STABLE du réseau lui-même, partagée par tous les nœuds réellement
+   * rattachés au même réseau (id Docker du network, uuid de subnet Nutanix) — sert au frontend à
+   * mettre en évidence les autres nœuds du même réseau au survol du tiroir. Absente si la source ne
+   * l'a pas renvoyée (NIC Nutanix sans subnet_reference) : aucun rapprochement n'est alors tenté.
+   */
+  networkId?: string;
+  /** Réseaux uniquement : adresse IP RÉELLEMENT attribuée sur ce réseau (EndpointSettings.IPAddress
+   * côté Docker, ip_endpoint_list[0].ip côté Nutanix) — absente tant qu'aucune IP n'est attribuée
+   * (conteneur arrêté, DHCP en attente), jamais une adresse fabriquée. */
+  ipAddress?: string;
+  /** Cartes réseau Nutanix uniquement : VLAN réel du subnet (NutanixVmNetwork#vlanId) — absent si
+   * Prism Central n'a pas pu le résoudre. */
+  vlanId?: number;
 }
 
 export interface TopologyEdge {
@@ -1370,32 +1388,7 @@ export interface TopologyEdge {
    * assignée à une policy HYCU ET rapprochée du graphe par une clé fiable (uuid, sinon nom exact
    * non ambigu — voir services/topology.ts#getHycuTopologyParts). Jamais construite sur un
    * rapprochement douteux. */
-  kind: "mount" | "network" | "hosts" | "automation-flow" | "uses-artifact" | "protects";
-  /**
-   * "network" uniquement : ports RÉELLEMENT publiés par le conteneur à l'une des deux extrémités
-   * (docker.listContainers()[].Ports, dédupliqués) — affiché façon Railway comme un badge flottant
-   * sur l'arête. Note d'honnêteté : Docker n'attribue pas un port publié à un network précis (le
-   * mapping host->conteneur est indépendant du network utilisé) — ce champ liste donc "les ports que
-   * publie ce conteneur", pas "le trafic qui transite par CETTE arête" ; pour l'immense majorité des
-   * cas (un seul network applicatif par conteneur) les deux coïncident. Absent/[] si le conteneur ne
-   * publie aucun port vers l'hôte (cas courant : communication interne au network uniquement).
-   */
-  ports?: TopologyEdgePort[];
-  /**
-   * "network" uniquement : `Internal` réel du network Docker (docker.listNetworks()[].Internal) —
-   * true = network non routé vers l'extérieur du démon Docker ("Private" façon Railway), false =
-   * routable (ex : bridge par défaut avec NAT vers l'hôte). Absent seulement si le network n'a pas
-   * pu être retrouvé (course rare entre deux appels Docker).
-   */
-  private?: boolean;
-  /**
-   * "network" uniquement, networks "overlay" seulement : chiffrement natif Docker au niveau network
-   * (`--opt encrypted`, exposé dans `Options.encrypted`) — seul mécanisme de chiffrement de network
-   * que Docker expose lui-même. Absent pour tout autre driver (bridge/host/none/macvlan) : la
-   * question n'a pas le même sens pour eux (trafic local au noyau, jamais sur le fil), plutôt que
-   * d'inventer un "non chiffré" alarmiste hors sujet.
-   */
-  encrypted?: boolean;
+  kind: "mount" | "hosts" | "automation-flow" | "uses-artifact" | "protects";
   /** "mount" uniquement : lecture seule réelle du montage (Mount.RW === false côté Docker), déjà
    * calculée pour les "briques" (TopologyNodeAttachment#readOnly) — reprise ici pour les volumes
    * restés de vrais nœuds (partagés par ≥2 conteneurs), qui n'ont pas d'attachment correspondant. */

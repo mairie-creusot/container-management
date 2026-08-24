@@ -8,7 +8,6 @@ import {
   IconGitOps,
   IconHostMachine,
   IconImages,
-  IconNetworks,
   IconPlay,
   IconStack,
   IconTopology,
@@ -38,7 +37,7 @@ import type { IacEngine, TopologyHostKind, TopologyNode, TopologyNodeKind } from
  *    d'automatisation, autrefois posés par un JSX conditionnel hors table (comportement implicite
  *    rendu explicite par ce chantier).
  *  - buildTopologyEdges (topologyGraphShared.tsx) interroge `edgeHealth` de chaque extrémité pour
- *    la couleur/le pointillé d'une arête — la logique conteneur (healthStatus/hasPublishedPort) et
+ *    la couleur/le pointillé d'une arête — la logique conteneur (healthStatus) et
  *    la logique Nutanix (nutanixVmHostEdgeState) sont deux implémentations de la MÊME interface.
  *  - computeNodeResourceAlerts (topologyGraphShared.tsx) lit `resourceAlerts` (seuils déclaratifs)
  *    — un kind sans métriques déclare `null`, jamais un `if kind === "container"` implicite.
@@ -69,8 +68,6 @@ import type { IacEngine, TopologyHostKind, TopologyNode, TopologyNodeKind } from
  * enfin une donnée du contrat, pas un cas spécial de rendu.
  */
 export type CapabilityId =
-  | "network"
-  | "attach"
   | "volume-mount"
   | "provide"
   | "hosted-by"
@@ -95,7 +92,7 @@ export interface PortSpec {
   label: string;
   /** Suffixe de classe .topology-handle--<token> — couleur reprise de celle de l'icône du même
    * type de nœud (variables.css), pas de couleur arbitraire ajoutée. */
-  colorToken: "network" | "volume" | "host" | "automation" | "template" | "backup";
+  colorToken: "volume" | "host" | "automation" | "template" | "backup";
 }
 
 export interface CapabilityDef {
@@ -107,8 +104,6 @@ export interface CapabilityDef {
 }
 
 export const CAPABILITY_DEFS: Record<CapabilityId, CapabilityDef> = {
-  network: { linksTo: "attach", interactive: true },
-  attach: { linksTo: "network", interactive: true },
   // Vague 3 (câblage au fil) : le fil ouvre MountVolumePopover pré-rempli — la recréation du
   // conteneur reste confirmée par l'utilisateur, jamais déclenchée par le seul geste.
   "volume-mount": { linksTo: "provide", interactive: true },
@@ -161,8 +156,6 @@ export const CAPABILITY_DEFS: Record<CapabilityId, CapabilityDef> = {
  * position/couleur/libellé à chaque usage.
  */
 export const CAPABILITY_PORT_META: Record<CapabilityId, Pick<PortSpec, "handleType" | "position" | "colorToken" | "label">> = {
-  network: { handleType: "source", position: Position.Right, colorToken: "network", label: "Network" },
-  attach: { handleType: "target", position: Position.Left, colorToken: "network", label: "Attache un conteneur" },
   "volume-mount": { handleType: "target", position: Position.Left, colorToken: "volume", label: "Volume (lecture seule)" },
   provide: { handleType: "source", position: Position.Right, colorToken: "volume", label: "Fournit un volume" },
   // Position.Left (bug corrigé le 17/08/2026, même correctif que les ports "nutanix-vm"/"host"
@@ -188,8 +181,10 @@ export const CAPABILITY_PORT_META: Record<CapabilityId, Pick<PortSpec, "handleTy
 // --- Câblage manuel au fil (React Flow onConnect) ------------------------------------------------
 
 /** Action réelle déclenchée au drop d'un fil — l'implémentation (popovers pré-remplis) reste chez
- * l'appelant (TopologyGraph.tsx#connectionWireHandlers), même principe que buildNodeMenuItems. */
-export type ConnectionActionId = "mount-volume-on-container" | "connect-container-to-network";
+ * l'appelant (TopologyGraph.tsx#connectionWireHandlers), même principe que buildNodeMenuItems.
+ * "connect-container-to-network" a été retiré le 24/08/2026 : un réseau n'étant plus un nœud, un
+ * fil n'a plus de cible à viser — la connexion passe par le ＋ / le menu du conteneur. */
+export type ConnectionActionId = "mount-volume-on-container";
 
 export type CapabilityPairKey = `${CapabilityId}->${CapabilityId}`;
 
@@ -208,8 +203,6 @@ export function capabilityPairKey(source: CapabilityId, target: CapabilityId): C
 export const CONNECTION_ACTIONS: Partial<Record<CapabilityPairKey, ConnectionActionId>> = {
   // volume -> conteneur : MountVolumePopover pré-rempli (recréation confirmée par l'utilisateur).
   "provide->volume-mount": "mount-volume-on-container",
-  // conteneur -> network : NetworkConnectPopover pré-rempli (POST /api/networks/:id/connect).
-  "network->attach": "connect-container-to-network",
 };
 
 // --- Santé des arêtes (couleur/pointillé) --------------------------------------------------------
@@ -241,13 +234,10 @@ export interface EdgeHealthInfo {
  * légitimement vouloir consulter SANS que le moteur ait à connaître sa plateforme. */
 export interface EdgeHealthContext {
   /** Kind de l'arête interrogée — même union que TopologyEdge["kind"]. */
-  edgeKind: "mount" | "network" | "hosts" | "automation-flow" | "uses-artifact" | "protects";
+  edgeKind: "mount" | "hosts" | "automation-flow" | "uses-artifact" | "protects";
   /** Rôle de CE nœud sur l'arête — permet à un contrat de ne répondre que pour le bout où son
    * signal a un sens (ex : une VM Nutanix n'est porteuse que comme CIBLE d'une arête "hosts"). */
   role: "source" | "target";
-  /** Au moins un port réellement publié sur l'hôte (TopologyEdgePort#publicPort) — seul signal de
-   * connectivité "confirmée" dont QUAI dispose sans sonde active, voir buildTopologyEdges. */
-  hasPublishedPort: boolean;
   /** Statut de déclencheur propagé jusqu'à la SOURCE de l'arête le long des arêtes
    * "automation-flow" (pré-passe générique de buildTopologyEdges, alimentée par
    * NodeContract#automationStatusSeed) — "unknown" si aucun signal n'atteint cette arête. */
@@ -289,7 +279,7 @@ export function automationTriggerEdgeState(status: AutomationTriggerStatus): Edg
 export function nutanixVmHostEdgeState(vmNode: TopologyNode): { state: EdgeHealthState; strokeDasharray: string | undefined } {
   if (vmNode.status === "stopped") return { state: "stopped", strokeDasharray: "2 8" };
   // Pointillé de confiance de placement, indépendant de la couleur ci-dessous (même principe que
-  // hasPublishedPort pour un conteneur) : "4 4" (tirets fins) tant que le placement n'est pas
+  // la santé d'un conteneur) : "4 4" (tirets fins) tant que le placement n'est pas
   // confirmé en direct, `undefined` (plein) dès qu'il l'est — s'applique aussi bien à "unhealthy"
   // qu'à "healthy"/"starting", ces deux axes restant volontairement indépendants.
   const strokeDasharray = vmNode.nutanixHostPlacementConfirmed ? undefined : "4 4";
@@ -427,7 +417,6 @@ export type NodeMenuActionId =
   | "nutanix-vm-edit-compute"
   | "volume-mount-on-container"
   | "volume-remove"
-  | "network-remove"
   | "host-add-environment"
   | "host-create-vm"
   | "automation-node-remove"
@@ -453,10 +442,6 @@ export interface NodeMenuActionSpec {
    * ContextMenuItem#disabled ; incluse SANS handler (une entrée désactivée n'a pas d'action). */
   disabled?: boolean;
 }
-
-/** Networks Docker par défaut — jamais supprimables depuis le graphe (partagés par nature au
- * niveau de l'hôte), même exclusion que services/topology.ts#DEFAULT_NETWORK_NAMES côté API. */
-export const DEFAULT_DOCKER_NETWORK_NAMES = ["bridge", "host", "none"];
 
 /**
  * Rend les actions déclarées par le contrat de `node.kind` en items de menu concrets — l'appelant
@@ -558,31 +543,19 @@ export interface NodeContract {
   menuItems: NodeMenuActionSpec[] | ((node: TopologyNode) => NodeMenuActionSpec[]);
 }
 
-/** Santé "conteneur" — extrémité conteneur d'une arête mount/network (il y a toujours au plus un
- * nœud conteneur parmi les deux bouts : mount = volume<->conteneur, network = conteneur<->network).
- * "stopped" prime sur healthStatus : un conteneur arrêté n'a plus de healthcheck qui tourne, ce
- * n'est pas une panne (arrêt souvent volontaire) donc pas rouge, mais clairement "injoignable".
- * Pointillé : axe séparé de la couleur — trait PLEIN = port publié sur l'hôte (Docker confirme un
- * socket réellement lié) ; tirets fins = configuré mais sans port publié à vérifier ; tirets
- * larges = ressource arrêtée. Une arête "mount" reste structurelle (jamais de sonde active
- * pertinente) : toujours pleine, seule sa couleur bouge — même chose pour une hypothétique arête
- * "hosts" touchant un conteneur (comportement historique de buildTopologyEdges, conservé tel quel). */
+/** Santé "conteneur" — extrémité conteneur d'une arête "mount" (volume partagé <-> conteneur) ou
+ * "hosts" (Docker local -> conteneur). "stopped" prime sur healthStatus : un conteneur arrêté n'a
+ * plus de healthcheck qui tourne, ce n'est pas une panne (arrêt souvent volontaire) donc pas rouge,
+ * mais clairement "injoignable". Les deux kinds d'arête touchant un conteneur sont STRUCTURELS
+ * (aucune sonde active pertinente) : trait toujours plein, seule la couleur bouge — comportement
+ * historique de buildTopologyEdges, conservé tel quel. */
 function containerEdgeHealth(node: TopologyNode, ctx: EdgeHealthContext): EdgeHealthInfo | null {
   // Une arête "automation-flow" ne lit JAMAIS un conteneur (son signal vient de la propagation de
   // statut de déclencheur, chemin dédié) — comportement historique : buildTopologyEdges traitait
   // isAutomationFlowEdge avant même de chercher un conteneur aux extrémités.
   if (ctx.edgeKind === "automation-flow") return null;
-  const stopped = node.status !== "running";
-  const state: EdgeHealthState = stopped ? "stopped" : (node.healthStatus ?? "none");
-  const strokeDasharray =
-    ctx.edgeKind === "mount" || ctx.edgeKind === "hosts"
-      ? undefined // structurel, jamais de pointillé
-      : state === "stopped"
-        ? "2 8" // large : ressource inactive
-        : ctx.hasPublishedPort
-          ? undefined // plein : connectivité confirmée
-          : "4 4"; // fin animé : configuré, non confirmable sans sonde active
-  return { state, strokeDasharray };
+  const state: EdgeHealthState = node.status !== "running" ? "stopped" : (node.healthStatus ?? "none");
+  return { state, strokeDasharray: undefined };
 }
 
 /** Santé "source d'automatisation" (déclencheur OU condition héritière) — répond UNIQUEMENT comme
@@ -600,8 +573,9 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     icon: IconContainers,
     minimapColor: "#3b6fef",
     defaultColumnX: 340,
+    // Plus de port "network" (retiré le 24/08/2026) : un réseau n'est plus un nœud, ce Handle
+    // n'aurait plus aucune cible à viser — la connexion à un réseau passe par le ＋ / le menu.
     ports: [
-      { id: "network", capability: "network", handleType: "source", position: Position.Right, label: "Network", colorToken: "network" },
       {
         id: "volume-mount",
         capability: "volume-mount",
@@ -628,12 +602,11 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
       { id: "container-start", label: "Démarrer", visible: (n) => n.status !== "running" },
       { id: "container-restart", label: "Redémarrer" },
       { id: "container-rename", label: "Renommer" },
-      // Depuis les "briques" (voir services/topology.ts § "Briques"), un network mono-conteneur
-      // n'est plus un nœud du graphe à viser au glisser-déposer — cette action couvre ce cas (et
-      // reste disponible aussi pour un network resté un vrai nœud, résultat identique).
-      { id: "container-connect-network", label: "Connecter à un network…" },
+      // Un réseau n'étant plus un nœud du graphe (24/08/2026), c'est le SEUL chemin de connexion
+      // avec le ＋ de la carte : rattacher à un réseau bridge existant ou en créer un.
+      { id: "container-connect-network", label: "Connecter à un réseau…" },
       // Même picker que le bouton ＋ au survol de la carte (TopologyGraph.tsx#attachPickerItems).
-      { id: "container-attach", label: "Attacher (stockage, variable, secret)…" },
+      { id: "container-attach", label: "Attacher (stockage, réseau, variable)…" },
       { id: "container-remove", label: "Supprimer", danger: true },
     ],
   },
@@ -659,22 +632,8 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
       { id: "volume-remove", label: "Supprimer", danger: true },
     ],
   },
-  network: {
-    icon: IconNetworks,
-    minimapColor: "#7c5cfc",
-    defaultColumnX: 680,
-    ports: [
-      { id: "attach", capability: "attach", handleType: "target", position: Position.Left, label: "Attache un conteneur", colorToken: "network" },
-    ],
-    edgeHealth: null, // l'arête "network" lit la santé du CONTENEUR à l'autre bout, jamais le network
-    automationStatusSeed: null,
-    resourceAlerts: null,
-    menuItems: [
-      // Un network Docker par défaut (bridge/host/none) n'est jamais supprimable depuis le graphe
-      // — même exclusion que côté API (services/topology.ts#DEFAULT_NETWORK_NAMES).
-      { id: "network-remove", label: "Supprimer", danger: true, visible: (n) => !DEFAULT_DOCKER_NETWORK_NAMES.includes(n.label) },
-    ],
-  },
+  // Le kind "network" a été retiré le 24/08/2026 : un réseau est un tiroir sous la carte du nœud
+  // qui y est rattaché (TopologyNodeAttachment), jamais un nœud du graphe.
   // Bug réel corrigé le 14/08/2026 (retour utilisateur, capture d'écran : "c'est pas relier
   // corectement cluster au hote 1 2 3 eu vm cncerner") : `ports: []` ici faisait que GraphNode ne
   // posait AUCUN <Handle> React Flow sur ce nœud — sans ancrage DOM des deux côtés, React Flow ne

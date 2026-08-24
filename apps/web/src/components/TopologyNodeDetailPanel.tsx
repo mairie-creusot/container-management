@@ -3,7 +3,6 @@ import { useAppDispatch, useAppSelector } from "@/hooks";
 import { fetchContainerDetail } from "@/features/containers/containersSlice";
 import { fetchImages } from "@/features/images/imagesSlice";
 import { fetchVolumes, openVolumeBrowser, removeVolume } from "@/features/volumes/volumesSlice";
-import { fetchNetworks, removeNetwork } from "@/features/networks/networksSlice";
 import { fetchTopology } from "@/features/topology/topologySlice";
 import { canAdminister, canOperate } from "@/features/auth/authSlice";
 import { apiGet } from "@/api/client";
@@ -107,10 +106,6 @@ import type { AutomationRunLogEntry, BackupRun, CronJobRun } from "@/types";
 import type { GithubDeployment, GithubDeploymentDetail } from "@/types";
 import type { IacEngine, IacRunStatus } from "@/types";
 
-/** Les 3 networks internes par défaut de Docker ne sont jamais supprimables — même exclusion que
- * NetworksPage.tsx (retirée) et TopologyGraph.tsx#nodeMenuItems (menu contextuel du nœud). */
-const DEFAULT_NETWORK_NAMES = ["bridge", "host", "none"];
-
 /** Rafraîchissement de l'onglet "Métriques" pendant qu'il est affiché — même ordre de grandeur que
  * config.metrics.intervalMs côté API (30s par défaut) : inutile de sonder plus vite qu'un nouveau
  * point n'est réellement écrit par metricsCollector.ts. */
@@ -126,19 +121,12 @@ const GITOPS_REFRESH_INTERVAL_MS = 90_000;
 interface TopologyNodeDetailPanelProps {
   /** Nœud dont on affiche le détail complet — null referme le panneau. */
   node: TopologyNode | null;
-  /**
-   * Graphe complet déjà chargé côté client — sert UNIQUEMENT à reconstruire, pour un conteneur, la
-   * liste RÉELLE des networks auxquels il est attaché : depuis l'introduction des "briques" (voir
-   * services/topology.ts), une partie de ces networks n'a plus d'arête dans `topology.edges`
-   * (attachés à ce seul conteneur, voir node.attachments) tandis que l'autre partie (partagés/par
-   * défaut) en a toujours une — cette reconstruction recombine les deux pour ne rien perdre.
-   * `null` tant que le graphe n'a pas encore chargé (le panneau reste utilisable, juste sans cette
-   * liste tant que `topology` n'est pas prêt).
-   */
+  /** Graphe complet déjà chargé côté client — conservé pour les vues qui ont besoin du contexte
+   * global ; `null` tant qu'il n'a pas chargé (le panneau reste utilisable). */
   topology: Topology | null;
   onClose: () => void;
-  /** Navigation interne (clic sur un network dans l'onglet "Réseau", ou sur une brique d'un autre
-   * nœud) : remplace le nœud affiché SANS fermer/rouvrir le panneau — évite l'aller-retour visuel
+  /** Navigation interne (clic sur un tiroir d'un autre nœud, lien de dépendance…) : remplace le
+   * nœud affiché SANS fermer/rouvrir le panneau — évite l'aller-retour visuel
    * d'une fermeture suivie d'une réouverture pour simplement changer de ressource inspectée. */
   onNavigate: (node: TopologyNode) => void;
   /** Onglet ouvert à l'affichage d'un NOUVEAU nœud (voir l'effet basé sur `node?.id` plus bas) —
@@ -219,7 +207,7 @@ interface TabDef {
 }
 
 /** Onglets réels (pas de simples sections empilées) — adaptés au kind : un conteneur a les six,
- * les autres kinds (volume/network/nutanix-vm/host) n'ont qu'un seul aperçu, rien d'autre
+ * les autres kinds (volume/nutanix-vm/host) n'ont qu'un seul aperçu, rien d'autre
  * à montrer de pertinent (pas de ports/volumes/variables/vulnérabilités/métriques pour une ressource
  * qui n'en a pas). */
 const CONTAINER_TABS: TabDef[] = [
@@ -381,7 +369,7 @@ function IacWorkspacePanel({
     if (deleteWorkspace.fulfilled.match(result)) {
       // Le nœud n'existe plus : referme le panneau et rafraîchit immédiatement le graphe plutôt que
       // d'attendre le prochain poll de 15s (TopologyGraph.tsx) — même réflexe que
-      // handleRemoveVolume/handleRemoveNetwork plus bas dans ce fichier.
+      // handleRemoveVolume plus bas dans ce fichier.
       dispatch(fetchTopology());
       onClose();
     }
@@ -1237,11 +1225,13 @@ function AutomationActionPanel({
   );
 }
 
+/** Une ligne "réseau connecté" de l'onglet Réseau — projection directe de
+ * TopologyNode#attachments (voir apps/api/src/types.ts) : nom, driver et IP RÉELLEMENT attribuée. */
 interface NetworkAttachmentRow {
-  id: string; // "network:<id>"
+  id: string;
   label: string;
   subtitle: string; // driver
-  shared: boolean; // true = vrai nœud du graphe (partagé ou par défaut), false = brique mono-conteneur
+  ipAddress: string | undefined;
 }
 
 // --- Statistiques temps réel Nutanix (GET /api/nutanix/cluster-stats, /api/nutanix/alerts) ------
@@ -1729,12 +1719,12 @@ function NutanixStatsPanel({ node }: { node: TopologyNode }) {
  * devenu `position: relative`), à onglets réels, largeur fixe raisonnable, pleine hauteur du
  * canevas, jamais de débordement horizontal — remplace l'ancienne TopologyNodeDetailModal.tsx
  * (modal centrée en grille qui débordait encore horizontalement sur écran étroit). Ouvert depuis
- * "Voir le détail" (menu contextuel d'un nœud OU d'une brique volume/network, voir
+ * "Voir le détail" (menu contextuel d'un nœud OU d'un tiroir volume, voir
  * TopologyGraph.tsx/topologyGraphShared.tsx#GraphNode) ou par navigation interne (`onNavigate`).
  *
  * Rien n'est inventé : `GET /api/containers/:id` pour un conteneur, la vraie liste de
  * vulnérabilités du dernier scan réussi de son image (`GET /api/images/:id/scans`), et les objets
- * complets `DockerVolume`/`DockerNetwork` déjà exposés par `GET /api/volumes`/`GET /api/networks`
+ * complet `DockerVolume` déjà exposé par `GET /api/volumes`
  * pour les deux autres kinds Docker — y compris pour une ressource "briquée" (plus un nœud
  * top-level du graphe, mais toujours une vraie ressource Docker avec son propre détail complet).
  */
@@ -1755,8 +1745,6 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
   // pendant que la modale (portée séparément, document.body) est ouverte par-dessus : sans cette
   // garde, Échap fermerait le panneau ET la modale en même temps au lieu de la seule modale.
   const volumeBrowserOpen = useAppSelector((s) => s.volumes.browser.volumeName !== null);
-  const networks = useAppSelector((s) => s.networks.items);
-  const mutatingNetworkId = useAppSelector((s) => s.networks.mutatingId);
   // Nœud "gitops-source" (voir services/gitops.ts) — même slice Redux que l'ancienne GitOpsPage.tsx
   // (gitopsSlice.ts, conservée telle quelle, désormais consommée uniquement par ce panneau).
   const gitopsFiles = useAppSelector((s) => s.gitops.files);
@@ -1879,8 +1867,6 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
       dispatch(fetchGithubDeployments());
     } else if (node.kind === "volume") {
       dispatch(fetchVolumes());
-    } else if (node.kind === "network") {
-      dispatch(fetchNetworks());
     }
     // nutanix-vm/host : rien à charger, TopologyNode porte déjà tout le détail disponible.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1978,36 +1964,20 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
     };
   }, [node, activeTab, rawId]);
 
-  // Reconstruction de la liste RÉELLE des networks connectés à ce conteneur : les networks restés
-  // "vrais nœuds" (partagés/par défaut) via les arêtes de `topology`, PLUS les networks "briqués"
-  // (mono-conteneur) via node.attachments — voir la doc du prop `topology` ci-dessus, les deux
-  // ensembles sont complémentaires et exhaustifs, jamais de recoupement.
+  // Liste RÉELLE des réseaux du conteneur — TOUS portés par node.attachments depuis le 24/08/2026
+  // (un réseau n'est plus jamais un nœud/une arête du graphe), donc plus rien à recombiner ici.
   const networkAttachments = useMemo<NetworkAttachmentRow[]>(() => {
     if (!node || node.kind !== "container") return [];
-    const rows: NetworkAttachmentRow[] = [];
-    if (topology) {
-      const nodesById = new Map(topology.nodes.map((n) => [n.id, n]));
-      for (const edge of topology.edges) {
-        if (edge.kind !== "network") continue;
-        const otherId = edge.source === node.id ? edge.target : edge.target === node.id ? edge.source : null;
-        if (!otherId) continue;
-        const other = nodesById.get(otherId);
-        if (other) rows.push({ id: other.id, label: other.label, subtitle: other.subtitle, shared: true });
-      }
-    }
-    for (const attachment of node.attachments ?? []) {
-      if (attachment.kind !== "network") continue;
-      rows.push({ id: attachment.id, label: attachment.label, subtitle: attachment.subtitle, shared: false });
-    }
-    return rows;
-  }, [node, topology]);
+    return (node.attachments ?? [])
+      .filter((a) => a.kind === "network")
+      .map((a) => ({ id: a.id, label: a.label, subtitle: a.subtitle, ipAddress: a.ipAddress }));
+  }, [node]);
 
   if (!node) return null;
 
   const Icon = KIND_ICON[node.kind];
   const isContainerDetailReady = kind === "container" && detailStatus === "ready" && detail?.id === rawId;
   const volume = kind === "volume" ? volumes.find((v) => v.name === rawId) ?? null : null;
-  const network = kind === "network" ? networks.find((n) => n.id === rawId) ?? null : null;
   const tabs = tabsForNode(node);
 
   // Plafonds de référence RÉELS pour l'onglet "Métriques" (façon Railway "Max 8 vCPU"/"Max 8 GB")
@@ -2039,7 +2009,7 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
   /** Redéploie EXACTEMENT le même repo/ref/environnement/sous-domaine que le déploiement GitHub
    * trouvé pour ce conteneur, via le thunk deployGithubRepo déjà utilisé par GitHubDeployPage.tsx
    * (même route POST /api/github/repos/:owner/:repo/deploy) — confirmation explicite avant action
-   * (même pattern que handleRemoveVolume/handleRemoveNetwork ci-dessous). Le port n'est
+   * (même pattern que handleRemoveVolume ci-dessous). Le port n'est
    * volontairement PAS repassé : GithubDeployment (historique) ne le conserve pas (seul le port
    * effectivement EXPOSE détecté au moment du déploiement original comptait), le POST /deploy
    * réappliquera la même auto-détection que pour un premier déploiement plutôt qu'une valeur
@@ -2074,10 +2044,6 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
     dispatch(fetchGithubDeployments());
   }
 
-  function openNetworkAttachment(row: NetworkAttachmentRow) {
-    onNavigate({ id: row.id, kind: "network", label: row.label, subtitle: row.subtitle, status: "running" });
-  }
-
   /** Suppression réelle (DELETE /api/volumes/:name) — même confirmation/libellé que l'ancienne
    * VolumesPage.tsx#handleRemove (retirée) : la description prévient explicitement si le volume
    * est monté (la suppression échouera côté Docker tant qu'il l'est). Referme le panneau après
@@ -2095,21 +2061,6 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
     if (!ok) return;
     const result = await dispatch(removeVolume({ name }));
     if (removeVolume.fulfilled.match(result)) onClose();
-  }
-
-  /** Suppression réelle (DELETE /api/networks/:id) — même confirmation/libellé que l'ancienne
-   * NetworksPage.tsx#handleRemove (retirée). Jamais appelée pour un network par défaut
-   * (bridge/host/none) : le bouton lui-même est masqué dans le JSX, voir DEFAULT_NETWORK_NAMES. */
-  async function handleRemoveNetwork(id: string, name: string) {
-    const ok = await confirm({
-      title: "Supprimer le network",
-      description: `Confirmer la suppression du network "${name}" ?`,
-      confirmLabel: "Supprimer",
-      variant: "danger",
-    });
-    if (!ok) return;
-    const result = await dispatch(removeNetwork({ id, name }));
-    if (removeNetwork.fulfilled.match(result)) onClose();
   }
 
   return (
@@ -2304,24 +2255,18 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
               />
             )}
 
-            <div className="inspector-section-title">Networks connectés</div>
-            {networkAttachments.length === 0 && <div className="empty-state">Aucun network connecté.</div>}
+            {/* Réseaux réellement rattachés (TopologyNode#attachments, mêmes données que les
+                tiroirs sous la carte) — un tiret quand aucune IP n'est attribuée, jamais une
+                adresse inventée. */}
+            <div className="inspector-section-title">Réseaux connectés</div>
+            {networkAttachments.length === 0 && <div className="empty-state">Aucun réseau connecté.</div>}
             {networkAttachments.length > 0 && (
-              <ul className="topology-detail-panel__attachment-list">
-                {networkAttachments.map((row) => (
-                  <li key={row.id}>
-                    <button type="button" className="topology-detail-panel__attachment-btn" onClick={() => openNetworkAttachment(row)}>
-                      <span className="topology-detail-panel__attachment-label" title={row.label}>
-                        {row.label}
-                      </span>
-                      <span className="topology-detail-panel__attachment-meta">
-                        {row.subtitle}
-                        {!row.shared && " · dédié à ce conteneur"}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <KeyValueList
+                rows={networkAttachments.map((row) => ({
+                  key: row.label,
+                  value: `${row.ipAddress ?? "—"}${row.subtitle ? ` · ${row.subtitle}` : ""}`,
+                }))}
+              />
             )}
           </>
         )}
@@ -2440,12 +2385,12 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
 
         {/* --- Volume -------------------------------------------------------------------- */}
         {/* Pas de badge "Orphelin" ici : un volume à 0 conteneur est explicitement exclu du graphe
-            par conception (services/topology.ts, voir le commentaire "Volumes/networks ORPHELINS"
+            par conception (services/topology.ts, voir le commentaire "Volumes ORPHELINS"
             dans TopologyGraph.tsx) — qu'il s'agisse d'un vrai nœud (partagé, ≥2 conteneurs) ou d'une
             "brique" ouverte depuis un conteneur (TopologyNode#attachments, toujours exactement 1
             conteneur), soit un vrai nœud top-level partagé par ≥2 conteneurs, soit — depuis le
             13/08/2026 — un volume orphelin (`node.orphan`, `volume.inUseBy === 0`) : voir
-            services/topology.ts § "Volumes/networks ORPHELINS". Le bouton Supprimer ci-dessous
+            services/topology.ts § "Volumes ORPHELINS". Le bouton Supprimer ci-dessous
             reste disponible dans les trois cas (l'API DELETE /api/volumes/:name ne dépend pas de
             ce panneau pour refuser un volume encore réellement monté). */}
         {node.kind === "volume" && (
@@ -2491,46 +2436,6 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
                     <KeyValueList rows={Object.entries(volume.labels).map(([key, value]) => ({ key, value }))} />
                   </>
                 )}
-              </>
-            )}
-          </>
-        )}
-
-        {/* --- Network --------------------------------------------------------------------- */}
-        {/* Même remarque que pour le volume ci-dessus : un network à 0 conteneur (hors les 3
-            networks par défaut, jamais "orphelins" par convention, voir DEFAULT_NETWORK_NAMES) est
-            depuis le 13/08/2026 un vrai nœud top-level `node.orphan`/`network.containerCount === 0`
-            (services/topology.ts), avec son bouton Supprimer déjà disponible ci-dessous. */}
-        {node.kind === "network" && (
-          <>
-            <div className="chip-row topology-detail-panel__chips">
-              <StatusPill status={node.status} />
-            </div>
-            {!network && <div className="empty-state">Chargement du détail du network…</div>}
-            {network && (
-              <>
-                {operate && !DEFAULT_NETWORK_NAMES.includes(network.name) && (
-                  <div className="inspector-actions">
-                    <button
-                      type="button"
-                      className="btn btn-ghost btn-sm"
-                      disabled={mutatingNetworkId === network.id}
-                      onClick={() => handleRemoveNetwork(network.id, network.name)}
-                    >
-                      {mutatingNetworkId === network.id ? "…" : "Supprimer"}
-                    </button>
-                  </div>
-                )}
-                <KeyValueList
-                  rows={[
-                    { key: "Nom", value: network.name },
-                    { key: "Driver", value: network.driver },
-                    { key: "Scope", value: network.scope },
-                    { key: "Conteneurs attachés", value: String(network.containerCount) },
-                    { key: "Créé le", value: formatDate(network.createdAt) },
-                    { key: "Interne", value: network.internal ? "Oui" : "Non" },
-                  ]}
-                />
               </>
             )}
           </>

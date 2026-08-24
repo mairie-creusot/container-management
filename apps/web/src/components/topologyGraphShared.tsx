@@ -30,7 +30,7 @@ import {
   type PortSpec,
   type QuickLifecycleAction,
 } from "@/components/topologyNodeContract";
-import type { ImageTemplate, TemplateStep, TopologyEdge, TopologyEdgePort, TopologyGroup, TopologyNode, TopologyNodeAttachment } from "@/types";
+import type { ImageTemplate, TemplateStep, TopologyEdge, TopologyGroup, TopologyNode, TopologyNodeAttachment } from "@/types";
 import type { LifecycleAction } from "@/features/containers/containersSlice";
 // Logique PURE de recette réutilisée telle quelle (libellés/résumés du studio — jamais dupliqués).
 import { STEP_TYPE_LABEL, stepSummary, templateBaseLabel } from "@/features/templates/templateCatalog";
@@ -105,7 +105,7 @@ export const ACTION_LABEL: Record<LifecycleAction, string> = {
 
 /**
  * Écarte visuellement plusieurs Handles qui partageraient le même `position` sur un même nœud (ex
- * un groupe replié avec à la fois un port "network" ET un port "provide", tous deux Position.Right
+ * un groupe replié avec à la fois un port "provide" ET un port "hosts", tous deux Position.Right
  * — voir deriveGroupPorts ci-dessus) : React Flow centre par défaut TOUS les handles d'un même
  * côté au même endroit (`top: 50%` pour Left/Right, `left: 50%` pour Top/Bottom) sans répartition
  * explicite, les rendant visuellement superposés et impossibles à distinguer/cliquer séparément —
@@ -160,15 +160,12 @@ export function resolveGroupMemberNodeIds(nodeIds: string[], allGroups: Topology
  *
  * Règle de correspondance capacité <-> (kind d'arête, membre source ou cible) — copie directe de
  * NODE_CONTRACT[kind].ports (topologyNodeContract.tsx) pour les kinds connectables (container/
- * network/volume), plus "hosts" (source = nœud host, ex: docker-local ; target = conteneur — voir
+ * volume), plus "hosts" (source = nœud host, ex: docker-local ; target = conteneur — voir
  * services/topology.ts) qui n'a lui aucun port propre (jamais glissé à la main) mais reste réel et doit rester VISIBLE une
  * fois le groupe replié plutôt que silencieusement masqué :
  *  - arête "mount" (source = volume, target = conteneur) : conteneur membre -> "volume-mount"
  *    (le groupe consomme un volume extérieur) ; volume membre -> "provide" (le groupe fournit un
  *    volume à un conteneur extérieur).
- *  - arête "network" (source = conteneur, target = network) : conteneur membre -> "network" (le
- *    groupe se connecte à un network extérieur) ; network membre -> "attach" (le groupe accueille
- *    un conteneur extérieur).
  *  - arête "hosts" : conteneur membre (toujours target) -> "hosted-by" (le groupe est hébergé par
  *    un nœud host extérieur, ex: docker-local) — jamais l'inverse dans ce premier lot (grouper un
  *    nœud "host" lui-même avec d'autres nœuds n'est pas un cas réel supporté ici).
@@ -181,7 +178,6 @@ export function deriveGroupPorts(group: Pick<TopologyGroup, "nodeIds">, edges: T
     const targetIn = memberIds.has(edge.target);
     if (sourceIn === targetIn) continue; // les deux dedans (arête interne) ou les deux dehors (non pertinent ici)
     if (edge.kind === "mount") capabilities.add(targetIn ? "volume-mount" : "provide");
-    else if (edge.kind === "network") capabilities.add(sourceIn ? "network" : "attach");
     else if (edge.kind === "hosts" && targetIn) capabilities.add("hosted-by");
     // Sauvegarde HYCU : un groupe replié contenant une VM protégée (ou l'appliance) garde un port
     // réel — sans lui, l'arête redirigée vers le groupe n'aurait aucun ancrage et disparaîtrait.
@@ -343,7 +339,6 @@ export interface TopologyEdgeLike {
 // volume-mount + hosted-by, React Flow ne peut plus deviner seul).
 const EDGE_KIND_PORT_CAPABILITY: Record<TopologyEdge["kind"], { source: CapabilityId; target: CapabilityId }> = {
   mount: { source: "provide", target: "volume-mount" },
-  network: { source: "network", target: "attach" },
   hosts: { source: "hosts", target: "hosted-by" },
   "automation-flow": { source: "automation-out", target: "automation-in" },
   "uses-artifact": { source: "artifact-out", target: "artifact-in" },
@@ -360,7 +355,7 @@ function portIdForCapability(node: TopologyNode | undefined, capability: Capabil
  * partagée par le graphe principal ET le sous-graphe de dépendances, pour un rendu identique.
  * `sourceHandle`/`targetHandle` optionnels : utilisés par TopologyGraph.tsx quand une arête a été
  * redirigée vers un nœud de groupe replié (voir deriveGroupPorts ci-dessus) — un groupe peut porter
- * PLUSIEURS handles du même côté (ex: "network" ET "provide", tous deux source/Right), l'id du
+ * PLUSIEURS handles du même côté (ex: "provide" ET "hosts", tous deux source/Right), l'id du
  * handle cible devient alors nécessaire pour lever l'ambiguïté (React Flow ne peut plus déduire le
  * bon handle tout seul dès qu'il y en a plusieurs du même type sur un nœud).
  *
@@ -369,14 +364,14 @@ function portIdForCapability(node: TopologyNode | undefined, capability: Capabil
  * essentiellement la même information que la couleur) :
  *  - COULEUR = santé/état réel de la ressource à une extrémité — jamais un axe de type de relation.
  *  - POINTILLÉ = confiance de connectivité RÉELLE, jamais une simple redite de la couleur : trait
- *    PLEIN = port publié sur l'hôte / placement vérifié en direct ; tirets fins = configuré mais
- *    non confirmé ; tirets larges = ressource arrêtée/inactive. Une arête "mount" reste
- *    structurelle (jamais de sonde active pertinente pour elle) : toujours pleine.
+ *    PLEIN = placement vérifié en direct ; tirets fins = configuré mais non confirmé ; tirets
+ *    larges = ressource arrêtée/inactive. Les arêtes "mount"/"hosts" Docker restent structurelles
+ *    (jamais de sonde active pertinente pour elles) : toujours pleines.
  *
  * MOTEUR GÉNÉRIQUE depuis la migration vers le contrat (17/08/2026) : quelle extrémité porte le
  * signal et comment il se projette sur couleur/pointillé est déclaré PAR KIND dans
- * NODE_CONTRACT[kind].edgeHealth (topologyNodeContract.tsx) — conteneur (healthStatus/
- * hasPublishedPort), VM Nutanix (nutanixVmHostEdgeState : placement confirmé/incertain, mêmes
+ * NODE_CONTRACT[kind].edgeHealth (topologyNodeContract.tsx) — conteneur (healthStatus),
+ * VM Nutanix (nutanixVmHostEdgeState : placement confirmé/incertain, mêmes
  * détails que la légende), source d'automatisation (statut de déclencheur propagé)... Cette
  * fonction interroge la SOURCE puis la CIBLE de chaque arête et retient la première réponse — un
  * contrat se garde LUI-MÊME (edgeKind/role du contexte), ce moteur ne contient plus aucun
@@ -385,7 +380,7 @@ function portIdForCapability(node: TopologyNode | undefined, capability: Capabil
  * disponible côté Prism Central) retombe sur le rendu neutre : gris "none", pointillé générique
  * par kind d'arête ci-dessous.
  *
- * Seuls les kinds D'ARÊTE (mount/network/hosts/automation-flow — une notion transverse aux
+ * Seuls les kinds D'ARÊTE (mount/hosts/automation-flow — une notion transverse aux
  * plateformes, portée par TopologyEdge#kind côté API) restent testés ici : type de rendu
  * (particules pour "mount"), animation (jamais de tirets défilants pour "hosts", relation
  * structurelle sans flux de trafic à représenter — ni pour "mount", qui a ses particules) et
@@ -418,12 +413,6 @@ export function buildTopologyEdges(
     // "protects" (HYCU -> VM) : relation structurelle comme "hosts" — une sauvegarde est un
     // événement périodique, jamais un flux continu à animer en tirets défilants.
     const isProtectsEdge = e.kind === "protects";
-    // Port(s) réellement publié(s) sur l'hôte (voir TopologyEdgePort#publicPort, jamais déduit —
-    // absent si Docker n'a mappé aucun port hôte pour ce conteneur) : seul signal d'activité
-    // "confirmée" dont QUAI dispose sans sonde active à chaque rafraîchissement du graphe (une
-    // vraie sonde TCP par arête, à chaque fetch, coûterait cher — voir services/automationEngine.ts
-    // pour la sonde active RÉSERVÉE aux seules routes reverse-proxy explicitement surveillées).
-    const hasPublishedPort = e.ports?.some((p) => p.publicPort !== undefined) ?? false;
 
     // Interroge le contrat de chaque extrémité — SOURCE d'abord (une arête "automation-flow" lit
     // son signal côté source, comportement historique conservé), puis CIBLE (arêtes "mount" volume
@@ -443,7 +432,6 @@ export function buildTopologyEdges(
       edgeHealthInfo = edgeHealth(node, {
         edgeKind: e.kind,
         role: endpoint.role,
-        hasPublishedPort,
         automationUpstreamStatus: triggerStatusByNodeId.get(e.source) ?? "unknown",
       });
       if (edgeHealthInfo) break;
@@ -452,19 +440,13 @@ export function buildTopologyEdges(
     const state: EdgeHealthState = edgeHealthInfo?.state ?? "none";
     const color = EDGE_STATE_COLOR[state];
     // Pointillé : celui décidé par le contrat porteur du signal — sinon le défaut PAR KIND D'ARÊTE
-    // (aucune extrémité ne répond) : mount/hosts structurels toujours pleins, "automation-flow" son
-    // motif fixe distinctif (l'axe "port publié" n'a pas de sens pour lui), "network" retombe sur
-    // l'axe de confiance générique (plein si port publié, tirets fins sinon — l'état ne peut être
-    // "stopped" ici, ce cas n'existe que via un contrat qui a répondu).
+    // (aucune extrémité ne répond) : "automation-flow" son motif fixe distinctif, tout le reste
+    // (mount/hosts/protects/uses-artifact, relations structurelles) plein.
     const strokeDasharray = edgeHealthInfo
       ? edgeHealthInfo.strokeDasharray
-      : isMount || isHostsEdge || isProtectsEdge
-        ? undefined
-        : e.kind === "automation-flow"
-          ? "2 4"
-          : hasPublishedPort
-            ? undefined
-            : "4 4";
+      : e.kind === "automation-flow"
+        ? "2 4"
+        : undefined;
     // Ancrage sur le port du contrat dont la capacité correspond au kind de l'arête — un handle
     // déjà fixé par l'appelant (arête redirigée vers un groupe) reste prioritaire.
     const sourceHandle = e.sourceHandle ?? portIdForCapability(nodesById.get(e.source), EDGE_KIND_PORT_CAPABILITY[e.kind].source);
@@ -475,7 +457,7 @@ export function buildTopologyEdges(
       target: e.target,
       ...(sourceHandle ? { sourceHandle } : {}),
       ...(targetHandle ? { targetHandle } : {}),
-      type: isMount ? "mountFlow" : "networkEdge",
+      type: isMount ? "mountFlow" : "linkEdge",
       animated: !isMount && !isHostsEdge && !isProtectsEdge,
       className: `topology-edge topology-edge--${e.kind} topology-edge--${state}`,
       style: { stroke: color, ...(strokeDasharray ? { strokeDasharray } : {}) },
@@ -484,12 +466,8 @@ export function buildTopologyEdges(
         kind: e.kind,
         state,
         color,
-        hasPublishedPort,
         // Nature du lien (pastille au milieu de l'arête, voir EDGE_KIND_LABEL/edgeBadgeItems).
         kindLabel: EDGE_KIND_LABEL[e.kind](nodesById.get(e.source), nodesById.get(e.target)),
-        ...(e.ports ? { ports: e.ports } : {}),
-        ...(e.private !== undefined ? { private: e.private } : {}),
-        ...(e.encrypted !== undefined ? { encrypted: e.encrypted } : {}),
         ...(e.readOnly !== undefined ? { readOnly: e.readOnly } : {}),
         // Données supplémentaires posées par le contrat porteur du signal (ex :
         // nutanixPlacementConfirmed pour le badge "Placement confirmé"/"Dernier hôte connu", voir
@@ -530,7 +508,7 @@ export function isActiveEdgeState(state: EdgeHealthState | undefined): boolean {
 }
 
 /** Particules le long du tracé (offset-path CSS natif, aucun recalcul JS par frame) — partagées
- * par MountFlowEdge et NetworkEdge ci-dessous. */
+ * par MountFlowEdge et LinkEdge ci-dessous. */
 function EdgeFlowParticles({ edgePath, color }: { edgePath: string; color: string }) {
   return (
     <>
@@ -548,31 +526,16 @@ function EdgeFlowParticles({ edgePath, color }: { edgePath: string; color: strin
   );
 }
 
-// --- Badge flottant sur l'arête (façon Railway : "TCP:5432 · Private · Encrypted") -------------
-// Toutes les données affichées ici viennent RÉELLEMENT de Docker (voir TopologyEdge#ports/private/
-// encrypted/readOnly, services/topology.ts) — aucune latence affichée : QUAI ne sonde jamais
-// activement le réseau, ce chiffre serait inventé.
+// --- Badge flottant sur l'arête (façon Railway) -------------------------------------------------
+// Toutes les données affichées ici viennent RÉELLEMENT de Docker/Prism Central (voir
+// TopologyEdge#readOnly et NodeContract#edgeHealth) — aucune latence affichée : QUAI ne sonde
+// jamais activement le réseau, ce chiffre serait inventé.
 
-/** "TCP:5432" (premier port), ou "TCP:5432 +2" si le conteneur en publie plusieurs — jamais la
- * liste complète (le badge doit rester un petit pavé lisible, pas un tableau). null si le
- * conteneur ne publie aucun port vers l'hôte (cas le plus courant). */
-function formatPortLabel(ports?: TopologyEdgePort[]): string | null {
-  if (!ports || ports.length === 0) return null;
-  const first = ports[0]!;
-  const base = `${first.protocol.toUpperCase()}:${first.privatePort}`;
-  return ports.length > 1 ? `${base} +${ports.length - 1}` : base;
-}
-
-/** Libellé de la NATURE du lien, par kind d'arête (pastille au milieu — maquette validée).
- * network : NOM RÉEL du network à l'extrémité, jamais un libellé générique quand il est connu. */
+/** Libellé de la NATURE du lien, par kind d'arête (pastille au milieu — maquette validée). */
 export const EDGE_KIND_LABEL: Record<
   TopologyEdge["kind"],
   (source: TopologyNode | undefined, target: TopologyNode | undefined) => string
 > = {
-  network: (source, target) => {
-    const networkNode = target?.kind === "network" ? target : source?.kind === "network" ? source : undefined;
-    return networkNode ? `réseau ${networkNode.label}` : "réseau";
-  },
   mount: () => "montage",
   // Cluster -> hôte AHV = "hôte physique" ; hôte/environnement -> conteneur ou VM = "hébergement".
   // Master -> appliance HYCU = "intégration" : QUAI la lit, il ne l'héberge pas.
@@ -585,9 +548,6 @@ export const EDGE_KIND_LABEL: Record<
 };
 
 export interface EdgeBadgeData {
-  ports?: TopologyEdgePort[];
-  private?: boolean;
-  encrypted?: boolean;
   readOnly?: boolean;
   /** Arête "hosts" hôte physique -> VM Nutanix UNIQUEMENT (VM allumée sans erreur API, voir
    * buildTopologyEdges ci-dessus) : true = placement confirmé en direct, false = replié sur le
@@ -615,10 +575,6 @@ function edgeStateTone(state: EdgeHealthState | undefined): EdgeBadgeItem["tone"
 
 export function edgeBadgeItems(data: EdgeBadgeData): EdgeBadgeItem[] {
   const items: EdgeBadgeItem[] = [];
-  const portLabel = formatPortLabel(data.ports);
-  if (portLabel) items.push({ text: portLabel, tone: "neutral" });
-  if (data.private !== undefined) items.push({ text: data.private ? "Privé" : "Public", tone: data.private ? "good" : "neutral" });
-  if (data.encrypted !== undefined) items.push({ text: data.encrypted ? "Chiffré" : "Non chiffré", tone: data.encrypted ? "good" : "warn" });
   if (data.readOnly !== undefined) items.push({ text: data.readOnly ? "ro" : "rw", tone: "neutral" });
   if (data.nutanixPlacementConfirmed !== undefined) {
     items.push(
@@ -627,8 +583,8 @@ export function edgeBadgeItems(data: EdgeBadgeData): EdgeBadgeItem[] {
         : { text: "Dernier hôte connu", tone: "warn" },
     );
   }
-  // Un badge spécifique (port publié, placement Nutanix) prime : jamais un 2e libellé empilé dessus.
-  if (data.kindLabel && !portLabel && data.nutanixPlacementConfirmed === undefined) {
+  // Un badge spécifique (placement Nutanix) prime : jamais un 2e libellé empilé dessus.
+  if (data.kindLabel && data.nutanixPlacementConfirmed === undefined) {
     items.unshift({ text: data.kindLabel, tone: edgeStateTone(data.state) });
   }
   return items;
@@ -660,7 +616,7 @@ function EdgeBadge({ x, y, data }: { x: number; y: number; data: EdgeBadgeData }
 
 /**
  * Arête "mount" (conteneur <-> volume, des fichiers/données qui transitent) : un rendu distinct
- * de l'animation générique "tirets qui défilent" des arêtes "network" — trait plein + particules
+ * de l'animation générique "tirets qui défilent" des autres arêtes — trait plein + particules
  * qui voyagent réellement le long du tracé de l'arête via la propriété CSS `offset-path` (animation
  * native du navigateur sur la propriété `offset-distance`, donc aucun recalcul JS par frame, coût
  * quasi nul même avec beaucoup d'arêtes à l'écran). Vague 3 : particules réservées aux arêtes
@@ -681,12 +637,12 @@ function MountFlowEdge({ id, sourceX, sourceY, sourcePosition, targetX, targetY,
   );
 }
 
-/** Arête "network" (conteneur <-> network) : même tracé/rendu que le type "default" de React Flow
+/** Arête générique (tout kind sauf "mount") : même tracé/rendu que le type "default" de React Flow
  * (bezier), réimplémenté ici uniquement pour pouvoir y accrocher le badge flottant ci-dessus — le
- * type "default" ne permet pas d'injecter un enfant supplémentaire. Particules de flux sur TOUTE
- * arête ACTIVE quel que soit son kind (network/hosts/automation-flow — maquette validée), jamais
- * sur stopped/none/unhealthy ni sous prefers-reduced-motion. */
-function NetworkEdge({ id, sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, style, markerEnd, data }: EdgeProps) {
+ * type "default" ne permet pas d'injecter un enfant supplémentaire. Renommée de "networkEdge" à
+ * "linkEdge" le 24/08/2026 (plus aucune arête de réseau n'existe). Particules de flux sur TOUTE
+ * arête ACTIVE, jamais sur stopped/none/unhealthy ni sous prefers-reduced-motion. */
+function LinkEdge({ id, sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, style, markerEnd, data }: EdgeProps) {
   const [edgePath, labelX, labelY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
   const reducedMotion = usePrefersReducedMotion();
   const edgeData = data as (EdgeBadgeData & { kind?: string; state?: EdgeHealthState; color?: string }) | undefined;
@@ -700,7 +656,7 @@ function NetworkEdge({ id, sourceX, sourceY, sourcePosition, targetX, targetY, t
   );
 }
 
-export const edgeTypes = { mountFlow: MountFlowEdge, networkEdge: NetworkEdge };
+export const edgeTypes = { mountFlow: MountFlowEdge, linkEdge: LinkEdge };
 
 // --- Panneau "Légende" repliable du graphe (TopologyGraph.tsx) ----------------------------------
 // Retour utilisateur (mission du 17/08/2026, point 4) : la grille couleur/pointillé documentée
@@ -782,7 +738,7 @@ export function TopologyLegendPanel({ nutanixLastPoll, onClose }: TopologyLegend
 
       <div className="topology-legend-panel__section">
         <div className="topology-legend-panel__section-title">Pointillé — confiance de connexion</div>
-        <LegendLineRow variant="solid" label="Confirmé (port publié / placement vérifié en direct)" />
+        <LegendLineRow variant="solid" label="Confirmé (placement vérifié en direct / lien structurel)" />
         <LegendLineRow variant="dashed-fine" label="Configuré, non confirmé (pas de sonde active)" />
         <LegendLineRow variant="dashed-wide" label="Ressource arrêtée / inactive" />
       </div>
@@ -810,8 +766,7 @@ export function TopologyLegendPanel({ nutanixLastPoll, onClose }: TopologyLegend
   );
 }
 
-/** Icône par kind de brique — mêmes icônes que KIND_ICON, sous-ensemble volume/network uniquement
- * (les deux seuls kinds "briquables", voir TopologyNode#attachments). */
+/** Icône par kind de tiroir — mêmes icônes que l'ancien KIND_ICON des nœuds volume/network. */
 const ATTACHMENT_ICON: Record<TopologyNodeAttachment["kind"], (props: { className?: string }) => JSX.Element> = {
   volume: IconVolumes,
   network: IconNetworks,
@@ -822,12 +777,19 @@ const ATTACHMENT_ICON: Record<TopologyNodeAttachment["kind"], (props: { classNam
  * de la construction des `flowNodes` (jamais persistés — de simples fonctions en mémoire, le reste
  * de `data` reste le TopologyNode sérialisable tel que renvoyé par GET /api/topology) : GraphNode
  * est un composant partagé sans accès direct à Redux/au state du panneau parent, ces callbacks sont
- * donc le seul moyen pour une "brique" (volume/network à conteneur unique, rendue ICI plutôt que
- * comme un nœud séparé) de rester cliquable/clic-droit-able exactement comme un vrai nœud.
+ * donc le seul moyen pour un "tiroir" (volume dédié ou réseau, rendu ICI plutôt que comme un nœud
+ * séparé) de rester cliquable/clic-droit-able exactement comme un vrai nœud.
  */
 export interface GraphNodeCallbacks {
   onOpenAttachment?: (attachment: TopologyNodeAttachment) => void;
   onAttachmentContextMenu?: (event: React.MouseEvent, attachment: TopologyNodeAttachment) => void;
+  /** Survol d'un tiroir RÉSEAU (`null` à la sortie) — compense la disparition du nœud réseau, qui
+   * montrait d'un coup d'œil qui partageait un réseau : l'appelant s'en sert pour mettre en
+   * évidence les autres nœuds réellement rattachés au même `networkId`. */
+  onAttachmentHover?: (attachment: TopologyNodeAttachment | null) => void;
+  /** Ce nœud est rattaché au réseau actuellement survolé ailleurs (voir onAttachmentHover) —
+   * posé par l'appelant, jamais dérivé ici (GraphNode ne voit qu'un seul nœud à la fois). */
+  networkHighlight?: boolean;
   /** Bouton ＋ au survol d'une carte conteneur OU VM Nutanix (picker contextuel par kind :
    * conteneur -> Stockage/Variable ; VM -> Disque/Carte réseau/vCPU-Mémoire) — injecté par
    * TopologyGraph.tsx uniquement pour un rôle operator+ ; absent = bouton non rendu. */
@@ -865,20 +827,20 @@ export interface GraphNodeServiceModuleMeta {
   serviceModule?: NodeServiceModuleBinding;
 }
 
-/** Reconstruit un TopologyNode "synthétique" pour une brique (voir TopologyNode#attachments) —
- * une brique n'a PAS de nœud top-level correspondant dans `topology.nodes` (c'est tout l'objet de
- * son "briquage") : ouvrir son détail nécessite donc de reconstituer un TopologyNode minimal mais
- * suffisant (id/kind/label/subtitle attendus par TopologyNodeDetailPanel.tsx pour aller chercher
- * le VRAI détail complet via GET /api/volumes ou GET /api/networks, comme pour un nœud normal).
- * `status: "running"` : même convention que les vrais nœuds volume/network (services/topology.ts),
- * ces ressources n'ont pas d'état "arrêté" propre. */
+/** Reconstruit un TopologyNode "synthétique" pour un tiroir VOLUME (voir TopologyNode#attachments)
+ * — un volume dédié n'a PAS de nœud top-level correspondant dans `topology.nodes` : ouvrir son
+ * détail nécessite donc de reconstituer un TopologyNode minimal mais suffisant (id/kind/label/
+ * subtitle attendus par TopologyNodeDetailPanel.tsx pour aller chercher le VRAI détail complet via
+ * GET /api/volumes). `status: "running"` : même convention que les vrais nœuds volume
+ * (services/topology.ts), un volume n'a pas d'état "arrêté" propre. Jamais appelée pour un tiroir
+ * réseau : un réseau n'a plus de kind de nœud, son détail s'ouvre sur le nœud PORTEUR. */
 export function attachmentToTopologyNode(attachment: TopologyNodeAttachment): TopologyNode {
-  return { id: attachment.id, kind: attachment.kind, label: attachment.label, subtitle: attachment.subtitle, status: "running" };
+  return { id: attachment.id, kind: "volume", label: attachment.label, subtitle: attachment.subtitle, status: "running" };
 }
 
 /** `attachments` (voir TopologyNode#attachments) compte comme égal entre deux rendus si chaque
- * brique affichée (id/label/subtitle/destination/readOnly — les seuls champs rendus par
- * GraphNode) est identique, même si le tableau lui-même a été recréé par le parent. */
+ * tiroir affiché (les seuls champs rendus par GraphNode) est identique, même si le tableau
+ * lui-même a été recréé par le parent. */
 function attachmentsEqual(a: TopologyNodeAttachment[] | undefined, b: TopologyNodeAttachment[] | undefined): boolean {
   if (a === b) return true;
   if (!a || !b || a.length !== b.length) return false;
@@ -890,7 +852,9 @@ function attachmentsEqual(a: TopologyNodeAttachment[] | undefined, b: TopologyNo
       att.label === other.label &&
       att.subtitle === other.subtitle &&
       att.destination === other.destination &&
-      att.readOnly === other.readOnly
+      att.readOnly === other.readOnly &&
+      att.ipAddress === other.ipAddress &&
+      att.vlanId === other.vlanId
     );
   });
 }
@@ -929,6 +893,8 @@ function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
     // doit invalider le memo, contrairement aux callbacks eux-mêmes (voir JSDoc ci-dessus).
     a.actionPending === b.actionPending &&
     a.deletePending === b.deletePending &&
+    // Mise en évidence "même réseau que le tiroir survolé" — réellement rendue (classe CSS).
+    a.networkHighlight === b.networkHighlight &&
     a.label === b.label &&
     a.subtitle === b.subtitle &&
     a.status === b.status &&
@@ -961,7 +927,8 @@ function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
     a.serviceModule?.moduleLabel === b.serviceModule?.moduleLabel &&
     a.serviceModule?.origin === b.serviceModule?.origin &&
     attachmentsEqual(a.attachments, b.attachments) &&
-    domainsEqual(a.domains, b.domains)
+    domainsEqual(a.domains, b.domains) &&
+    domainsEqual(a.publishedPorts?.map(String), b.publishedPorts?.map(String))
   );
 }
 
@@ -1007,13 +974,15 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   // Pastille discrète "module <label>" — `null` pour tout nœud sans module lié (l'immense
   // majorité) : la carte reste alors strictement identique à ce qu'elle était.
   const moduleBadge = serviceModuleBadge(node.serviceModule);
-  // Répartition des attachments (TopologyNode#attachments — VRAIES données Docker, jamais un
-  // nouveau stockage) entre les deux rendus (Phase 2, 17/08/2026, maquette Railway validée par
-  // l'utilisateur) : un VOLUME attaché devient un "tiroir" (sous-carte glissée SOUS la carte du
-  // service, dépassant du bord inférieur, ton assourdi — voir .topology-node__drawers plus bas),
-  // un NETWORK reste une "brique" inline comme avant (chez Railway, le tiroir est le stockage).
-  const volumeAttachments = (node.attachments ?? []).filter((a) => a.kind === "volume");
-  const networkAttachments = (node.attachments ?? []).filter((a) => a.kind === "network");
+  // Tiroirs (TopologyNode#attachments — VRAIES données Docker/Prism Central, jamais un nouveau
+  // stockage) : sous-cartes glissées SOUS la carte du service, dépassant du bord inférieur, ton
+  // assourdi (voir .topology-node__drawers plus bas). Volumes d'abord, puis réseaux — depuis le
+  // 24/08/2026 les réseaux y passent aussi (ils n'ont plus de nœud), avec le MÊME composant que
+  // les volumes plutôt qu'un rendu parallèle.
+  const drawerAttachments = [
+    ...(node.attachments ?? []).filter((a) => a.kind === "volume"),
+    ...(node.attachments ?? []).filter((a) => a.kind === "network"),
+  ];
   // TOUS les Handles du nœud viennent du contrat (NODE_CONTRACT[kind].ports,
   // topologyNodeContract.tsx) — y compris ceux des nœuds d'automatisation, autrefois posés par un
   // JSX conditionnel par-kind juste en dessous (comportement implicite rendu explicite par la
@@ -1026,7 +995,7 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   const isCompact = zoom < ZOOM_DETAIL_THRESHOLD;
   return (
     <div
-      className={`topology-node topology-node--${node.kind}${node.kind === "host" && node.hostKind ? ` topology-node--host-${node.hostKind}` : ""} topology-node--${node.status}${node.orphan ? " topology-node--orphan" : ""}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}${node.actionPending ? " topology-node--pending" : ""}${node.deletePending ? " topology-node--deleting" : ""}`}
+      className={`topology-node topology-node--${node.kind}${node.kind === "host" && node.hostKind ? ` topology-node--host-${node.hostKind}` : ""} topology-node--${node.status}${node.orphan ? " topology-node--orphan" : ""}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}${node.actionPending ? " topology-node--pending" : ""}${node.deletePending ? " topology-node--deleting" : ""}${node.networkHighlight ? " topology-node--net-highlight" : ""}`}
       title={isCompact ? node.label : undefined}
     >
       {ports.map((port) => (
@@ -1233,6 +1202,26 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
           ))}
         </div>
       )}
+      {isContainer && !node.domains?.length && !!node.publishedPorts?.length && (
+        // Aucun sous-domaine ne sert ce conteneur, mais il publie un port : lien direct vers l'hôte
+        // qui sert cette page (les ports publiés le sont sur ce même hôte). Deux au maximum.
+        <div className="topology-node__domains">
+          {node.publishedPorts.slice(0, 2).map((port) => (
+            <a
+              key={port}
+              href={`http://${window.location.hostname}:${port}`}
+              target="_blank"
+              rel="noreferrer"
+              className="topology-node__domain nodrag nopan"
+              title={`Ouvrir le port ${port} publié par ce conteneur (aucun sous-domaine ne le sert)`}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <IconGlobe className="topology-node__domain-icon" />
+              <span className="topology-node__domain-label">{`${window.location.hostname}:${port}`}</span>
+            </a>
+          ))}
+        </div>
+      )}
       {isContainer && typeof node.cpuPercent === "number" && (
         <div className="topology-node__metrics">
           <div className="topology-node__metric-row">
@@ -1243,43 +1232,6 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
             <span className="topology-node__metric-value">{node.cpuPercent.toFixed(0)}%</span>
           </div>
           <div className="topology-node__metric-mem">{formatMem(node.memBytes ?? 0)}</div>
-        </div>
-      )}
-      {isContainer && networkAttachments.length > 0 && (
-        // "Briques" — désormais les NETWORKS mono-conteneur uniquement (voir
-        // TopologyNode#attachments) : les volumes attachés sont passés en "tiroirs" sous la carte
-        // (voir le bloc .topology-node__drawers plus bas — Phase 2 du 17/08/2026, maquette Railway
-        // validée : le tiroir y est réservé au STOCKAGE, un network reste une propriété inline du
-        // service). `nodrag`/`nopan` (classes React Flow) évitent qu'un clic ici ne fasse glisser
-        // le nœud entier ou ne panne le canevas ; `stopPropagation` évite en plus de sélectionner/
-        // désélectionner le nœud conteneur en même temps qu'on ouvre le détail de la brique.
-        <div className="topology-node__attachments">
-          {networkAttachments.map((attachment) => {
-            const AttachmentIcon = ATTACHMENT_ICON[attachment.kind];
-            return (
-              <button
-                key={attachment.id}
-                type="button"
-                className={`topology-brick topology-brick--${attachment.kind} nodrag nopan`}
-                title={`Network ${attachment.label}`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  node.onOpenAttachment?.(attachment);
-                }}
-                onContextMenu={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  node.onAttachmentContextMenu?.(event, attachment);
-                }}
-              >
-                <span className="topology-brick__icon">
-                  <AttachmentIcon />
-                </span>
-                <span className="topology-brick__label">{attachment.label}</span>
-                {attachment.readOnly && <span className="topology-brick__ro">ro</span>}
-              </button>
-            );
-          })}
         </div>
       )}
       {/* Boutons d'action directs révélés au survol (18/08/2026, retour utilisateur : "ajoute
@@ -1321,7 +1273,7 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
         <button
           type="button"
           className="topology-node__attach-btn nodrag nopan"
-          title={isNutanixVm ? "Ajouter un disque, une carte réseau ou modifier vCPU/mémoire" : "Attacher un stockage, une variable ou un secret"}
+          title={isNutanixVm ? "Ajouter un disque, une carte réseau ou modifier vCPU/mémoire" : "Attacher un stockage, un réseau ou une variable"}
           onClick={(event) => {
             event.stopPropagation();
             node.onOpenAttachPicker?.(event);
@@ -1347,48 +1299,64 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
                 : node.status}
         </span>
       </div>
-      {isContainer && !isCompact && volumeAttachments.length > 0 && (
-        // "Tiroirs" des VOLUMES attachés (Phase 2, 17/08/2026 — capture Railway de référence
-        // validée par l'utilisateur) : chaque volume monté par CE seul conteneur est une SOUS-CARTE
-        // glissée SOUS la carte du service (position absolue sous le bord inférieur, ton assourdi,
-        // z-index négatif pour paraître passer DERRIÈRE la carte — .topology-node ne crée pas de
-        // stacking context, le wrapper React Flow oui, donc le tiroir se place bien entre le fond
-        // du canevas et la carte). Ce sont les MÊMES données réelles (TopologyNode#attachments,
-        // Mounts Docker) et les MÊMES callbacks (détail/menu contextuel) que les briques d'avant —
-        // seul le rendu change. Masqués en zoom compact (comme badges/briques/métriques : sous le
+      {!isCompact && drawerAttachments.length > 0 && (
+        // "Tiroirs" (Phase 2, 17/08/2026 — capture Railway de référence validée par l'utilisateur ;
+        // étendus aux RÉSEAUX le 24/08/2026) : chaque volume dédié / réseau rattaché est une
+        // SOUS-CARTE glissée SOUS la carte du service (position absolue sous le bord inférieur, ton
+        // assourdi, z-index négatif pour paraître passer DERRIÈRE la carte — .topology-node ne crée
+        // pas de stacking context, le wrapper React Flow oui, donc le tiroir se place bien entre le
+        // fond du canevas et la carte). Masqués en zoom compact (comme badges/métriques : sous le
         // seuil, la carte se réduit à icône + statut). Animation d'apparition : voir
         // .topology-drawer dans topology.css (désactivée sous prefers-reduced-motion).
         <div className="topology-node__drawers">
-          {volumeAttachments.map((attachment, drawerIndex) => (
-            <button
-              key={attachment.id}
-              type="button"
-              className="topology-drawer nodrag nopan"
-              // Empilement : chaque tiroir supplémentaire glisse un cran plus bas ET un cran plus
-              // "derrière" — l'index pilote le z-index négatif (le 1er tiroir devant le 2e, etc.),
-              // le décalage vertical est porté par le flux normal du conteneur flex.
-              style={{ zIndex: -1 - drawerIndex }}
-              title={`Volume ${attachment.label}${
-                attachment.destination ? ` — monté sur ${attachment.destination}` : ""
-              }${attachment.readOnly ? " (lecture seule)" : ""}`}
-              onClick={(event) => {
-                event.stopPropagation();
-                node.onOpenAttachment?.(attachment);
-              }}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                node.onAttachmentContextMenu?.(event, attachment);
-              }}
-            >
-              <span className="topology-drawer__icon">
-                <IconVolumes />
-              </span>
-              <span className="topology-drawer__label">{attachment.label}</span>
-              {attachment.destination && <span className="topology-drawer__destination">{attachment.destination}</span>}
-              {attachment.readOnly && <span className="topology-drawer__ro">ro</span>}
-            </button>
-          ))}
+          {drawerAttachments.map((attachment, drawerIndex) => {
+            const AttachmentIcon = ATTACHMENT_ICON[attachment.kind];
+            const isNetwork = attachment.kind === "network";
+            // Colonne de droite : point de montage réel pour un volume, IP réellement attribuée
+            // pour un réseau — un tiret quand aucune IP ne l'est (jamais d'adresse fabriquée).
+            const trailing = isNetwork ? attachment.ipAddress ?? "—" : attachment.destination;
+            const title = isNetwork
+              ? `${isNutanixVm ? "Carte réseau" : "Réseau"} ${attachment.label}${attachment.subtitle ? ` (${attachment.subtitle})` : ""} — ${
+                  attachment.ipAddress ? `IP ${attachment.ipAddress}` : "aucune IP attribuée"
+                }`
+              : `Volume ${attachment.label}${attachment.destination ? ` — monté sur ${attachment.destination}` : ""}${
+                  attachment.readOnly ? " (lecture seule)" : ""
+                }`;
+            return (
+              <button
+                key={attachment.id}
+                type="button"
+                className={`topology-drawer topology-drawer--${attachment.kind} nodrag nopan`}
+                // Empilement : chaque tiroir supplémentaire glisse un cran plus bas ET un cran plus
+                // "derrière" — l'index pilote le z-index négatif (le 1er tiroir devant le 2e, etc.),
+                // le décalage vertical est porté par le flux normal du conteneur flex.
+                style={{ zIndex: -1 - drawerIndex }}
+                title={title}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  node.onOpenAttachment?.(attachment);
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  node.onAttachmentContextMenu?.(event, attachment);
+                }}
+                {...(isNetwork
+                  ? {
+                      onMouseEnter: () => node.onAttachmentHover?.(attachment),
+                      onMouseLeave: () => node.onAttachmentHover?.(null),
+                    }
+                  : {})}
+              >
+                <span className="topology-drawer__icon">
+                  <AttachmentIcon />
+                </span>
+                <span className="topology-drawer__label">{attachment.label}</span>
+                {trailing && <span className="topology-drawer__destination">{trailing}</span>}
+                {attachment.readOnly && <span className="topology-drawer__ro">ro</span>}
+              </button>
+            );
+          })}
         </div>
       )}
     </div>
@@ -1539,10 +1507,10 @@ export function radialPositions(rootId: string, satelliteIds: string[], radius =
  * nœud, disposés en cercle AUTOUR de lui) : un groupe n'a par nature AUCUNE arête vers ses membres
  * (voir services/topology.ts), il n'y a donc aucun "centre" réel à faire orbiter — la disposition
  * doit au contraire refléter comment les membres sont réellement reliés ENTRE EUX (ex : 5
- * conteneurs -> 2 networks, cas réel constaté).
+ * conteneurs -> 2 volumes partagés, cas réel constaté).
  *
  * Algorithme (bipartite/DAG simple, suffisant pour la taille réelle d'un groupe — jamais un
- * vrai risque de cycle, `edges` ne vient que de container<->network/volume, jamais l'inverse) :
+ * vrai risque de cycle, `edges` ne vient que de volume->conteneur/hôte->conteneur, jamais l'inverse) :
  * 1) couche 0 par défaut pour tout membre ; 2) chaque arête INTERNE (les deux bouts sont des
  * membres directs, voir l'appelant) pousse sa cible à au moins couche(source)+1, en passes
  * successives bornées par `memberIds.length` (jamais une boucle infinie même sur des données
@@ -1689,7 +1657,7 @@ function allChildrenAreLeaves(childIds: string[], childrenOf: Map<string, string
  * déterministe, jamais un sous-arbre "croisé" loin de ses voisins naturels). Deux limites HONNÊTES,
  * hors de portée d'un layout : en grille repliée (fratrie > HOST_TREE_MAX_LINE_CHILDREN), les
  * arêtes vers les colonnes 2+ passent visuellement par-dessus les cartes de la colonne 1 ; et les
- * arêtes NON-arbre (network/mount vers les colonnes fixes de droite) peuvent toujours croiser —
+ * arêtes NON-arbre ("mount" vers les colonnes fixes de droite) peuvent toujours croiser —
  * aucune promesse là-dessus.
  *
  * Algorithme classique en deux passes (garanti sans chevauchement) — IDENTIQUE dans son principe à
@@ -1930,7 +1898,7 @@ export function buildTemplateRecipeGraph(
       target: stepId,
       sourceHandle: "chain-out",
       targetHandle: "chain-in",
-      type: "networkEdge",
+      type: "linkEdge",
       animated: false,
       className: "topology-edge topology-edge--recipe-chain",
       style: chainStyle,
@@ -1965,7 +1933,7 @@ export function buildTemplateRecipeGraph(
         target: stepId,
         sourceHandle: "artifact-out",
         targetHandle: "artifact-in",
-        type: "networkEdge",
+        type: "linkEdge",
         animated: !options.reducedMotion,
         className: "topology-edge topology-edge--uses-artifact",
         style: { stroke: "#22d3ee", strokeDasharray: "4 4" },

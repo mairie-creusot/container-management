@@ -220,7 +220,7 @@ describe("buildTopologyEdges — arêtes \"hosts\"", () => {
     expect(edge?.className).toContain("topology-edge--unhealthy");
   });
 
-  it("régression : le comportement conteneur (mount/network) n'est pas affecté par cette extension", () => {
+  it("régression : le comportement conteneur (arête \"hosts\" Docker local -> conteneur) n'est pas affecté par cette extension", () => {
     const containerRunning: TopologyNode = {
       id: "container:c1",
       kind: "container",
@@ -237,28 +237,35 @@ describe("buildTopologyEdges — arêtes \"hosts\"", () => {
       status: "stopped",
       healthStatus: "healthy",
     };
-    const network: TopologyNode = { id: "network:n1", kind: "network", label: "app-net", subtitle: "bridge", status: "running" };
+    const local: TopologyNode = {
+      id: "host:docker-local",
+      kind: "host",
+      hostKind: "docker-env",
+      label: "Docker local",
+      subtitle: "local",
+      status: "running",
+    };
     const nodesById = new Map([
       [containerRunning.id, containerRunning],
       [containerStopped.id, containerStopped],
-      [network.id, network],
+      [local.id, local],
     ]);
     const edges: TopologyEdge[] = [
-      { id: "net:c1:n1", source: containerRunning.id, target: network.id, kind: "network" },
-      { id: "net:c2:n1", source: containerStopped.id, target: network.id, kind: "network" },
+      { id: "hosts:docker-local:c1", source: local.id, target: containerRunning.id, kind: "hosts" },
+      { id: "hosts:docker-local:c2", source: local.id, target: containerStopped.id, kind: "hosts" },
     ];
 
     const [runningEdge, stoppedEdge] = buildTopologyEdges(edges, nodesById);
 
     expect(runningEdge?.data).toMatchObject({ state: "healthy" });
     expect(stoppedEdge?.data).toMatchObject({ state: "stopped" });
-    expect(stoppedEdge?.style).toMatchObject({ strokeDasharray: "2 8" });
+    // Relation structurelle : jamais de pointillé, quelle que soit la santé du conteneur.
+    expect(stoppedEdge?.style).not.toHaveProperty("strokeDasharray");
   });
 });
 
 describe("EDGE_KIND_LABEL / edgeBadgeItems — pastille de nature du lien (maquette validée)", () => {
   const container: TopologyNode = { id: "container:c1", kind: "container", label: "app", subtitle: "app:latest", status: "running" };
-  const network: TopologyNode = { id: "network:n1", kind: "network", label: "app-net", subtitle: "bridge", status: "running" };
   const cluster: TopologyNode = {
     id: "host:nutanix-cluster:c1",
     kind: "host",
@@ -276,12 +283,6 @@ describe("EDGE_KIND_LABEL / edgeBadgeItems — pastille de nature du lien (maque
     status: "running",
   };
 
-  it("network : NOM RÉEL du network à l'extrémité, repli générique seulement si le nœud est inconnu", () => {
-    expect(EDGE_KIND_LABEL.network(container, network)).toBe("réseau app-net");
-    expect(EDGE_KIND_LABEL.network(network, container)).toBe("réseau app-net");
-    expect(EDGE_KIND_LABEL.network(undefined, undefined)).toBe("réseau");
-  });
-
   it("hosts : « hôte physique » vers un nœud host, « hébergement » vers un conteneur/une VM", () => {
     expect(EDGE_KIND_LABEL.hosts(cluster, host)).toBe("hôte physique");
     expect(EDGE_KIND_LABEL.hosts(host, container)).toBe("hébergement");
@@ -292,20 +293,13 @@ describe("EDGE_KIND_LABEL / edgeBadgeItems — pastille de nature du lien (maque
     expect(EDGE_KIND_LABEL["automation-flow"](undefined, undefined)).toBe("automatisation");
   });
 
-  it("le badge spécifique prime : jamais de libellé générique empilé sur un port publié ou un placement Nutanix", () => {
-    expect(
-      edgeBadgeItems({ kindLabel: "réseau app-net", ports: [{ protocol: "tcp", privatePort: 5432, publicPort: 5432 }] }).map((i) => i.text),
-    ).toEqual(["TCP:5432"]);
+  it("le badge spécifique prime : jamais de libellé générique empilé sur un placement Nutanix", () => {
     expect(edgeBadgeItems({ kindLabel: "hébergement", nutanixPlacementConfirmed: true }).map((i) => i.text)).toEqual([
       "Placement confirmé",
     ]);
   });
 
-  it("sans badge spécifique, le libellé passe en tête et coexiste avec les qualificatifs (Privé/ro-rw)", () => {
-    expect(edgeBadgeItems({ kindLabel: "réseau app-net", private: false, state: "healthy" })).toEqual([
-      { text: "réseau app-net", tone: "good" },
-      { text: "Public", tone: "neutral" },
-    ]);
+  it("sans badge spécifique, le libellé passe en tête et coexiste avec le qualificatif ro/rw", () => {
     // stopped -> critical : choix utilisateur explicite ("une machine éteinte doit être rouge").
     expect(edgeBadgeItems({ kindLabel: "montage", readOnly: false, state: "stopped" })).toEqual([
       { text: "montage", tone: "critical" },
@@ -322,20 +316,21 @@ describe("EDGE_KIND_LABEL / edgeBadgeItems — pastille de nature du lien (maque
   });
 
   it("buildTopologyEdges pose le libellé dans edge.data pour chaque kind", () => {
+    const volume: TopologyNode = { id: "volume:v1", kind: "volume", label: "pgdata", subtitle: "local", status: "running" };
     const nodesById = new Map([
       [container.id, container],
-      [network.id, network],
+      [volume.id, volume],
       [cluster.id, cluster],
       [host.id, host],
     ]);
     const edges: TopologyEdge[] = [
-      { id: "net:c1:n1", source: container.id, target: network.id, kind: "network" },
+      { id: "mount:c1:v1", source: volume.id, target: container.id, kind: "mount" },
       { id: "hosts:c1:h1", source: cluster.id, target: host.id, kind: "hosts" },
     ];
 
-    const [networkEdge, hostsEdge] = buildTopologyEdges(edges, nodesById);
+    const [mountEdge, hostsEdge] = buildTopologyEdges(edges, nodesById);
 
-    expect(networkEdge?.data).toMatchObject({ kindLabel: "réseau app-net" });
+    expect(mountEdge?.data).toMatchObject({ kindLabel: "montage" });
     expect(hostsEdge?.data).toMatchObject({ kindLabel: "hôte physique" });
   });
 });

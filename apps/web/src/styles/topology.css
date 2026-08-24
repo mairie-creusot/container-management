@@ -87,7 +87,7 @@
   box-shadow: 0 12px 28px -10px rgba(0, 0, 0, 0.75), 0 0 18px -6px rgba(124, 92, 252, 0.3);
 }
 
-/* Poignées de connexion (glisser-connecter conteneur <-> network/volume) — visibles et
+/* Poignées de connexion (glisser-connecter volume -> conteneur) — visibles et
    légèrement agrandies au survol pour rester faciles à attraper malgré leur petite taille.
    Connexions par capacité : chaque port a une couleur idle propre à sa capacité (pas seulement
    au survol) pour rester repérable au premier coup d'œil, façon ports colorés de Railway — mêmes
@@ -147,14 +147,6 @@
 .react-flow__handle-bottom.topology-handle {
   bottom: -1px;
   transform: translate(-50%, 100%);
-}
-
-.topology-handle--network.react-flow__handle {
-  border-color: var(--accent-end);
-}
-
-.topology-handle--network.react-flow__handle:hover {
-  background: var(--accent-end);
 }
 
 .topology-handle--volume.react-flow__handle {
@@ -218,11 +210,6 @@
 .topology-node--volume .topology-node__icon {
   background: rgba(245, 165, 36, 0.16);
   color: var(--color-warning);
-}
-
-.topology-node--network .topology-node__icon {
-  background: rgba(124, 92, 252, 0.16);
-  color: var(--accent-end);
 }
 
 /* VM Nutanix — vert (--color-success), distinct des trois couleurs Docker ci-dessus, cohérent
@@ -337,7 +324,7 @@
 }
 
 /* Handles génériques de connexion des nœuds d'automatisation (voir GraphNode,
-   topologyGraphShared.tsx) — même mécanique visuelle que .topology-handle--network/--volume
+   topologyGraphShared.tsx) — même mécanique visuelle que .topology-handle--volume
    ci-dessus, couleur reprise de l'icône "automation-trigger" (rouge) : un seul token de couleur
    pour les 3 kinds, la distinction trigger/condition/action est déjà portée par l'icône/couleur du
    nœud lui-même, pas besoin d'un token par kind ici. */
@@ -358,7 +345,7 @@
   background: #22d3ee;
 }
 
-/* Volume/network orphelin (rattaché à AUCUN conteneur, voir TopologyNode#orphan) — atténué +
+/* Volume orphelin (monté par AUCUN conteneur, voir TopologyNode#orphan) — atténué +
    bordure pointillée plutôt que caché : reste un vrai nœud du graphe (décision produit du
    13/08/2026), juste visuellement mis en retrait par rapport aux ressources réellement utilisées. */
 .topology-node--orphan {
@@ -393,7 +380,7 @@
    isNutanixVm, GraphNodeImpl dans topologyGraphShared.tsx, retour utilisateur du 17/08/2026 :
    "le meme logique que pour els container na pas ete appliquer") — même famille visuelle que
    .topology-brick (chip arrondie, surface 2) mais NON interactive (pas de :hover/cursor pointer,
-   rien n'est cliquable ici, contrairement à une brique volume/network d'un conteneur). */
+   rien n'est cliquable ici, contrairement à un tiroir volume/réseau). */
 .topology-node__specs {
   display: flex;
   flex-wrap: wrap;
@@ -769,105 +756,13 @@
   color: var(--color-critical);
 }
 
-/* --- "Briques" : volumes/networks montés par CE conteneur ET AUCUN AUTRE (voir
-   TopologyNode#attachments, services/topology.ts § "Briques") — façon Railway : une ressource
-   dédiée à un service s'affiche comme une propriété DE CE service plutôt que comme un nœud séparé
-   du graphe relié par une arête. Une ressource partagée par ≥2 conteneurs (ou un network par
-   défaut bridge/host/none) reste un vrai .topology-node ailleurs sur le canevas, jamais dupliquée
-   ici. --------------------------------------------------------------------------------------- */
-.topology-node__attachments {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-bottom: 8px;
-}
-
-.topology-brick {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 100%;
-  padding: 3px 8px 3px 6px;
-  border-radius: 999px;
-  border: 1px solid var(--color-border);
-  background: var(--color-surface-2);
-  color: var(--color-text-muted);
-  font-size: 10.5px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
-}
-
-.topology-brick:hover {
-  background: var(--color-surface-3);
-  color: var(--color-text);
-}
-
-.topology-brick:active {
-  transform: scale(0.96);
-}
-
-.topology-brick--volume {
-  border-color: rgba(245, 165, 36, 0.35);
-}
-
-.topology-brick--volume:hover {
-  border-color: var(--color-warning);
-}
-
-.topology-brick--network {
-  border-color: rgba(124, 92, 252, 0.35);
-}
-
-.topology-brick--network:hover {
-  border-color: var(--accent-end);
-}
-
-.topology-brick__icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 12px;
-  height: 12px;
-  flex: none;
-}
-
-.topology-brick--volume .topology-brick__icon {
-  color: var(--color-warning);
-}
-
-.topology-brick--network .topology-brick__icon {
-  color: var(--accent-end);
-}
-
-.topology-brick__icon svg {
-  width: 100%;
-  height: 100%;
-}
-
-.topology-brick__label {
-  min-width: 0;
-  max-width: 120px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.topology-brick__ro {
-  flex: none;
-  font-size: 9px;
-  color: var(--color-text-faint);
-  text-transform: uppercase;
-}
-
-/* --- "Tiroirs" : volumes montés par CE conteneur (Phase 2, 17/08/2026 — capture Railway de
-   référence validée par l'utilisateur : le volume attaché est une SOUS-CARTE glissée SOUS la carte
-   du service, dépassant du bord inférieur, ton assourdi ; seul le STOCKAGE devient tiroir, les
-   networks restent des briques inline ci-dessus). Positionné en absolu sous la carte avec un
-   z-index négatif : .topology-node (position: relative, aucun z-index/transform propre) ne crée
-   pas de stacking context, le tiroir se place donc visuellement DERRIÈRE le fond de la carte —
-   l'effet "glissé dessous" sans dupliquer la géométrie de la carte. Mêmes données réelles/mêmes
-   callbacks que les anciennes briques volume (voir GraphNodeImpl, topologyGraphShared.tsx). ---- */
+/* --- "Tiroirs" : volumes dédiés ET réseaux rattachés au nœud (Phase 2, 17/08/2026 pour les
+   volumes ; étendu aux réseaux le 24/08/2026, qui ne sont plus des nœuds du graphe) — SOUS-CARTE
+   glissée SOUS la carte du service, dépassant du bord inférieur, ton assourdi. Positionné en absolu
+   sous la carte avec un z-index négatif : .topology-node (position: relative, aucun
+   z-index/transform propre) ne crée pas de stacking context, le tiroir se place donc visuellement
+   DERRIÈRE le fond de la carte — l'effet "glissé dessous" sans dupliquer la géométrie de la carte.
+   Voir GraphNodeImpl (topologyGraphShared.tsx). ------------------------------------------------ */
 .topology-node__drawers {
   position: absolute;
   top: 100%;
@@ -926,6 +821,12 @@
   transform: translateY(2px);
 }
 
+/* Tiroir RÉSEAU : violet (couleur historique de l'ancien nœud/handle réseau) plutôt que l'ambre du
+   stockage — même composant, seule la teinte distingue les deux natures. */
+.topology-drawer--network:hover {
+  border-color: rgba(124, 92, 252, 0.45);
+}
+
 .topology-drawer:active {
   transform: translateY(1px);
 }
@@ -938,6 +839,10 @@
   height: 12px;
   flex: none;
   color: var(--color-warning);
+}
+
+.topology-drawer--network .topology-drawer__icon {
+  color: var(--accent-end);
 }
 
 .topology-drawer__icon svg {
@@ -971,6 +876,15 @@
   font-size: 9px;
   color: var(--color-text-faint);
   text-transform: uppercase;
+}
+
+/* Mise en évidence des AUTRES nœuds rattachés au réseau survolé sur un tiroir (voir
+   GraphNodeCallbacks#onAttachmentHover, topologyGraphShared.tsx) — compense la disparition du nœud
+   réseau, qui montrait d'un coup d'œil qui le partageait. Contour violet + halo, aucun déplacement
+   (rien ne doit bouger sous le pointeur pendant un simple survol). */
+.topology-node--net-highlight {
+  border-color: var(--accent-end);
+  box-shadow: 0 0 0 2px rgba(124, 92, 252, 0.35), 0 8px 24px rgba(124, 92, 252, 0.18);
 }
 
 @keyframes topology-drawer-slide {
@@ -1138,13 +1052,6 @@
   }
 }
 
-.topology-node--compact .topology-node__attachments {
-  opacity: 0;
-  max-height: 0;
-  margin: 0;
-  pointer-events: none;
-}
-
 /* Zoom sémantique : sous le seuil de zoom (TopologyGraph.tsx#ZOOM_DETAIL_THRESHOLD), un nœud se
    réduit à son icône + son point de statut — libellé/sous-titre/badges/métriques s'effacent en
    fondu plutôt que de disparaître brutalement (transition douce à 0.15s, cohérente avec le reste
@@ -1153,7 +1060,6 @@
 .topology-node__subtitle,
 .topology-node__badges,
 .topology-node__metrics,
-.topology-node__attachments,
 .topology-node__specs,
 .topology-node__status-label {
   transition: opacity 0.15s ease, max-height 0.15s ease, margin 0.15s ease;
@@ -1197,15 +1103,11 @@
    connectivité réelle (port publié = plein, configuré non confirmé = tirets fins, inactif =
    tirets larges) — un axe DISTINCT de la couleur, jamais une redite. Les deux sont calculés par
    topologyGraphShared.tsx#buildTopologyEdges et posés en inline style ; ces règles CSS ne gèrent
-   que les effets visuels additionnels : épaisseur par kind (mount/network/hosts/automation-flow),
+   que les effets visuels additionnels : épaisseur par kind (mount/hosts/automation-flow),
    estompage "stopped", et la pulsation d'alerte "unhealthy". Le sélecteur cible
    `.react-flow__edge-path` (le <path> réel) à l'intérieur du groupe `<g>` qui porte les classes
    `topology-edge--*` posées via la prop `className` de chaque arête. */
 .react-flow__edge.topology-edge--mount .react-flow__edge-path {
-  stroke-width: 2.2;
-}
-
-.react-flow__edge.topology-edge--network .react-flow__edge-path {
   stroke-width: 2.2;
 }
 
@@ -1218,7 +1120,7 @@
 
 /* "automation-flow" (trigger -> condition -> action, voir AUTOMATION_FLOW_EDGE_COLOR dans
    topologyGraphShared.tsx) : couleur déjà fixe/distincte posée en inline style, cette règle ne
-   gère que l'épaisseur du trait — un peu plus marquée que "network" pour rester lisible malgré son
+   gère que l'épaisseur du trait — un peu plus marquée que "mount" pour rester lisible malgré son
    dasharray plus serré ("2 4", voir buildTopologyEdges). */
 .react-flow__edge.topology-edge--automation-flow .react-flow__edge-path {
   stroke-width: 2.2;
@@ -1244,7 +1146,7 @@
 
 /* Conteneur arrêté (status !== "running") : arrêt souvent volontaire, pas une panne — donc pas de
    rouge, mais visuellement clairement "injoignable" (tirets larges + légèrement estompée). Prime
-   sur mount/network ci-dessus (règle plus spécifique via topology-edge--stopped, même poids CSS
+   sur mount/hosts ci-dessus (règle plus spécifique via topology-edge--stopped, même poids CSS
    mais déclarée après dans la feuille de style, stroke-width laissé tel quel volontairement). */
 .react-flow__edge.topology-edge--stopped .react-flow__edge-path {
   opacity: 0.55;
@@ -1268,14 +1170,14 @@
 }
 
 /* Badge "Unhealthy" du nœud (TopologyGraph.tsx#GraphNode) — même pulsation, utile même quand le
-   conteneur est un nœud isolé sans arête (pas de volume/network affiché sur ce nœud). */
+   conteneur est un nœud isolé sans arête (aucun volume partagé sur ce nœud). */
 .topology-badge--pulse {
   animation: topology-pulse 1.6s ease-in-out infinite;
 }
 
 /* Particules de flux le long d'une arête "mount" (MountFlowEdge dans TopologyGraph.tsx) —
    matérialise "des données/fichiers transitent ici", plus marqué que le tiret défilant générique
-   des arêtes "network". `offset-path`/`fill`/`color` sont posés en inline style (le tracé change à
+   des autres arêtes. `offset-path`/`fill`/`color` sont posés en inline style (le tracé change à
    chaque render, impossible à figer ici) ; cette règle ne définit que l'animation de la position le
    long du chemin (`offset-distance`, natif navigateur — aucun recalcul JS par frame) et le halo. */
 .topology-edge-particle {
@@ -1571,7 +1473,6 @@
   .topology-node__metrics,
   .topology-node__status-label,
   .topology-node__status-dot,
-  .topology-brick,
   .topology-drawer {
     transition: none;
   }
@@ -1716,7 +1617,6 @@
 
 .topology-detail-panel__icon--container { color: var(--accent-start, #3b6fef); }
 .topology-detail-panel__icon--volume { color: var(--color-warning); }
-.topology-detail-panel__icon--network { color: var(--accent-end, #7c5cfc); }
 .topology-detail-panel__icon--nutanix-vm { color: var(--color-success); }
 .topology-detail-panel__icon--host { color: #14b8a6; }
 .topology-detail-panel__icon--cron-job { color: #facc15; }
@@ -1774,7 +1674,7 @@
 
 /* Onglets réels (façon Railway : Deployments/Variables/Metrics/Settings) — adaptés au kind du
    nœud (TopologyNodeDetailPanel.tsx#tabsForKind), pas affichés du tout s'il n'y en a qu'un seul
-   (volume/network/nutanix-vm/host : rien d'autre de pertinent à montrer). */
+   (volume/nutanix-vm/host : rien d'autre de pertinent à montrer). */
 .topology-detail-panel__tabs {
   display: flex;
   flex-wrap: wrap;
@@ -1840,54 +1740,6 @@
 
 .topology-detail-panel__scan-cta {
   margin-top: 10px;
-}
-
-/* Liste des networks connectés (onglet "Réseau") — chaque entrée cliquable navigue le panneau VERS
-   le détail de ce network (brique ou vrai nœud, voir TopologyNodeDetailPanel.tsx#openNetworkAttachment),
-   sans fermer/rouvrir le panneau. */
-.topology-detail-panel__attachment-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.topology-detail-panel__attachment-btn {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  background: var(--color-surface-2);
-  color: var(--color-text);
-  cursor: pointer;
-  text-align: left;
-}
-
-.topology-detail-panel__attachment-btn:hover {
-  background: var(--color-surface-3);
-  border-color: var(--accent-end);
-}
-
-.topology-detail-panel__attachment-label {
-  max-width: 100%;
-  font-size: 12.5px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.topology-detail-panel__attachment-meta {
-  font-size: 11px;
-  color: var(--color-text-faint);
-  font-family: var(--font-mono);
 }
 
 /* Ligne de variable d'environnement avec révélation à la demande (secrets masqués par défaut) —

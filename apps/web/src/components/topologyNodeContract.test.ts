@@ -34,7 +34,6 @@ import type { IacEngine, TopologyEdge, TopologyHostKind, TopologyNode, TopologyN
 const ALL_KINDS_RECORD: Record<TopologyNodeKind, true> = {
   container: true,
   volume: true,
-  network: true,
   "nutanix-vm": true,
   host: true,
   "cron-job": true,
@@ -169,8 +168,17 @@ describe("NODE_CONTRACT — totalité et conventions transverses", () => {
     expect(edge?.style?.strokeDasharray).toBe("4 4");
   });
 
-  it("container porte un port cible \"hosted-by\" (arête \"Docker local\" -> conteneur) en plus de network/volume-mount", () => {
-    expect(NODE_CONTRACT.container.ports.map((p) => p.id)).toEqual(["network", "volume-mount", "hosted-by"]);
+  it("container : plus de port \"network\" (24/08/2026, un réseau n'est plus un nœud) — seulement volume-mount + hosted-by", () => {
+    expect(NODE_CONTRACT.container.ports.map((p) => p.id)).toEqual(["volume-mount", "hosted-by"]);
+  });
+
+  it("aucune capacité \"network\"/\"attach\" ne subsiste : plus aucun Handle du graphe ne viserait un réseau", () => {
+    const capabilities = Object.keys(CAPABILITY_DEFS);
+    expect(capabilities).not.toContain("network");
+    expect(capabilities).not.toContain("attach");
+    const portCapabilities = NODE_KINDS.flatMap((kind) => NODE_CONTRACT[kind].ports.map((p) => String(p.capability)));
+    expect(portCapabilities).not.toContain("network");
+    expect(portCapabilities).not.toContain("attach");
   });
 });
 
@@ -200,10 +208,9 @@ describe("CONNECTION_ACTIONS — câblage manuel au fil (vague 3)", () => {
     }
   });
 
-  it("paires réelles verrouillées : volume->conteneur ouvre le montage confirmé, conteneur->network la connexion réseau", () => {
+  it("paire réelle verrouillée : volume->conteneur ouvre le montage confirmé — la connexion réseau n'est PLUS un fil (elle vit dans le ＋/le menu du conteneur)", () => {
     expect(CONNECTION_ACTIONS["provide->volume-mount"]).toBe("mount-volume-on-container");
-    expect(CONNECTION_ACTIONS["network->attach"]).toBe("connect-container-to-network");
-    expect(Object.keys(CONNECTION_ACTIONS)).toHaveLength(2);
+    expect(Object.keys(CONNECTION_ACTIONS)).toHaveLength(1);
   });
 
   it("provide/volume-mount désormais interactives (fil -> popover), hosts/hosted-by restent non interactives avec message d'info", () => {
@@ -275,38 +282,33 @@ describe("buildTopologyEdges — ancrage des arêtes sur le port du contrat corr
   });
 
   it("un handle déjà fixé par l'appelant (arête redirigée vers un groupe) reste prioritaire ; une extrémité inconnue (id de groupe) reste sans handle", () => {
-    const container = node("container", { id: "container:c1" });
-    const nodesById = new Map([[container.id, container]]);
+    const volume = node("volume", { id: "volume:v1" });
+    const nodesById = new Map([[volume.id, volume]]);
     const edges: (TopologyEdge & { targetHandle?: string })[] = [
-      { id: "net:c1:g1", source: container.id, target: "group:g1", kind: "network", targetHandle: "attach" },
-      { id: "net:c1:g2", source: container.id, target: "group:g2", kind: "network" },
+      { id: "mount:g1:v1", source: volume.id, target: "group:g1", kind: "mount", targetHandle: "volume-mount" },
+      { id: "mount:g2:v1", source: volume.id, target: "group:g2", kind: "mount" },
     ];
     const [redirected, unknownTarget] = buildTopologyEdges(edges, nodesById);
-    expect(redirected).toMatchObject({ sourceHandle: "network", targetHandle: "attach" });
-    expect(unknownTarget?.sourceHandle).toBe("network");
+    expect(redirected).toMatchObject({ sourceHandle: "provide", targetHandle: "volume-mount" });
+    expect(unknownTarget?.sourceHandle).toBe("provide");
     expect(unknownTarget?.targetHandle).toBeUndefined();
   });
 });
 
 describe("edgeHealth générique — mêmes résultats que l'ancien code par-kind", () => {
-  it("arête network : couleur du conteneur, pointillé selon le port publié — identique à l'ancien chemin edgeContainerNode", () => {
+  it("arête \"hosts\" Docker local -> conteneur : couleur du conteneur, jamais de pointillé (relation structurelle)", () => {
     const container = node("container", { id: "container:c1", healthStatus: "healthy" });
-    const net = node("network", { id: "network:n1" });
+    const local = node("host", { id: "host:docker-local", hostKind: "docker-env" });
     const nodesById = new Map([
       [container.id, container],
-      [net.id, net],
+      [local.id, local],
     ]);
-    const withPort: TopologyEdge[] = [
-      { id: "net:c1:n1", source: container.id, target: net.id, kind: "network", ports: [{ protocol: "tcp", privatePort: 80, publicPort: 8080 }] },
-    ];
-    const [confirmed] = buildTopologyEdges(withPort, nodesById);
-    expect(confirmed?.data).toMatchObject({ state: "healthy", hasPublishedPort: true });
-    expect((confirmed?.style as { strokeDasharray?: string })?.strokeDasharray).toBeUndefined();
-
-    const withoutPort: TopologyEdge[] = [{ id: "net:c1:n1", source: container.id, target: net.id, kind: "network" }];
-    const [unconfirmed] = buildTopologyEdges(withoutPort, nodesById);
-    expect(unconfirmed?.data).toMatchObject({ state: "healthy", hasPublishedPort: false });
-    expect(unconfirmed?.style).toMatchObject({ strokeDasharray: "4 4" });
+    const [edge] = buildTopologyEdges(
+      [{ id: "hosts:docker-local:c1", source: local.id, target: container.id, kind: "hosts" }],
+      nodesById,
+    );
+    expect(edge?.data).toMatchObject({ state: "healthy" });
+    expect((edge?.style as { strokeDasharray?: string })?.strokeDasharray).toBeUndefined();
   });
 
   it("arête mount : structurelle, toujours pleine — seule la couleur bouge (conteneur arrêté = gris, jamais de tirets)", () => {
@@ -366,7 +368,7 @@ describe("edgeHealth générique — mêmes résultats que l'ancien code par-kin
   it("iac-workspace : santé déclarée sur la MÊME palette depuis iacLastRunStatus (jamais appelée par une arête aujourd'hui — aucune arête serveur ne touche ce kind, prêt pour la Phase 2)", () => {
     const edgeHealth = NODE_CONTRACT["iac-workspace"].edgeHealth;
     expect(edgeHealth).not.toBeNull();
-    const ctx = { edgeKind: "hosts" as const, role: "target" as const, hasPublishedPort: false, automationUpstreamStatus: "unknown" as const };
+    const ctx = { edgeKind: "hosts" as const, role: "target" as const, automationUpstreamStatus: "unknown" as const };
     expect(edgeHealth!(node("iac-workspace", { iacLastRunStatus: "success" }), ctx)).toMatchObject({ state: "healthy" });
     expect(edgeHealth!(node("iac-workspace", { iacLastRunStatus: "failed" }), ctx)).toMatchObject({ state: "unhealthy" });
     expect(edgeHealth!(node("iac-workspace", { iacLastRunStatus: "running" }), ctx)).toMatchObject({ state: "starting" });
@@ -415,7 +417,6 @@ describe("buildNodeMenuItems — la liste vit dans le contrat, les callbacks che
       "nutanix-vm-edit-compute",
       "volume-mount-on-container",
       "volume-remove",
-      "network-remove",
       "automation-node-remove",
     ]) {
       handlers[id] = () => calls.push(id);
@@ -426,7 +427,7 @@ describe("buildNodeMenuItems — la liste vit dans le contrat, les callbacks che
   it("conteneur running : Arrêter/Redémarrer/Renommer/Connecter/Supprimer — même liste, même ordre qu'avant la migration", () => {
     const { handlers } = allHandlers();
     const items = buildNodeMenuItems(node("container"), handlers);
-    expect(items.map((i) => i.label)).toEqual(["Arrêter", "Redémarrer", "Renommer", "Connecter à un network…", "Supprimer"]);
+    expect(items.map((i) => i.label)).toEqual(["Arrêter", "Redémarrer", "Renommer", "Connecter à un réseau…", "Supprimer"]);
     expect(items.find((i) => i.label === "Supprimer")?.danger).toBe(true);
     expect(items.find((i) => i.label === "Arrêter")?.danger).toBeUndefined();
   });
@@ -434,7 +435,7 @@ describe("buildNodeMenuItems — la liste vit dans le contrat, les callbacks che
   it("conteneur non-running : Démarrer remplace Arrêter (même règle `status === \"running\"` qu'avant)", () => {
     const { handlers } = allHandlers();
     const items = buildNodeMenuItems(node("container", { status: "stopped" }), handlers);
-    expect(items.map((i) => i.label)).toEqual(["Démarrer", "Redémarrer", "Renommer", "Connecter à un network…", "Supprimer"]);
+    expect(items.map((i) => i.label)).toEqual(["Démarrer", "Redémarrer", "Renommer", "Connecter à un réseau…", "Supprimer"]);
   });
 
   it("handlers PARTIELS (cas TopologySubGraphPanel) : les actions sans callback sont omises, jamais un item mort", () => {
@@ -472,12 +473,6 @@ describe("buildNodeMenuItems — la liste vit dans le contrat, les callbacks che
     expect(items.map((i) => i.label)).toEqual(["Supprimer"]);
   });
 
-  it("network : Supprimer masqué pour les networks Docker par défaut (bridge/host/none), présent sinon", () => {
-    const { handlers } = allHandlers();
-    expect(buildNodeMenuItems(node("network", { label: "bridge" }), handlers)).toEqual([]);
-    expect(buildNodeMenuItems(node("network", { label: "quai-app-net" }), handlers).map((i) => i.label)).toEqual(["Supprimer"]);
-  });
-
   it("kinds sans action de cycle de vie (host/cron-job/backup/gitops-source) : liste vide EXPLICITE", () => {
     const { handlers } = allHandlers();
     for (const kind of ["host", "cron-job", "backup", "gitops-source"] as const) {
@@ -507,7 +502,7 @@ describe("buildNodeMenuItems — la liste vit dans le contrat, les callbacks che
     expect(quickLifecycleActions(node("nutanix-vm", { status: "stopped" }))).toEqual(["start"]);
     expect(quickLifecycleActions(node("nutanix-vm", { status: "neutral" }))).toEqual([]);
     // Jamais sur un autre kind (volume/host/automation... n'ont pas de cycle de vie pilotable ici).
-    for (const kind of ["volume", "network", "host", "iac-workspace", "automation-trigger"] as const) {
+    for (const kind of ["volume", "host", "iac-workspace", "automation-trigger"] as const) {
       expect(quickLifecycleActions(node(kind)), kind).toEqual([]);
     }
   });

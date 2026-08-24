@@ -367,6 +367,14 @@ describe("getTopology — nœuds host physique Nutanix (kind \"host\", hostKind 
       nutanixDisks: [{ uuid: "disk-1", deviceType: "DISK", sizeBytes: 805306368000 }],
       nutanixNetworks: [{ subnetUuid: "subnet-1", subnetName: "VLAN 1", vlanId: 1, ips: ["172.16.8.48"] }],
     });
+    // Refonte du 24/08/2026 : la carte réseau devient AUSSI un "tiroir" sous la carte de la VM
+    // (même contrat que les réseaux d'un conteneur) — VLAN + IP réellement attribuée, `networkId`
+    // = uuid du subnet pour la mise en évidence des autres VMs du même subnet au survol.
+    expect(vmNode?.attachments).toEqual([
+      { kind: "network", id: "network:vm-uuid-1:0", label: "VLAN 1", subtitle: "VLAN 1", networkId: "subnet-1", ipAddress: "172.16.8.48", vlanId: 1 },
+    ]);
+    // Aucun nœud/arête de réseau, jamais, quelle que soit la source.
+    expect(topology.nodes.some((n) => n.id.startsWith("network:"))).toBe(false);
   });
 
   it("si l'hôte visé par une VM n'est plus dans la liste réellement retournée (course), la VM se rattache au cluster (repli, jamais flottante)", async () => {
@@ -638,7 +646,7 @@ describe("getTopology — nœud master QUAI (hostKind \"quai-master\") et rattac
     expect(topology.nodes.find((n) => n.id === "host:quai-master")?.subtitle).toBe("4 environnements");
   });
 
-  it("Docker local joignable : chaque conteneur se rattache à \"Docker local\" — jamais les volumes/networks (déjà couverts par mount/network)", async () => {
+  it("Docker local joignable : chaque conteneur se rattache à \"Docker local\" — jamais les volumes partagés (déjà couverts par leurs arêtes \"mount\")", async () => {
     isNutanixConfiguredMock.mockResolvedValue(false);
     getNutanixVmsMock.mockResolvedValue([]);
     isDockerReachableMock.mockResolvedValue(true);
@@ -650,7 +658,7 @@ describe("getTopology — nœud master QUAI (hostKind \"quai-master\") et rattac
           Image: "nginx:latest",
           State: "running",
           Mounts: [{ Type: "volume", Name: "shared-data", Destination: "/data", RW: true }],
-          NetworkSettings: { Networks: { "app-net": { NetworkID: "n1" } } },
+          NetworkSettings: { Networks: { "app-net": { NetworkID: "n1", IPAddress: "172.18.0.2" } } },
           Ports: [],
         },
         {
@@ -659,7 +667,8 @@ describe("getTopology — nœud master QUAI (hostKind \"quai-master\") et rattac
           Image: "worker:latest",
           State: "exited",
           Mounts: [{ Type: "volume", Name: "shared-data", Destination: "/data", RW: true }],
-          NetworkSettings: { Networks: { "app-net": { NetworkID: "n1" } } },
+          // Conteneur arrêté : Docker ne rapporte AUCUNE IP (chaîne vide) — jamais fabriquée.
+          NetworkSettings: { Networks: { "app-net": { NetworkID: "n1", IPAddress: "" } } },
           Ports: [],
         },
       ],
@@ -671,11 +680,68 @@ describe("getTopology — nœud master QUAI (hostKind \"quai-master\") et rattac
     const localEdges = topology.edges.filter((e) => e.kind === "hosts" && e.source === "host:docker-local");
 
     expect(localEdges.map((e) => e.target).sort()).toEqual(["container:c1", "container:c2"]);
-    // Les ressources partagées restent de vrais nœuds reliés par leurs arêtes mount/network — jamais
-    // rattachées en plus au nœud "Docker local".
-    expect(topology.edges.some((e) => e.kind === "hosts" && (e.target === "volume:shared-data" || e.target === "network:n1"))).toBe(false);
+    // Un volume partagé reste un vrai nœud relié par ses arêtes "mount" — jamais rattaché en plus
+    // au nœud "Docker local".
+    expect(topology.edges.some((e) => e.kind === "hosts" && e.target === "volume:shared-data")).toBe(false);
     expect(topology.edges).toContainEqual(expect.objectContaining({ kind: "mount", source: "volume:shared-data", target: "container:c1" }));
-    expect(topology.edges).toContainEqual(expect.objectContaining({ kind: "network", source: "container:c1", target: "network:n1" }));
+  });
+
+  it("réseaux : plus AUCUN nœud ni arête — un tiroir par réseau sur le conteneur, avec driver et IP RÉELLE (un tiret côté frontend si aucune)", async () => {
+    isNutanixConfiguredMock.mockResolvedValue(false);
+    getNutanixVmsMock.mockResolvedValue([]);
+    isDockerReachableMock.mockResolvedValue(true);
+    getClientMock.mockResolvedValue({
+      listContainers: async () => [
+        {
+          Id: "c1",
+          Names: ["/web"],
+          Image: "nginx:latest",
+          State: "running",
+          Mounts: [],
+          // Un réseau par défaut (bridge, autrefois toujours un vrai nœud) ET un réseau applicatif
+          // dédié : les deux deviennent des tiroirs, sans exception.
+          NetworkSettings: {
+            Networks: { bridge: { NetworkID: "n0", IPAddress: "172.17.0.2" }, "app-net": { NetworkID: "n1", IPAddress: "172.18.0.2" } },
+          },
+          Ports: [{ PrivatePort: 80, PublicPort: 8080, Type: "tcp" }],
+        },
+        {
+          Id: "c2",
+          Names: ["/worker"],
+          Image: "worker:latest",
+          State: "exited",
+          Mounts: [],
+          NetworkSettings: { Networks: { "app-net": { NetworkID: "n1" } } },
+          Ports: [],
+        },
+      ],
+      listVolumes: async () => ({ Volumes: [] }),
+      // "orphan-net" n'est rattaché à aucun conteneur : plus aucune représentation dans le graphe.
+      listNetworks: async () => [
+        { Id: "n0", Name: "bridge", Driver: "bridge" },
+        { Id: "n1", Name: "app-net", Driver: "bridge" },
+        { Id: "n2", Name: "orphan-net", Driver: "bridge" },
+      ],
+    });
+
+    const topology = await getTopology();
+
+    expect(topology.nodes.some((n) => n.id.startsWith("network:"))).toBe(false);
+    expect(topology.edges.some((e) => e.target.startsWith("network:") || e.source.startsWith("network:"))).toBe(false);
+
+    const web = topology.nodes.find((n) => n.id === "container:c1");
+    expect(web?.attachments).toEqual([
+      { kind: "network", id: "network:n0", label: "bridge", subtitle: "bridge", networkId: "n0", ipAddress: "172.17.0.2" },
+      { kind: "network", id: "network:n1", label: "app-net", subtitle: "bridge", networkId: "n1", ipAddress: "172.18.0.2" },
+    ]);
+    // Conteneur arrêté : aucune IP rapportée par Docker -> champ ABSENT, jamais une valeur inventée.
+    const worker = topology.nodes.find((n) => n.id === "container:c2");
+    expect(worker?.attachments).toEqual([
+      { kind: "network", id: "network:n1", label: "app-net", subtitle: "bridge", networkId: "n1" },
+    ]);
+    // Même `networkId` des deux côtés : c'est ce qui permet au frontend de mettre en évidence les
+    // autres nœuds du même réseau au survol d'un tiroir.
+    expect(worker?.attachments?.[0]?.networkId).toBe(web?.attachments?.[1]?.networkId);
   });
 });
 

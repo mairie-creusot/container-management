@@ -1,9 +1,9 @@
 /**
- * Graphe visuel de l'infrastructure (façon Railway) : conteneurs, volumes, networks et leurs
- * relations réelles — construit à partir d'UN SEUL appel `docker.listContainers({all:true})`
- * (son résumé inclut déjà Mounts et NetworkSettings.Networks, pas besoin d'un inspect() par
- * conteneur) + listVolumes()/listNetworks() pour les nœuds isolés (pas encore montés/attachés
- * à un conteneur, mais existants sur l'hôte).
+ * Graphe visuel de l'infrastructure (façon Railway) : conteneurs, volumes et leurs relations
+ * réelles — construit à partir d'UN SEUL appel `docker.listContainers({all:true})` (son résumé
+ * inclut déjà Mounts et NetworkSettings.Networks avec l'IP réelle de chaque endpoint, pas besoin
+ * d'un inspect() par conteneur) + listVolumes() pour les volumes isolés et listNetworks() pour le
+ * driver réel de chaque réseau.
  *
  * Chaque nœud "conteneur" est en plus enrichi (dashboard vue d'ensemble, cf. ARCHITECTURE.md) :
  *  - cpuPercent/memBytes : snapshot d'utilisation réel (docker.ts#readContainerUsage).
@@ -19,12 +19,13 @@
  * Tous best-effort par nom — aucune donnée arbitraire n'est inventée si rien ne correspond (le
  * nœud reste simplement sans badge).
  *
- * Arêtes "network" enrichies (badge flottant façon Railway, cf. TopologyEdge#ports/private/
- * encrypted dans types.ts et topologyGraphShared.tsx#EdgeBadge) : ports réellement publiés par le
- * conteneur, `Internal` réel du network (Private/Public) et chiffrement natif Docker (`--opt
- * encrypted` d'un network overlay uniquement — absent pour tout autre driver, jamais un "non
- * chiffré" inventé hors sujet). Aucune mesure de latence : QUAI ne fait aucun sondage réseau actif,
- * ce chiffre serait inventé — volontairement absent du badge plutôt que fabriqué.
+ * RÉSEAUX (refonte du 24/08/2026) : plus AUCUN nœud ni arête de réseau — un réseau est porté par le
+ * nœud qui y est réellement rattaché, sous forme de "tiroir" (TopologyNodeAttachment kind
+ * "network", rendu sous la carte comme un volume dédié). Vaut pour TOUS les réseaux d'un conteneur
+ * Docker (partagés, par défaut ou dédiés) ET pour chaque carte réseau réelle d'une VM Nutanix
+ * (nutanixVmNetworkAttachments ci-dessous). Données portées : nom, driver (ou VLAN côté Nutanix) et
+ * IP RÉELLEMENT attribuée — jamais d'IP fabriquée quand aucune ne l'est. Aucune mesure de latence :
+ * QUAI ne fait aucun sondage réseau actif, ce chiffre serait inventé.
  *
  * Nœuds "nutanix-vm" (voir getNutanixTopologyParts ci-dessous) : source totalement indépendante de
  * Docker — récupérés et ajoutés au graphe que Docker soit joignable ou non, [] tant que Nutanix
@@ -77,34 +78,21 @@
  *    présent dès que LXD est configuré (lxcStore.ts), status honnête selon la joignabilité réelle
  *    (lxc.ts#getLxcEnvironment).
  * Aucun nœud "host" n'a de port de connexion (NODE_CAPABILITIES["host"] = [] côté frontend) : ce
- * ne sont pas des ressources connectables comme un conteneur/volume/network.
+ * ne sont pas des ressources connectables comme un conteneur/volume.
  *
- * Volumes/networks ORPHELINS (existants sur l'hôte Docker mais rattachés à AUCUN conteneur) :
- * décision produit du 13/08/2026 (VolumesPage.tsx/NetworksPage.tsx supprimées, "tout est dans le
- * graphe") — restent de VRAIS nœuds top-level, `orphan: true`, SANS AUCUNE arête (par construction :
- * une arête suppose un conteneur qui référence la ressource, un orphelin n'en a aucun). Le frontend
- * les rend visuellement atténués (topologyGraphShared.tsx) plutôt que de les cacher — un hôte de dev
- * peut en accumuler des dizaines d'autres projets, c'est un compromis de clarté assumé, pas un bug.
- * `inUseBy === 0` / `containerCount === 0` déterminent l'orphelinage (networks internes par défaut
- * bridge/host/none jamais orphelins par convention, voir DEFAULT_NETWORK_NAMES — mêmes réseaux déjà
- * exclus de la notion de "ressource à nettoyer" par TopologyGraph.tsx#nodeMenuItems côté suppression).
+ * Volumes ORPHELINS (existants sur l'hôte Docker mais montés par AUCUN conteneur) : décision
+ * produit du 13/08/2026 (VolumesPage.tsx supprimée, "tout est dans le graphe") — restent de VRAIS
+ * nœuds top-level, `orphan: true`, SANS AUCUNE arête. Le frontend les rend visuellement atténués
+ * plutôt que de les cacher. Un RÉSEAU orphelin n'apparaît en revanche plus du tout dans le graphe
+ * depuis la refonte ci-dessus : sans nœud porteur, il n'a aucun tiroir où s'afficher (il reste
+ * listé par GET /api/networks).
  *
- * "Briques" (volumes/networks à conteneur UNIQUE, voir TopologyNode#attachments) : décision prise
- * ICI, côté backend, par ressource — pas au frontend, pour que GET /api/topology reflète déjà le
- * modèle final (le frontend n'a pas à recalculer une notion de "partage" qu'il ne peut pas dériver
- * sans reparcourir toutes les arêtes lui-même). Choix (b) du cahier des charges : un volume/network
- * monté par UN SEUL conteneur (cas de loin le plus fréquent — une stack `docker compose` typique)
- * devient une "brique" listée dans `attachments` du nœud conteneur plutôt qu'un nœud top-level relié
- * par une arête, façon Railway (la ressource s'affiche comme une propriété du service, pas comme un
- * élément du graphe) ; un volume/network RÉELLEMENT partagé par ≥2 conteneurs reste un vrai nœud +
- * arêtes — cette relation-là garde un sens graphique réel (ex : un network applicatif traversé par
- * 5 conteneurs). Un network Docker par défaut (bridge/host/none) reste toujours un vrai nœud, même
- * mono-conteneur : partagé par nature au niveau de l'hôte, et c'est lui qui porte encore le port de
- * connexion glissé-déposé. Pour une ressource "briquée", le glisser-déposer inter-nœuds n'a plus de
- * cible : côté frontend, la connexion container<->network passe désormais AUSSI par une action du
- * menu contextuel du conteneur ("Connecter à un network…", TopologyGraph.tsx), qui fonctionne que le
- * network visé soit une brique ou un vrai nœud — le glisser-déposer historique continue de marcher
- * en plus pour les networks restés des nœuds (partagés/par défaut).
+ * Volumes en "tiroir" (à conteneur UNIQUE, voir TopologyNode#attachments) : décision prise ICI,
+ * côté backend, pour que GET /api/topology reflète déjà le modèle final (le frontend n'a pas à
+ * recalculer une notion de "partage" qu'il ne peut pas dériver sans reparcourir toutes les arêtes).
+ * Un volume monté par UN SEUL conteneur (cas de loin le plus fréquent) s'affiche comme une
+ * propriété du service, façon Railway ; RÉELLEMENT partagé par ≥2 conteneurs, il reste un vrai
+ * nœud + arêtes "mount" — cette relation-là garde un sens graphique réel.
  */
 
 import { config } from "../config.js";
@@ -137,7 +125,6 @@ import type {
   ScanResult,
   Topology,
   TopologyEdge,
-  TopologyEdgePort,
   TopologyNode,
 } from "../types.js";
 
@@ -242,7 +229,31 @@ function mapNutanixPowerState(powerState: NutanixVm["powerState"]): TopologyNode
   return "neutral";
 }
 
+/**
+ * Cartes réseau RÉELLES d'une VM (status.resources.nic_list, voir nutanix.ts#NutanixVmNetwork)
+ * projetées en tiroirs sous sa carte — MÊME contrat que les réseaux d'un conteneur
+ * (TopologyNodeAttachment), pour un rendu unique côté frontend. `networkId` = uuid du subnet, ce
+ * qui permet de mettre en évidence les autres VMs du MÊME subnet au survol du tiroir ; absent si
+ * Prism Central n'a pas renvoyé de subnet_reference (aucun rapprochement tenté alors). `id` reste
+ * unique au sein de la VM même si deux NICs partagent un subnet.
+ */
+function nutanixVmNetworkAttachments(vm: NutanixVm): NonNullable<TopologyNode["attachments"]> {
+  return (vm.networks ?? []).map((nic, index) => {
+    const ip = nic.ips[0];
+    return {
+      kind: "network" as const,
+      id: `network:${vm.id}:${index}`,
+      label: nic.subnetName ?? "Carte réseau",
+      subtitle: typeof nic.vlanId === "number" ? `VLAN ${nic.vlanId}` : "",
+      ...(nic.subnetUuid ? { networkId: nic.subnetUuid } : {}),
+      ...(ip ? { ipAddress: ip } : {}),
+      ...(typeof nic.vlanId === "number" ? { vlanId: nic.vlanId } : {}),
+    };
+  });
+}
+
 function nutanixVmToNode(vm: NutanixVm): TopologyNode {
+  const networkAttachments = nutanixVmNetworkAttachments(vm);
   return {
     id: `nutanix-vm:${vm.id}`,
     kind: "nutanix-vm",
@@ -262,6 +273,7 @@ function nutanixVmToNode(vm: NutanixVm): TopologyNode {
     ...(typeof vm.hostPlacementConfirmed === "boolean" ? { nutanixHostPlacementConfirmed: vm.hostPlacementConfirmed } : {}),
     ...(vm.disks && vm.disks.length > 0 ? { nutanixDisks: vm.disks } : {}),
     ...(vm.networks && vm.networks.length > 0 ? { nutanixNetworks: vm.networks } : {}),
+    ...(networkAttachments.length > 0 ? { attachments: networkAttachments } : {}),
     // VRAI état d'erreur Prism Central (status.state === "ERROR"), DISTINCT d'une VM simplement
     // éteinte — voir nutanix.ts#mapVmEntity. Absent (pas false) si aucune erreur.
     ...(vm.apiError ? { nutanixApiError: true, ...(vm.apiErrorMessage ? { nutanixApiErrorMessage: vm.apiErrorMessage } : {}) } : {}),
@@ -863,6 +875,24 @@ async function getAutomationNodes(): Promise<{ nodes: TopologyNode[]; edges: Top
  * remplace ce premier graphe partiel par le graphe entier dès qu'il est prêt. */
 export type TopologyScope = "full" | "local";
 
+/** Même ordre de préférence que la détection du port au déploiement (services/reverseProxy.ts). */
+const PREFERRED_HTTP_PORTS = [80, 8080, 8000, 3000, 5000];
+
+/**
+ * Ports RÉELLEMENT publiés sur l'hôte (TCP uniquement), les ports HTTP usuels d'abord : de quoi
+ * proposer un lien direct sur la carte du nœud quand aucun sous-domaine ne le sert. Un port
+ * seulement exposé (jamais publié) n'est joignable depuis aucun navigateur : il n'apparaît pas.
+ */
+function publishedHttpPorts(ports: { PublicPort?: number; Type?: string }[] | undefined): number[] {
+  const published = [...new Set((ports ?? []).filter((p) => p.Type !== "udp" && p.PublicPort).map((p) => p.PublicPort!))];
+  return published.sort((a, b) => {
+    const rankA = PREFERRED_HTTP_PORTS.indexOf(a);
+    const rankB = PREFERRED_HTTP_PORTS.indexOf(b);
+    if (rankA !== rankB) return (rankA === -1 ? Number.MAX_SAFE_INTEGER : rankA) - (rankB === -1 ? Number.MAX_SAFE_INTEGER : rankB);
+    return a - b;
+  });
+}
+
 export async function getTopology(scope: TopologyScope = "full"): Promise<Topology> {
   const docker = await getClient();
   const external = scope === "full";
@@ -1011,14 +1041,11 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
     interface NetworkRef {
       networkId: string;
       networkName: string;
+      ipAddress?: string;
     }
     const containerMounts = new Map<string, MountRef[]>(); // containerNodeId -> ses montages volume
     const containerNets = new Map<string, NetworkRef[]>(); // containerNodeId -> ses attaches network
     const volumeContainerIds = new Map<string, Set<string>>(); // nom de volume -> conteneurs qui le montent
-    const networkContainerIds = new Map<string, Set<string>>(); // id de network -> conteneurs attachés
-    // containerNodeId -> ports RÉELLEMENT publiés (docker.listContainers()[].Ports, déjà dans le
-    // résumé) — voir TopologyEdge#ports (apps/api/src/types.ts) pour la limite d'honnêteté du champ.
-    const containerPorts = new Map<string, TopologyEdgePort[]>();
     // Une seule passe O(S) sur tout l'historique de scans (voir buildVulnSummaryByImage ci-dessus),
     // consultée en O(1) par conteneur ci-dessous plutôt que reparcourue C fois.
     const vulnSummaryByImage = buildVulnSummaryByImage(allScans);
@@ -1034,6 +1061,7 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
       const image = ensureImageTag(c.Image);
       const vulnSummary = vulnSummaryByImage.get(image) ?? null;
       const domains = domainsByContainerId.get(c.Id);
+      const publishedPorts = domains?.length ? undefined : publishedHttpPorts(c.Ports);
       nodes.push({
         id: containerNodeId,
         kind: "container",
@@ -1052,25 +1080,11 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
         ...(healthAndLimits.memoryLimitBytes ? { memoryLimitBytes: healthAndLimits.memoryLimitBytes } : {}),
         ...(healthAndLimits.nanoCpus ? { nanoCpus: healthAndLimits.nanoCpus } : {}),
         ...(domains && domains.length > 0 ? { domains } : {}),
+        ...(publishedPorts && publishedPorts.length > 0 ? { publishedPorts } : {}),
       });
-      // Rattachement "Docker local" -> conteneur UNIQUEMENT (les volumes/networks ont déjà leurs
-      // arêtes mount/network — pas de surcharge visuelle).
+      // Rattachement "Docker local" -> conteneur UNIQUEMENT (un volume partagé a déjà son arête
+      // "mount", un réseau est un tiroir — pas de surcharge visuelle).
       edges.push({ id: `hosts:docker-local:${c.Id}`, source: LOCAL_DOCKER_NODE_ID, target: containerNodeId, kind: "hosts" });
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const rawPorts: any[] = (c as any).Ports ?? [];
-      const seenPorts = new Set<string>();
-      const ports: TopologyEdgePort[] = [];
-      for (const p of rawPorts) {
-        if (typeof p.PrivatePort !== "number") continue; // port privé absent = entrée inexploitable, jamais inventée
-        const protocol: "tcp" | "udp" = p.Type === "udp" ? "udp" : "tcp";
-        const publicPort: number | undefined = typeof p.PublicPort === "number" ? p.PublicPort : undefined;
-        const key = `${protocol}:${p.PrivatePort}:${publicPort ?? ""}`;
-        if (seenPorts.has(key)) continue; // Docker répète la même entrée pour 0.0.0.0 ET :: (IPv4/IPv6)
-        seenPorts.add(key);
-        ports.push({ protocol, privatePort: p.PrivatePort, ...(publicPort !== undefined ? { publicPort } : {}) });
-      }
-      containerPorts.set(containerNodeId, ports);
 
       const mounts: MountRef[] = [];
       for (const mount of c.Mounts ?? []) {
@@ -1086,39 +1100,25 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
 
       const nets: NetworkRef[] = [];
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const containerNetworks: Record<string, { NetworkID?: string }> = (c as any).NetworkSettings?.Networks ?? {};
+      const containerNetworks: Record<string, { NetworkID?: string; IPAddress?: string }> =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (c as any).NetworkSettings?.Networks ?? {};
       for (const [networkName, net] of Object.entries(containerNetworks)) {
         const networkId = net.NetworkID ?? networkName;
-        nets.push({ networkId, networkName });
-        if (!networkContainerIds.has(networkId)) networkContainerIds.set(networkId, new Set());
-        networkContainerIds.get(networkId)!.add(containerNodeId);
+        // IPAddress est déjà dans le résumé listContainers() (EndpointSettings) — "" tant qu'aucune
+        // IP n'est attribuée (conteneur arrêté), jamais une adresse fabriquée.
+        nets.push({ networkId, networkName, ...(net.IPAddress ? { ipAddress: net.IPAddress } : {}) });
       }
       containerNets.set(containerNodeId, nets);
     });
 
-    // --- Étape 2 : décide, PAR RESSOURCE, "nœud top-level + arêtes" vs "brique attachée au seul
-    // conteneur qui la monte" (voir TopologyNode#attachments, apps/api/src/types.ts) :
-    //   - ≥ 2 conteneurs distincts la référencent -> reste un vrai nœud + arêtes (relation graphique
-    //     utile, ex : un network applicatif partagé par 5 conteneurs).
-    //   - exactement 1 conteneur -> devient une brique (le cas le plus fréquent, correspond à
-    //     l'intention Railway : une ressource dédiée à UN service s'affiche comme une propriété de
-    //     ce service, pas comme un nœud du graphe reliée par une arête).
-    //   - 0 conteneur -> orphelin, exclu comme avant (voir en-tête de fichier).
-    // Un network Docker PAR DÉFAUT (bridge/host/none) reste toujours un vrai nœud même à 1 seul
-    // conteneur attaché : partagé "par nature" (toute l'infra Docker de l'hôte le traverse), et
-    // c'est là que le glisser-connecter/clic droit "Déconnecter" doivent rester disponibles sans
-    // détour — même exclusion que TopologyGraph.tsx#nodeMenuItems côté suppression.
-    const DEFAULT_NETWORK_NAMES = new Set(["bridge", "host", "none"]);
-    const networkNameById = new Map<string, string>();
-    for (const nets of containerNets.values()) {
-      for (const ref of nets) networkNameById.set(ref.networkId, ref.networkName);
-    }
+    // --- Étape 2 : VOLUMES — décide "nœud top-level + arêtes" vs "tiroir attaché au seul conteneur
+    // qui le monte" (voir TopologyNode#attachments) : ≥2 conteneurs -> vrai nœud + arêtes ;
+    // exactement 1 -> tiroir ; 0 -> orphelin (voir en-tête de fichier).
+    // RÉSEAUX — plus aucune décision : depuis le 24/08/2026 ils sont TOUJOURS des tiroirs, jamais
+    // des nœuds ni des arêtes (le nœud porte lui-même nom/driver/IP réelle du réseau).
     function isSharedVolume(name: string): boolean {
       return (volumeContainerIds.get(name)?.size ?? 0) >= 2;
-    }
-    function isSharedOrDefaultNetwork(id: string): boolean {
-      if ((networkContainerIds.get(id)?.size ?? 0) >= 2) return true;
-      return DEFAULT_NETWORK_NAMES.has(networkNameById.get(id) ?? "");
     }
 
     const volumeByName = new Map((volumesResponse.Volumes ?? []).map((v) => [v.Name, v]));
@@ -1144,11 +1144,18 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
     }
     for (const [containerNodeId, nets] of containerNets) {
       for (const ref of nets) {
-        if (isSharedOrDefaultNetwork(ref.networkId)) continue;
+        // Le nom vient du conteneur lui-même (clé de NetworkSettings.Networks) : un network absent
+        // de listNetworks() (course entre deux appels) reste donc affiché, juste sans son driver.
         const n = networkById.get(ref.networkId);
-        if (!n) continue;
         const list = attachmentsByContainer.get(containerNodeId) ?? [];
-        list.push({ kind: "network", id: `network:${ref.networkId}`, label: n.Name, subtitle: n.Driver });
+        list.push({
+          kind: "network",
+          id: `network:${ref.networkId}`,
+          label: n?.Name ?? ref.networkName,
+          subtitle: n?.Driver ?? "",
+          networkId: ref.networkId,
+          ...(ref.ipAddress ? { ipAddress: ref.ipAddress } : {}),
+        });
         attachmentsByContainer.set(containerNodeId, list);
       }
     }
@@ -1173,30 +1180,10 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
         });
       }
     }
-    for (const [containerNodeId, nets] of containerNets) {
-      const containerId = idFromContainerNodeId(containerNodeId);
-      const ports = containerPorts.get(containerNodeId) ?? [];
-      for (const ref of nets) {
-        if (!isSharedOrDefaultNetwork(ref.networkId)) continue;
-        const n = networkById.get(ref.networkId);
-        edges.push({
-          id: `net:${containerId}:${ref.networkId}`,
-          source: containerNodeId,
-          target: `network:${ref.networkId}`,
-          kind: "network",
-          ...(ports.length > 0 ? { ports } : {}),
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ...(n ? { private: !!(n as any).Internal } : {}),
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          ...(n && n.Driver === "overlay" ? { encrypted: (n as any).Options?.encrypted !== undefined } : {}),
-        });
-      }
-    }
 
-    // Volumes/networks restés "vrai nœud" (partagés par ≥2 conteneurs, ou network par défaut) —
-    // les ressources à conteneur unique n'atteignent jamais cette liste, voir attachmentsByContainer
-    // ci-dessus. Toujours pas "tous les volumes Docker" : un volume/network orphelin (0 conteneur)
-    // reste exclu, comme avant.
+    // Volumes restés "vrai nœud" (partagés par ≥2 conteneurs) — un volume à conteneur unique
+    // n'atteint jamais cette liste (voir attachmentsByContainer ci-dessus), un volume orphelin
+    // (0 conteneur) est traité juste après.
     for (const v of volumesResponse.Volumes ?? []) {
       if (!isSharedVolume(v.Name)) continue;
       nodes.push({
@@ -1210,19 +1197,9 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
       });
     }
 
-    for (const n of networks) {
-      if (!isSharedOrDefaultNetwork(n.Id)) continue;
-      nodes.push({
-        id: `network:${n.Id}`,
-        kind: "network",
-        label: n.Name,
-        subtitle: n.Driver,
-        status: "running",
-        ...(n.Created ? { createdAt: n.Created } : {}),
-      });
-    }
-
-    // Orphelins (0 conteneur) : voir en-tête de fichier — vrais nœuds top-level, jamais d'arête.
+    // Volumes orphelins (0 conteneur) : voir en-tête de fichier — vrais nœuds top-level, jamais
+    // d'arête. Un RÉSEAU orphelin n'a plus de représentation dans le graphe (aucun nœud porteur sur
+    // lequel poser son tiroir) : il reste listé par GET /api/networks, jamais inventé ici.
     for (const v of volumesResponse.Volumes ?? []) {
       if ((volumeContainerIds.get(v.Name)?.size ?? 0) > 0) continue; // référencé par ≥1 conteneur, déjà géré ci-dessus
       nodes.push({
@@ -1234,19 +1211,6 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
         orphan: true,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         ...((v as any).CreatedAt ? { createdAt: (v as any).CreatedAt as string } : {}),
-      });
-    }
-    for (const n of networks) {
-      if (DEFAULT_NETWORK_NAMES.has(n.Name)) continue; // jamais orphelins par convention
-      if ((networkContainerIds.get(n.Id)?.size ?? 0) > 0) continue;
-      nodes.push({
-        id: `network:${n.Id}`,
-        kind: "network",
-        label: n.Name,
-        subtitle: n.Driver,
-        status: "neutral",
-        orphan: true,
-        ...(n.Created ? { createdAt: n.Created } : {}),
       });
     }
 

@@ -13,7 +13,6 @@ import {
   type LifecycleAction,
 } from "@/features/containers/containersSlice";
 import { removeVolume } from "@/features/volumes/volumesSlice";
-import { removeNetwork } from "@/features/networks/networksSlice";
 // Recette de template éditable dans le sous-graphe (18/08/2026) — thunks réels + logique pure du
 // studio réutilisée telle quelle (libellés/validation/réordonnancement, jamais dupliqués).
 import { fetchArtifactSources, fetchTemplates, updateTemplate, type StudioListStatus } from "@/features/templates/templatesSlice";
@@ -76,6 +75,7 @@ import type {
   TopologyEdge,
   TopologyGroup,
   TopologyNode,
+  TopologyNodeAttachment,
 } from "@/types";
 
 interface TopologySubGraphPanelProps {
@@ -99,7 +99,7 @@ interface TopologySubGraphPanelProps {
   /** L'animation de sortie est terminée (ou sautée sous `prefers-reduced-motion`) : le parent peut
    * démonter ce composant sans à-coup visuel. */
   onExited: () => void;
-  /** Ouvre TopologyNodeDetailPanel pour un nœud (ou une brique, voir brickCallbacks ci-dessous) du
+  /** Ouvre TopologyNodeDetailPanel pour un nœud (ou un tiroir, voir drawerCallbacks ci-dessous) du
    * sous-graphe — déléguée au parent pour n'avoir qu'UNE seule instance du panneau de détail,
    * partagée entre le graphe principal et ce panneau. */
   onOpenDetail: (node: TopologyNode) => void;
@@ -180,7 +180,7 @@ function CollapsibleSection({
  * nœud") au double-clic sur un nœud (ou "Visualiser les dépendances" du menu contextuel).
  *
  * Vues internes (`viewMode`), choisies par bascule — pour un conteneur, TROIS onglets exposés
- * (Shell, Logs, Composition interne) ; pour tout AUTRE kind (volume/network/host/groupe/etc.) OU
+ * (Shell, Logs, Composition interne) ; pour tout AUTRE kind (volume/host/groupe/etc.) OU
  * un GROUPE, aucune bascule n'est affichée du tout, "dependencies" reste le seul contenu (rien ne
  * change ici, hors de la portée de la fusion du 13/08/2026 ci-dessous) :
  * - "shell"/"logs" (conteneurs UNIQUEMENT, vue par défaut à l'ouverture sur un conteneur — retour
@@ -392,7 +392,7 @@ export default function TopologySubGraphPanel({
   // sur la vue par défaut adaptée à SON kind : "shell" pour un conteneur (retour utilisateur du
   // 13/08/2026 : c'est la destination la plus utile, jamais une simple carte de dépendances pour
   // ce kind précis), "dependencies" pour tout le reste (aucun shell/logs/composition interne n'a
-  // de sens pour un volume/network/host/nœud d'automatisation/etc., ni pour un groupe).
+  // de sens pour un volume/host/nœud d'automatisation/etc., ni pour un groupe).
   //
   // Bug réel corrigé le 13/08/2026 (retour utilisateur : l'onglet Logs/Dépendances/Composition
   // interne "se remet sur Shell" tout seul après quelques secondes, tuant au passage la connexion
@@ -484,7 +484,7 @@ export default function TopologySubGraphPanel({
    * fois groupé il ne son plus relié") — bug réel corrigé : cette vue n'affichait jusqu'ici QUE des
    * traits neutres groupe -> chaque membre (voir `groupMemberEdges` plus bas, conservé en repli
    * pour un groupe sans aucune arête interne), jamais les arêtes RÉELLES qui existaient entre les
-   * membres eux-mêmes (ex : conteneur -> network) — l'information de connectivité qui a justement
+   * membres eux-mêmes (ex : volume -> conteneur) — l'information de connectivité qui a justement
    * amené l'utilisateur à les grouper ensemble disparaissait entièrement une fois à l'intérieur.
    * `sOwner === tOwner` exclue une arête entièrement interne à un même sous-groupe MEMBRE (déjà
    * masquée par sa propre carte repliée, voir deriveGroupPorts) ; une arête touchant un nœud hors de
@@ -514,10 +514,8 @@ export default function TopologySubGraphPanel({
         id: `${e.id}__group-interior`,
         source: sOwner,
         target: tOwner,
-        ...(sourceRedirected ? { sourceHandle: e.kind === "mount" ? "provide" : "network" } : {}),
-        ...(targetRedirected
-          ? { targetHandle: e.kind === "mount" ? "volume-mount" : e.kind === "hosts" ? "hosted-by" : "attach" }
-          : {}),
+        ...(sourceRedirected ? { sourceHandle: "provide" } : {}),
+        ...(targetRedirected ? { targetHandle: e.kind === "hosts" ? "hosted-by" : "volume-mount" } : {}),
       });
     }
     return result;
@@ -571,14 +569,14 @@ export default function TopologySubGraphPanel({
             id: n.id,
             type: "graphNode",
             position: positions[n.id] ?? { x: 0, y: 0 },
-            // Briques (voir GraphNode/TopologyNode#attachments) : mêmes callbacks que le graphe
+            // Tiroirs (voir GraphNode/TopologyNode#attachments) : mêmes callbacks que le graphe
             // principal (TopologyGraph.tsx) pour rester cliquables/clic-droit-ables ICI aussi — pas
-            // de "Connecter à un network…"/déconnexion depuis ce panneau en revanche (ce sous-graphe
-            // n'a jamais eu d'action de (dé)connexion réseau propre, même pour une arête réelle :
-            // scope volontairement inchangé, seule "Voir le détail" est couverte).
+            // de "Connecter à un réseau…"/déconnexion depuis ce panneau en revanche (ce sous-graphe
+            // n'a jamais eu d'action de (dé)connexion réseau propre : scope volontairement
+            // inchangé, seule "Voir le détail" est couverte).
             data: {
               ...n,
-              ...(brickCallbacks(n.kind)),
+              ...drawerCallbacks(n),
               // Pastille "module <label>" sur les cartes du sous-graphe aussi (voir
               // topologyGraphShared.tsx#GraphNodeServiceModuleMeta) — absente pour un nœud sans
               // module, la carte reste alors strictement identique à ce qu'elle était.
@@ -939,7 +937,7 @@ export default function TopologySubGraphPanel({
       return;
     }
     // Échec réel (process déjà mort, permission refusée...) — jamais avalé en silence, même
-    // pattern que handleRemoveVolume/handleRemoveNetwork ci-dessous (pushNotification, la seule
+    // pattern que handleRemoveVolume ci-dessous (pushNotification, la seule
     // surface d'erreur mutante réellement affichée dans ce fichier).
     dispatch(pushNotification({ level: "error", message: result.payload?.message ?? "Échec de l'arrêt du processus." }));
   }
@@ -1080,16 +1078,18 @@ export default function TopologySubGraphPanel({
     setNodeMenu({ x: event.clientX, y: event.clientY, node: node.data as unknown as TopologyNode });
   }
 
-  /** Callbacks de brique (voir GraphNode/TopologyNode#attachments) pour un nœud de kind `kind` —
-   * seuls les nœuds "container" en rendent, `{}` pour les autres (GraphNode gère déjà l'absence de
-   * callback sans erreur, `?.()`). Réutilise le MÊME `nodeMenu` que pour un vrai nœud pour le clic
-   * droit (voir nodeMenuItems ci-dessous, gardé contre le drilldown sur un id synthétique). */
-  function brickCallbacks(kind: TopologyNode["kind"]): GraphNodeCallbacks {
-    if (kind !== "container") return {};
+  /** Callbacks de tiroir (voir GraphNode/TopologyNode#attachments) pour un nœud de kind `kind` —
+   * seuls "container"/"nutanix-vm" en rendent, `{}` pour les autres (GraphNode gère déjà l'absence
+   * de callback sans erreur, `?.()`). Un tiroir RÉSEAU n'a plus de nœud de détail propre depuis le
+   * 24/08/2026 : son clic ouvre le détail du nœud PORTEUR, comme dans le graphe principal. */
+  function drawerCallbacks(node: TopologyNode): GraphNodeCallbacks {
+    if (node.kind !== "container" && node.kind !== "nutanix-vm") return {};
+    const detailNodeFor = (attachment: TopologyNodeAttachment) =>
+      attachment.kind === "network" ? node : attachmentToTopologyNode(attachment);
     return {
-      onOpenAttachment: (attachment) => onOpenDetail(attachmentToTopologyNode(attachment)),
+      onOpenAttachment: (attachment) => onOpenDetail(detailNodeFor(attachment)),
       onAttachmentContextMenu: (event, attachment) =>
-        setNodeMenu({ x: event.clientX, y: event.clientY, node: attachmentToTopologyNode(attachment) }),
+        setNodeMenu({ x: event.clientX, y: event.clientY, node: detailNodeFor(attachment) }),
     };
   }
 
@@ -1111,11 +1111,11 @@ export default function TopologySubGraphPanel({
   // existante — jamais affiché pour un simple nœud conteneur/volume/etc.).
   const isGroupNavigation = [...stack, ...(currentRootId ? [currentRootId] : [])].some((id) => groupsById.has(id));
 
-  /** Actions réelles conteneur/volume/network — retour utilisateur du 13/08/2026 : "le clic droit
+  /** Actions réelles conteneur/volume — retour utilisateur du 13/08/2026 : "le clic droit
    * n'est pas sur le node il manque supprimer ou autre element aussi", le menu contextuel de ce
    * panneau se limitait à "Voir le détail"/"Visualiser ses dépendances", contrairement à celui du
    * graphe principal (TopologyGraph.tsx#handleContainerAction/handleRemoveVolume/
-   * handleRemoveNetwork, mêmes thunks/confirmations réutilisés ici à l'identique — aucune logique
+   * mêmes thunks/confirmations réutilisés ici à l'identique — aucune logique
    * dupliquée avec un comportement différent). `dispatch(fetchTopology())` après succès : ce
    * panneau reçoit `topology` en PROP depuis TopologyGraph.tsx (pas de fetch propre), il faut donc
    * explicitement redéclencher le rafraîchissement partagé pour voir l'effet ici aussi. */
@@ -1149,23 +1149,10 @@ export default function TopologySubGraphPanel({
     else dispatch(pushNotification({ level: "error", message: result.payload ?? "Échec de la suppression du volume." }));
   }
 
-  async function handleRemoveNetwork(id: string, name: string) {
-    const ok = await confirm({
-      title: "Supprimer le network",
-      description: `Confirmer la suppression du network "${name}" ?`,
-      confirmLabel: "Supprimer",
-      variant: "danger",
-    });
-    if (!ok) return;
-    const result = await dispatch(removeNetwork({ id, name }));
-    if (removeNetwork.fulfilled.match(result)) dispatch(fetchTopology());
-    else dispatch(pushNotification({ level: "error", message: result.payload ?? "Échec de la suppression du network." }));
-  }
-
   function nodeMenuItems(node: TopologyNode, x: number, y: number): ContextMenuItem[] {
     const items: ContextMenuItem[] = [{ label: "Voir le détail", onClick: () => onOpenDetail(node) }];
     // `nodesById.has(node.id)` exclut le drilldown sur une brique (TopologyNode synthétique
-    // reconstruit par attachmentToTopologyNode, voir brickCallbacks ci-dessus) : son id ne
+    // reconstruit par attachmentToTopologyNode, voir drawerCallbacks ci-dessus) : son id ne
     // correspond à AUCUN nœud top-level de `topology.nodes` (tout l'objet du "briquage"), le
     // sous-graphe n'aurait rien de réel à recentrer dessus.
     if (node.id !== currentRootId && nodesById.has(node.id)) {
@@ -1193,7 +1180,7 @@ export default function TopologySubGraphPanel({
     // contrat (NODE_CONTRACT[kind].menuItems, topologyNodeContract.tsx — même source de vérité que
     // le menu du graphe principal, jamais une liste dupliquée qui pourrait diverger) ; ce panneau
     // ne fournit VOLONTAIREMENT qu'un sous-ensemble de callbacks — pas de "Renommer"/"Connecter à
-    // un network…" ni d'action VM Nutanix/automatisation dans le sous-graphe (comportement
+    // un réseau…" ni d'action VM Nutanix/automatisation dans le sous-graphe (comportement
     // historique, inchangé par la migration du 17/08/2026) : buildNodeMenuItems omet simplement
     // toute action déclarée sans handler, jamais un item mort.
     const id = idWithoutPrefix(node.id);
@@ -1204,7 +1191,6 @@ export default function TopologySubGraphPanel({
         "container-restart": () => void handleContainerAction(id, node.label, "restart"),
         "container-remove": () => void handleContainerAction(id, node.label, "remove"),
         "volume-remove": () => void handleRemoveVolume(id),
-        "network-remove": () => void handleRemoveNetwork(id, node.label),
       }),
     );
     return items;

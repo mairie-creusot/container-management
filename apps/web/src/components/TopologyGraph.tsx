@@ -187,7 +187,7 @@ function TopologyLoader() {
 // (NODE_CONTRACT[kind].defaultColumnX, topologyNodeContract.tsx : mêmes abscisses qu'avant la
 // migration, le pourquoi de chaque colonne est documenté sur l'entrée du kind), projetées ici en
 // table plate. Colonnes "nutanix-vm"/"host"/"iac-workspace"/"cron-job"/"backup" à
-// part, après network — nœuds isolés ou reliés entre eux uniquement (jamais d'arête vers Docker),
+// part — nœuds isolés ou reliés entre eux uniquement (jamais d'arête vers Docker),
 // des colonnes dédiées les gardent lisibles plutôt que de les mélanger aux conteneurs.
 const COLUMN_X: Record<TopologyNode["kind"], number> = mapNodeContract((c) => c.defaultColumnX);
 // 130 -> 200 (Phase 2, 17/08/2026) : les volumes attachés d'un conteneur sont rendus en "tiroirs"
@@ -348,8 +348,10 @@ function shortId(): string {
 
 /** Sous-ensemble créable par le popover de création rapide (clic droit sur le canevas) — les
  * VMs Nutanix ne le sont pas (QUAI ne fait que les lire via Prism Central), pas d'entrée pour
- * ce kind ici plutôt qu'une entrée jamais utilisée dans TopologyNode["kind"] au complet. */
-type CreatableKind = "container" | "volume" | "network";
+ * ce kind ici plutôt qu'une entrée jamais utilisée dans TopologyNode["kind"] au complet. Plus de
+ * "network" depuis le 24/08/2026 : un réseau sans nœud rattaché n'aurait aucune carte où
+ * s'afficher — il se crée depuis le ＋ d'un conteneur, qui l'y rattache dans la foulée. */
+type CreatableKind = "container" | "volume";
 
 interface CreatePopoverProps {
   kind: CreatableKind;
@@ -364,18 +366,16 @@ interface CreatePopoverProps {
 const CREATE_TITLE: Record<CreatableKind, string> = {
   container: "Nouveau conteneur",
   volume: "Nouveau volume",
-  network: "Nouveau network",
 };
 
 /** Popover de création rapide (clic droit sur le canevas) — réutilise les mêmes thunks Redux
- * que ContainersPage/VolumesPage/NetworksPage, en version minimale positionnée près du clic. */
+ * que ContainersPage/VolumesPage, en version minimale positionnée près du clic. */
 function CreatePopover({ kind, x, y, onClose, initialImage }: CreatePopoverProps) {
   const dispatch = useAppDispatch();
   const { ref, style } = useDismiss(onClose, x, y);
   const [image, setImage] = useState(initialImage ?? "");
   const [name, setName] = useState("");
   const [ports, setPorts] = useState("");
-  const [driver, setDriver] = useState("bridge");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -400,7 +400,7 @@ function CreatePopover({ kind, x, y, onClose, initialImage }: CreatePopoverProps
           return;
         }
         setError(result.payload ?? "Échec de la création du conteneur.");
-      } else if (kind === "volume") {
+      } else {
         const trimmedName = name.trim();
         if (!trimmedName) return;
         const result = await dispatch(createVolume(trimmedName));
@@ -410,16 +410,6 @@ function CreatePopover({ kind, x, y, onClose, initialImage }: CreatePopoverProps
           return;
         }
         setError(result.payload ?? "Échec de la création du volume.");
-      } else {
-        const trimmedName = name.trim();
-        if (!trimmedName) return;
-        const result = await dispatch(createNetwork({ name: trimmedName, driver }));
-        if (createNetwork.fulfilled.match(result)) {
-          dispatch(fetchTopology());
-          onClose();
-          return;
-        }
-        setError(result.payload ?? "Échec de la création du network.");
       }
     } finally {
       setBusy(false);
@@ -489,33 +479,6 @@ function CreatePopover({ kind, x, y, onClose, initialImage }: CreatePopoverProps
             />
           </div>
         )}
-        {kind === "network" && (
-          <>
-            <div className="field">
-              <label htmlFor="graph-new-network-name">Nom</label>
-              <input
-                id="graph-new-network-name"
-                type="text"
-                autoFocus
-                placeholder="ex : quai-app-net"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                disabled={busy}
-                required
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="graph-new-network-driver">Driver</label>
-              <select id="graph-new-network-driver" value={driver} onChange={(e) => setDriver(e.target.value)} disabled={busy}>
-                {NETWORK_DRIVERS.map((d) => (
-                  <option key={d} value={d}>
-                    {d}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </>
-        )}
 
         {error && <p className="graph-popover__error">{error}</p>}
 
@@ -547,7 +510,7 @@ interface CreateSpotlightProps {
   x: number;
   y: number;
   onClose: () => void;
-  /** Ouvre le formulaire détaillé existant (CreatePopover) pour ce kind — conteneur/volume/network
+  /** Ouvre le formulaire détaillé existant (CreatePopover) pour ce kind — conteneur/volume
    * "classiques", inchangés, juste précédés désormais d'un champ de recherche pour les retrouver. */
   onPickKind: (kind: CreatableKind) => void;
   /** Nœuds RÉELS du graphe déjà chargés (voir TopologyGraph.tsx#return, `data?.nodes ?? []`) —
@@ -1442,15 +1405,13 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
     onSelect: () => setShowGithubDeploy(true),
   };
 
-  const kindActions: SpotlightAction[] = (["container", "volume", "network"] as CreatableKind[]).map((kind) => ({
+  const kindActions: SpotlightAction[] = (["container", "volume"] as CreatableKind[]).map((kind) => ({
     id: `kind-${kind}`,
     title: CREATE_TITLE[kind],
     description:
       kind === "container"
         ? "Lancer n'importe quelle image Docker, avec vos propres réglages."
-        : kind === "volume"
-          ? "Créer un espace de stockage persistant pour un conteneur."
-          : "Créer un réseau privé pour faire communiquer plusieurs conteneurs.",
+        : "Créer un espace de stockage persistant pour un conteneur.",
     icon: KIND_ICON[kind],
     onSelect: () => onPickKind(kind),
   }));
@@ -1762,30 +1723,31 @@ function RenamePopover({ containerId, initialName, x, y, onClose }: RenamePopove
 
 interface NetworkConnectPopoverProps {
   containerId: string;
-  /** Ids Docker bruts (pas "network:<id>") des networks déjà connectés à ce conteneur — retirés du
-   * choix, qu'ils soient restés un vrai nœud (partagé/par défaut) ou devenus une brique. */
+  /** Ids Docker bruts (pas "network:<id>") des réseaux déjà rattachés à ce conteneur — retirés du
+   * choix (voir connectedNetworkIds, lus sur node.attachments). */
   excludeNetworkIds: Set<string>;
-  /** Network présélectionné (id Docker brut) — câblage au fil (vague 3), le fil vise déjà un network précis. */
-  initialNetworkId?: string;
   x: number;
   y: number;
   onClose: () => void;
 }
 
+/** Valeur sentinelle de l'option "Créer un réseau…" du select — jamais un id Docker réel. */
+const NEW_NETWORK_OPTION = "__new__";
+
 /**
- * Popover "Connecter à un network…" (menu contextuel d'un nœud conteneur) — depuis l'introduction
- * des "briques" (voir services/topology.ts § "Briques"), un network attaché à un seul conteneur
- * n'est plus un nœud du graphe : le glisser-connecter historique (container -> network, toujours
- * fonctionnel pour les networks restés de vrais nœuds, partagés/par défaut) n'a alors plus de
- * cible à viser. Cette action, disponible pour TOUT network existant (brique ou nœud), couvre ce
- * cas sans exiger de point de connexion dédié sur chaque brique — POST /api/networks/:id/connect
- * comme le glisser-connecter, résultat strictement identique.
+ * Popover "Connecter à un réseau…" (bouton ＋ / menu contextuel d'un nœud conteneur) — SEUL chemin
+ * de rattachement depuis que les réseaux ne sont plus des nœuds du graphe (24/08/2026) : le
+ * glisser-connecter historique n'avait plus aucune cible à viser. Deux issues, toutes deux
+ * RÉELLES : rattacher à un réseau existant (POST /api/networks/:id/connect) ou en créer un
+ * (POST /api/networks, bridge par défaut) puis l'y rattacher dans la foulée.
  */
-function NetworkConnectPopover({ containerId, excludeNetworkIds, initialNetworkId, x, y, onClose }: NetworkConnectPopoverProps) {
+function NetworkConnectPopover({ containerId, excludeNetworkIds, x, y, onClose }: NetworkConnectPopoverProps) {
   const dispatch = useAppDispatch();
   const { ref, style } = useDismiss(onClose, x, y);
   const networks = useAppSelector((s) => s.networks.items);
-  const [networkId, setNetworkId] = useState(initialNetworkId ?? "");
+  const [networkId, setNetworkId] = useState("");
+  const [newName, setNewName] = useState("");
+  const [newDriver, setNewDriver] = useState("bridge");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1794,53 +1756,123 @@ function NetworkConnectPopover({ containerId, excludeNetworkIds, initialNetworkI
   }, [dispatch]);
 
   const options = networks.filter((n) => !excludeNetworkIds.has(n.id));
+  const selectedNetwork = options.find((n) => n.id === networkId);
+  const confirm = useConfirm();
+
+  async function handleRemoveUnused() {
+    if (!selectedNetwork) return;
+    const ok = await confirm({
+      title: "Supprimer ce réseau ?",
+      description: `Le réseau « ${selectedNetwork.name} » n'est utilisé par aucun conteneur. Cette suppression est définitive.`,
+      confirmLabel: "Supprimer",
+      cancelLabel: "Annuler",
+      variant: "danger",
+    });
+    if (!ok) return;
+    setBusy(true);
+    setError(null);
+    const result = await dispatch(removeNetwork({ id: selectedNetwork.id, name: selectedNetwork.name }));
+    setBusy(false);
+    if (removeNetwork.rejected.match(result)) {
+      setError(result.payload ?? "Suppression impossible.");
+      return;
+    }
+    setNetworkId("");
+  }
+  const creating = networkId === NEW_NETWORK_OPTION;
 
   useEffect(() => {
-    // Présélection absente des options (ex : déjà connecté entre-temps) : repli sur la première.
-    if ((!networkId || !options.some((n) => n.id === networkId)) && options.length > 0) setNetworkId(options[0]!.id);
+    // Sélection absente des options (ex : rattaché entre-temps) : repli sur la première, ou sur la
+    // création quand plus aucun réseau n'est disponible.
+    if (networkId === NEW_NETWORK_OPTION) return;
+    if (!networkId || !options.some((n) => n.id === networkId)) setNetworkId(options[0]?.id ?? NEW_NETWORK_OPTION);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [options.length]);
 
+  const trimmedNewName = newName.trim();
+  const canSubmit = creating ? trimmedNewName.length > 0 : networkId.length > 0;
+
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    if (!networkId) return;
+    if (!canSubmit) return;
     setBusy(true);
     setError(null);
-    const result = await dispatch(connectContainerToNetwork({ networkId, containerId }));
+    let targetId = networkId;
+    if (creating) {
+      const created = await dispatch(createNetwork({ name: trimmedNewName, driver: newDriver }));
+      if (!createNetwork.fulfilled.match(created)) {
+        setBusy(false);
+        setError(created.payload ?? "Échec de la création du réseau.");
+        return;
+      }
+      targetId = created.payload.id;
+    }
+    const result = await dispatch(connectContainerToNetwork({ networkId: targetId, containerId }));
     setBusy(false);
     if (connectContainerToNetwork.fulfilled.match(result)) {
       dispatch(fetchTopology());
       onClose();
     } else {
-      setError(result.payload ?? "Échec de la connexion au network.");
+      setError(result.payload ?? "Échec du rattachement au réseau.");
     }
   }
 
   return (
     <div className="graph-popover" style={style} ref={ref}>
-      <div className="graph-popover__title">Connecter à un network</div>
+      <div className="graph-popover__title">Connecter à un réseau</div>
       <form onSubmit={handleSubmit}>
-        {options.length === 0 ? (
-          <p className="graph-popover__error" style={{ color: "var(--color-text-faint)" }}>
-            Aucun network disponible à connecter (déjà tous connectés, ou aucun n'existe encore).
-          </p>
-        ) : (
-          <div className="field">
-            <label htmlFor="graph-network-connect-select">Network</label>
-            <select
-              id="graph-network-connect-select"
-              value={networkId}
-              onChange={(e) => setNetworkId(e.target.value)}
-              disabled={busy}
-              required
-            >
-              {options.map((n) => (
-                <option key={n.id} value={n.id}>
-                  {n.name} ({n.driver})
-                </option>
-              ))}
-            </select>
-          </div>
+        <div className="field">
+          <label htmlFor="graph-network-connect-select">Réseau</label>
+          <select
+            id="graph-network-connect-select"
+            value={networkId}
+            onChange={(e) => setNetworkId(e.target.value)}
+            disabled={busy}
+            required
+          >
+            {options.map((n) => (
+              <option key={n.id} value={n.id}>
+                {n.name} ({n.driver}){n.containerCount === 0 ? " — inutilisé" : ""}
+              </option>
+            ))}
+            <option value={NEW_NETWORK_OPTION}>Créer un réseau…</option>
+          </select>
+        </div>
+
+        {selectedNetwork?.containerCount === 0 && (
+          // Un réseau sans conteneur n'apparaît plus nulle part dans le graphe depuis que les
+          // réseaux sont des tiroirs : cette liste est le seul endroit d'où le supprimer.
+          <button type="button" className="btn btn-ghost btn-sm" onClick={handleRemoveUnused} disabled={busy}>
+            Supprimer « {selectedNetwork.name} », qui n'est utilisé par aucun conteneur
+          </button>
+        )}
+
+        {creating && (
+          <>
+            <div className="field">
+              <label htmlFor="graph-network-new-name">Nom du réseau</label>
+              <input
+                id="graph-network-new-name"
+                type="text"
+                autoFocus
+                placeholder="ex : quai-app-net"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                disabled={busy}
+                required
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="graph-network-new-driver">Driver</label>
+              <select id="graph-network-new-driver" value={newDriver} onChange={(e) => setNewDriver(e.target.value)} disabled={busy}>
+                {NETWORK_DRIVERS.map((d) => (
+                  <option key={d} value={d}>
+                    {d}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </>
         )}
 
         {error && <p className="graph-popover__error">{error}</p>}
@@ -1849,8 +1881,8 @@ function NetworkConnectPopover({ containerId, excludeNetworkIds, initialNetworkI
           <button type="button" className="btn btn-ghost btn-sm" onClick={onClose} disabled={busy}>
             Annuler
           </button>
-          <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !networkId || options.length === 0}>
-            {busy ? "…" : "Connecter"}
+          <button type="submit" className="btn btn-primary btn-sm" disabled={busy || !canSubmit}>
+            {busy ? "…" : creating ? "Créer et connecter" : "Connecter"}
           </button>
         </div>
       </form>
@@ -2501,7 +2533,7 @@ interface TopologyGraphProps {
 // handleNodeDragStop persiste déjà la position finale via PUT /api/topology/positions) — PAS le
 // mécanisme de connexion par Handle/port (handleConnect/classifyConnection) : la relation "hosts"/
 // "hosted-by" y est délibérément non-interactive (voir NODE_CONTRACT, topologyNodeContract.tsx)
-// car c'est une vérité SERVEUR, jamais une intention à glisser à la main comme un network. Détecter
+// car c'est une vérité SERVEUR, jamais une intention à glisser à la main comme un volume. Détecter
 // une "dépose sur un hôte" est donc un test géométrique simple sur les positions déjà connues du
 // canevas, pas un nouveau type de Handle.
 
@@ -2553,12 +2585,12 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const confirm = useConfirm();
   const [cleaningOrphans, setCleaningOrphans] = useState(false);
 
-  // Volumes/networks orphelins (voir TopologyNode#orphan, services/topology.ts) — vrais nœuds du
-  // graphe, jamais reliés par une arête (0 conteneur ne référence rien à connecter). Recalculé à
-  // chaque fetch pour alimenter le bouton flottant "Nettoyer les orphelins" ci-dessous.
+  // Volumes orphelins (voir TopologyNode#orphan, services/topology.ts) — vrais nœuds du graphe,
+  // jamais reliés par une arête (0 conteneur ne monte rien à relier). Recalculé à chaque fetch pour
+  // alimenter le bouton flottant "Nettoyer les orphelins" ci-dessous. Plus de réseau orphelin
+  // depuis le 24/08/2026 : un réseau sans nœud rattaché n'apparaît plus du tout dans le graphe.
   const orphanVolumeNodes = useMemo(() => (data?.nodes ?? []).filter((n) => n.kind === "volume" && n.orphan), [data]);
-  const orphanNetworkNodes = useMemo(() => (data?.nodes ?? []).filter((n) => n.kind === "network" && n.orphan), [data]);
-  const orphanCount = orphanVolumeNodes.length + orphanNetworkNodes.length;
+  const orphanCount = orphanVolumeNodes.length;
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [canvasMenu, setCanvasMenu] = useState<{ x: number; y: number } | null>(null);
@@ -2570,7 +2602,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [renamePopover, setRenamePopover] = useState<{ containerId: string; initialName: string; x: number; y: number } | null>(
     null,
   );
-  // Menu contextuel d'une "brique" (volume/network monté par un seul conteneur, voir
+  // Menu contextuel d'un "tiroir" (volume dédié ou réseau rattaché, voir
   // TopologyNode#attachments et GraphNode dans topologyGraphShared.tsx) — clic droit sur une
   // brique plutôt que sur un nœud/une arête, distinct de `nodeMenu`/`edgeMenu` (une brique n'est
   // ni l'un ni l'autre : pas de nœud top-level, pas d'arête, voir services/topology.ts).
@@ -2580,15 +2612,14 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     containerNodeId: string;
     attachment: TopologyNodeAttachment;
   } | null>(null);
-  // Popover "Connecter à un network…" (menu contextuel d'un conteneur, ou fil conteneur -> network
-  // avec `initialNetworkId` pré-rempli) — voir NetworkConnectPopover ci-dessus : chemin de connexion
-  // qui fonctionne même quand le network visé est une brique (donc sans nœud à glisser-déposer dessus).
-  const [networkConnectPopover, setNetworkConnectPopover] = useState<{
-    containerId: string;
-    initialNetworkId?: string;
-    x: number;
-    y: number;
-  } | null>(null);
+  // Popover "Connecter à un réseau…" (bouton ＋ ou menu contextuel d'un conteneur) — voir
+  // NetworkConnectPopover ci-dessus : SEUL chemin de rattachement depuis que les réseaux ne sont
+  // plus des nœuds du graphe (plus rien à viser au glisser-déposer).
+  const [networkConnectPopover, setNetworkConnectPopover] = useState<{ containerId: string; x: number; y: number } | null>(null);
+  // Réseau actuellement survolé sur un tiroir (voir GraphNodeCallbacks#onAttachmentHover) — son
+  // `networkId` met en évidence TOUS les nœuds qui y sont réellement rattachés, ce que montrait
+  // d'un coup d'œil l'ancien nœud réseau. `null` dès que le pointeur quitte le tiroir.
+  const [hoveredNetworkId, setHoveredNetworkId] = useState<string | null>(null);
   // Popover de montage (voir MountVolumePopover : deux cibles, volume existant ou volume neuf).
   const [mountVolumePopover, setMountVolumePopover] = useState<{ target: MountPopoverTarget; x: number; y: number } | null>(null);
   // Picker "Attacher" (bouton ＋ au survol d'une carte conteneur, ou entrée du clic droit).
@@ -2862,11 +2893,19 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
             setAttachPicker({ x: rect.left, y: rect.bottom + 6, node: n });
           };
           const rawActionId = idWithoutPrefix(n.id);
+          // Callbacks des tiroirs (volumes dédiés + réseaux) — posés sur tout nœud qui en porte
+          // réellement (conteneur ET VM Nutanix depuis le 24/08/2026).
+          const attachmentCallbacks: GraphNodeCallbacks = n.attachments?.length
+            ? {
+                onOpenAttachment: (attachment) => handleOpenAttachment(n, attachment),
+                onAttachmentContextMenu: (event, attachment) => handleAttachmentContextMenu(event, n.id, attachment),
+                onAttachmentHover: (attachment) => setHoveredNetworkId(attachment?.networkId ?? null),
+              }
+            : {};
           const callbacks: GraphNodeCallbacks =
             n.kind === "container"
               ? {
-                  onOpenAttachment: (attachment) => handleOpenAttachment(attachment),
-                  onAttachmentContextMenu: (event, attachment) => handleAttachmentContextMenu(event, n.id, attachment),
+                  ...attachmentCallbacks,
                   // Bouton ＋ + actions rapides (operator+ uniquement — non injecté = non rendu).
                   ...(operate
                     ? {
@@ -2879,15 +2918,25 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
                       }
                     : {}),
                 }
-              : n.kind === "nutanix-vm" && operate
+              : n.kind === "nutanix-vm"
                 ? {
-                    onOpenAttachPicker: openAttachPicker,
-                    onQuickAction: (action: QuickLifecycleAction) => void handleNutanixVmAction(rawActionId, n.label, action),
-                    actionPending:
-                      nutanixActionPendingUuid === rawActionId ||
-                      convergenceStillPending(nutanixConvergence[rawActionId], n.status),
+                    ...attachmentCallbacks,
+                    ...(operate
+                      ? {
+                          onOpenAttachPicker: openAttachPicker,
+                          onQuickAction: (action: QuickLifecycleAction) => void handleNutanixVmAction(rawActionId, n.label, action),
+                          actionPending:
+                            nutanixActionPendingUuid === rawActionId ||
+                            convergenceStillPending(nutanixConvergence[rawActionId], n.status),
+                        }
+                      : {}),
                   }
                 : {};
+          // Mise en évidence "même réseau que le tiroir survolé" — compense la disparition du nœud
+          // réseau (qui montrait d'un coup d'œil qui le partageait). Comparaison sur le `networkId`
+          // RÉEL porté par l'attachment : jamais un rapprochement par nom.
+          const networkHighlight =
+            !!hoveredNetworkId && (n.attachments ?? []).some((a) => a.kind === "network" && a.networkId === hoveredNetworkId);
           // Chips "appliance repliée" d'un nœud template (voir templatesById) — absentes tant que
           // la liste de templates n'est pas chargée, jamais un compte inventé.
           const template = n.kind === "image-template" ? templatesById.get(rawActionId) : undefined;
@@ -2910,6 +2959,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
               ...n,
               ...callbacks,
               ...templateMeta,
+              ...(networkHighlight ? { networkHighlight: true } : {}),
               ...(serviceModuleBindings.get(n.id) ? { serviceModule: serviceModuleBindings.get(n.id)! } : {}),
               deletePending:
                 deletingIds.has(n.id) || nutanixDeletePendingUuid === rawActionId || containerDeletePendingId === rawActionId,
@@ -2967,6 +3017,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     nutanixDeletePendingUuid,
     containerDeletePendingId,
     serviceModuleBindings,
+    // Survol d'un tiroir réseau : seuls les nœuds du MÊME réseau changent réellement de rendu
+    // (graphNodePropsEqual#networkHighlight borne le re-render aux cartes concernées).
+    hoveredNetworkId,
   ]);
 
   /**
@@ -3095,7 +3148,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
    * (voir deriveGroupPorts, topologyGraphShared.tsx) — une arête ENTIÈREMENT interne au groupe
    * (les deux bouts sont membres) est masquée (rien à connecter au monde extérieur). `sourceHandle`/
    * `targetHandle` fixés explicitement au nom de la capacité côté groupe : un groupe peut porter
-   * plusieurs handles du même type (ex: "network" ET "provide", tous deux source/Right), React Flow
+   * plusieurs handles du même type (ex: "provide" ET "hosts", tous deux source/Right), React Flow
    * ne peut alors plus deviner tout seul lequel utiliser.
    *
    * Groupes imbriqués (13/08/2026) : `resolveVisibleGroupTarget` (ci-dessus) remonte RÉCURSIVEMENT
@@ -3120,13 +3173,12 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         continue;
       }
       // Capacité du côté groupe = EXACTEMENT la même règle que deriveGroupPorts (topologyGraphShared.tsx)
-      // — mount: target->"volume-mount", source->"provide" ; network: source->"network",
-      // target->"attach" ; hosts: target->"hosted-by" (jamais de port côté source, voir
-      // deriveGroupPorts). Un "automation-flow" redirigé vers un groupe (cas rare, non supporté
-      // dans ce premier lot) retomberait sur "network"/"attach" par défaut plutôt que de planter —
-      // pas un vrai port existant sur le groupe, React Flow masque alors simplement l'arête.
-      const sourceHandle = e.kind === "mount" ? "provide" : "network";
-      const targetHandle = e.kind === "mount" ? "volume-mount" : e.kind === "hosts" ? "hosted-by" : "attach";
+      // — mount: source->"provide", target->"volume-mount" ; hosts: target->"hosted-by" (jamais de
+      // port côté source, voir deriveGroupPorts). Tout autre kind redirigé vers un groupe (cas rare,
+      // non supporté dans ce premier lot) retombe sur ces mêmes ids plutôt que de planter — pas un
+      // vrai port existant sur le groupe, React Flow masque alors simplement l'arête.
+      const sourceHandle = "provide";
+      const targetHandle = e.kind === "hosts" ? "hosted-by" : "volume-mount";
       result.push({
         ...e,
         id: `${e.id}__grouped`,
@@ -3316,10 +3368,6 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         x,
         y,
       }),
-    // source = conteneur (network), target = network (attach) : même POST réel que l'action de menu
-    // "container-connect-network" (connectContainerToNetwork), network présélectionné.
-    "connect-container-to-network": (containerNode, networkNode, x, y) =>
-      setNetworkConnectPopover({ containerId: idWithoutPrefix(containerNode.id), initialNetworkId: idWithoutPrefix(networkNode.id), x, y }),
   };
 
   /** Fin du geste de connexion — seule étape qui connaît la position du pointeur : joue l'action
@@ -3442,28 +3490,16 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     if (removeVolume.fulfilled.match(result)) dispatch(fetchTopology());
   }
 
-  async function handleRemoveNetwork(id: string, name: string) {
-    const ok = await confirm({
-      title: "Supprimer le network",
-      description: `Confirmer la suppression du network "${name}" ?`,
-      confirmLabel: "Supprimer",
-      variant: "danger",
-    });
-    if (!ok) return;
-    const result = await dispatch(removeNetwork({ id, name }));
-    if (removeNetwork.fulfilled.match(result)) dispatch(fetchTopology());
-  }
-
-  /** Bouton flottant "Nettoyer les orphelins" (voir orphanVolumeNodes/orphanNetworkNodes ci-dessus)
-   * — supprime EN UNE FOIS tous les volumes/networks à 0 conteneur actuellement affichés comme
-   * nœuds atténués sur le graphe. Séquentiel plutôt que Promise.all : chaque suppression Docker
-   * réelle, pas besoin de paralléliser une poignée d'appels, et un échec isolé (ressource déjà
-   * supprimée entre-temps, verrou Docker...) ne doit pas interrompre les suivants. */
+  /** Bouton flottant "Nettoyer les orphelins" (voir orphanVolumeNodes ci-dessus) — supprime EN UNE
+   * FOIS tous les volumes à 0 conteneur actuellement affichés comme nœuds atténués sur le graphe.
+   * Séquentiel plutôt que Promise.all : chaque suppression Docker réelle, pas besoin de
+   * paralléliser une poignée d'appels, et un échec isolé (ressource déjà supprimée entre-temps,
+   * verrou Docker...) ne doit pas interrompre les suivants. */
   async function handleCleanOrphans() {
     if (orphanCount === 0) return;
     const ok = await confirm({
-      title: "Nettoyer les ressources orphelines",
-      description: `Confirmer la suppression de ${orphanVolumeNodes.length} volume(s) et ${orphanNetworkNodes.length} network(s) non utilisés par aucun conteneur ? Les données des volumes seront définitivement perdues. Cette action est irréversible.`,
+      title: "Nettoyer les volumes orphelins",
+      description: `Confirmer la suppression de ${orphanVolumeNodes.length} volume(s) monté(s) par aucun conteneur ? Les données qu'ils contiennent seront définitivement perdues. Cette action est irréversible.`,
       confirmLabel: `Nettoyer (${orphanCount})`,
       variant: "danger",
     });
@@ -3473,10 +3509,6 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     for (const node of orphanVolumeNodes) {
       const result = await dispatch(removeVolume({ name: idWithoutPrefix(node.id), silent: true }));
       if (!removeVolume.fulfilled.match(result)) failures++;
-    }
-    for (const node of orphanNetworkNodes) {
-      const result = await dispatch(removeNetwork({ id: idWithoutPrefix(node.id), name: node.label, silent: true }));
-      if (!removeNetwork.fulfilled.match(result)) failures++;
     }
     setCleaningOrphans(false);
     dispatch(fetchTopology());
@@ -3491,24 +3523,10 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     );
   }
 
-  async function handleDisconnectEdge(source: string, target: string) {
-    const containerId = idWithoutPrefix(source);
-    const networkId = idWithoutPrefix(target);
-    const ok = await confirm({
-      title: "Déconnecter du network",
-      description: "Le conteneur sera détaché de ce network.",
-      confirmLabel: "Déconnecter",
-      variant: "danger",
-    });
-    if (!ok) return;
-    const result = await dispatch(disconnectContainerFromNetwork({ networkId, containerId }));
-    if (disconnectContainerFromNetwork.fulfilled.match(result)) dispatch(fetchTopology());
-  }
-
   /** Menu contextuel d'une arête "automation-flow" (voir edgeMenu ci-dessus) — DELETE
    * /api/automation/edges/:id réel (automationSlice.ts), id BRUT extrait de l'id préfixé du graphe
    * (`automation-flow:<uuid>`, voir services/topology.ts#getAutomationNodes), même garde
-   * `useConfirm` que handleDisconnectEdge ci-dessus. */
+   * `useConfirm` que les autres actions destructrices de ce fichier. */
   async function handleDisconnectAutomationEdge(edgeId: string) {
     const ok = await confirm({
       title: "Déconnecter",
@@ -3550,27 +3568,37 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     await handleContainerAction(idWithoutPrefix(node.id), node.label, "restart");
   }
 
-  /** Clic sur une brique (volume/network monté par un seul conteneur, voir GraphNode) -> ouvre le
-   * MÊME panneau de détail qu'un vrai nœud, avec un TopologyNode synthétique reconstruit depuis
-   * l'attachment (le panneau va chercher lui-même le détail complet réel via GET /api/volumes ou
-   * GET /api/networks, il n'a besoin que de id/kind pour ça). */
-  function handleOpenAttachment(attachment: TopologyNodeAttachment) {
-    openNodeDetail(attachmentToTopologyNode(attachment));
+  /** Clic sur un tiroir (voir GraphNode) : un VOLUME dédié ouvre le MÊME panneau de détail qu'un
+   * vrai nœud volume (TopologyNode synthétique — le panneau va chercher le détail complet réel via
+   * GET /api/volumes) ; un RÉSEAU n'a plus de kind de nœud, son détail s'ouvre donc sur le nœud
+   * PORTEUR, onglet "Réseau" (qui liste ses réseaux réels avec leur IP). */
+  function handleOpenAttachment(ownerNode: TopologyNode, attachment: TopologyNodeAttachment) {
+    if (attachment.kind !== "network") {
+      openNodeDetail(attachmentToTopologyNode(attachment));
+      return;
+    }
+    // L'onglet "Réseau" n'existe que pour un conteneur (voir tabsForNode) — une VM Nutanix ouvre
+    // son aperçu, qui liste déjà ses cartes réseau réelles.
+    openNodeDetail(ownerNode, ownerNode.kind === "container" ? "network" : undefined);
   }
 
   function handleAttachmentContextMenu(event: React.MouseEvent, containerNodeId: string, attachment: TopologyNodeAttachment) {
     setAttachmentMenu({ x: event.clientX, y: event.clientY, containerNodeId, attachment });
   }
 
-  function attachmentMenuItems(containerNodeId: string, attachment: TopologyNodeAttachment): ContextMenuItem[] {
-    const items: ContextMenuItem[] = [{ label: "Voir le détail", onClick: () => handleOpenAttachment(attachment) }];
-    // Un volume ne peut pas être détaché sans recréer le conteneur (identique à .edgeMenu "mount"
-    // ci-dessous) — seule la déconnexion d'un network briqué a un sens réel ici.
-    if (operate && attachment.kind === "network") {
+  function attachmentMenuItems(ownerNodeId: string, attachment: TopologyNodeAttachment): ContextMenuItem[] {
+    const ownerNode = data?.nodes.find((n) => n.id === ownerNodeId);
+    const items: ContextMenuItem[] = ownerNode
+      ? [{ label: "Voir le détail", onClick: () => handleOpenAttachment(ownerNode, attachment) }]
+      : [];
+    // Un volume ne peut pas être détaché sans recréer le conteneur (identique au menu d'arête
+    // "mount") ; une carte réseau Nutanix ne se retire pas depuis QUAI (aucune route). Seul le
+    // détachement d'un réseau DOCKER a un chemin réel (POST /api/networks/:id/disconnect).
+    if (operate && attachment.kind === "network" && ownerNode?.kind === "container") {
       items.push({
-        label: "Déconnecter du network",
+        label: "Déconnecter du réseau",
         danger: true,
-        onClick: () => handleDisconnectAttachment(containerNodeId, attachment),
+        onClick: () => handleDisconnectAttachment(ownerNodeId, attachment),
       });
     }
     return items;
@@ -3578,10 +3606,10 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
 
   async function handleDisconnectAttachment(containerNodeId: string, attachment: TopologyNodeAttachment) {
     const containerId = idWithoutPrefix(containerNodeId);
-    const networkId = idWithoutPrefix(attachment.id);
+    const networkId = attachment.networkId ?? idWithoutPrefix(attachment.id);
     const ok = await confirm({
-      title: "Déconnecter du network",
-      description: `Le conteneur sera détaché du network "${attachment.label}".`,
+      title: "Déconnecter du réseau",
+      description: `Le conteneur sera détaché du réseau "${attachment.label}".`,
       confirmLabel: "Déconnecter",
       variant: "danger",
     });
@@ -3590,21 +3618,17 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     if (disconnectContainerFromNetwork.fulfilled.match(result)) dispatch(fetchTopology());
   }
 
-  /** Ids Docker bruts (pas "network:<id>") de TOUS les networks déjà connectés au conteneur
-   * `containerNodeId` — partagés/par défaut (vrais nœuds, via les arêtes) ET briqués (via
-   * node.attachments) — pour ne pas les reproposer dans NetworkConnectPopover. Ensemble vide si le
-   * nœud n'existe plus (course avec un rafraîchissement entre l'ouverture du menu et son usage). */
+  /** Ids Docker bruts des réseaux déjà rattachés au conteneur `containerNodeId` (tous portés par
+   * node.attachments depuis le 24/08/2026) — pour ne pas les reproposer dans
+   * NetworkConnectPopover. Ensemble vide si le nœud n'existe plus (course avec un rafraîchissement
+   * entre l'ouverture du menu et son usage). */
   function connectedNetworkIds(containerNodeId: string): Set<string> {
     const ids = new Set<string>();
     const node = data?.nodes.find((n) => n.id === containerNodeId);
     if (!node) return ids;
-    for (const a of node.attachments ?? []) if (a.kind === "network") ids.add(idWithoutPrefix(a.id));
-    if (data) {
-      for (const e of data.edges) {
-        if (e.kind !== "network") continue;
-        if (e.source === node.id) ids.add(idWithoutPrefix(e.target));
-        else if (e.target === node.id) ids.add(idWithoutPrefix(e.source));
-      }
+    for (const a of node.attachments ?? []) {
+      if (a.kind !== "network") continue;
+      ids.add(a.networkId ?? idWithoutPrefix(a.id));
     }
     return ids;
   }
@@ -3723,7 +3747,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
 
   /** Menu contextuel d'un nœud d'automatisation (voir nodeMenuItems ci-dessous) — DELETE
    * /api/automation/nodes/:id réel (automationSlice.ts), avec confirmation `useConfirm` comme les
-   * autres kinds (handleRemoveVolume/handleRemoveNetwork ci-dessus). Supprime aussi côté serveur
+   * autres kinds (handleRemoveVolume ci-dessus). Supprime aussi côté serveur
    * toute arête qui touchait ce nœud (services/automationStore.ts#deleteAutomationNode) — un
    * rafraîchissement de la topologie suffit donc à refléter l'état complet. */
   async function handleDeleteAutomationNode(node: TopologyNode) {
@@ -3804,9 +3828,8 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       "container-start": () => void handleContainerAction(id, node.label, "start"),
       "container-restart": () => void handleContainerAction(id, node.label, "restart"),
       "container-rename": () => setRenamePopover({ containerId: id, initialName: node.label, x, y }),
-      // Depuis les "briques" (voir GraphNode/services/topology.ts), un network mono-conteneur
-      // n'est plus un nœud du graphe à viser au glisser-déposer — cette action couvre ce cas (et
-      // reste disponible aussi pour un network resté un vrai nœud, résultat identique).
+      // Un réseau n'étant plus un nœud du graphe, c'est ici (et au ＋ de la carte) que se
+      // rattache/se crée un réseau — le glisser-déposer n'a plus de cible.
       "container-connect-network": () => setNetworkConnectPopover({ containerId: id, x, y }),
       "container-remove": () => void withDeleteAnimation(node.id, () => handleContainerAction(id, node.label, "remove")),
       "nutanix-vm-stop": () => void handleNutanixVmAction(id, node.label, "stop"),
@@ -3818,7 +3841,6 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       "nutanix-vm-edit-compute": () => setNutanixComputePopover({ node, x, y }),
       "volume-mount-on-container": () => setMountVolumePopover({ target: { kind: "existing-volume", volumeName: id }, x, y }),
       "volume-remove": () => void withDeleteAnimation(node.id, () => handleRemoveVolume(id)),
-      "network-remove": () => void withDeleteAnimation(node.id, () => handleRemoveNetwork(id, node.label)),
       "automation-node-remove": () => void withDeleteAnimation(node.id, () => handleDeleteAutomationNode(node)),
       "container-attach": () => setAttachPicker({ x, y, node }),
       "host-add-environment": () => setRemoteEnvModalOpen(true),
@@ -4026,8 +4048,8 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         </div>
       )}
 
-      {/* Bouton flottant "Nettoyer les orphelins" (voir orphanVolumeNodes/orphanNetworkNodes —
-          services/topology.ts § "Volumes/networks ORPHELINS") — coin bas-GAUCHE du canevas,
+      {/* Bouton flottant "Nettoyer les orphelins" (voir orphanVolumeNodes —
+          services/topology.ts § "Volumes ORPHELINS") — coin bas-GAUCHE du canevas,
           PERMANENT (retour utilisateur du 13/08/2026 : découvrabilité, plutôt que masqué tant qu'il
           n'y a rien à nettoyer) mais désactivé si `orphanCount === 0` (handleCleanOrphans refuse de
           toute façon toute action à 0, voir sa garde ci-dessus — le bouton reflète honnêtement cet
@@ -4043,8 +4065,8 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
             onClick={handleCleanOrphans}
             title={
               orphanCount === 0
-                ? "Aucun volume/network orphelin à supprimer pour l'instant"
-                : "Supprimer tous les volumes/networks non utilisés par aucun conteneur"
+                ? "Aucun volume orphelin à supprimer pour l'instant"
+                : "Supprimer tous les volumes montés par aucun conteneur"
             }
           >
             <IconTrash />
@@ -4139,11 +4161,9 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           y={edgeMenu.y}
           onClose={() => setEdgeMenu(null)}
           items={
-            edgeMenu.kind === "network"
-              ? [{ label: "Déconnecter du network", danger: true, onClick: () => handleDisconnectEdge(edgeMenu.source, edgeMenu.target) }]
-              : edgeMenu.kind === "automation-flow"
-                ? [{ label: "Déconnecter", danger: true, onClick: () => void handleDisconnectAutomationEdge(edgeMenu.id) }]
-                : [{ label: "Détachement impossible sans recréer le conteneur", onClick: () => {}, disabled: true }]
+            edgeMenu.kind === "automation-flow"
+              ? [{ label: "Déconnecter", danger: true, onClick: () => void handleDisconnectAutomationEdge(edgeMenu.id) }]
+              : [{ label: "Détachement impossible sans recréer le conteneur", onClick: () => {}, disabled: true }]
           }
         />
       )}
@@ -4199,7 +4219,6 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         <NetworkConnectPopover
           containerId={networkConnectPopover.containerId}
           excludeNetworkIds={connectedNetworkIds(`container:${networkConnectPopover.containerId}`)}
-          {...(networkConnectPopover.initialNetworkId ? { initialNetworkId: networkConnectPopover.initialNetworkId } : {})}
           x={networkConnectPopover.x}
           y={networkConnectPopover.y}
           onClose={() => setNetworkConnectPopover(null)}
@@ -4216,10 +4235,10 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         />
       )}
 
-      {/* Picker du bouton ＋ (ou "Attacher…"/entrées matérielles du menu) — CONTEXTUEL par kind
-          (18/08/2026) : conteneur -> Stockage/Variable (flux par recréation, les variables SONT
-          les secrets de la plateforme) ; VM Nutanix -> Disque/Carte réseau/vCPU-Mémoire (mêmes
-          entrées que le menu "Update VM" de Prism, backend réel routes/nutanix.ts). */}
+      {/* Picker du bouton ＋ (ou "Attacher…"/entrées matérielles du menu) — CONTEXTUEL par kind :
+          conteneur -> Stockage/Réseau bridge/Variable ; VM Nutanix -> Disque/Carte réseau/
+          vCPU-Mémoire (mêmes entrées que le menu "Update VM" de Prism, backend réel
+          routes/nutanix.ts, inchangé le 24/08/2026). */}
       {attachPicker && (
         <ContextMenu
           x={attachPicker.x}
@@ -4250,6 +4269,18 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
                     icon: IconVolumes,
                     onClick: () =>
                       setMountVolumePopover({ target: { kind: "new-volume", containerNode: attachPicker.node }, x: attachPicker.x, y: attachPicker.y }),
+                  },
+                  {
+                    // Rattache à un réseau bridge existant OU en crée un (voir NetworkConnectPopover)
+                    // — remplace le glisser-déposer vers un nœud réseau, disparu le 24/08/2026.
+                    label: "Réseau (bridge)…",
+                    icon: IconNetworks,
+                    onClick: () =>
+                      setNetworkConnectPopover({
+                        containerId: idWithoutPrefix(attachPicker.node.id),
+                        x: attachPicker.x,
+                        y: attachPicker.y,
+                      }),
                   },
                   {
                     label: "Variable d'environnement…",

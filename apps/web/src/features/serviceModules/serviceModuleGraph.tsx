@@ -174,7 +174,7 @@ export function buildServiceModuleGraph(
       target: relation.target,
       sourceHandle: "out",
       targetHandle: "in",
-      type: "networkEdge",
+      type: "linkEdge",
       // Tirets qui défilent pour un flux VIVANT (appel en cours) — coupés sous prefers-reduced-motion.
       animated: relation.state === "active" && !options.reducedMotion,
       className: "topology-edge topology-edge--module",
