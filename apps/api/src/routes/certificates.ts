@@ -13,24 +13,40 @@
  * POST   /api/certificates/issue      — émet/réémet pour un sujet donné (operator|admin).
  * DELETE /api/certificates/:subject   — oublie un certificat (operator|admin).
  *
- * Aucune de ces routes ne renvoie de clé privée ni d'identifiant, y compris dans un message
+ * Aucune de ces routes ne renvoie de mot de passe ni de clé privée, y compris dans un message
  * d'erreur (voir services/certificates.ts#scrubSecrets).
+ *
+ * Compte présenté à l'autorité : identifiants dédiés s'ils sont renseignés, sinon le compte de
+ * l'annuaire LDAP (voir services/certificates.ts#resolveEnrollmentAccount).
+ *
+ * Traçabilité : POST /issue et DELETE /:subject sont mutants, donc journalisés automatiquement
+ * avec leur demandeur par plugins/audit.ts — rien à câbler ici. Le renouvellement automatique
+ * (certificatesReconciler.ts) ne passe par aucune requête : il reste une action système, sans
+ * utilisateur inventé.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
+  CertificateAccountError,
   CertificateEnrollmentError,
   CertificatesNotConfiguredError,
+  describeEnrollmentAccount,
   forgetCertificate,
   testCertificatesConnection,
 } from "../services/certificates.js";
+import type { EnrollmentAccountView } from "../services/certificates.js";
 import { certificatesOverview, renewSubjectNow } from "../services/certificatesReconciler.js";
 import {
   clearCertificatesConfig,
+  effectiveAccountSource,
   getEffectiveCertificatesConfig,
   setCertificatesConfig,
 } from "../services/setupStore.js";
-import type { CertificateEnrollmentMethod, SetupCertificatesConfig } from "../services/setupStore.js";
+import type {
+  CertificateAccountSource,
+  CertificateEnrollmentMethod,
+  SetupCertificatesConfig,
+} from "../services/setupStore.js";
 
 /** Même garde locale admin que routes/hycu.ts#rejectIfNotAdmin — les identifiants configurés ici
  * permettent d'émettre des certificats au nom de la mairie. */
@@ -47,7 +63,11 @@ interface PublicCertificatesConfig {
   caUrl: string;
   method: CertificateEnrollmentMethod;
   template: string;
-  username: string;
+  accountSource: CertificateAccountSource;
+  /** Compte dédié : son identifiant. Compte de l'annuaire : la surcharge saisie, sinon absent. */
+  username?: string;
+  /** Compte réellement présenté à l'autorité, dérivation comprise — jamais de mot de passe. */
+  account?: EnrollmentAccountView;
   renewBeforeDays?: number;
   keySize?: number;
   autoEnroll: boolean;
@@ -59,12 +79,14 @@ interface CertificatesConfigStatus {
   config?: PublicCertificatesConfig;
 }
 
-function toPublicConfig(cfg: SetupCertificatesConfig): PublicCertificatesConfig {
+async function toPublicConfig(cfg: SetupCertificatesConfig): Promise<PublicCertificatesConfig> {
   return {
     caUrl: cfg.caUrl,
     method: cfg.method ?? "certsrv",
     template: cfg.template,
-    username: cfg.username,
+    accountSource: effectiveAccountSource(cfg),
+    ...(cfg.username ? { username: cfg.username } : {}),
+    account: await describeEnrollmentAccount(cfg),
     ...(cfg.renewBeforeDays !== undefined ? { renewBeforeDays: cfg.renewBeforeDays } : {}),
     ...(cfg.keySize !== undefined ? { keySize: cfg.keySize } : {}),
     autoEnroll: cfg.autoEnroll ?? true,
@@ -76,6 +98,7 @@ interface CertificatesConfigBody {
   caUrl?: string;
   method?: string;
   template?: string;
+  accountSource?: string;
   username?: string;
   password?: string;
   renewBeforeDays?: number;
@@ -84,15 +107,29 @@ interface CertificatesConfigBody {
   tlsRejectUnauthorized?: boolean;
 }
 
+/** Mode explicite s'il est envoyé ; sinon un identifiant seul reste un compte dédié (compat). */
+function accountSourceFrom(body: CertificatesConfigBody, existing: SetupCertificatesConfig | null): CertificateAccountSource {
+  if (body.accountSource === "directory" || body.accountSource === "dedicated") return body.accountSource;
+  if (body.username?.trim()) return "dedicated";
+  return existing ? effectiveAccountSource(existing) : "directory";
+}
+
 /** Construit une config candidate depuis le corps de requête, en conservant le mot de passe déjà
  * enregistré si le champ est vide (même convention que PUT /api/hycu/config). */
 function candidateFrom(body: CertificatesConfigBody, existing: SetupCertificatesConfig | null): SetupCertificatesConfig {
+  const accountSource = accountSourceFrom(body, existing);
+  const keepExistingSecret = existing !== null && effectiveAccountSource(existing) === "dedicated";
+  const username = body.username?.trim() ?? existing?.username ?? "";
   return {
     caUrl: body.caUrl?.trim() ?? existing?.caUrl ?? "",
     method: "certsrv",
     template: body.template?.trim() ?? existing?.template ?? "",
-    username: body.username?.trim() ?? existing?.username ?? "",
-    password: body.password?.trim() || existing?.password || "",
+    accountSource,
+    ...(username ? { username } : {}),
+    // Aucun mot de passe n'est conservé ni accepté pour le compte de l'annuaire : c'est bindPassword.
+    ...(accountSource === "dedicated"
+      ? { password: body.password?.trim() || (keepExistingSecret ? (existing?.password ?? "") : "") }
+      : {}),
     ...(body.renewBeforeDays !== undefined
       ? { renewBeforeDays: body.renewBeforeDays }
       : existing?.renewBeforeDays !== undefined
@@ -112,14 +149,18 @@ function missingFields(candidate: SetupCertificatesConfig): string[] {
   const missing: string[] = [];
   if (!candidate.caUrl) missing.push("caUrl");
   if (!candidate.template) missing.push("template");
-  if (!candidate.username) missing.push("username");
-  if (!candidate.password) missing.push("password");
+  // Compte de l'annuaire : identifiant et mot de passe viennent du LDAP, rien n'est requis ici.
+  if (effectiveAccountSource(candidate) === "dedicated") {
+    if (!candidate.username) missing.push("username");
+    if (!candidate.password) missing.push("password");
+  }
   return missing;
 }
 
 /** Traduit une erreur du service en réponse HTTP — jamais de 500 opaque, jamais de secret. */
 function replyForEnrollmentError(reply: FastifyReply, err: unknown): FastifyReply {
-  if (err instanceof CertificatesNotConfiguredError) {
+  if (err instanceof CertificatesNotConfiguredError || err instanceof CertificateAccountError) {
+    // Problème de configuration, pas d'échec de l'autorité : 400, pas 502.
     return reply.code(400).send({ error: err.message });
   }
   if (err instanceof CertificateEnrollmentError) {
@@ -136,7 +177,7 @@ export default async function certificatesRoutes(fastify: FastifyInstance): Prom
   fastify.get("/api/certificates/config", async (_request, reply) => {
     const current = await getEffectiveCertificatesConfig();
     const status: CertificatesConfigStatus = current
-      ? { configured: true, config: toPublicConfig(current) }
+      ? { configured: true, config: await toPublicConfig(current) }
       : { configured: false };
     return reply.send(status);
   });
@@ -151,14 +192,16 @@ export default async function certificatesRoutes(fastify: FastifyInstance): Prom
       return reply.code(400).send({ error: `Champs requis manquants : ${missing.join(", ")}` });
     }
 
-    // Teste réellement l'autorité avant d'enregistrer — jamais persisté à l'aveugle.
+    // Teste réellement l'autorité avant d'enregistrer — jamais persisté à l'aveugle. `account`
+    // accompagne l'échec pour que l'interface sache quel compte a été essayé, et pourquoi.
     const test = await testCertificatesConnection(candidate);
     if (!test.ok) {
-      return reply.code(400).send({ error: test.message });
+      return reply.code(400).send({ error: test.message, ...(test.account ? { account: test.account } : {}) });
     }
 
+    // `saved.certificates` porte le mot de passe CHIFFRÉ : toPublicConfig ne le renvoie jamais.
     const saved = await setCertificatesConfig(candidate);
-    return reply.send({ configured: true, config: toPublicConfig(saved.certificates!) } satisfies CertificatesConfigStatus);
+    return reply.send({ configured: true, config: await toPublicConfig(saved.certificates!) } satisfies CertificatesConfigStatus);
   });
 
   fastify.post<{ Body: CertificatesConfigBody }>("/api/certificates/config/test", async (request, reply) => {

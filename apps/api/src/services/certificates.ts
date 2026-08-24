@@ -6,6 +6,9 @@
  *
  * La clé privée est générée ICI, ne quitte jamais le process autrement que chiffrée sur disque
  * (AES-256-GCM, crypto.ts) et n'est JAMAIS journalisée ni renvoyée par une route.
+ *
+ * Compte présenté à l'autorité — ordre de résolution : identifiants dédiés s'ils sont renseignés,
+ * sinon le compte de l'annuaire LDAP (voir resolveEnrollmentAccount plus bas).
  */
 
 import { generateKeyPairSync, sign, X509Certificate, type KeyObject } from "node:crypto";
@@ -16,8 +19,8 @@ import path from "node:path";
 import { URL } from "node:url";
 import { config } from "../config.js";
 import { decryptSecret, encryptSecretIfNeeded } from "./crypto.js";
-import { getEffectiveCertificatesConfig } from "./setupStore.js";
-import type { SetupCertificatesConfig } from "./setupStore.js";
+import { effectiveAccountSource, getEffectiveCertificatesConfig, getEffectiveLdapConfig } from "./setupStore.js";
+import type { CertificateAccountSource, SetupCertificatesConfig } from "./setupStore.js";
 import { writeFileRestricted } from "../utils/secureFile.js";
 
 /** L'intégration AD CS n'a jamais été configurée : rien à émettre, jamais une erreur "réseau". */
@@ -25,6 +28,9 @@ export class CertificatesNotConfiguredError extends Error {}
 
 /** L'autorité a refusé, mis en attente, ou est injoignable — message déjà expurgé de tout secret. */
 export class CertificateEnrollmentError extends Error {}
+
+/** Aucun compte présentable à `certsrv` : erreur de CONFIGURATION, aucun appel réseau n'est tenté. */
+export class CertificateAccountError extends Error {}
 
 // ---------------------------------------------------------------------------------------
 // Encodage DER minimal + génération de CSR PKCS#10 (RFC 2986) en pur Node.
@@ -226,14 +232,213 @@ function tlsRejectUnauthorized(cfg: SetupCertificatesConfig): boolean {
   return cfg.tlsRejectUnauthorized ?? config.certificates.tlsRejectUnauthorized;
 }
 
+// ---------------------------------------------------------------------------------------
+// Compte présenté à `certsrv`.
+// Ordre de résolution : identifiants dédiés s'ils sont renseignés, sinon le compte de l'annuaire
+// LDAP (getEffectiveLdapConfig : bindDn + bindPassword).
+// ---------------------------------------------------------------------------------------
+
+/** Découpe un DN en composants, en respectant l'échappement `\,` (RFC 4514). */
+function splitDnComponents(dn: string): { type: string; value: string }[] {
+  const rdns: string[] = [];
+  let current = "";
+  for (let i = 0; i < dn.length; i += 1) {
+    const char = dn[i]!;
+    if (char === "\\" && i + 1 < dn.length) {
+      current += dn[i + 1];
+      i += 1;
+    } else if (char === ",") {
+      rdns.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  rdns.push(current);
+  const components: { type: string; value: string }[] = [];
+  for (const rdn of rdns) {
+    const equals = rdn.indexOf("=");
+    if (equals <= 0) continue;
+    components.push({ type: rdn.slice(0, equals).trim().toLowerCase(), value: rdn.slice(equals + 1).trim() });
+  }
+  return components;
+}
+
+/** Un sAMAccountName tient en 20 caractères sans espace : au-delà, le CN est un nom d'affichage. */
+const SAM_ACCOUNT_NAME = /^[A-Za-z0-9._-]{1,20}$/;
+
+export type WindowsIdentifier =
+  | { ok: true; username: string; how: string }
+  | { ok: false; reason: string };
+
+/**
+ * Identifiant de connexion Windows à présenter à `certsrv` (IIS n'accepte PAS un DN) à partir du
+ * `bindDn` de l'annuaire. On ne DEVINE pas : seuls un UPN/`DOMAINE\utilisateur` déjà saisi tel
+ * quel, ou un DN dont le `CN=` a la forme d'un sAMAccountName (l'UPN implicite `cn@dns.domaine`
+ * étant alors accepté par AD), donnent un résultat ; sinon on refuse explicitement.
+ */
+export function windowsIdentifierFromBindDn(bindDn: string): WindowsIdentifier {
+  const trimmed = bindDn.trim();
+  if (!trimmed) return { ok: false, reason: "aucun compte de connexion n'est enregistré dans l'annuaire LDAP" };
+
+  if (!trimmed.includes("=")) {
+    if (trimmed.includes("\\")) {
+      return { ok: true, username: trimmed, how: "identifiant DOMAINE\\utilisateur repris tel quel du compte de l'annuaire" };
+    }
+    if (trimmed.includes("@")) {
+      return { ok: true, username: trimmed, how: "UPN repris tel quel du compte de l'annuaire" };
+    }
+    return {
+      ok: false,
+      reason: `il est enregistré sous « ${trimmed} », qui n'est ni un DN, ni un UPN, ni une forme DOMAINE\\utilisateur`,
+    };
+  }
+
+  const components = splitDnComponents(trimmed);
+  const commonName = components.find((component) => component.type === "cn")?.value;
+  const domain = components
+    .filter((component) => component.type === "dc")
+    .map((component) => component.value)
+    .join(".");
+  if (!commonName) {
+    return { ok: false, reason: "son DN ne comporte aucun « CN= » dont déduire un identifiant de connexion Windows" };
+  }
+  if (!domain) {
+    return { ok: false, reason: "son DN ne comporte aucun « DC= » dont déduire le domaine Windows" };
+  }
+  if (!SAM_ACCOUNT_NAME.test(commonName)) {
+    return {
+      ok: false,
+      reason: `il est enregistré sous « CN=${commonName} », qui n'est pas un identifiant de connexion Windows (espaces ou caractères interdits) — QUAI ne le devine pas`,
+    };
+  }
+  const username = `${commonName}@${domain}`;
+  return { ok: true, username, how: `UPN implicite « ${username} » dérivé du DN de l'annuaire (CN= + composants DC=)` };
+}
+
+export interface ResolvedEnrollmentAccount {
+  source: CertificateAccountSource;
+  username: string;
+  /** Jamais journalisé, jamais renvoyé par une route — passe seulement dans l'en-tête Basic. */
+  password: string;
+  /** Provenance affichable de l'identifiant, sans aucun secret. */
+  how: string;
+}
+
+const NO_DIRECTORY_ACCOUNT = "Impossible d'utiliser le compte de l'annuaire pour s'inscrire auprès de l'autorité";
+
+/** Identifiants dédiés s'ils sont renseignés, sinon le compte de l'annuaire LDAP. */
+export async function resolveEnrollmentAccount(cfg: SetupCertificatesConfig): Promise<ResolvedEnrollmentAccount> {
+  const source = effectiveAccountSource(cfg);
+
+  if (source === "dedicated") {
+    const username = cfg.username?.trim() ?? "";
+    const password = cfg.password ?? "";
+    if (!username || !password) {
+      throw new CertificateAccountError(
+        "Compte dédié incomplet : identifiant et mot de passe sont tous deux requis, ou choisissez le compte de l'annuaire.",
+      );
+    }
+    return { source, username, password, how: "compte dédié saisi dans la configuration des certificats" };
+  }
+
+  const ldap = await getEffectiveLdapConfig();
+  const password = ldap.bindPassword ?? "";
+  if (!password) {
+    throw new CertificateAccountError(
+      `${NO_DIRECTORY_ACCOUNT} : aucun mot de passe n'est enregistré pour ce compte. Renseignez un compte dédié dans la configuration des certificats.`,
+    );
+  }
+
+  const override = cfg.username?.trim();
+  if (override) {
+    return { source, username: override, password, how: `identifiant Windows « ${override} » saisi pour le compte de l'annuaire` };
+  }
+
+  const derived = windowsIdentifierFromBindDn(ldap.bindDn ?? "");
+  if (!derived.ok) {
+    throw new CertificateAccountError(
+      `${NO_DIRECTORY_ACCOUNT} : ${derived.reason}. Renseignez son identifiant Windows (ex : LECREUSOT\\svc-quai), ou un compte dédié, dans la configuration des certificats.`,
+    );
+  }
+  return { source, username: derived.username, password, how: derived.how };
+}
+
+/** Vue affichable du compte réellement utilisé — sans mot de passe, par construction. */
+export interface EnrollmentAccountView {
+  source: CertificateAccountSource;
+  /** Absent quand aucun compte n'a pu être déterminé. */
+  username?: string;
+  how: string;
+  /** Pourquoi aucun compte n'est utilisable — présent uniquement dans ce cas. */
+  problem?: string;
+}
+
+export async function describeEnrollmentAccount(cfg: SetupCertificatesConfig): Promise<EnrollmentAccountView> {
+  try {
+    const account = await resolveEnrollmentAccount(cfg);
+    return { source: account.source, username: account.username, how: account.how };
+  } catch (err) {
+    return {
+      source: effectiveAccountSource(cfg),
+      how: "aucun compte utilisable en l'état",
+      problem: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------------------
+// Diagnostic d'un refus : identifiants refusés / droits insuffisants / autorité injoignable.
+// ---------------------------------------------------------------------------------------
+
+function accountLabel(account: ResolvedEnrollmentAccount): string {
+  return account.source === "dedicated"
+    ? `le compte dédié « ${account.username} »`
+    : `le compte de l'annuaire « ${account.username} »`;
+}
+
+/** N'a de sens que si c'est le compte de l'annuaire qui a été essayé — c'est le parcours voulu. */
+function dedicatedAccountHint(account: ResolvedEnrollmentAccount, template: string): string {
+  if (account.source === "dedicated") return "";
+  return ` Renseignez un compte dédié disposant du droit « Inscrire » sur le modèle « ${template} » dans la configuration des certificats.`;
+}
+
+/** 401 = identifiants refusés ; 403 = authentifié mais interdit d'accès au site d'inscription. */
+function authFailureMessage(account: ResolvedEnrollmentAccount, template: string, status: number): string {
+  if (status === 403) {
+    return `L'autorité AD CS a accepté ${accountLabel(account)} mais lui refuse l'accès au site d'inscription certsrv (HTTP 403) : droits insuffisants sur le site.${dedicatedAccountHint(account, template)}`;
+  }
+  if (account.source === "dedicated") {
+    return `L'autorité AD CS a refusé les identifiants du compte dédié « ${account.username} » (HTTP 401) — vérifiez l'identifiant et le mot de passe, et que l'authentification de base est activée sur le site certsrv (HTTPS obligatoire).`;
+  }
+  return `L'autorité AD CS a refusé le compte de l'annuaire « ${account.username} » (HTTP 401) : ce compte n'a pas le droit de s'inscrire sur le site certsrv, ou son identifiant Windows n'est pas celui-ci.${dedicatedAccountHint(account, template)}`;
+}
+
+/** Marqueurs de CERTSRV_E_TEMPLATE_DENIED — « droits sur le modèle », distinct d'un refus de politique. */
+const TEMPLATE_RIGHTS_MARKERS = [
+  "permissions on the certificate template",
+  "do not allow the current user to enroll",
+  "0x80094012",
+  "certsrv_e_template_denied",
+];
+
+function looksLikeTemplateRightsDenial(detail: string): boolean {
+  const lowered = detail.toLowerCase();
+  return TEMPLATE_RIGHTS_MARKERS.some((marker) => lowered.includes(marker));
+}
+
 const REQUEST_ID_ISSUED = /certnew\.cer\?ReqID=(\d+)&/;
 const REQUEST_ID_PENDING = /Your Request Id is (\d+)\./;
 const DISPOSITION_MESSAGE = /The disposition message is "([^"]+)/;
 
 /** Soumet un CSR à `certfnsh.asp` puis récupère le certificat émis sur `certnew.cer`. */
-async function submitCsrToCertsrv(cfg: SetupCertificatesConfig, csrPem: string): Promise<string> {
-  const secrets = [cfg.password];
-  const auth = basicAuthHeader(cfg.username, cfg.password);
+async function submitCsrToCertsrv(
+  cfg: SetupCertificatesConfig,
+  account: ResolvedEnrollmentAccount,
+  csrPem: string,
+): Promise<string> {
+  const secrets = [account.password];
+  const auth = basicAuthHeader(account.username, account.password);
   const form = new URLSearchParams({
     Mode: "newreq",
     CertRequest: csrPem,
@@ -261,9 +466,7 @@ async function submitCsrToCertsrv(cfg: SetupCertificatesConfig, csrPem: string):
   }
 
   if (submitted.status === 401 || submitted.status === 403) {
-    throw new CertificateEnrollmentError(
-      `L'autorité AD CS a refusé l'authentification du compte de service (HTTP ${submitted.status}) — vérifiez le compte et que l'authentification de base est activée sur le site certsrv.`,
-    );
+    throw new CertificateEnrollmentError(authFailureMessage(account, cfg.template, submitted.status));
   }
   if (submitted.status < 200 || submitted.status >= 300) {
     throw new CertificateEnrollmentError(`L'autorité AD CS a répondu HTTP ${submitted.status} à la soumission de la demande.`);
@@ -279,6 +482,14 @@ async function submitCsrToCertsrv(cfg: SetupCertificatesConfig, csrPem: string):
     }
     const disposition = DISPOSITION_MESSAGE.exec(submitted.raw);
     const detail = disposition?.[1] ?? submitted.raw.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+    if (looksLikeTemplateRightsDenial(detail)) {
+      throw new CertificateEnrollmentError(
+        scrubSecrets(
+          `Le modèle « ${cfg.template} » n'autorise pas ${accountLabel(account)} à s'inscrire : droit « Inscrire » manquant sur le modèle (réponse de l'autorité : ${detail}).${dedicatedAccountHint(account, cfg.template)}`,
+          secrets,
+        ),
+      );
+    }
     throw new CertificateEnrollmentError(
       scrubSecrets(`L'autorité AD CS a refusé la demande${detail ? ` : ${detail}` : "."}`, secrets),
     );
@@ -307,11 +518,11 @@ async function submitCsrToCertsrv(cfg: SetupCertificatesConfig, csrPem: string):
 
 /** Chaîne d'autorité (PKCS#7) — best-effort : sans elle le navigateur peut manquer l'intermédiaire,
  * mais un échec ici ne doit jamais faire échouer une émission par ailleurs réussie. */
-async function fetchCaChain(cfg: SetupCertificatesConfig): Promise<string | null> {
+async function fetchCaChain(cfg: SetupCertificatesConfig, account: ResolvedEnrollmentAccount): Promise<string | null> {
   try {
     const response = await rawRequest(certsrvUrl(cfg.caUrl, "certnew.p7b?ReqID=CACert&Renewal=0&Enc=bin"), {
       method: "GET",
-      headers: { Authorization: basicAuthHeader(cfg.username, cfg.password) },
+      headers: { Authorization: basicAuthHeader(account.username, account.password) },
       rejectUnauthorized: tlsRejectUnauthorized(cfg),
     });
     if (response.status < 200 || response.status >= 300) return null;
@@ -405,6 +616,8 @@ export interface CertificatesStatus {
   caUrl?: string;
   template?: string;
   autoEnroll?: boolean;
+  /** Compte réellement présenté à l'autorité — jamais son mot de passe. */
+  account?: EnrollmentAccountView;
   renewBeforeDays: number;
   certificates: CertificateSummary[];
 }
@@ -447,9 +660,11 @@ export async function getCertificatesStatus(now: Date = new Date()): Promise<Cer
   const certificates = entries
     .map((entry) => toSummary(entry, renewBeforeDays, now))
     .sort((a, b) => a.subject.localeCompare(b.subject));
+  const account = cfg ? await describeEnrollmentAccount(cfg) : null;
   return {
     configured: cfg !== null,
     ...(cfg ? { caUrl: cfg.caUrl, template: cfg.template, autoEnroll: cfg.autoEnroll ?? true } : {}),
+    ...(account ? { account } : {}),
     renewBeforeDays,
     certificates,
   };
@@ -498,11 +713,14 @@ export async function issueCertificate(subject: string): Promise<CertificateSumm
   const normalized = normalizeSubject(subject);
   if (!normalized) throw new CertificateEnrollmentError("Le sujet du certificat est requis.");
 
+  // Résolu AVANT de générer quoi que ce soit : sans compte utilisable, aucun appel réseau n'est tenté.
+  const account = await resolveEnrollmentAccount(cfg);
+
   const modulusLength = cfg.keySize && cfg.keySize >= 2048 ? cfg.keySize : 2048;
   const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength });
   const csrPem = buildCertificateSigningRequest(normalized, [normalized], privateKey, publicKey);
 
-  const certificatePem = await submitCsrToCertsrv(cfg, csrPem);
+  const certificatePem = await submitCsrToCertsrv(cfg, account, csrPem);
 
   let parsed: X509Certificate;
   try {
@@ -516,7 +734,7 @@ export async function issueCertificate(subject: string): Promise<CertificateSumm
     throw new CertificateEnrollmentError("Le certificat rendu par l'autorité ne correspond pas à la clé générée — émission abandonnée.");
   }
 
-  const chainPem = await fetchCaChain(cfg);
+  const chainPem = await fetchCaChain(cfg, account);
   const now = new Date();
   const entries = await getAll();
   const existing = entries.find((entry) => entry.subject === normalized);
@@ -581,35 +799,48 @@ export async function knownSubjects(): Promise<string[]> {
 export interface CertificatesTestResult {
   ok: boolean;
   message: string;
+  /** Compte réellement essayé — permet à l'interface de rappeler lequel a servi. */
+  account?: EnrollmentAccountView;
 }
 
 /**
- * Vérifie que l'autorité répond ET accepte les identifiants, SANS émettre de certificat : la page
+ * Vérifie que l'autorité répond ET accepte le compte résolu, SANS émettre de certificat : la page
  * d'accueil de `certsrv` est protégée par la même authentification que l'inscription.
  */
 export async function testCertificatesConnection(cfg: SetupCertificatesConfig): Promise<CertificatesTestResult> {
-  if (!cfg.caUrl || !cfg.username || !cfg.password || !cfg.template) {
-    return { ok: false, message: "URL de l'autorité, modèle, identifiant et mot de passe sont requis." };
+  if (!cfg.caUrl || !cfg.template) {
+    return { ok: false, message: "URL de l'autorité et modèle de certificat sont requis." };
   }
+
+  let account: ResolvedEnrollmentAccount;
+  try {
+    account = await resolveEnrollmentAccount(cfg);
+  } catch (err) {
+    const view = await describeEnrollmentAccount(cfg);
+    return { ok: false, message: err instanceof Error ? err.message : String(err), account: view };
+  }
+  const view: EnrollmentAccountView = { source: account.source, username: account.username, how: account.how };
+
   let response: RawHttpResponse;
   try {
     response = await rawRequest(certsrvUrl(cfg.caUrl, "certrqxt.asp"), {
       method: "GET",
-      headers: { Authorization: basicAuthHeader(cfg.username, cfg.password) },
+      headers: { Authorization: basicAuthHeader(account.username, account.password) },
       rejectUnauthorized: tlsRejectUnauthorized(cfg),
     });
   } catch (err) {
-    const message = scrubSecrets(err instanceof Error ? err.message : String(err), [cfg.password]);
-    return { ok: false, message: `Autorité AD CS injoignable : ${message}` };
+    const message = scrubSecrets(err instanceof Error ? err.message : String(err), [account.password]);
+    return { ok: false, message: `Autorité AD CS injoignable : ${message}`, account: view };
   }
   if (response.status === 401 || response.status === 403) {
-    return {
-      ok: false,
-      message: `L'autorité a refusé les identifiants (HTTP ${response.status}) — vérifiez le compte de service et que l'authentification de base est activée sur le site certsrv (HTTPS obligatoire).`,
-    };
+    return { ok: false, message: authFailureMessage(account, cfg.template, response.status), account: view };
   }
   if (response.status < 200 || response.status >= 300) {
-    return { ok: false, message: `L'autorité a répondu HTTP ${response.status} sur certrqxt.asp.` };
+    return { ok: false, message: `L'autorité a répondu HTTP ${response.status} sur certrqxt.asp.`, account: view };
   }
-  return { ok: true, message: `Autorité AD CS joignable et identifiants acceptés (modèle "${cfg.template}").` };
+  return {
+    ok: true,
+    message: `Autorité AD CS joignable, ${accountLabel(account)} accepté (modèle "${cfg.template}").`,
+    account: view,
+  };
 }

@@ -164,6 +164,9 @@ export interface SetupAdDnsConfig {
  */
 export type CertificateEnrollmentMethod = "certsrv";
 
+/** Compte présenté à `certsrv` : celui de l'annuaire LDAP (défaut) ou un compte dédié. */
+export type CertificateAccountSource = "directory" | "dedicated";
+
 export interface SetupCertificatesConfig {
   // URL du site d'inscription web AD CS (ex: "https://ca.lecreusot.priv/certsrv").
   caUrl: string;
@@ -171,9 +174,14 @@ export interface SetupCertificatesConfig {
   method?: CertificateEnrollmentMethod;
   // Nom du modèle de certificat AD CS (ex: "WebServer").
   template: string;
-  username: string;
-  // password : chiffré au repos (voir encryptSecrets ci-dessous), comme hycu.password.
-  password: string;
+  // Absent = déduit de la présence d'un mot de passe (voir effectiveAccountSource ci-dessous).
+  accountSource?: CertificateAccountSource;
+  // "dedicated" : identifiant Windows du compte dédié. "directory" : surcharge FACULTATIVE de
+  // l'identifiant Windows du compte de l'annuaire, quand il n'est pas dérivable de son bindDn.
+  username?: string;
+  // password : mot de passe du compte DÉDIÉ uniquement, chiffré au repos (voir encryptSecrets
+  // ci-dessous). En mode "directory" c'est ldap.bindPassword qui est utilisé, jamais recopié ici.
+  password?: string;
   // Marge de renouvellement en jours ; absent = config.certificates.renewBeforeDays.
   renewBeforeDays?: number;
   // Taille de clé RSA ; absent = 2048 (minimum usuel d'un modèle AD CS moderne).
@@ -772,17 +780,25 @@ export async function clearAdDnsConfig(): Promise<SetupConfig> {
   return next;
 }
 
+/** Mode de compte effectif : une config écrite avant l'option n'a pas le champ mais a toujours un
+ * mot de passe, donc un compte dédié. */
+export function effectiveAccountSource(cfg: SetupCertificatesConfig): CertificateAccountSource {
+  return cfg.accountSource ?? (cfg.password ? "dedicated" : "directory");
+}
+
 /** Config AD CS effective (mot de passe déchiffré), ou `null` si jamais configurée — même
  * principe que getEffectiveHycuConfig (aucun bootstrap par variable d'environnement : l'URL de
  * l'autorité et le compte de service sont toujours saisis explicitement). */
 export async function getEffectiveCertificatesConfig(): Promise<SetupCertificatesConfig | null> {
   const current = await getCurrent();
   if (!current.certificates) return null;
-  // Migration à la lecture : une config écrite avant l'ajout du champ reste en "certsrv".
+  // Migration à la lecture : "certsrv" et le mode de compte sont explicités ici une fois pour toutes.
+  const stored = current.certificates;
   return {
-    ...current.certificates,
-    password: decryptSecret(current.certificates.password),
-    method: current.certificates.method ?? "certsrv",
+    ...stored,
+    ...(stored.password ? { password: decryptSecret(stored.password) } : {}),
+    method: stored.method ?? "certsrv",
+    accountSource: effectiveAccountSource(stored),
   };
 }
 
@@ -790,7 +806,11 @@ export async function getEffectiveCertificatesConfig(): Promise<SetupCertificate
  * écriture), n'affecte aucune autre section — même principe que setHycuConfig ci-dessus. */
 export async function setCertificatesConfig(input: SetupCertificatesConfig): Promise<SetupConfig> {
   const current = await getCurrent();
-  const next: SetupConfig = encryptSecrets({ ...current, certificates: input });
+  // Repasser sur le compte de l'annuaire ne doit laisser AUCUN mot de passe dédié sur disque.
+  const { password: _dropped, ...withoutPassword } = input;
+  const certificates: SetupCertificatesConfig =
+    effectiveAccountSource(input) === "dedicated" ? input : { ...withoutPassword, accountSource: "directory" };
+  const next: SetupConfig = encryptSecrets({ ...current, certificates });
   await writeToDisk(next);
   cache = next;
   return next;

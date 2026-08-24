@@ -5,6 +5,9 @@
  *
  * Règle absolue : une autorité injoignable ne casse JAMAIS TLS. Un échec est enregistré et visible,
  * le certificat en place reste stocké et servi jusqu'à sa vraie expiration.
+ *
+ * Cette boucle est une action SYSTÈME : aucun utilisateur ne lui est attribué au journal d'audit
+ * (seules les demandes manuelles passent par une route mutante, auditée par plugins/audit.ts).
  */
 
 import { config } from "../config.js";
@@ -154,7 +157,8 @@ export async function runCertificatesReconcileCycle(): Promise<CertificatesRecon
   }
 }
 
-/** Renouvellement manuel d'un sujet (POST /api/certificates/:subject/renew) — republie Caddy. */
+/** Renouvellement manuel d'un sujet (POST /api/certificates/issue) — republie Caddy. Appelé depuis
+ * une route mutante : plugins/audit.ts journalise déjà l'utilisateur qui l'a demandé. */
 export async function renewSubjectNow(subject: string): Promise<void> {
   await issueCertificate(subject);
   await pushConfigToCaddy();

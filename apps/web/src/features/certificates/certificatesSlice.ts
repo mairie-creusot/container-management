@@ -5,6 +5,18 @@ import { apiDelete, apiGet, apiPost, apiPut, ApiError } from "@/api/client";
  * réellement automatisable depuis un conteneur Linux (voir apps/api/src/services/certificates.ts). */
 export type CertificateEnrollmentMethod = "certsrv";
 
+/** Compte présenté à `certsrv` : celui de l'annuaire LDAP (défaut) ou un compte dédié. */
+export type CertificateAccountSource = "directory" | "dedicated";
+
+/** Compte réellement utilisé, tel que le backend le résout — jamais de mot de passe. */
+export interface EnrollmentAccountView {
+  source: CertificateAccountSource;
+  username?: string;
+  how: string;
+  /** Renseigné quand aucun compte n'est utilisable en l'état (identifiant Windows indérivable…). */
+  problem?: string;
+}
+
 export type CertificateHealth = "valid" | "expiring" | "expired";
 
 /** GET /api/certificates — jamais de clé privée, jamais d'identifiant. */
@@ -38,6 +50,7 @@ export interface CertificatesOverview {
   caUrl?: string;
   template?: string;
   autoEnroll?: boolean;
+  account?: EnrollmentAccountView;
   renewBeforeDays: number;
   certificates: CertificateSummary[];
   reconciliation: CertificatesReconciliationStatus;
@@ -48,7 +61,10 @@ export interface CertificatesConfig {
   caUrl: string;
   method: CertificateEnrollmentMethod;
   template: string;
-  username: string;
+  accountSource: CertificateAccountSource;
+  /** Compte dédié : son identifiant. Compte de l'annuaire : la surcharge saisie, sinon absent. */
+  username?: string;
+  account?: EnrollmentAccountView;
   renewBeforeDays?: number;
   keySize?: number;
   autoEnroll: boolean;
@@ -63,13 +79,16 @@ export interface CertificatesConfigStatus {
 export interface CertificatesTestResult {
   ok: boolean;
   message: string;
+  account?: EnrollmentAccountView;
 }
 
 /** `password` vide = conserver celui déjà enregistré (même convention que AdDnsFormInput). */
 export interface CertificatesFormInput {
   caUrl: string;
   template: string;
-  username: string;
+  accountSource: CertificateAccountSource;
+  /** Compte dédié : identifiant obligatoire. Annuaire : surcharge facultative de l'identifiant. */
+  username?: string;
   password?: string;
   renewBeforeDays?: number;
   keySize?: number;
@@ -85,6 +104,8 @@ export interface CertificatesState {
   error: string | null;
   configured: boolean;
   config: CertificatesConfig | null;
+  /** Dernier compte résolu par le backend (config lue, test, ou échec d'enregistrement). */
+  accountHint: EnrollmentAccountView | null;
   configStatus: LoadStatus;
   saving: boolean;
   clearing: boolean;
@@ -100,6 +121,7 @@ const initialState: CertificatesState = {
   error: null,
   configured: false,
   config: null,
+  accountHint: null,
   configStatus: "idle",
   saving: false,
   clearing: false,
@@ -113,6 +135,17 @@ function errorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : fallback;
 }
 
+/** Échec de PUT /certificates/config : le backend joint le compte réellement essayé (jamais un secret). */
+export interface CertificatesSaveFailure {
+  message: string;
+  account?: EnrollmentAccountView;
+}
+
+function saveFailure(error: unknown, fallback: string): CertificatesSaveFailure {
+  const account = error instanceof ApiError ? (error.details?.account as EnrollmentAccountView | undefined) : undefined;
+  return { message: errorMessage(error, fallback), ...(account ? { account } : {}) };
+}
+
 export const fetchCertificates = createAsyncThunk<CertificatesOverview>("certificates/fetch", async () =>
   apiGet<CertificatesOverview>("/certificates"),
 );
@@ -121,16 +154,17 @@ export const fetchCertificatesConfig = createAsyncThunk<CertificatesConfigStatus
   apiGet<CertificatesConfigStatus>("/certificates/config"),
 );
 
-export const saveCertificatesConfig = createAsyncThunk<CertificatesConfigStatus, CertificatesFormInput, { rejectValue: string }>(
-  "certificates/saveConfig",
-  async (input, { rejectWithValue }) => {
-    try {
-      return await apiPut<CertificatesConfigStatus>("/certificates/config", input);
-    } catch (error) {
-      return rejectWithValue(errorMessage(error, "Impossible d'enregistrer la configuration de l'autorité."));
-    }
-  },
-);
+export const saveCertificatesConfig = createAsyncThunk<
+  CertificatesConfigStatus,
+  CertificatesFormInput,
+  { rejectValue: CertificatesSaveFailure }
+>("certificates/saveConfig", async (input, { rejectWithValue }) => {
+  try {
+    return await apiPut<CertificatesConfigStatus>("/certificates/config", input);
+  } catch (error) {
+    return rejectWithValue(saveFailure(error, "Impossible d'enregistrer la configuration de l'autorité."));
+  }
+});
 
 export const testCertificatesConfig = createAsyncThunk<CertificatesTestResult, CertificatesFormInput, { rejectValue: string }>(
   "certificates/testConfig",
@@ -210,6 +244,7 @@ const certificatesSlice = createSlice({
         state.configStatus = "ready";
         state.configured = action.payload.configured;
         state.config = action.payload.config ?? null;
+        state.accountHint = action.payload.config?.account ?? null;
       })
       .addCase(fetchCertificatesConfig.rejected, (state) => {
         state.configStatus = "error";
@@ -222,11 +257,13 @@ const certificatesSlice = createSlice({
         state.saving = false;
         state.configured = action.payload.configured;
         state.config = action.payload.config ?? null;
+        state.accountHint = action.payload.config?.account ?? null;
         state.testResult = null;
       })
       .addCase(saveCertificatesConfig.rejected, (state, action) => {
         state.saving = false;
-        state.error = action.payload ?? "Impossible d'enregistrer la configuration de l'autorité.";
+        state.error = action.payload?.message ?? "Impossible d'enregistrer la configuration de l'autorité.";
+        if (action.payload?.account) state.accountHint = action.payload.account;
       })
       .addCase(testCertificatesConfig.pending, (state) => {
         state.testing = true;
@@ -235,6 +272,7 @@ const certificatesSlice = createSlice({
       .addCase(testCertificatesConfig.fulfilled, (state, action) => {
         state.testing = false;
         state.testResult = action.payload;
+        state.accountHint = action.payload.account ?? null;
       })
       .addCase(testCertificatesConfig.rejected, (state, action) => {
         state.testing = false;
@@ -247,6 +285,7 @@ const certificatesSlice = createSlice({
         state.clearing = false;
         state.configured = false;
         state.config = null;
+        state.accountHint = null;
         state.testResult = null;
       })
       .addCase(disableCertificates.rejected, (state, action) => {

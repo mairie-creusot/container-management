@@ -50,6 +50,14 @@ const CA_USERNAME = "svc-quai";
 const CA_PASSWORD = "mot-de-passe-tres-secret-adcs";
 const TEMPLATE = "WebServer";
 
+// Compte de l'annuaire (LDAP) : c'est lui qui doit servir par défaut, sans compte dédié.
+const LDAP_BIND_DN = "CN=svc-annuaire,OU=Informatique,OU=ville-du-Creusot,DC=lecreusot,DC=priv";
+const LDAP_BIND_PASSWORD = "mot-de-passe-annuaire-tres-secret";
+/** UPN implicite que le service doit dériver de LDAP_BIND_DN. */
+const DIRECTORY_USERNAME = "svc-annuaire@lecreusot.priv";
+/** DN dont le CN est un nom d'affichage : aucun identifiant Windows n'en est dérivable. */
+const UNDERIVABLE_BIND_DN = "CN=Copieur NT,OU=Informatique,OU=ville-du-Creusot,DC=lecreusot,DC=priv";
+
 let caReachable = true;
 let nextValidityDays = 365;
 let serveChain = true;
@@ -59,6 +67,9 @@ let signingCounter = 0;
 let requestIdCounter = 0;
 const issuedByRequestId = new Map<number, string>();
 const seenCertAttribs: string[] = [];
+/** Chaque tentative d'authentification vue par l'autorité simulée (acceptée ou non). */
+const seenAccounts: { username: string; password: string }[] = [];
+let acceptedAccounts = new Map<string, string>();
 
 function signCsr(csrPem: string, days: number): string {
   signingCounter += 1;
@@ -69,12 +80,20 @@ function signCsr(csrPem: string, days: number): string {
   return fsSync.readFileSync(outPath, "utf-8");
 }
 
-function expectedAuthorization(): string {
-  return `Basic ${Buffer.from(`${CA_USERNAME}:${CA_PASSWORD}`).toString("base64")}`;
+/** Décode l'en-tête Basic pour savoir QUEL compte a été présenté, accepté ou non. */
+function decodeBasic(authorization: string | undefined): { username: string; password: string } | null {
+  if (!authorization?.startsWith("Basic ")) return null;
+  const decoded = Buffer.from(authorization.slice("Basic ".length), "base64").toString("utf-8");
+  const separator = decoded.indexOf(":");
+  return separator === -1
+    ? { username: decoded, password: "" }
+    : { username: decoded.slice(0, separator), password: decoded.slice(separator + 1) };
 }
 
 function respond(target: URL, method: string, body: string, authorization: string | undefined): { status: number; payload: Buffer | string } {
-  if (authorization !== expectedAuthorization()) {
+  const presented = decodeBasic(authorization);
+  if (presented) seenAccounts.push(presented);
+  if (!presented || acceptedAccounts.get(presented.username) !== presented.password) {
     return { status: 401, payload: "<html><body>401 - Unauthorized: Access is denied due to invalid credentials.</body></html>" };
   }
   const route = `${method} ${target.pathname}`;
@@ -140,15 +159,18 @@ vi.mock("node:https", () => ({
 const { buildServer } = await import("../src/index.js");
 const { config } = await import("../src/config.js");
 const { signSessionToken } = await import("../src/services/session.js");
-const { setCertificatesConfig, clearCertificatesConfig } = await import("../src/services/setupStore.js");
+const { setCertificatesConfig, clearCertificatesConfig, setLdapConfig } = await import("../src/services/setupStore.js");
 const {
   buildCertificateSigningRequest,
+  describeEnrollmentAccount,
   extractCertificatesFromPkcs7,
   getCertificatesStatus,
   getServableCertificates,
   issueCertificate,
   resetCertificatesCache,
+  resolveEnrollmentAccount,
   scrubSecrets,
+  windowsIdentifierFromBindDn,
 } = await import("../src/services/certificates.js");
 const { runCertificatesReconcileCycle, planCertificateWork } = await import("../src/services/certificatesReconciler.js");
 const { buildDesiredCaddyConfig, createRoute, deleteRoute, listRoutes } = await import("../src/services/reverseProxy.js");
@@ -159,13 +181,20 @@ afterAll(async () => {
 
 let app: FastifyInstance | undefined;
 
-beforeEach(() => {
+beforeEach(async () => {
   caReachable = true;
   nextValidityDays = 365;
   serveChain = true;
   denyReason = null;
   pendingApproval = false;
   seenCertAttribs.length = 0;
+  seenAccounts.length = 0;
+  // Les deux comptes sont acceptés par défaut : chaque test choisit lequel doit servir.
+  acceptedAccounts = new Map([
+    [CA_USERNAME, CA_PASSWORD],
+    [DIRECTORY_USERNAME, LDAP_BIND_PASSWORD],
+  ]);
+  await seedLdapConfig();
   vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 200 })));
 });
 
@@ -193,14 +222,64 @@ function viewerCookie() {
   return { [config.session.cookieName]: token };
 }
 
+/** Compte dédié explicite — le mode historique, qui doit rester prioritaire. */
 async function seedCertificatesConfig(overrides: Partial<Parameters<typeof setCertificatesConfig>[0]> = {}): Promise<void> {
   await setCertificatesConfig({
     caUrl: CA_URL,
     method: "certsrv",
     template: TEMPLATE,
+    accountSource: "dedicated",
     username: CA_USERNAME,
     password: CA_PASSWORD,
     ...overrides,
+  });
+}
+
+/** Aucun compte dédié : l'inscription doit retomber sur le compte de l'annuaire. */
+async function seedDirectoryOnlyCertificatesConfig(
+  overrides: Partial<Parameters<typeof setCertificatesConfig>[0]> = {},
+): Promise<void> {
+  await setCertificatesConfig({ caUrl: CA_URL, method: "certsrv", template: TEMPLATE, ...overrides });
+}
+
+interface AuditEventLine {
+  actor: string;
+  method: string;
+  path: string;
+  ok: boolean;
+}
+
+/** plugins/audit.ts écrit dans le dossier de CONFIG_PATH (voir auditLog.ts#resolvedAuditLogPath). */
+async function readAuditEvents(): Promise<AuditEventLine[]> {
+  try {
+    const raw = await fs.readFile(path.join(tmpDataDir, "audit-log.jsonl"), "utf-8");
+    return raw
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as AuditEventLine);
+  } catch {
+    return [];
+  }
+}
+
+/** Le hook onResponse s'exécute APRÈS la résolution d'inject() : attente bornée, pas un sleep fixe. */
+async function waitForAuditEvent(predicate: (event: AuditEventLine) => boolean): Promise<boolean> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if ((await readAuditEvents()).some(predicate)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  return false;
+}
+
+async function seedLdapConfig(bindDn: string = LDAP_BIND_DN, bindPassword: string = LDAP_BIND_PASSWORD): Promise<void> {
+  await setLdapConfig({
+    url: "ldap://dc.lecreusot.priv:389",
+    bindDn,
+    bindPassword,
+    searchBase: "DC=lecreusot,DC=priv",
+    searchFilter: "(sAMAccountName={{username}})",
+    groupRoleMap: {},
+    defaultRole: "viewer",
   });
 }
 
@@ -295,6 +374,275 @@ describe("Configuration AD CS — test réel avant persistance, chiffrement au r
     });
     expect(response.statusCode).toBe(200);
     expect(response.json().config.template).toBe("WebServerV2");
+  });
+});
+
+describe("Compte présenté à l'autorité — annuaire par défaut, compte dédié prioritaire", () => {
+  it("ne dérive un identifiant Windows du bindDn que lorsque c'est certain", () => {
+    expect(windowsIdentifierFromBindDn(LDAP_BIND_DN)).toMatchObject({ ok: true, username: DIRECTORY_USERNAME });
+    expect(windowsIdentifierFromBindDn("LECREUSOT\\svc-quai")).toMatchObject({ ok: true, username: "LECREUSOT\\svc-quai" });
+    expect(windowsIdentifierFromBindDn("svc-quai@lecreusot.priv")).toMatchObject({ ok: true, username: "svc-quai@lecreusot.priv" });
+
+    // Un CN avec espace est un nom d'affichage, pas un identifiant de connexion : on REFUSE de deviner.
+    const refused = windowsIdentifierFromBindDn(UNDERIVABLE_BIND_DN);
+    expect(refused.ok).toBe(false);
+    expect(refused.ok === false && refused.reason).toContain("CN=Copieur NT");
+    expect(windowsIdentifierFromBindDn("CN=svcquai,OU=Informatique").ok).toBe(false);
+    expect(windowsIdentifierFromBindDn("").ok).toBe(false);
+  });
+
+  it("sans compte dédié configuré, s'inscrit avec le compte de l'annuaire", async () => {
+    await seedDirectoryOnlyCertificatesConfig();
+    await issueCertificate("monapp.lecreusot.priv");
+
+    expect(seenAccounts.map((account) => account.username)).toContain(DIRECTORY_USERNAME);
+    expect(seenAccounts.every((account) => account.username !== CA_USERNAME)).toBe(true);
+    expect(seenAccounts.every((account) => account.password === LDAP_BIND_PASSWORD)).toBe(true);
+  });
+
+  it("le compte dédié est prioritaire dès qu'il est renseigné", async () => {
+    await seedCertificatesConfig();
+    await issueCertificate("monapp.lecreusot.priv");
+
+    expect(seenAccounts.map((account) => account.username)).toContain(CA_USERNAME);
+    expect(seenAccounts.every((account) => account.username !== DIRECTORY_USERNAME)).toBe(true);
+  });
+
+  it("l'identifiant Windows saisi pour le compte de l'annuaire l'emporte sur la dérivation", async () => {
+    await seedLdapConfig(UNDERIVABLE_BIND_DN);
+    acceptedAccounts.set("LECREUSOT\\copieurnt", LDAP_BIND_PASSWORD);
+    await seedDirectoryOnlyCertificatesConfig({ username: "LECREUSOT\\copieurnt" });
+
+    await issueCertificate("monapp.lecreusot.priv");
+    expect(seenAccounts.map((account) => account.username)).toContain("LECREUSOT\\copieurnt");
+  });
+
+  it("refuse SANS aucun appel réseau quand le DN de l'annuaire ne donne pas d'identifiant Windows", async () => {
+    await seedLdapConfig(UNDERIVABLE_BIND_DN);
+    await seedDirectoryOnlyCertificatesConfig();
+    app = buildServer();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/certificates/issue",
+      cookies: adminCookie(),
+      payload: { subject: "monapp.lecreusot.priv" },
+    });
+    // Problème de CONFIGURATION (400), pas un échec de l'autorité (502).
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toContain("CN=Copieur NT");
+    expect(response.json().error).toContain("compte dédié");
+    expect(seenAccounts).toHaveLength(0);
+    expect(response.body).not.toContain(LDAP_BIND_PASSWORD);
+  });
+
+  it("expose le compte réellement utilisé, jamais son mot de passe", async () => {
+    await seedDirectoryOnlyCertificatesConfig();
+    app = buildServer();
+
+    const status = await app.inject({ method: "GET", url: "/api/certificates", cookies: viewerCookie() });
+    expect(status.json().account).toMatchObject({ source: "directory", username: DIRECTORY_USERNAME });
+    expect(status.body).not.toContain(LDAP_BIND_PASSWORD);
+
+    const configResponse = await app.inject({ method: "GET", url: "/api/certificates/config", cookies: adminCookie() });
+    expect(configResponse.json().config).toMatchObject({
+      accountSource: "directory",
+      account: { source: "directory", username: DIRECTORY_USERNAME },
+    });
+    expect(configResponse.body).not.toContain(LDAP_BIND_PASSWORD);
+  });
+
+  it("describeEnrollmentAccount ne porte aucun mot de passe, resolveEnrollmentAccount le garde en interne", async () => {
+    const view = await describeEnrollmentAccount({ caUrl: CA_URL, template: TEMPLATE });
+    expect(view).toMatchObject({ source: "directory", username: DIRECTORY_USERNAME });
+    expect(JSON.stringify(view)).not.toContain(LDAP_BIND_PASSWORD);
+
+    const resolved = await resolveEnrollmentAccount({ caUrl: CA_URL, template: TEMPLATE });
+    expect(resolved.password).toBe(LDAP_BIND_PASSWORD);
+  });
+});
+
+describe("Refus de l'autorité — diagnostic distinct selon le compte essayé", () => {
+  it("compte de l'annuaire refusé (401) : le message invite explicitement à renseigner un compte dédié", async () => {
+    acceptedAccounts.delete(DIRECTORY_USERNAME);
+    await seedDirectoryOnlyCertificatesConfig();
+    app = buildServer();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/certificates/issue",
+      cookies: adminCookie(),
+      payload: { subject: "monapp.lecreusot.priv" },
+    });
+    expect(response.statusCode).toBe(502);
+    const error = response.json().error as string;
+    expect(error).toContain("compte de l'annuaire");
+    expect(error).toContain(DIRECTORY_USERNAME);
+    expect(error).toContain("HTTP 401");
+    expect(error).toContain("compte dédié");
+    expect(error).toContain(TEMPLATE);
+    expect(response.body).not.toContain(LDAP_BIND_PASSWORD);
+  });
+
+  it("compte dédié refusé (401) : on renvoie à ses identifiants, pas à la création d'un autre compte", async () => {
+    acceptedAccounts.delete(CA_USERNAME);
+    await seedCertificatesConfig();
+    app = buildServer();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/certificates/issue",
+      cookies: adminCookie(),
+      payload: { subject: "monapp.lecreusot.priv" },
+    });
+    expect(response.statusCode).toBe(502);
+    const error = response.json().error as string;
+    expect(error).toContain("compte dédié");
+    expect(error).toContain("HTTP 401");
+    expect(error).not.toContain("Renseignez un compte dédié");
+    expect(response.body).not.toContain(CA_PASSWORD);
+  });
+
+  it("droits insuffisants sur le modèle : distingué d'un refus d'identifiants", async () => {
+    await seedDirectoryOnlyCertificatesConfig();
+    denyReason =
+      "Denied by Policy Module 0x80094012, The permissions on the certificate template do not allow the current user to enroll for this type of certificate.";
+    app = buildServer();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/certificates/issue",
+      cookies: adminCookie(),
+      payload: { subject: "monapp.lecreusot.priv" },
+    });
+    expect(response.statusCode).toBe(502);
+    const error = response.json().error as string;
+    expect(error).toContain(`modèle « ${TEMPLATE} »`);
+    expect(error).toContain("Inscrire");
+    expect(error).toContain("compte de l'annuaire");
+    expect(error).not.toContain("HTTP 401");
+    expect(response.body).not.toContain(LDAP_BIND_PASSWORD);
+  });
+
+  it("autorité injoignable : ni « identifiants refusés », ni « droits », et aucun secret", async () => {
+    await seedDirectoryOnlyCertificatesConfig();
+    caReachable = false;
+    app = buildServer();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/certificates/issue",
+      cookies: adminCookie(),
+      payload: { subject: "monapp.lecreusot.priv" },
+    });
+    expect(response.statusCode).toBe(502);
+    const error = response.json().error as string;
+    expect(error).toContain("injoignable");
+    expect(error).not.toContain("401");
+    expect(error).not.toContain("Inscrire");
+    expect(response.body).not.toContain(LDAP_BIND_PASSWORD);
+  });
+});
+
+describe("Configuration — le compte de l'annuaire ne réclame aucun identifiant", () => {
+  it("PUT sans identifiant ni mot de passe enregistre et utilise le compte de l'annuaire", async () => {
+    app = buildServer();
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/certificates/config",
+      cookies: adminCookie(),
+      payload: { caUrl: CA_URL, template: TEMPLATE, accountSource: "directory" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().config).toMatchObject({
+      accountSource: "directory",
+      account: { source: "directory", username: DIRECTORY_USERNAME },
+    });
+    expect(response.body).not.toContain(LDAP_BIND_PASSWORD);
+
+    const onDisk = JSON.parse(await fs.readFile(tmpConfigPath, "utf-8")) as { certificates?: { password?: string } };
+    expect(onDisk.certificates?.password).toBeUndefined();
+  });
+
+  it("repasser au compte de l'annuaire efface le mot de passe dédié du disque", async () => {
+    await seedCertificatesConfig();
+    app = buildServer();
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/certificates/config",
+      cookies: adminCookie(),
+      payload: { caUrl: CA_URL, template: TEMPLATE, accountSource: "directory", username: "" },
+    });
+    expect(response.statusCode).toBe(200);
+
+    const onDisk = JSON.parse(await fs.readFile(tmpConfigPath, "utf-8")) as {
+      certificates?: { password?: string; username?: string };
+    };
+    expect(onDisk.certificates?.password).toBeUndefined();
+    expect(onDisk.certificates?.username).toBeUndefined();
+  });
+
+  it("le mode dédié exige toujours identifiant ET mot de passe", async () => {
+    app = buildServer();
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/certificates/config",
+      cookies: adminCookie(),
+      payload: { caUrl: CA_URL, template: TEMPLATE, accountSource: "dedicated", username: CA_USERNAME },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error).toContain("password");
+  });
+
+  it("un échec d'enregistrement joint le compte essayé, sans son mot de passe", async () => {
+    acceptedAccounts.delete(DIRECTORY_USERNAME);
+    app = buildServer();
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/certificates/config",
+      cookies: adminCookie(),
+      payload: { caUrl: CA_URL, template: TEMPLATE, accountSource: "directory" },
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().account).toMatchObject({ source: "directory", username: DIRECTORY_USERNAME });
+    expect(response.body).not.toContain(LDAP_BIND_PASSWORD);
+    // Rien n'a été persisté.
+    expect((await app.inject({ method: "GET", url: "/api/certificates/config", cookies: adminCookie() })).json()).toEqual({
+      configured: false,
+    });
+  });
+});
+
+describe("Traçabilité — manuel audité, automatique resté système", () => {
+  it("une émission manuelle est inscrite au journal d'audit avec son demandeur", async () => {
+    await seedDirectoryOnlyCertificatesConfig();
+    app = buildServer();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/certificates/issue",
+      cookies: adminCookie(),
+      payload: { subject: "monapp.lecreusot.priv" },
+    });
+    expect(response.statusCode).toBe(200);
+
+    const audited = await waitForAuditEvent(
+      (event) => event.actor === "ybanas" && event.method === "POST" && event.path === "/api/certificates/issue" && event.ok,
+    );
+    expect(audited).toBe(true);
+  });
+
+  it("le renouvellement automatique n'invente aucun utilisateur", async () => {
+    await seedDirectoryOnlyCertificatesConfig({ renewBeforeDays: 30 });
+    nextValidityDays = 10; // dans la marge -> à renouveler au prochain cycle
+    await issueCertificate("monapp.lecreusot.priv");
+
+    // Laisse retomber un éventuel onResponse en vol du test précédent avant de figer le compteur.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const before = await readAuditEvents();
+    nextValidityDays = 365;
+    expect(await runCertificatesReconcileCycle()).toBe("renewed");
+    expect(await readAuditEvents()).toHaveLength(before.length);
   });
 });
 

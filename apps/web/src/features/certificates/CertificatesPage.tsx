@@ -11,9 +11,11 @@ import {
   issueCertificate,
   saveCertificatesConfig,
   testCertificatesConfig,
+  type CertificateAccountSource,
   type CertificateSummary,
   type CertificatesFormInput,
   type CertificatesState,
+  type EnrollmentAccountView,
 } from "@/features/certificates/certificatesSlice";
 import { canAdminister, canOperate } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
@@ -22,8 +24,17 @@ import StatusPill from "@/components/StatusPill";
 import KeyValueList from "@/components/KeyValueList";
 import { IconCheck } from "@/components/icons";
 
-const EMPTY_FORM: CertificatesFormInput = { caUrl: "", template: "WebServer", username: "", password: "" };
+// Par défaut on essaie le compte déjà enregistré dans l'annuaire : aucun compte dédié à saisir.
+const EMPTY_FORM: CertificatesFormInput = { caUrl: "", template: "WebServer", accountSource: "directory" };
 const MISSING = "—";
+
+/** Rappel du compte réellement présenté à l'autorité — jamais un mot de passe. */
+function accountRecap(account: EnrollmentAccountView | undefined): string {
+  if (!account) return MISSING;
+  if (account.problem) return account.problem;
+  const origin = account.source === "dedicated" ? "compte dédié" : "compte de l'annuaire";
+  return `${account.username ?? MISSING} (${origin} — ${account.how})`;
+}
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleDateString("fr-FR", { year: "numeric", month: "short", day: "numeric" });
@@ -44,7 +55,7 @@ export default function CertificatesPage() {
   const dispatch = useAppDispatch();
   // Sélecteur typé localement (pas useAppSelector) : le reducer `certificates` n'est pas encore
   // déclaré dans store.ts — cette page compile donc indépendamment de son câblage.
-  const { overview, status, error, configured, config, saving, clearing, testing, testResult, issuing, issueError } =
+  const { overview, status, error, configured, config, accountHint, saving, clearing, testing, testResult, issuing, issueError } =
     useAppSelector((s) => s.certificates);
   const session = useAppSelector((s) => s.auth.session);
   const admin = canAdminister(session);
@@ -66,7 +77,8 @@ export default function CertificatesPage() {
       setForm({
         caUrl: config.caUrl,
         template: config.template,
-        username: config.username,
+        accountSource: config.accountSource,
+        ...(config.username ? { username: config.username } : {}),
         password: "",
         ...(config.renewBeforeDays !== undefined ? { renewBeforeDays: config.renewBeforeDays } : {}),
         autoEnroll: config.autoEnroll,
@@ -140,11 +152,14 @@ export default function CertificatesPage() {
   );
 
   function currentInput(): CertificatesFormInput {
+    const dedicated = form.accountSource === "dedicated";
     return {
       caUrl: form.caUrl.trim(),
       template: form.template.trim(),
-      username: form.username.trim(),
-      ...(form.password?.trim() ? { password: form.password.trim() } : {}),
+      accountSource: form.accountSource,
+      ...(form.username?.trim() ? { username: form.username.trim() } : {}),
+      // Aucun mot de passe n'est envoyé pour le compte de l'annuaire : c'est celui du bind LDAP.
+      ...(dedicated && form.password?.trim() ? { password: form.password.trim() } : {}),
       ...(form.renewBeforeDays !== undefined ? { renewBeforeDays: Number(form.renewBeforeDays) } : {}),
       ...(form.autoEnroll !== undefined ? { autoEnroll: form.autoEnroll } : {}),
     };
@@ -152,8 +167,16 @@ export default function CertificatesPage() {
 
   function isFormValid(): boolean {
     const input = currentInput();
-    const hasPassword = !!input.password || configured;
-    return !!(input.caUrl && input.template && input.username && hasPassword);
+    if (!input.caUrl || !input.template) return false;
+    if (input.accountSource !== "dedicated") return true;
+    const keepsExistingPassword = configured && config?.accountSource === "dedicated";
+    return !!(input.username && (input.password || keepsExistingPassword));
+  }
+
+  function setAccountSource(accountSource: CertificateAccountSource) {
+    dispatch(clearCertificatesTestResult());
+    // Changer de mode ne traîne jamais l'identifiant ni le mot de passe de l'autre mode.
+    setForm((f) => ({ ...f, accountSource, username: "", password: "" }));
   }
 
   function openForm() {
@@ -217,6 +240,11 @@ export default function CertificatesPage() {
   }
 
   const showForm = editing || (admin && !configured);
+  const resolvedAccount = accountHint ?? config?.account ?? overview?.account;
+  // Le champ identifiant n'apparaît que lorsqu'il est réellement nécessaire : quand le backend a
+  // dit ne pas pouvoir déduire l'identifiant Windows du compte de l'annuaire.
+  const needsDirectoryUsername = !!resolvedAccount?.problem;
+  const keepsDedicatedPassword = configured && config?.accountSource === "dedicated";
   const reconciliation = overview?.reconciliation;
   const expiringCount = certificates.filter((certificate) => certificate.health === "expiring").length;
   const expiredCount = certificates.filter((certificate) => certificate.health === "expired").length;
@@ -363,11 +391,16 @@ export default function CertificatesPage() {
                 { key: "Site d'inscription (certsrv)", value: config.caUrl },
                 { key: "Voie d'inscription", value: "Inscription web certsrv (HTTPS + authentification de base)" },
                 { key: "Modèle de certificat", value: config.template },
-                { key: "Compte de service", value: config.username },
+                {
+                  key: "Compte utilisé",
+                  value: config.accountSource === "dedicated" ? "Compte dédié" : "Compte de l'annuaire (par défaut)",
+                },
+                { key: "Identifiant présenté à l'autorité", value: accountRecap(resolvedAccount) },
                 { key: "Marge de renouvellement", value: `${config.renewBeforeDays ?? overview?.renewBeforeDays ?? 30} jours` },
                 { key: "Émission automatique des sous-domaines", value: config.autoEnroll ? "activée" : "désactivée" },
               ]}
             />
+            {resolvedAccount?.problem && <div className="error-banner">{resolvedAccount.problem}</div>}
           </div>
         )}
 
@@ -394,27 +427,83 @@ export default function CertificatesPage() {
                 required
               />
             </div>
-            <div className="field">
-              <label htmlFor="certs-username">Compte de service (droit "Inscrire" sur le modèle)</label>
-              <input
-                id="certs-username"
-                value={form.username}
-                onChange={(event) => setForm((f) => ({ ...f, username: event.target.value }))}
-                placeholder="LECREUSOT\svc-quai-pki"
-                required
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="certs-password">Mot de passe{configured ? " (laisser vide pour conserver l'existant)" : ""}</label>
-              <input
-                id="certs-password"
-                type="password"
-                value={form.password ?? ""}
-                onChange={(event) => setForm((f) => ({ ...f, password: event.target.value }))}
-                autoComplete="new-password"
-                {...(configured ? {} : { required: true })}
-              />
-            </div>
+            <fieldset className="certificates-account">
+              <legend>Compte présenté à l'autorité</legend>
+              <label className="certificates-account__choice">
+                <input
+                  type="radio"
+                  name="certs-account-source"
+                  checked={form.accountSource === "directory"}
+                  onChange={() => setAccountSource("directory")}
+                />
+                <span>
+                  Utiliser le compte de l'annuaire (par défaut)
+                  <small>Le compte de connexion LDAP déjà enregistré. Rien à saisir : son mot de passe est réutilisé tel quel.</small>
+                </span>
+              </label>
+              <label className="certificates-account__choice">
+                <input
+                  type="radio"
+                  name="certs-account-source"
+                  checked={form.accountSource === "dedicated"}
+                  onChange={() => setAccountSource("dedicated")}
+                />
+                <span>
+                  Utiliser un compte dédié
+                  <small>À réserver au cas où l'autorité refuse le compte de l'annuaire faute de droit « Inscrire ».</small>
+                </span>
+              </label>
+
+              {form.accountSource === "directory" && resolvedAccount && (
+                <p className={`certificates-account__recap${resolvedAccount.problem ? " certificates-account__recap--problem" : ""}`}>
+                  Identifiant qui sera présenté : {accountRecap(resolvedAccount)}
+                </p>
+              )}
+
+              {/* Le CN de l'annuaire n'est pas toujours un identifiant Windows : on le dit et on le
+                  laisse saisir plutôt que de le deviner. */}
+              {form.accountSource === "directory" && (needsDirectoryUsername || !!form.username?.trim()) && (
+                <div className="field">
+                  <label htmlFor="certs-directory-username">Identifiant Windows du compte de l'annuaire</label>
+                  <input
+                    id="certs-directory-username"
+                    value={form.username ?? ""}
+                    onChange={(event) => setForm((f) => ({ ...f, username: event.target.value }))}
+                    placeholder="LECREUSOT\copieurnt"
+                    autoComplete="off"
+                  />
+                </div>
+              )}
+
+              {form.accountSource === "dedicated" && (
+                <>
+                  <div className="field">
+                    <label htmlFor="certs-username">Compte dédié (droit « Inscrire » sur le modèle)</label>
+                    <input
+                      id="certs-username"
+                      value={form.username ?? ""}
+                      onChange={(event) => setForm((f) => ({ ...f, username: event.target.value }))}
+                      placeholder="LECREUSOT\svc-quai-pki"
+                      autoComplete="off"
+                      required
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="certs-password">
+                      Mot de passe{keepsDedicatedPassword ? " (laisser vide pour conserver l'existant)" : ""}
+                    </label>
+                    <input
+                      id="certs-password"
+                      type="password"
+                      value={form.password ?? ""}
+                      onChange={(event) => setForm((f) => ({ ...f, password: event.target.value }))}
+                      autoComplete="new-password"
+                      {...(keepsDedicatedPassword ? {} : { required: true })}
+                    />
+                  </div>
+                </>
+              )}
+            </fieldset>
             <div className="field">
               <label htmlFor="certs-renew">Renouveler combien de jours avant expiration</label>
               <input
