@@ -890,7 +890,6 @@ function graphNodePropsEqual(prev: NodeProps, next: NodeProps): boolean {
     // doit invalider le memo, contrairement aux callbacks eux-mêmes (voir JSDoc ci-dessus).
     a.actionPending === b.actionPending &&
     a.deletePending === b.deletePending &&
-    // Mise en évidence "même réseau que le tiroir survolé" — réellement rendue (classe CSS).
     a.label === b.label &&
     a.subtitle === b.subtitle &&
     a.status === b.status &&
@@ -1403,10 +1402,6 @@ function GroupNodeImpl({ data, selected }: NodeProps) {
   // .topology-node__label/__subtitle) : aucune règle CSS dédiée nécessaire.
   const zoom = useStore(zoomSelector);
   const isCompact = zoom < ZOOM_DETAIL_THRESHOLD;
-  const networkIds = (node.attachments ?? [])
-    .filter((a) => a.kind === "network" && a.networkId)
-    .map((a) => a.networkId!)
-    .join(" ");
   return (
     <div
       className={`topology-node topology-group-node${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}`}
