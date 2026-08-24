@@ -57,6 +57,12 @@ services:
       # Accès au démon Docker de l'hôte : c'est l'objet même de QUAI (gestion des conteneurs).
       # Équivaut à un accès root sur l'hôte — n'exposez jamais l'API directement à Internet.
       - /var/run/docker.sock:/var/run/docker.sock
+    # L'image de production tourne sous l'utilisateur non root "node" : sans appartenir au groupe
+    # propriétaire du socket, elle ne peut pas lire /var/run/docker.sock et QUAI croit le démon
+    # absent. DOCKER_GID est relevé sur l'hôte au moment du déploiement (voir .gitlab-ci.yml) ;
+    # le défaut 999 est celui de Debian/Ubuntu, ajustez-le pour un déploiement à la main.
+    group_add:
+      - "${DOCKER_GID:-999}"
     networks:
       - quai
     healthcheck:

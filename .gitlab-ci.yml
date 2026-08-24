@@ -193,6 +193,11 @@ deploiement:production:
         printf 'LDAP_SEARCH_FILTER=%s\n' "$filtre"
         printf 'LDAP_GROUP_ROLE_MAP=%s\n' "$role_map"
         printf 'LDAP_DEFAULT_ROLE=%s\n' "${LDAP_DEFAULT_ROLE:-viewer}"
+        # Groupe propriétaire RÉEL du socket Docker de l'hôte : l'API tourne sous l'utilisateur non
+        # root "node" et n'aurait sinon pas le droit de lire /var/run/docker.sock (le démon répond
+        # alors « connection refused », constaté le 24/08/2026). Lu sur la machine plutôt que
+        # codé en dur — le GID varie d'une distribution à l'autre.
+        printf 'DOCKER_GID=%s\n' "$(stat -c '%g' /var/run/docker.sock)"
       } > "$COMPOSE_ENV_FILE"
       chmod 600 "$COMPOSE_ENV_FILE"
       echo "$(wc -l < "$COMPOSE_ENV_FILE") variables écrites dans un fichier temporaire du job."
