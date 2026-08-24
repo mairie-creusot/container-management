@@ -138,6 +138,8 @@ describe("GET /api/containers/:id/files/hexdump — rôles et validation (aucun 
 // présent dans une image tierce) : la comparaison octet-par-octet ci-dessous porte sur un
 // contenu entièrement contrôlé, donc vérifiable sans aucune donnée inventée.
 // ---------------------------------------------------------------------------------------
+const FIXTURE_IMAGE = "alpine:3.19";
+
 let dockerReachable = false;
 try {
   const docker = await getClient();
@@ -146,7 +148,30 @@ try {
   dockerReachable = false;
 }
 
-describe.skipIf(!dockerReachable)("readContainerFileHexdump — vérification réelle octet par octet (Docker requis)", () => {
+// L'image de test n'est pas forcément présente sur la machine (cas réel : le runner GitLab, où ces
+// tests se sont mis à s'exécuter dès que le socket Docker lui a été donné — échec « No such image »
+// le 24/08/2026). On la récupère si elle manque ; si le téléchargement échoue (machine sans accès
+// au registre), on saute honnêtement au lieu de faire échouer la suite.
+let fixtureImageReady = false;
+if (dockerReachable) {
+  try {
+    const docker = await getClient();
+    try {
+      await docker.getImage(FIXTURE_IMAGE).inspect();
+    } catch {
+      const stream = await docker.pull(FIXTURE_IMAGE);
+      await new Promise<void>((resolve, reject) => {
+        docker.modem.followProgress(stream, (err: Error | null) => (err ? reject(err) : resolve()));
+      });
+      await docker.getImage(FIXTURE_IMAGE).inspect();
+    }
+    fixtureImageReady = true;
+  } catch {
+    fixtureImageReady = false;
+  }
+}
+
+describe.skipIf(!dockerReachable || !fixtureImageReady)("readContainerFileHexdump — vérification réelle octet par octet (Docker requis)", () => {
   // Motif ASCII simple (pas de guillemets/backticks/$ — traverse un Env Docker puis `printf '%s'`
   // sans aucune réinterprétation shell supplémentaire) répété pour dépasser HEXDUMP_MAX_LENGTH
   // (8192 octets, voir services/docker.ts) et exercer le plafonnement réel, pas seulement le cas
@@ -169,7 +194,7 @@ describe.skipIf(!dockerReachable)("readContainerFileHexdump — vérification r�
   beforeAll(async () => {
     const docker = await getClient();
     const container = await docker.createContainer({
-      Image: "alpine:3.19",
+      Image: FIXTURE_IMAGE,
       Cmd: [
         "/bin/sh",
         "-c",
