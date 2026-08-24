@@ -213,9 +213,9 @@ deploiement:production:
       # --keep-storage conserve le cache récent (sans lui, chaque build repartirait de zéro).
       # JAMAIS de prune de volumes ici : ils portent les données réelles (config, GitLab, etc.).
       docker system df || true
-      # 5 Go : la partition de l'hôte fait 28 Go au total (relevé du 24/08/2026) et un build a
-      # besoin de plusieurs Go transitoires. À relever par variable CI si le disque grandit.
-      docker builder prune -f --keep-storage "${DOCKER_BUILD_CACHE_MAX:-5GB}" || true
+      # 30 Go sur une partition passée à 124 Go (24/08/2026) : garde le cache de la compilation
+      # Rust de wasm-core, de loin le poste le plus long d'un build.
+      docker builder prune -f --keep-storage "${DOCKER_BUILD_CACHE_MAX:-30GB}" || true
       docker image prune -f || true
     - |
       set -e
