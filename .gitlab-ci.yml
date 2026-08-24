@@ -206,7 +206,18 @@ deploiement:production:
       echo "Contenu volontairement non affiché ; le fichier est supprimé en fin de job."
     - |
       set -e
-      echo "=== 4/5 — Construction des images de production ==="
+      echo "=== 4/6 — Entretien du disque de l'hôte ==="
+      # Chaque déploiement reconstruit les images : le cache de build (dont la compilation Rust de
+      # packages/wasm-core, très volumineuse) grossit indéfiniment jusqu'à saturer /var/lib/docker
+      # — build en échec sur "no space left on device", constaté le 24/08/2026.
+      # --keep-storage conserve le cache récent (sans lui, chaque build repartirait de zéro).
+      # JAMAIS de prune de volumes ici : ils portent les données réelles (config, GitLab, etc.).
+      docker system df || true
+      docker builder prune -f --keep-storage "${DOCKER_BUILD_CACHE_MAX:-15GB}" || true
+      docker image prune -f || true
+    - |
+      set -e
+      echo "=== 5/6 — Construction des images de production ==="
       # Le contexte de build est envoyé depuis CE conteneur vers le démon de l'hôte : les fichiers
       # du dépôt sont donc bien lus ici. Ce qui ne marcherait PAS, ce sont les bind mounts de
       # fichiers du dépôt dans le compose — il n'y en a plus aucun, tout est intégré aux images.
@@ -215,7 +226,7 @@ deploiement:production:
       docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_PROD_FILE" --env-file "$COMPOSE_ENV_FILE" build
     - |
       set -e
-      echo "=== 5/5 — Démarrage et vérification de l'état des services ==="
+      echo "=== 6/6 — Démarrage et vérification de l'état des services ==="
       docker compose -p "$COMPOSE_PROJECT" -f "$COMPOSE_PROD_FILE" --env-file "$COMPOSE_ENV_FILE" up -d --remove-orphans
       restant=36
       while [ "$restant" -gt 0 ]; do
