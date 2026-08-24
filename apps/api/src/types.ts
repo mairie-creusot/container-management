@@ -982,11 +982,10 @@ export interface TemplateArtifactSource {
 // "cron-job"/"backup" (voir getCronJobNodes/getBackupNodes, services/topology.ts) : un nœud PAR
 // DÉFINITION réelle (cronJobsStore.ts/backupsStore.ts, jamais modifiés par ce chantier — la
 // mission "tout devient un nœud du graphe" ne fait que projeter leurs définitions déjà
-// persistées dans la topologie), indépendants de Docker comme "ad-server"/"nutanix-vm" ci-dessus
+// persistées dans la topologie), indépendants de Docker comme "nutanix-vm" ci-dessus
 // (récupérés que le démon local soit joignable ou non). `status` dérivé de la DERNIÈRE exécution
 // réelle connue (CronJobRun/BackupRun) — jamais inventé :
-//  - aucune exécution connue -> "neutral" ("jamais exécuté", même convention que "ad-server" sans
-//    tentative de synchro depuis le démarrage du process) ;
+//  - aucune exécution connue -> "neutral" ("jamais exécuté", honnêtement indéterminé) ;
 //  - dernière exécution "running" -> "restarting" (exécution en cours) ;
 //  - dernière exécution "success" -> "running" ;
 //  - dernière exécution "failed" -> "stopped".
@@ -995,7 +994,6 @@ export type TopologyNodeKind =
   | "volume"
   | "network"
   | "nutanix-vm"
-  | "ad-server"
   | "host"
   | "cron-job"
   | "backup"
@@ -1295,7 +1293,7 @@ export interface TopologyNode {
 // jamais une nouvelle implémentation d'effet de bord.
 
 /** Ce qu'un nœud "automation-trigger" surveille réellement — v1 : soit un AUTRE TopologyNode déjà
- * existant sur le graphe (conteneur/host/vm nutanix/ad-server — évalué via son `status`/`healthStatus`
+ * existant sur le graphe (conteneur/host/vm nutanix — évalué via son `status`/`healthStatus`
  * déjà calculés par services/topology.ts, jamais une nouvelle métrique inventée), soit une route de
  * reverse proxy (évaluée via une VRAIE sonde de joignabilité de son upstream, voir plus bas). */
 export type AutomationTriggerSource =

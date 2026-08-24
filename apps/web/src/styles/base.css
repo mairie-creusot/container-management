@@ -258,7 +258,7 @@ p {
 }
 
 /* Pendant positif de .error-banner ci-dessus — même forme, couleur succès (ex : résultat d'un
-   test de connexion réussi, voir AdDnsPage.tsx). */
+   test de connexion réussi, voir features/adDns/AdDnsConfigSection.tsx). */
 .success-banner {
   display: flex;
   align-items: center;

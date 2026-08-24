@@ -357,7 +357,6 @@ export type TopologyNodeKind =
   | "volume"
   | "network"
   | "nutanix-vm"
-  | "ad-server"
   | "host"
   | "cron-job"
   | "backup"

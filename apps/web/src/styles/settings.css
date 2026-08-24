@@ -1,0 +1,101 @@
+/* Page Réglages (features/settings/SettingsPage.tsx) : rail d'intégrations à gauche, formulaire de
+   l'intégration sélectionnée à droite. Volontairement sobre — les cartes, champs et bannières
+   viennent de components.css, rien n'est redéfini ici. */
+
+.settings-layout {
+  display: flex;
+  gap: 22px;
+  align-items: flex-start;
+}
+
+.settings-rail {
+  flex: none;
+  width: 250px;
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+.settings-rail__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 9px 10px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.settings-rail__item:hover {
+  background: var(--color-surface-2);
+  color: var(--color-text);
+}
+
+.settings-rail__item.is-active {
+  background: var(--color-surface-2);
+  color: var(--color-text);
+  font-weight: 600;
+}
+
+.settings-rail__icon {
+  display: inline-flex;
+  color: var(--color-text-faint);
+  flex: none;
+}
+
+.settings-rail__item.is-active .settings-rail__icon {
+  color: var(--accent-start);
+}
+
+.settings-rail__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-panel {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Renvoi discret vers la page métier qui consomme le réglage affiché. */
+.settings-panel__related {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--color-text-faint);
+}
+
+/* Sous 1000px, le rail passe en bandeau horizontal défilable au-dessus du formulaire — même
+   principe que la sidebar réduite (layout.css). */
+@media (max-width: 1000px) {
+  .settings-layout {
+    flex-direction: column;
+  }
+
+  .settings-rail {
+    width: 100%;
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+  }
+
+  .settings-rail__item {
+    white-space: nowrap;
+  }
+}

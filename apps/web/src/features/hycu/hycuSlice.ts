@@ -20,11 +20,11 @@ export interface HycuConfigFormInput {
   password?: string;
 }
 
-/** Onglets réels de la page Sauvegardes (HycuPage.tsx) — déclarés ici pour qu'un autre écran
+/** Onglets réels de la page Sauvegardes (BackupsPage.tsx) — déclarés ici pour qu'un autre écran
  * (menu contextuel du nœud HYCU du graphe) puisse en demander un précis sans dépendre de la page. */
 export type HycuTab = "vms" | "policies" | "targets" | "jobs" | "events";
 
-/** Demande d'ouverture ciblée de la page Sauvegardes — consommée UNE fois par HycuPage, qui la
+/** Demande d'ouverture ciblée de la page Sauvegardes — consommée UNE fois par BackupsPage, qui la
  * remet aussitôt à `null` (jamais un état persistant qui rejouerait à chaque montage). */
 export interface HycuFocusRequest {
   tab?: HycuTab;

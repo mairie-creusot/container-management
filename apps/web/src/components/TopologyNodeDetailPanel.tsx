@@ -219,7 +219,7 @@ interface TabDef {
 }
 
 /** Onglets réels (pas de simples sections empilées) — adaptés au kind : un conteneur a les six,
- * les autres kinds (volume/network/nutanix-vm/ad-server/host) n'ont qu'un seul aperçu, rien d'autre
+ * les autres kinds (volume/network/nutanix-vm/host) n'ont qu'un seul aperçu, rien d'autre
  * à montrer de pertinent (pas de ports/volumes/variables/vulnérabilités/métriques pour une ressource
  * qui n'en a pas). */
 const CONTAINER_TABS: TabDef[] = [
@@ -1882,7 +1882,7 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
     } else if (node.kind === "network") {
       dispatch(fetchNetworks());
     }
-    // nutanix-vm/ad-server/host : rien à charger, TopologyNode porte déjà tout le détail disponible.
+    // nutanix-vm/host : rien à charger, TopologyNode porte déjà tout le détail disponible.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dispatch, node?.id, node?.kind]);
 
@@ -2680,30 +2680,6 @@ export default function TopologyNodeDetailPanel({ node, topology, onClose, onNav
                 ))}
               </div>
             )}
-          </>
-        )}
-
-        {/* --- Contrôleur de domaine / DNS AD (services/adDns.ts) ----------------------------- */}
-        {node.kind === "ad-server" && (
-          <>
-            <div className="chip-row topology-detail-panel__chips">
-              <StatusPill status={node.status} />
-            </div>
-            <KeyValueList
-              rows={[
-                { key: "Contrôleur de domaine", value: node.label },
-                { key: "Zone DNS", value: node.subtitle },
-                {
-                  key: "Dernière synchronisation",
-                  value:
-                    node.status === "running"
-                      ? "Réussie — le sous-domaine des routes reverse proxy résout automatiquement"
-                      : node.status === "stopped"
-                        ? "Échec — voir Paramètres › DNS Active Directory pour le détail"
-                        : "Aucune tentative depuis le démarrage de QUAI",
-                },
-              ]}
-            />
           </>
         )}
 

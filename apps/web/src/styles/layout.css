@@ -137,7 +137,9 @@
   min-width: 160px;
 }
 
-.topbar__bell {
+/* Boutons-icônes du Topbar : cloche des notifications et engrenage des Réglages — même gabarit. */
+.topbar__bell,
+.topbar__icon-btn {
   position: relative;
   display: flex;
   align-items: center;
@@ -153,9 +155,16 @@
   transition: background 0.15s ease, color 0.15s ease;
 }
 
-.topbar__bell:hover {
+.topbar__bell:hover,
+.topbar__icon-btn:hover,
+.topbar__icon-btn[aria-expanded="true"] {
   background: var(--color-surface-2);
   color: var(--color-text);
+}
+
+.topbar__settings {
+  position: relative;
+  flex: none;
 }
 
 .topbar__bell-badge {
@@ -333,6 +342,33 @@
 
 .profile-menu__item--neutral {
   color: var(--color-text);
+}
+
+/* Menu Réglages du Topbar — même popover que .profile-menu, une entrée par intégration. */
+.settings-menu {
+  width: 268px;
+  gap: 2px;
+  padding: 8px;
+}
+
+.settings-menu__title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-faint);
+  padding: 4px 10px 6px;
+}
+
+.settings-menu__item {
+  gap: 10px;
+  font-size: 12.5px;
+}
+
+.settings-menu__icon {
+  display: inline-flex;
+  color: var(--color-text-faint);
+  flex: none;
 }
 
 /* Zone de travail : contenu + inspector docké */

@@ -171,6 +171,11 @@ const clustersSlice = createSlice({
         state.nutanixConfigSaving = false;
         state.nutanixConfigured = action.payload.configured;
         state.nutanixConfig = action.payload.config ?? null;
+        // Le formulaire vit désormais dans les Réglages, pas sur la page Environnements : la liste
+        // affichée vient peut-être de l'ancien Prism Central — repassée en "idle" pour être relue
+        // au prochain affichage de la page plutôt que d'y rester périmée.
+        state.status = "idle";
+        state.nutanixVmsStatus = "idle";
       })
       .addCase(saveNutanixConfig.rejected, (state, action) => {
         state.nutanixConfigSaving = false;
@@ -179,6 +184,9 @@ const clustersSlice = createSlice({
       .addCase(disableNutanix.fulfilled, (state) => {
         state.nutanixConfigured = false;
         state.nutanixConfig = null;
+        state.nutanixVms = [];
+        state.nutanixVmsStatus = "idle";
+        state.status = "idle";
       })
       .addCase(disableNutanix.rejected, (state, action) => {
         state.nutanixConfigError = action.payload ?? "Impossible de désactiver Nutanix.";

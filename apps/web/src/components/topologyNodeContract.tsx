@@ -10,7 +10,6 @@ import {
   IconImages,
   IconNetworks,
   IconPlay,
-  IconServer,
   IconStack,
   IconTopology,
   IconVm,
@@ -746,19 +745,8 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
       { id: "nutanix-vm-edit-compute", label: "vCPU / Mémoire…" },
     ],
   },
-  // Contrôleur de domaine/DNS AD (services/adDns.ts) : jamais relié par une arête (aucune donnée
-  // ne prouve un lien réel avec un nœud Docker/Nutanix précis) — ports: [] EXPLICITE, aucune
-  // action de cycle de vie (QUAI ne pilote pas cette machine, il la synchronise).
-  "ad-server": {
-    icon: IconServer,
-    minimapColor: "#e879f9",
-    defaultColumnX: 1360,
-    ports: [],
-    edgeHealth: null,
-    automationStatusSeed: null,
-    resourceAlerts: null,
-    menuItems: [],
-  },
+  // Le kind "ad-server" a été retiré le 24/08/2026 : les contrôleurs de domaine sont des VMs
+  // Nutanix déjà présentes dans le graphe, et la configuration AD/DNS vit dans les Réglages.
   // Nœuds "host" (cluster Nutanix physique / hôte AHV physique / environnement Docker distant /
   // hôte LXD, voir services/topology.ts) — ce kind peut être LES DEUX bouts d'une arête "hosts"
   // selon le hostKind réel (un cluster est toujours SOURCE vers ses hôtes physiques ; un hôte AHV
@@ -1004,9 +992,9 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
   // et source des arêtes "protects" vers les VMs qu'elle sauvegarde réellement.
   "hycu-appliance": {
     icon: IconBackup,
-    // Magenta — distinct du bleu ciel de "backup" (#0ea5e9), du rose/rouge de gitops-source
-    // (#f43f5e) et du fuchsia clair d'ad-server (#e879f9) ; cohérent avec
-    // .topology-node--hycu-appliance et .topology-handle--backup (topology.css).
+    // Magenta — distinct du bleu ciel de "backup" (#0ea5e9) et du rose/rouge de gitops-source
+    // (#f43f5e) ; cohérent avec .topology-node--hycu-appliance et .topology-handle--backup
+    // (topology.css).
     minimapColor: "#ec4899",
     defaultColumnX: 4760,
     ports: [

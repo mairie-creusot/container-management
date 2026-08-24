@@ -232,13 +232,6 @@
   color: var(--color-success);
 }
 
-/* Contrôleur de domaine/DNS AD — fuchsia, cohérent avec MINIMAP_NODE_COLOR["ad-server"] dans
-   topologyGraphShared.tsx (voir services/adDns.ts). */
-.topology-node--ad-server .topology-node__icon {
-  background: rgba(232, 121, 249, 0.16);
-  color: #e879f9;
-}
-
 /* Hôte (cluster Nutanix physique / environnement Docker distant / hôte LXD, voir hostKind sur
    TopologyNode) — teal, distinct des cinq autres couleurs de kind ci-dessus, cohérent avec
    MINIMAP_NODE_COLOR["host"] dans topologyGraphShared.tsx. */
@@ -1725,7 +1718,6 @@
 .topology-detail-panel__icon--volume { color: var(--color-warning); }
 .topology-detail-panel__icon--network { color: var(--accent-end, #7c5cfc); }
 .topology-detail-panel__icon--nutanix-vm { color: var(--color-success); }
-.topology-detail-panel__icon--ad-server { color: #e879f9; }
 .topology-detail-panel__icon--host { color: #14b8a6; }
 .topology-detail-panel__icon--cron-job { color: #facc15; }
 .topology-detail-panel__icon--backup { color: #0ea5e9; }
@@ -1782,7 +1774,7 @@
 
 /* Onglets réels (façon Railway : Deployments/Variables/Metrics/Settings) — adaptés au kind du
    nœud (TopologyNodeDetailPanel.tsx#tabsForKind), pas affichés du tout s'il n'y en a qu'un seul
-   (volume/network/nutanix-vm/ad-server/host : rien d'autre de pertinent à montrer). */
+   (volume/network/nutanix-vm/host : rien d'autre de pertinent à montrer). */
 .topology-detail-panel__tabs {
   display: flex;
   flex-wrap: wrap;
@@ -3745,7 +3737,7 @@
 /* --- Modules métier par nœud (19/08/2026, features/serviceModules/) ---------------------------
    Vue du SERVICE réel porté par un nœud (Active Directory/DNS, 3CX, DHCP…) — même grammaire
    visuelle que le reste du graphe (mêmes arêtes, mêmes couleurs d'état), teintée de violet
-   (#a78bfa) pour se distinguer du cyan "template" et du fuchsia "ad-server" sans introduire une
+   (#a78bfa) pour se distinguer du cyan "template" sans introduire une
    seconde identité visuelle. */
 
 /* Pastille discrète "module <label>" d'une carte de nœud lié (voir serviceModuleBadge). */

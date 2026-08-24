@@ -20,17 +20,15 @@ const RegistriesPage = lazy(() => import("@/features/registries/RegistriesPage")
 const RegistryExplorerPage = lazy(() => import("@/features/registries/RegistryExplorerPage"));
 const SecretsPage = lazy(() => import("@/features/secrets/SecretsPage"));
 const ContainersPage = lazy(() => import("@/features/containers/ContainersPage"));
-const ReverseProxyPage = lazy(() => import("@/features/reverseProxy/ReverseProxyPage"));
-const AdDnsPage = lazy(() => import("@/features/adDns/AdDnsPage"));
+const PublicationPage = lazy(() => import("@/features/publication/PublicationPage"));
+const SettingsPage = lazy(() => import("@/features/settings/SettingsPage"));
 const NotificationChannelsPage = lazy(() => import("@/features/notificationChannels/NotificationChannelsPage"));
 const EnvironmentsPage = lazy(() => import("@/features/clusters/EnvironmentsPage"));
 const NotificationsPage = lazy(() => import("@/features/notifications/NotificationsPage"));
 const AuditPage = lazy(() => import("@/features/audit/AuditPage"));
-const HycuPage = lazy(() => import("@/features/hycu/HycuPage"));
-const ExagridPage = lazy(() => import("@/features/exagrid/ExagridPage"));
+const BackupsPage = lazy(() => import("@/features/dataProtection/BackupsPage"));
 const ThreecxPage = lazy(() => import("@/features/threecx/ThreecxPage"));
 const GlpiPage = lazy(() => import("@/features/glpi/GlpiPage"));
-const CertificatesPage = lazy(() => import("@/features/certificates/CertificatesPage"));
 
 // Notifications système (watchdog proactif côté API — nouvelle version d'image, intégration
 // devenue injoignable/de nouveau joignable) : câblé ici plutôt que dans une page précise, pour
@@ -66,10 +64,10 @@ function renderView(view: string) {
       return <SecretsPage />;
     case "containers":
       return <ContainersPage />;
-    case "reverse-proxy":
-      return <ReverseProxyPage />;
-    case "ad-dns":
-      return <AdDnsPage />;
+    case "publication":
+      return <PublicationPage />;
+    case "settings":
+      return <SettingsPage />;
     case "notification-channels":
       return <NotificationChannelsPage />;
     case "clusters":
@@ -78,16 +76,12 @@ function renderView(view: string) {
       return <NotificationsPage />;
     case "audit":
       return <AuditPage />;
-    case "hycu":
-      return <HycuPage />;
-    case "exagrid":
-      return <ExagridPage />;
+    case "backups":
+      return <BackupsPage />;
     case "threecx":
       return <ThreecxPage />;
     case "glpi":
       return <GlpiPage />;
-    case "certificates":
-      return <CertificatesPage />;
     default:
       return <OverviewPage />;
   }

@@ -296,7 +296,7 @@ export async function buildAdDnsSnapshot(deps: AdDnsModuleDeps = DEFAULT_AD_DNS_
       generatedAt,
       status: "not-configured",
       message:
-        "Intégration Active Directory / DNS non configurée — renseignez realm, KDC, zone et compte de service dans les paramètres.",
+        "Intégration Active Directory / DNS non configurée — renseignez realm, KDC, zone et compte de service dans les Réglages.",
       summary: [],
       entities: [],
       relations: [],
@@ -429,6 +429,11 @@ export const adDnsModuleProvider: ServiceModuleProvider = {
   label: "Active Directory / DNS",
   description: "Contrôleur de domaine, zone DNS et enregistrements A réellement poussés par QUAI (lecture seule).",
   isConfigured: async () => (await getEffectiveAdDnsConfig()) !== null,
+  // Le KDC configuré EST le contrôleur de domaine : son nom rattache le module à la VM Nutanix qui
+  // le porte réellement (règle 3 de resolveAutomaticBindings, nom court ou FQDN). Tant que le
+  // graphe portait EN PLUS un nœud "ad-server" étiqueté avec ce même hostname, deux nœuds
+  // correspondaient et la liaison restait ambiguë donc inexistante — ce nœud a été retiré le
+  // 24/08/2026 (services/topology.ts).
   configuredHosts: async () => {
     const cfg = await getEffectiveAdDnsConfig();
     return cfg ? [cfg.kdcHost] : [];
@@ -452,7 +457,7 @@ async function buildThreecxSnapshot(): Promise<ServiceModuleSnapshot> {
       moduleId: "3cx",
       generatedAt,
       status: "not-configured",
-      message: "Intégration 3CX non configurée — renseignez l'URL du PBX, le ClientID et la clé API dans les paramètres.",
+      message: "Intégration 3CX non configurée — renseignez l'URL du PBX, le ClientID et la clé API dans les Réglages.",
       summary: [],
       entities: [],
       relations: [],

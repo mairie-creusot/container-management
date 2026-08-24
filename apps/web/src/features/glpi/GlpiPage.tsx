@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import { canAdminister } from "@/features/auth/authSlice";
+import { openSettingsSection } from "@/features/ui/uiSlice";
 import StatusPill from "@/components/StatusPill";
 import { IconInfo } from "@/components/icons";
 import {
@@ -11,7 +12,6 @@ import {
   selectGlpiState,
   TICKETS_PAGE_SIZE,
 } from "@/features/glpi/glpiSlice";
-import GlpiConfigSection from "@/features/glpi/GlpiConfigSection";
 import GlpiInventoryTab from "@/features/glpi/GlpiInventoryTab";
 import GlpiTicketsTab from "@/features/glpi/GlpiTicketsTab";
 import { formatDateTime } from "@/features/glpi/format";
@@ -116,7 +116,17 @@ export default function GlpiPage() {
             <IconInfo />
             <strong>GLPI n'est pas configuré</strong>
             {admin ? (
-              <span>Renseignez l'accès à l'API GLPI dans la section Configuration ci-dessous.</span>
+              <>
+                <span>L'accès à l'API GLPI se renseigne dans les Réglages.</span>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  style={{ marginTop: 12 }}
+                  onClick={() => dispatch(openSettingsSection("glpi"))}
+                >
+                  Ouvrir le réglage GLPI
+                </button>
+              </>
             ) : (
               <span>Seul un administrateur peut renseigner l'accès à l'API GLPI.</span>
             )}
@@ -164,11 +174,8 @@ export default function GlpiPage() {
           </>
         )}
 
-        {admin && (
-          <div style={{ marginTop: configured ? 32 : 0 }}>
-            <GlpiConfigSection />
-          </div>
-        )}
+        {/* La configuration GLPI (GlpiConfigSection.tsx) a quitté cette page le 24/08/2026 : elle
+            n'est plus montée que par la page Réglages — une seule source de vérité. */}
       </div>
     </div>
   );

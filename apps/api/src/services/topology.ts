@@ -32,10 +32,12 @@
  * leur nœud "host" de cluster (voir juste en dessous) par une VRAIE arête `kind: "hosts"` quand le
  * cluster de la VM est déterminable — jamais reliées aux nœuds Docker (aucune relation réelle).
  *
- * Nœud "ad-server" (voir getAdServerNodes ci-dessous) : le contrôleur de domaine/DNS Active
- * Directory synchronisé par les routes de reverse proxy (services/adDns.ts) — même principe que
- * "nutanix-vm" (indépendant de Docker, [] tant que jamais configuré), jamais relié par une arête
- * à un nœud Docker ou Nutanix (aucune donnée ne prouve que c'est la même machine physique/VM).
+ * PAS de nœud dédié au contrôleur de domaine/DNS Active Directory (retiré le 24/08/2026) : les
+ * contrôleurs de domaine de la mairie SONT des VMs Nutanix, déjà présentes ci-dessus. Un second
+ * nœud isolé portant le même hostname doublonnait la machine réelle — et rendait la liaison
+ * automatique du module métier "ad-dns" AMBIGUË (deux nœuds candidats pour un même hôte configuré,
+ * voir serviceModules.ts#resolveAutomaticBindings, qui ne lie rien dans ce cas). La configuration
+ * AD/DNS elle-même vit dans les Réglages (web), et son module se rattache maintenant à la VRAIE VM.
  *
  * Nœud "hycu-appliance" (voir getHycuTopologyParts ci-dessous) : le contrôleur de sauvegarde HYCU
  * réel — aucun nœud tant qu'il n'a jamais été configuré, LECTURE SEULE stricte. Seul émetteur
@@ -112,8 +114,7 @@ import { listGitOpsFiles } from "./gitops.js";
 import { listAllScans } from "./scan.js";
 import { getNutanixClusters, getNutanixHosts, getNutanixVms, isNutanixConfigured, lastKnownNutanixPoll } from "./nutanix.js";
 import { getHycuTopologySnapshot, hycuVmProtectionState, lastKnownHycuPoll } from "./hycu.js";
-import { getEffectiveAdDnsConfig } from "./setupStore.js";
-import { lastKnownDnsSync, listRoutes } from "./reverseProxy.js";
+import { listRoutes } from "./reverseProxy.js";
 import { listGroups } from "./topologyGroupsStore.js";
 import { listRemoteDockerEnvironments } from "./remoteDockerStore.js";
 import { getLxcEnvironment } from "./lxc.js";
@@ -568,35 +569,6 @@ async function getLocalDockerEnvNode(): Promise<TopologyNode> {
 }
 
 /**
- * Nœud "ad-server" (voir services/adDns.ts, types.ts#AdDnsConfig) : le contrôleur de domaine/DNS
- * AD que QUAI synchronise pour les routes de reverse proxy — indépendant de Docker (comme les VMs
- * Nutanix ci-dessus), [] si jamais configuré. `status` reflète le DERNIER essai réel de
- * synchronisation (lastKnownDnsSync, en mémoire process — voir reverseProxy.ts) : "running" =
- * dernière synchro réussie, "stopped" = dernière synchro en échec (KDC injoignable, droits
- * insuffisants...), "neutral" = configuré mais aucune route créée/supprimée depuis le démarrage du
- * process (aucune tentative encore faite, honnêtement "indéterminé" plutôt qu'un statut inventé).
- * PAS de lien/arête vers un éventuel nœud "nutanix-vm" : QUAI n'a aucune donnée reliant réellement
- * ce contrôleur de domaine à une VM Nutanix précise (même principe que l'absence d'arête entre
- * nœuds Docker et VMs Nutanix, voir en-tête de fichier) — à l'utilisateur de le reconnaître
- * visuellement via le libellé (hostname du KDC) si c'est bien la même machine.
- */
-async function getAdServerNodes(): Promise<TopologyNode[]> {
-  const adDnsConfig = await getEffectiveAdDnsConfig();
-  if (!adDnsConfig) return [];
-  const lastSync = lastKnownDnsSync();
-  const status: TopologyNode["status"] = lastSync ? (lastSync.status === "synced" ? "running" : "stopped") : "neutral";
-  return [
-    {
-      id: `ad-server:${adDnsConfig.kdcHost}`,
-      kind: "ad-server",
-      label: adDnsConfig.kdcHost,
-      subtitle: `Zone DNS ${adDnsConfig.zone}`,
-      status,
-    },
-  ];
-}
-
-/**
  * Statut d'un nœud "cron-job"/"backup" dérivé de sa DERNIÈRE exécution réelle connue (le run le
  * plus récent, `runs[0]` — `listCronJobRuns`/`listBackupRuns` trient déjà du plus récent au plus
  * ancien) — jamais inventé, voir types.ts#TopologyNodeKind pour la règle complète. Partagée par
@@ -611,8 +583,8 @@ function lastRunNodeStatus(lastRun: { status: "running" | "success" | "failed" }
 
 /**
  * Un nœud "cron-job" par définition RÉELLE de cronJobsStore.ts (jamais modifié par ce chantier,
- * voir mission "tout devient un nœud du graphe") — indépendant de Docker (comme "ad-server" ci-
- * dessus, récupéré que le démon local soit joignable ou non) : la LISTE des définitions ne dépend
+ * voir mission "tout devient un nœud du graphe") — indépendant de Docker (comme "nutanix-vm"
+ * ci-dessus, récupéré que le démon local soit joignable ou non) : la LISTE des définitions ne dépend
  * pas de Docker, même si l'EXÉCUTION d'un job en dépend (docker exec sur son conteneur cible,
  * inchangé, voir cronJobsScheduler.ts). `status` dérivé de son dernier run réel connu
  * (listCronJobRuns, lastRunNodeStatus ci-dessus) — [] si aucun cron job n'a jamais été créé.
@@ -664,7 +636,7 @@ const IAC_ENGINE_LABEL: Record<IacEngine, string> = { tofu: "OpenTofu", ansible:
 /**
  * Un nœud "iac-workspace" par workspace Infra-as-code RÉEL (services/iac/workspaces.ts) — TOUJOURS
  * présent dès qu'il est créé (l'utilisateur l'a explicitement créé via POST /api/iac/workspaces),
- * indépendant de Docker/Nutanix/AD comme "ad-server"/"cron-job"/"backup" ci-dessus (récupéré que
+ * indépendant de Docker/Nutanix comme "cron-job"/"backup" ci-dessus (récupéré que
  * Docker local soit joignable ou non). [] si aucun workspace n'a jamais été créé.
  *
  * `status` dérivé du DERNIER run réel de ce workspace (services/iac/runner.ts#listRuns, déjà trié
@@ -676,7 +648,7 @@ const IAC_ENGINE_LABEL: Record<IacEngine, string> = { tofu: "OpenTofu", ansible:
  * exécuté" de "en cours" nécessite cette valeur précise pour le panneau de détail).
  *
  * Aucune arête : QUAI n'a aucune donnée reliant réellement un workspace IaC à une ressource Docker/
- * Nutanix précise (même principe que "ad-server" ci-dessus) — à l'utilisateur de le reconnaître
+ * Nutanix précise (même principe que "cron-job"/"backup" ci-dessus) — à l'utilisateur de le reconnaître
  * visuellement si un `tofu apply` a par exemple provisionné tel conteneur.
  */
 async function getIacWorkspaceNodes(): Promise<TopologyNode[]> {
@@ -761,26 +733,26 @@ async function getImageTemplateParts(): Promise<{ nodes: TopologyNode[]; edges: 
 
 /**
  * Nœud "gitops-source" (voir services/gitops.ts, config.ts#gitops) : LE dépôt Git configuré comme
- * source de vérité GitOps — une config globale UNIQUE (comme "ad-server" pour AD DNS ci-dessus),
+ * source de vérité GitOps — une config globale UNIQUE, pas une liste,
  * jamais une liste d'items malgré le nom pluriel du chantier "tout devient un nœud du graphe".
  *
  * Gardé sur `config.gitops.repoUrl` précisément (pas juste "un dépôt local existe") : GITOPS_REPO_PATH
  * a TOUJOURS une valeur par défaut ("./data/gitops", voir config.ts) et gitops.ts l'auto-amorce
  * silencieusement (bootstrapLocalRepo) même sans configuration explicite de l'utilisateur — ce
  * comportement de repli reste inchangé (le badge "Dérive GitOps" des conteneurs, ci-dessous, continue
- * d'en profiter), mais ne justifie PAS d'afficher un nœud dans le graphe : comme pour "ad-server",
- * un nœud représente une INTÉGRATION EXTERNE délibérément configurée, jamais un mécanisme de repli
+ * d'en profiter), mais ne justifie PAS d'afficher un nœud dans le graphe : un nœud représente une
+ * INTÉGRATION EXTERNE délibérément configurée, jamais un mécanisme de repli
  * automatique. [] si GITOPS_REPO_URL n'a jamais été renseigné.
  *
  * `status` dérivé du nombre RÉEL de fichiers actuellement en dérive (listGitOpsFiles().filter(f =>
  * f.drift), même source que driftFilePaths ci-dessous) : "running" si aucune dérive (sain), "stopped"
  * dès qu'au moins un fichier dérive (alerte) — toujours déterminable une fois le dépôt configuré,
- * donc jamais de troisième état "neutral" ici (contrairement à "ad-server", où "neutral" couvre
- * l'absence de toute tentative de synchro depuis le démarrage du process).
+ * donc jamais de troisième état "neutral" ici (contrairement à "cron-job"/"backup", où "neutral"
+ * couvre l'absence de toute exécution connue).
  *
  * Appel dédié à listGitOpsFiles() (indépendant de celui du bloc Docker plus bas, qui ne tourne que
  * si Docker est joignable ET sert un autre usage — le rapprochement de dérive PAR CONTENEUR) : même
- * principe qu'ad-server/nutanix-vm/host, chaque nœud "statique" récupère sa propre donnée sans
+ * principe que nutanix-vm/host, chaque nœud "statique" récupère sa propre donnée sans
  * dépendre de la disponibilité de Docker. `ensureRepoReady()` (gitops.ts) protège déjà les appels
  * concurrents entre eux (garde anti-chevauchement) ; les deux appels ici restent séquentiels, donc
  * un léger surcoût réseau (un second fetch/pull) uniquement quand GITOPS_REPO_URL est réellement
@@ -788,7 +760,7 @@ async function getImageTemplateParts(): Promise<{ nodes: TopologyNode[]; edges: 
  * la fonction pour partager un résultat entre deux préoccupations indépendantes.
  *
  * PAS d'arête vers un nœud Docker/Nutanix/host : aucune donnée ne prouve un lien réel (même principe
- * que "ad-server" ci-dessus).
+ * que "iac-workspace" ci-dessus).
  */
 async function getGitOpsSourceNode(): Promise<TopologyNode[]> {
   if (!config.gitops.repoUrl) return [];
@@ -897,10 +869,9 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
   const { vmNodes: nutanixVmNodes, hostNodes: nutanixHostNodes, hostEdges: nutanixHostEdges } = external
     ? await getNutanixTopologyParts()
     : { vmNodes: [], hostNodes: [], hostEdges: [] };
-  const adServerNodes = external ? await getAdServerNodes() : [];
   // Nœuds "host" Docker distant/LXD : indépendants eux aussi de la joignabilité du démon LOCAL
   // (ce sont d'autres hôtes) — récupérés que Docker local soit joignable ou non, même principe que
-  // Nutanix/ad-server ci-dessus.
+  // Nutanix ci-dessus.
   const remoteDockerHostNodes = external ? await getRemoteDockerHostNodes() : [];
   const lxcHostNodes = external ? await getLxcHostNodes() : [];
   // Appliance HYCU : source EXTERNE lente au même titre que Nutanix (appels HTTPS réels) — jamais
@@ -908,7 +879,7 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
   const hycuParts = external ? await getHycuTopologyParts(nutanixVmNodes) : { nodes: [], edges: [] };
   const localDockerNode = await getLocalDockerEnvNode();
   // Racine MASTER "QUAI" : chaque ENVIRONNEMENT (Docker local/distant, cluster Nutanix, LXD) s'y
-  // rattache par une arête "hosts" — jamais les nœuds hors-infra (ad-server, cron, backup, iac,
+  // rattache par une arête "hosts" — jamais les nœuds hors-infra (cron, backup, iac,
   // gitops, automation), qui ne sont pas des environnements.
   const environmentNodeIds = [
     localDockerNode.id,
@@ -934,7 +905,7 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
   }));
   // Cron jobs/sauvegardes (voir getCronJobNodes/getBackupNodes ci-dessus) : indépendants eux
   // aussi de la joignabilité Docker locale — leurs DÉFINITIONS sont de simples lectures JSON,
-  // même principe que Nutanix/ad-server/host ci-dessus.
+  // même principe que Nutanix/host ci-dessus.
   const cronJobNodes = await getCronJobNodes();
   const backupNodes = await getBackupNodes();
   // Workspaces Infra-as-code (voir getIacWorkspaceNodes ci-dessus) : indépendants eux aussi de la
@@ -962,7 +933,6 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
     localDockerNode,
     ...nutanixVmNodes,
     ...nutanixHostNodes,
-    ...adServerNodes,
     ...remoteDockerHostNodes,
     ...lxcHostNodes,
     ...cronJobNodes,

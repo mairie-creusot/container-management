@@ -1,12 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
-import { pageTitle, setCurrentView, setSearchQuery, setSelectedEnvironmentId } from "@/features/ui/uiSlice";
+import {
+  openSettingsSection,
+  pageTitle,
+  setCurrentView,
+  setSearchQuery,
+  setSelectedEnvironmentId,
+} from "@/features/ui/uiSlice";
 import { fetchEnvironments } from "@/features/clusters/clustersSlice";
 import { canAdminister, logout } from "@/features/auth/authSlice";
-import { resetSetup } from "@/features/setup/setupSlice";
 import { markAllRead, markServerNotificationsRead } from "@/features/notifications/notificationsSlice";
+import { SETTINGS_SECTIONS } from "@/features/settings/settingsSections";
 import { useConfirm } from "@/components/ConfirmProvider";
-import { IconBell, IconSearch } from "@/components/icons";
+import { IconBell, IconSearch, IconSettings } from "@/components/icons";
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/);
@@ -32,7 +38,9 @@ export default function Topbar() {
   const confirm = useConfirm();
 
   const [menuOpen, setMenuOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const settingsRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (environmentsStatus === "idle") {
@@ -40,18 +48,21 @@ export default function Topbar() {
     }
   }, [dispatch, environmentsStatus]);
 
-  // Ferme le menu au clic en dehors ou à l'échappement — pattern standard pour un menu
+  // Ferme le menu ouvert au clic en dehors ou à l'échappement — pattern standard pour un menu
   // déclenché par bouton (pas de librairie de popover dans ce projet, cf. absence de
-  // dépendance équivalente dans package.json).
+  // dépendance équivalente dans package.json). Les deux menus (profil, Réglages) partagent
+  // l'écouteur : un seul est ouvert à la fois.
   useEffect(() => {
-    if (!menuOpen) return;
+    if (!menuOpen && !settingsOpen) return;
     function handlePointerDown(event: PointerEvent) {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
-        setMenuOpen(false);
-      }
+      const target = event.target as Node;
+      if (menuRef.current && !menuRef.current.contains(target)) setMenuOpen(false);
+      if (settingsRef.current && !settingsRef.current.contains(target)) setSettingsOpen(false);
     }
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setMenuOpen(false);
+      if (event.key !== "Escape") return;
+      setMenuOpen(false);
+      setSettingsOpen(false);
     }
     document.addEventListener("pointerdown", handlePointerDown);
     document.addEventListener("keydown", handleKeyDown);
@@ -59,7 +70,7 @@ export default function Topbar() {
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [menuOpen]);
+  }, [menuOpen, settingsOpen]);
 
   async function handleLogout() {
     setMenuOpen(false);
@@ -71,16 +82,9 @@ export default function Topbar() {
     if (ok) dispatch(logout());
   }
 
-  async function handleReconfigure() {
-    setMenuOpen(false);
-    const ok = await confirm({
-      title: "Reconfigurer QUAI",
-      description:
-        "Rouvre l'assistant de configuration (LDAP, Docker, Kubernetes, registries). L'application redevient inaccessible aux autres utilisateurs tant que l'assistant n'est pas terminé.",
-      confirmLabel: "Reconfigurer",
-      variant: "danger",
-    });
-    if (ok) dispatch(resetSetup());
+  function openSettings(sectionId: string | null) {
+    setSettingsOpen(false);
+    dispatch(openSettingsSection(sectionId));
   }
 
   return (
@@ -133,6 +137,57 @@ export default function Topbar() {
         {unreadCount > 0 && <span className="topbar__bell-badge">{unreadCount > 9 ? "9+" : unreadCount}</span>}
       </button>
 
+      {/* Menu Réglages — toutes les configurations d'intégration, réservé aux admins (la vue
+          "settings" refuse elle aussi les autres rôles). Ouvre la page dédiée sur la section
+          choisie ; la liste vient de SETTINGS_SECTIONS, jamais recopiée ici. */}
+      {canAdminister(session) && (
+        <div className="topbar__settings" ref={settingsRef}>
+          <button
+            type="button"
+            className="topbar__icon-btn"
+            aria-label="Réglages"
+            title="Réglages"
+            aria-expanded={settingsOpen}
+            aria-haspopup="menu"
+            onClick={() => setSettingsOpen((open) => !open)}
+          >
+            <IconSettings />
+          </button>
+
+          {settingsOpen && (
+            <div className="profile-menu settings-menu" role="menu">
+              <div className="settings-menu__title">Réglages</div>
+              {SETTINGS_SECTIONS.map((section) => {
+                const Icon = section.icon;
+                return (
+                  <button
+                    key={section.id}
+                    type="button"
+                    className="profile-menu__item profile-menu__item--neutral settings-menu__item"
+                    role="menuitem"
+                    onClick={() => openSettings(section.id)}
+                  >
+                    <span className="settings-menu__icon">
+                      <Icon />
+                    </span>
+                    {section.label}
+                  </button>
+                );
+              })}
+              <div className="profile-menu__divider" />
+              <button
+                type="button"
+                className="profile-menu__item profile-menu__item--neutral"
+                role="menuitem"
+                onClick={() => openSettings(null)}
+              >
+                Tous les réglages
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       {session && (
         <div className="topbar__user" ref={menuRef}>
           <button
@@ -165,19 +220,9 @@ export default function Topbar() {
                   </span>
                 ))}
               </div>
-              {canAdminister(session) && (
-                <>
-                  <div className="profile-menu__divider" />
-                  <button
-                    type="button"
-                    className="profile-menu__item profile-menu__item--neutral"
-                    role="menuitem"
-                    onClick={handleReconfigure}
-                  >
-                    Reconfigurer (LDAP, Docker, registries…)
-                  </button>
-                </>
-              )}
+              {/* Ce menu ne garde que l'identité, le rôle et la déconnexion : la reconfiguration
+                  (LDAP, Docker, registries) a rejoint le menu Réglages, avec les autres
+                  intégrations. */}
               <div className="profile-menu__divider" />
               <button type="button" className="profile-menu__item" role="menuitem" onClick={handleLogout}>
                 Déconnexion

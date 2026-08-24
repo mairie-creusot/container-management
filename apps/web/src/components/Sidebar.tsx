@@ -13,12 +13,9 @@ import {
   IconHistory,
   IconKey,
   IconGlobe,
-  IconServer,
   IconBackup,
-  IconCertificate,
   IconLifebuoy,
   IconPhone,
-  IconStorageArray,
 } from "@/components/icons";
 
 const ICONS: Partial<Record<ViewId, (props: { className?: string }) => JSX.Element>> = {
@@ -26,13 +23,11 @@ const ICONS: Partial<Record<ViewId, (props: { className?: string }) => JSX.Eleme
   images: IconImages,
   registries: IconRegistries,
   containers: IconContainers,
-  "reverse-proxy": IconGlobe,
+  publication: IconGlobe,
   clusters: IconClusters,
-  hycu: IconBackup,
-  exagrid: IconStorageArray,
+  backups: IconBackup,
   threecx: IconPhone,
   glpi: IconLifebuoy,
-  certificates: IconCertificate,
   notifications: IconBell,
   audit: IconHistory,
 };
@@ -115,19 +110,9 @@ export default function Sidebar() {
           </button>
         )}
 
-        {canAdminister(session) && (
-          <button
-            type="button"
-            className={`sidebar__item${currentView === "ad-dns" ? " is-active" : ""}`}
-            onClick={() => handleNavigate("ad-dns")}
-            title={pageTitle("ad-dns")}
-          >
-            <span className="sidebar__icon">
-              <IconServer />
-            </span>
-            {pageTitle("ad-dns")}
-          </button>
-        )}
+        {/* « DNS Active Directory » a quitté ce menu le 24/08/2026 : son formulaire et son
+            diagnostic de compte vivent dans les Réglages (menu engrenage du Topbar), et ses données
+            métier sur le nœud de la VM contrôleur de domaine (module « ad-dns » du graphe). */}
 
         {canAdminister(session) && (
           <button

@@ -1,31 +1,236 @@
-/* Page Sauvegardes (HYCU) — onglets à la silhouette de .diff-tabs (components.css). */
+/* Page Sauvegardes (contrôleur HYCU + appliance ExaGrid réunis). Les relevés de l'appliance
+   réutilisent les jauges et tuiles de exagrid.css. */
 
-.hycu-tabs {
+/* --- Bandeau des deux intégrations ----------------------------------------------------------- */
+
+.bkp-integrations {
   display: flex;
-  gap: 4px;
-  margin-bottom: 14px;
+  align-items: center;
   flex-wrap: wrap;
+  gap: 10px 24px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
 }
 
-.hycu-tab {
-  background: transparent;
-  border: 1px solid var(--color-border);
+.bkp-integration {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
   color: var(--color-text-muted);
+}
+
+.bkp-integration__name {
+  color: var(--color-text);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.bkp-integrations__action {
+  margin-left: auto;
+}
+
+.bkp-integration__hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-faint);
+  font-size: 11.5px;
+}
+
+/* --- Résumé de tête -------------------------------------------------------------------------- */
+
+.bkp-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.bkp-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+}
+
+/* L'ancienneté de la réplication trahit un retard de copie hors site avant tout autre signal. */
+.bkp-tile--hero {
+  grid-column: span 2;
+  border-left: 3px solid var(--accent-end);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent-start) 12%, var(--color-surface-1)), var(--color-surface-1));
+}
+
+.bkp-tile__label {
+  color: var(--color-text-muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.bkp-tile__value {
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
+}
+
+.bkp-tile--hero .bkp-tile__value {
+  font-size: 28px;
+}
+
+.bkp-tile__value.is-missing {
+  color: var(--color-text-faint);
+  font-size: 17px;
+  font-weight: 400;
+}
+
+.bkp-tile__hint {
+  color: var(--color-text-faint);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.bkp-tile__hint.is-warning {
+  color: var(--color-warning);
+}
+
+.bkp-tile__hint.is-critical {
+  color: var(--color-critical);
+}
+
+.bkp-tile__job {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.bkp-tile__job-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+/* --- Rapprochement HYCU <-> ExaGrid ---------------------------------------------------------- */
+
+.bkp-link {
+  padding: 11px 14px;
+  margin-bottom: 14px;
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-text-faint);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-1);
+  color: var(--color-text-muted);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.bkp-link.is-confirmed {
+  border-left-color: var(--color-success);
+  background: var(--color-success-bg);
+}
+
+.bkp-link.is-probable {
+  border-left-color: var(--color-warning);
+  background: var(--color-warning-bg);
+}
+
+.bkp-link strong,
+.bkp-link code {
+  color: var(--color-text);
+}
+
+.bkp-link code {
+  font-size: 12px;
+}
+
+/* --- Onglets et sections --------------------------------------------------------------------- */
+
+.bkp-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+
+.bkp-tab {
   padding: 6px 14px;
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-muted);
   font-size: 12.5px;
   cursor: pointer;
 }
 
-.hycu-tab.is-active {
-  background: var(--color-surface-3);
+.bkp-tab:hover {
   color: var(--color-text);
-  border-color: var(--color-text-faint);
 }
 
-.hycu-last-job {
-  display: flex;
+.bkp-tab.is-active {
+  background: var(--color-surface-3);
+  border-color: var(--color-text-faint);
+  color: var(--color-text);
+}
+
+.bkp-section-title {
+  margin: 22px 0 10px;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.bkp-section-title:first-of-type {
+  margin-top: 0;
+}
+
+/* --- Cellules -------------------------------------------------------------------------------- */
+
+.bkp-cell-inline {
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 20px;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.bkp-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border: 1px dashed var(--color-border);
+  border-radius: 999px;
+  color: var(--color-text-faint);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.bkp-badge.is-confirmed {
+  border-style: solid;
+  border-color: transparent;
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+
+.bkp-missing {
+  color: var(--color-text-faint);
+}
+
+@media (max-width: 900px) {
+  .bkp-tile--hero {
+    grid-column: span 1;
+  }
 }

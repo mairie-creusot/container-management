@@ -112,6 +112,23 @@ describe("liaison automatique nœud <-> module", () => {
     expect(resolveAutomaticBindings(ambiguous, { "3cx": ["HDV3CX"] })).toEqual([]);
   });
 
+  // Régression du 24/08/2026 : le graphe portait un nœud "ad-server" étiqueté avec le hostname du
+  // KDC EN PLUS de la VM Nutanix qui l'exécute — deux candidats pour le même hôte configuré, donc
+  // ambiguïté et AUCUNE liaison. Le nœud a été retiré de services/topology.ts : seule la VM reste,
+  // et le module se rattache enfin au nœud réel.
+  it("le module AD/DNS se lie à la VM du contrôleur de domaine, plus aucun nœud « ad-server » ne le rend ambigu", () => {
+    const withLegacyAdServerNode = [
+      { id: "nutanix-vm:uuid-dc", label: "HDVAD2", ips: [] },
+      { id: "ad-server:HDVAD2.lecreusot.priv", label: "HDVAD2.lecreusot.priv", ips: [] },
+    ];
+    expect(resolveAutomaticBindings(withLegacyAdServerNode, { "ad-dns": ["HDVAD2.lecreusot.priv"] })).toEqual([]);
+
+    const graphOfToday = [{ id: "nutanix-vm:uuid-dc", label: "HDVAD2", ips: [] }];
+    expect(resolveAutomaticBindings(graphOfToday, { "ad-dns": ["HDVAD2.lecreusot.priv"] })).toEqual([
+      { nodeId: "nutanix-vm:uuid-dc", moduleId: "ad-dns", origin: "automatic", matchedOn: "HDVAD2.lecreusot.priv" },
+    ]);
+  });
+
   it("fait primer la liaison manuelle sur l'automatique pour un même nœud", () => {
     const merged = mergeBindings(
       [{ nodeId: "nutanix-vm:uuid-3cx", moduleId: "3cx", origin: "manual" }],

@@ -36,7 +36,6 @@ const ALL_KINDS_RECORD: Record<TopologyNodeKind, true> = {
   volume: true,
   network: true,
   "nutanix-vm": true,
-  "ad-server": true,
   host: true,
   "cron-job": true,
   backup: true,
@@ -82,7 +81,7 @@ describe("NODE_CONTRACT — totalité et conventions transverses", () => {
   });
 
   it("un kind jamais connectable déclare EXPLICITEMENT ports: [] (jamais une absence implicite)", () => {
-    for (const kind of ["ad-server", "iac-workspace", "cron-job", "backup", "gitops-source"] as const) {
+    for (const kind of ["iac-workspace", "cron-job", "backup", "gitops-source"] as const) {
       expect(NODE_CONTRACT[kind].ports).toEqual([]);
     }
   });
@@ -479,9 +478,9 @@ describe("buildNodeMenuItems — la liste vit dans le contrat, les callbacks che
     expect(buildNodeMenuItems(node("network", { label: "quai-app-net" }), handlers).map((i) => i.label)).toEqual(["Supprimer"]);
   });
 
-  it("kinds sans action de cycle de vie (host/ad-server/cron-job/backup/gitops-source) : liste vide EXPLICITE", () => {
+  it("kinds sans action de cycle de vie (host/cron-job/backup/gitops-source) : liste vide EXPLICITE", () => {
     const { handlers } = allHandlers();
-    for (const kind of ["host", "ad-server", "cron-job", "backup", "gitops-source"] as const) {
+    for (const kind of ["host", "cron-job", "backup", "gitops-source"] as const) {
       expect(buildNodeMenuItems(node(kind), handlers), kind).toEqual([]);
     }
   });
@@ -508,7 +507,7 @@ describe("buildNodeMenuItems — la liste vit dans le contrat, les callbacks che
     expect(quickLifecycleActions(node("nutanix-vm", { status: "stopped" }))).toEqual(["start"]);
     expect(quickLifecycleActions(node("nutanix-vm", { status: "neutral" }))).toEqual([]);
     // Jamais sur un autre kind (volume/host/automation... n'ont pas de cycle de vie pilotable ici).
-    for (const kind of ["volume", "network", "host", "ad-server", "iac-workspace", "automation-trigger"] as const) {
+    for (const kind of ["volume", "network", "host", "iac-workspace", "automation-trigger"] as const) {
       expect(quickLifecycleActions(node(kind)), kind).toEqual([]);
     }
   });

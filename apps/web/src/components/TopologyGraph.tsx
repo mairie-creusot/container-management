@@ -48,11 +48,11 @@ import { canAdminister, canOperate } from "@/features/auth/authSlice";
 // une seule source de vérité (exigence utilisateur explicite de la maquette validée).
 import RemoteEnvironmentCreateModal from "@/features/remoteEnvironments/RemoteEnvironmentCreateModal";
 import { serviceModuleMenuItem, useServiceModuleBindings } from "@/features/serviceModules";
-// "Ajouter Nutanix…" (même menu) : Nutanix se configure via la section dédiée de la page
-// Environnements (EnvironmentsPage.tsx#NutanixConfigSection, seul flux réel existant — test de
-// connexion Prism Central avant persistance) — l'entrée du spotlight NAVIGUE vers cette page
-// plutôt que de dupliquer son formulaire ici.
-import { setCurrentView } from "@/features/ui/uiSlice";
+// "Ajouter Nutanix…" (même menu) : Nutanix se configure via la page Réglages
+// (features/clusters/NutanixConfigSection.tsx, seul flux réel existant — test de connexion Prism
+// Central avant persistance) — l'entrée du spotlight NAVIGUE vers ce réglage plutôt que de
+// dupliquer son formulaire ici.
+import { openSettingsSection, setCurrentView } from "@/features/ui/uiSlice";
 // Ouverture ciblée de la page Sauvegardes depuis le menu du nœud HYCU (onglet Jobs/Configuration).
 import { focusHycuSection } from "@/features/hycu/hycuSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
@@ -80,7 +80,7 @@ import { createBackupDefinition } from "@/features/backups/backupsSlice";
 // "Nouveau déclencheur"/"Nouvelle condition"/"Nouvelle action" (câblage frontend du moteur
 // d'automatisation, voir apps/api/src/routes/automation.ts) — même principe que les imports
 // ci-dessus : réutilise le nouveau slice dédié (automationSlice.ts, POST /api/automation/nodes
-// réel), ainsi que fetchRoutes (reverseProxySlice.ts, déjà utilisé par ReverseProxyPage.tsx) et
+// réel), ainsi que fetchRoutes (reverseProxySlice.ts, déjà utilisé par PublicationPage.tsx) et
 // fetchNotificationChannels (notificationChannelsSlice.ts, déjà utilisé par
 // NotificationChannelsPage.tsx) pour peupler les select de source/action avec des ressources RÉELLES,
 // jamais une liste inventée.
@@ -186,7 +186,7 @@ function TopologyLoader() {
 // Colonnes par défaut PAR KIND — valeurs désormais déclarées dans le contrat
 // (NODE_CONTRACT[kind].defaultColumnX, topologyNodeContract.tsx : mêmes abscisses qu'avant la
 // migration, le pourquoi de chaque colonne est documenté sur l'entrée du kind), projetées ici en
-// table plate. Colonnes "nutanix-vm"/"ad-server"/"host"/"iac-workspace"/"cron-job"/"backup" à
+// table plate. Colonnes "nutanix-vm"/"host"/"iac-workspace"/"cron-job"/"backup" à
 // part, après network — nœuds isolés ou reliés entre eux uniquement (jamais d'arête vers Docker),
 // des colonnes dédiées les gardent lisibles plutôt que de les mélanger aux conteneurs.
 const COLUMN_X: Record<TopologyNode["kind"], number> = mapNodeContract((c) => c.defaultColumnX);
@@ -632,13 +632,13 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
   const [triggerSourceRouteId, setTriggerSourceRouteId] = useState("");
   const [triggerBusy, setTriggerBusy] = useState(false);
   const [triggerError, setTriggerError] = useState<string | null>(null);
-  // Nœuds du graphe surveillables par un trigger "topology-node" — mêmes 4 kinds qui portent un
-  // état réel et durable, jamais un autre nœud d'automatisation (voir mission). `nodeId` envoyé au
+  // Nœuds du graphe surveillables par un trigger "topology-node" — les kinds qui portent un état
+  // réel et durable, jamais un autre nœud d'automatisation (voir mission). `nodeId` envoyé au
   // serveur est l'id COMPLET préfixé du nœud (ex: "container:abcd1234"), pas un id brut : c'est ce
   // que services/automationEngine.ts#resolveTopologyNodeState recherche directement dans
   // `topology.nodes` (`topology.nodes.find(n => n.id === nodeId)`), jamais un id Docker nu.
   const watchableTopologyNodes = topologyNodes.filter(
-    (n) => n.kind === "container" || n.kind === "host" || n.kind === "nutanix-vm" || n.kind === "ad-server",
+    (n) => n.kind === "container" || n.kind === "host" || n.kind === "nutanix-vm",
   );
   const routes = useAppSelector((s) => s.reverseProxy.items);
   const [showConditionCreate, setShowConditionCreate] = useState(false);
@@ -693,7 +693,7 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
 
   // "Nouveau déclencheur" (source "reverse-proxy-route") — routes réelles chargées seulement une
   // fois ce choix effectivement fait, même principe que les conteneurs ci-dessus. Réutilise
-  // fetchRoutes (reverseProxySlice.ts), déjà utilisé par ReverseProxyPage.tsx.
+  // fetchRoutes (reverseProxySlice.ts), déjà utilisé par PublicationPage.tsx.
   useEffect(() => {
     if (showTriggerCreate && triggerSourceKind === "reverse-proxy-route") dispatch(fetchRoutes());
   }, [dispatch, showTriggerCreate, triggerSourceKind]);
@@ -1550,10 +1550,10 @@ function CreateSpotlight({ x, y, onClose, onPickKind, topologyNodes }: CreateSpo
           {
             id: "configure-nutanix",
             title: "Ajouter Nutanix (Prism Central)…",
-            description: "Ouvre la page Environnements — configuration réelle de Prism Central (URL, identifiants).",
+            description: "Ouvre les Réglages — configuration réelle de Prism Central (URL, identifiants).",
             icon: KIND_ICON["nutanix-vm"],
             onSelect: () => {
-              dispatch(setCurrentView("clusters"));
+              dispatch(openSettingsSection("nutanix"));
               onClose();
             },
           },
@@ -3833,10 +3833,10 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
       "image-template-remove": () => void withDeleteAnimation(node.id, () => handleDeleteTemplate(id, node.label)),
       // HYCU : navigation vers la page Sauvegardes RÉELLE (aucune mutation possible — l'appliance
       // est en lecture seule côté API). "Voir les jobs" ouvre la page directement sur cet onglet.
-      "hycu-open-page": () => dispatch(setCurrentView("hycu")),
+      "hycu-open-page": () => dispatch(setCurrentView("backups")),
       "hycu-view-jobs": () => {
         dispatch(focusHycuSection({ tab: "jobs" }));
-        dispatch(setCurrentView("hycu"));
+        dispatch(setCurrentView("backups"));
       },
     };
     // "Configurer…" seulement pour un admin : la section de configuration de la page Sauvegardes
@@ -3847,7 +3847,7 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         ? {
             "hycu-configure": () => {
               dispatch(focusHycuSection({ config: true }));
-              dispatch(setCurrentView("hycu"));
+              dispatch(setCurrentView("backups"));
             },
           }
         : {}),

@@ -127,6 +127,8 @@ function SearchOptionsPanel() {
   );
 }
 
+/** Accès à l'API REST de GLPI — montée UNIQUEMENT par la page Réglages depuis le 24/08/2026
+ * (GlpiPage n'affiche plus que les tickets et l'inventaire). */
 export default function GlpiConfigSection() {
   const { configured, config, configLoad, configSaving, configError, clearing, testing, testResult, backendUnavailable } =
     useAppSelector(selectGlpiState);
@@ -221,7 +223,7 @@ export default function GlpiConfigSection() {
     <>
       <div className="page-header" style={{ marginTop: 0 }}>
         <div>
-          <h3 style={{ marginBottom: 4 }}>Configuration</h3>
+          <h3 style={{ marginBottom: 4 }}>Assistance GLPI</h3>
           <p>
             Accès à l'API REST de GLPI (apirest.php). La connexion est réellement ouverte puis refermée avant tout
             enregistrement : une configuration qui ne fonctionne pas n'est jamais persistée.

@@ -4,7 +4,6 @@ import {
   clearExagridTestResult,
   disableExagrid,
   fetchExagridConfig,
-  fetchExagridStatus,
   saveExagridConfig,
   testExagridConfig,
   type ExagridConfigFormInput,
@@ -13,154 +12,15 @@ import { canAdminister } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import StatusPill from "@/components/StatusPill";
 import KeyValueList from "@/components/KeyValueList";
+import { MISSING, versionLabel } from "@/features/exagrid/exagridFormat";
 import { IconCheck, IconStorageArray } from "@/components/icons";
 import type {
-  ExagridAlarm,
   ExagridAuthProtocol,
-  ExagridCapacityZone,
   ExagridConfigStatus,
   ExagridPrivProtocol,
   ExagridSecurityLevel,
   ExagridSnmpVersion,
 } from "@/types";
-
-/** Valeur absente de la réponse SNMP — affichée telle quelle, JAMAIS remplacée par 0. */
-const MISSING = "—";
-
-const BYTE_UNITS = ["o", "Kio", "Mio", "Gio", "Tio", "Pio"];
-
-function formatBytes(bytes?: number): string {
-  if (bytes === undefined || !Number.isFinite(bytes)) return MISSING;
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
-    value /= 1024;
-    unit += 1;
-  }
-  const decimals = unit === 0 || value >= 100 ? 0 : 2;
-  return `${value.toFixed(decimals).replace(".", ",")} ${BYTE_UNITS[unit] ?? "o"}`;
-}
-
-function formatPercent(percent?: number): string {
-  return percent === undefined || !Number.isFinite(percent) ? MISSING : `${percent.toFixed(1).replace(".", ",")} %`;
-}
-
-function formatAge(seconds?: number): string {
-  if (seconds === undefined || !Number.isFinite(seconds) || seconds < 0) return MISSING;
-  if (seconds < 60) return `${Math.round(seconds)} s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} min`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} h ${String(minutes % 60).padStart(2, "0")} min`;
-  const days = Math.floor(hours / 24);
-  return `${days} j ${hours % 24} h`;
-}
-
-// Seuils d'ALERTE VISUELLE QUAI sur l'ancienneté d'une file d'attente (la MIB ne publie aucun
-// seuil) — la valeur exacte reste affichée à côté.
-const AGE_WARNING_SECONDS = 24 * 3600;
-const AGE_CRITICAL_SECONDS = 72 * 3600;
-
-function ageSeverityClass(seconds?: number): string {
-  if (seconds === undefined || !Number.isFinite(seconds)) return "";
-  if (seconds >= AGE_CRITICAL_SECONDS) return " is-critical";
-  if (seconds >= AGE_WARNING_SECONDS) return " is-warning";
-  return "";
-}
-
-function usageSeverityClass(percent?: number): string {
-  if (percent === undefined || !Number.isFinite(percent)) return "";
-  if (percent >= 90) return " is-critical";
-  if (percent >= 75) return " is-warning";
-  return "";
-}
-
-function ExagridMeter({ label, zone }: { label: string; zone?: ExagridCapacityZone | undefined }) {
-  const percent = zone?.usedPct;
-  const known = percent !== undefined && Number.isFinite(percent);
-  const clamped = known ? Math.max(0, Math.min(100, percent)) : 0;
-  const foot =
-    zone?.configuredBytes === undefined && zone?.availableBytes === undefined
-      ? "Volumes non communiqués par la MIB"
-      : `${formatBytes(zone?.availableBytes)} disponibles sur ${formatBytes(zone?.configuredBytes)}`;
-  return (
-    <div className="exagrid-meter">
-      <div className="exagrid-meter__head">
-        <span className="exagrid-meter__label">{label}</span>
-        <span className={`exagrid-meter__value${known ? "" : " is-missing"}`}>{formatPercent(percent)}</span>
-      </div>
-      {known && (
-        <div className="exagrid-meter__track">
-          <div className={`exagrid-meter__fill${usageSeverityClass(percent)}`} style={{ width: `${clamped}%` }} />
-        </div>
-      )}
-      <span className="exagrid-meter__foot">{foot}</span>
-      {zone?.usedBytes !== undefined && (
-        <span className="exagrid-meter__foot">{formatBytes(zone.usedBytes)} occupés</span>
-      )}
-    </div>
-  );
-}
-
-function ExagridTile({
-  label,
-  value,
-  hint,
-  hintClass,
-  title,
-}: {
-  label: string;
-  value: string;
-  hint?: string | undefined;
-  hintClass?: string | undefined;
-  title?: string | undefined;
-}) {
-  return (
-    <div className="exagrid-tile" {...(title ? { title } : {})}>
-      <span className="exagrid-tile__label">{label}</span>
-      <span className={`exagrid-tile__value${value === MISSING ? " is-missing" : ""}`}>{value}</span>
-      {hint && <span className={`exagrid-tile__hint${hintClass ?? ""}`}>{hint}</span>}
-    </div>
-  );
-}
-
-const ALARM_TEXT = {
-  ok: { className: "is-ok", title: "Aucune alarme", text: "L'appliance signale un fonctionnement normal." },
-  warning: {
-    className: "is-warning",
-    title: "Avertissement",
-    text: "L'appliance signale une alarme d'avertissement — consultez son interface d'administration.",
-  },
-  error: {
-    className: "is-error",
-    title: "Alarme critique",
-    text: "L'appliance signale une alarme en erreur — intervention requise sur l'appliance.",
-  },
-} as const;
-
-function ExagridAlarmBanner({ alarm }: { alarm?: ExagridAlarm | undefined }) {
-  if (!alarm) return null;
-  // `state` absent = valeur d'alarme hors des trois codes de la MIB : annoncée comme non
-  // interprétée plutôt que rattachée arbitrairement à un niveau.
-  const meta = alarm.state
-    ? ALARM_TEXT[alarm.state]
-    : {
-        className: "is-unknown",
-        title: "État d'alarme non interprété",
-        text: "L'appliance a renvoyé une valeur d'alarme hors des codes prévus par la MIB.",
-      };
-  const rawLabel = alarm.raw !== undefined ? `Valeur brute SNMP : ${alarm.raw}` : undefined;
-  return (
-    <div className={`exagrid-alarm ${meta.className}`} {...(rawLabel ? { title: rawLabel } : {})}>
-      <span className="exagrid-alarm__dot" />
-      <div className="exagrid-alarm__body">
-        <strong className="exagrid-alarm__title">{meta.title}</strong>
-        <span className="exagrid-alarm__text">{meta.text}</span>
-      </div>
-      {!alarm.state && alarm.raw !== undefined && <span className="exagrid-alarm__raw">{alarm.raw}</span>}
-    </div>
-  );
-}
 
 interface ExagridFormState {
   host: string;
@@ -213,12 +73,6 @@ const PRIV_PROTOCOLS: { id: ExagridPrivProtocol; label: string }[] = [
   { id: "aes256r", label: "AES-256 (Reeder)" },
 ];
 
-function versionLabel(version?: ExagridSnmpVersion): string {
-  if (version === "2c") return "SNMP v2c";
-  if (version === "3") return "SNMP v3";
-  return MISSING;
-}
-
 function labelOf<T extends string>(options: { id: T; label: string }[], id?: T): string {
   return options.find((option) => option.id === id)?.label ?? MISSING;
 }
@@ -239,14 +93,24 @@ function formFromConfig(status: ExagridConfigStatus | null): ExagridFormState {
   };
 }
 
-function ExagridConfigSection() {
+/**
+ * Formulaire d'accès SNMP à l'appliance ExaGrid, destiné à la page Réglages.
+ * ExaGrid n'expose aucune API REST : la lecture se fait exclusivement en SNMP.
+ */
+export default function ExagridConnectionForm({ onSaved }: { onSaved?: () => void }) {
+  const dispatch = useAppDispatch();
   const { configured, config, configLoad, configSaving, configError, clearing, testing, testResult, backendUnavailable } =
     useAppSelector((s) => s.exagrid);
-  const dispatch = useAppDispatch();
+  const session = useAppSelector((s) => s.auth.session);
+  const admin = canAdminister(session);
   const confirm = useConfirm();
 
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<ExagridFormState>(EMPTY_FORM);
+
+  useEffect(() => {
+    if (configLoad === "idle") dispatch(fetchExagridConfig());
+  }, [dispatch, configLoad]);
 
   useEffect(() => {
     if (config?.config) setForm(formFromConfig(config));
@@ -291,11 +155,6 @@ function ExagridConfigSection() {
     };
   }
 
-  function openForm() {
-    dispatch(clearExagridTestResult());
-    setEditing(true);
-  }
-
   function closeForm() {
     setEditing(false);
     dispatch(clearExagridTestResult());
@@ -313,10 +172,10 @@ function ExagridConfigSection() {
     const input = currentInput();
     if (!input) return;
     const result = await dispatch(saveExagridConfig(input));
-    // L'état est rechargé par l'effet de la page (le reducer a remis statusLoad à "idle").
     if (saveExagridConfig.fulfilled.match(result)) {
       setEditing(false);
       dispatch(clearExagridTestResult());
+      onSaved?.();
     }
   }
 
@@ -324,7 +183,7 @@ function ExagridConfigSection() {
     const ok = await confirm({
       title: "Retirer la configuration ExaGrid ?",
       description:
-        "QUAI n'interrogera plus l'appliance de stockage en SNMP — occupation, files d'attente et alarme disparaîtront de cette page. Aucune donnée n'est modifiée sur l'appliance.",
+        "QUAI n'interrogera plus l'appliance de stockage en SNMP — occupation, files d'attente et alarme disparaîtront de la page Sauvegardes. Aucune donnée n'est modifiée sur l'appliance.",
       confirmLabel: "Retirer",
       variant: "danger",
     });
@@ -334,18 +193,22 @@ function ExagridConfigSection() {
     setEditing(false);
   }
 
+  if (!admin) {
+    return <div className="empty-state">Seul un administrateur peut configurer l'accès SNMP à l'appliance ExaGrid.</div>;
+  }
+
   const showForm = editing || !configured;
   const valid = currentInput() !== null;
   const endpoint = config?.config;
 
   return (
-    <>
+    <section className="settings-form">
       <div className="page-header" style={{ marginTop: 0 }}>
         <div>
-          <h3 style={{ marginBottom: 4 }}>Configuration</h3>
+          <h3 style={{ marginBottom: 4 }}>Appliance de stockage (ExaGrid)</h3>
           <p>
-            Interrogation SNMP de l'appliance ExaGrid, en lecture seule (ExaGrid n'expose pas d'API REST). La
-            session SNMP est réellement testée avant l'enregistrement.
+            Interrogation SNMP de l'appliance ExaGrid, en lecture seule (ExaGrid n'expose pas d'API REST). La session
+            SNMP est réellement testée avant l'enregistrement.
           </p>
         </div>
         {configured && !editing && (
@@ -353,7 +216,14 @@ function ExagridConfigSection() {
             <button type="button" className="btn btn-ghost btn-sm" onClick={handleTest} disabled={testing || !valid}>
               {testing ? "Test en cours…" : "Tester la connexion"}
             </button>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={openForm}>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => {
+                dispatch(clearExagridTestResult());
+                setEditing(true);
+              }}
+            >
               Modifier
             </button>
             <button type="button" className="btn btn-ghost btn-sm" onClick={handleDisable} disabled={clearing}>
@@ -365,16 +235,12 @@ function ExagridConfigSection() {
 
       {backendUnavailable && (
         <div className="exagrid-note" style={{ marginBottom: 16 }}>
-          L'API ExaGrid ne répond pas encore sur ce serveur — l'enregistrement échouera tant que la route n'est
-          pas déployée.
+          L'API ExaGrid ne répond pas encore sur ce serveur — l'enregistrement échouera tant que la route n'est pas
+          déployée.
         </div>
       )}
 
-      {configError && (
-        <div className="error-banner" style={{ marginBottom: 16 }}>
-          {configError}
-        </div>
-      )}
+      {configError && <div className="error-banner" style={{ marginBottom: 16 }}>{configError}</div>}
 
       {testResult && (
         <div className={testResult.ok ? "success-banner" : "error-banner"} style={{ marginBottom: 16 }}>
@@ -384,7 +250,7 @@ function ExagridConfigSection() {
       )}
 
       {configLoad !== "loading" && configured && !editing && endpoint && (
-        <div className="card" style={{ marginBottom: 24, display: "flex", flexDirection: "column", gap: 12 }}>
+        <div className="card" style={{ marginBottom: 16, display: "flex", flexDirection: "column", gap: 12 }}>
           <div className="chip-row">
             <span style={{ display: "inline-flex" }}>
               <IconStorageArray />
@@ -414,11 +280,7 @@ function ExagridConfigSection() {
       )}
 
       {showForm && (
-        <form
-          className="card"
-          style={{ marginBottom: 24, display: "flex", flexDirection: "column", gap: 12 }}
-          onSubmit={handleSave}
-        >
+        <form className="card" style={{ display: "flex", flexDirection: "column", gap: 12 }} onSubmit={handleSave}>
           <div className="field">
             <label htmlFor="exagrid-host">Hôte de l'appliance</label>
             <input
@@ -598,168 +460,6 @@ function ExagridConfigSection() {
           </div>
         </form>
       )}
-    </>
-  );
-}
-
-export default function ExagridPage() {
-  const dispatch = useAppDispatch();
-  const { status, statusLoad, statusError, backendUnavailable, configured, configLoad } = useAppSelector(
-    (s) => s.exagrid,
-  );
-  const session = useAppSelector((s) => s.auth.session);
-  const admin = canAdminister(session);
-
-  useEffect(() => {
-    if (statusLoad === "idle") dispatch(fetchExagridStatus());
-    if (configLoad === "idle") dispatch(fetchExagridConfig());
-  }, [dispatch, statusLoad, configLoad]);
-
-  function handleRefresh() {
-    dispatch(fetchExagridStatus());
-    dispatch(fetchExagridConfig());
-  }
-
-  const unreachable = configured && status?.reachable === false;
-  // `reachable` absent : on n'invente pas de verdict, mais on affiche les valeurs réellement
-  // renvoyées plutôt que de masquer la page.
-  const showData = configured && !!status && status.reachable !== false;
-  const readings = status?.readings;
-
-  const connectionPill = backendUnavailable
-    ? { status: "unavailable", label: "Indisponible" }
-    : statusLoad === "loading" && !status
-      ? { status: "checking", label: "Vérification…" }
-      : !configured
-        ? { status: "unconfigured" }
-        : unreachable
-          ? { status: "crit", label: "Injoignable" }
-          : status?.reachable === true
-            ? { status: "connected" }
-            : { status: "unknown", label: "État inconnu" };
-
-  return (
-    <div className="workspace">
-      <div className="page-content">
-        <div className="page-header">
-          <div>
-            <h2>Stockage de sauvegarde</h2>
-            <p>
-              Appliance ExaGrid interrogée en SNMP, en lecture seule — occupation des zones d'atterrissage et de
-              rétention, files d'attente de déduplication et de réplication, état d'alarme.
-            </p>
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <StatusPill {...connectionPill} />
-            <button type="button" className="btn btn-ghost btn-sm" onClick={handleRefresh}>
-              Actualiser
-            </button>
-          </div>
-        </div>
-
-        {backendUnavailable && (
-          <div className="empty-state">
-            <IconStorageArray />
-            <strong>Intégration ExaGrid indisponible</strong>
-            <span>
-              L'API QUAI ne répond pas sur les routes ExaGrid. Aucune donnée n'est affichée tant que l'appliance
-              n'est pas réellement interrogée.
-            </span>
-          </div>
-        )}
-
-        {!backendUnavailable && statusError && (
-          <div className="error-banner" style={{ marginBottom: 16 }}>
-            {statusError}
-          </div>
-        )}
-
-        {!backendUnavailable && statusLoad === "loading" && !status && (
-          <div className="empty-state">Chargement de l'état de l'appliance…</div>
-        )}
-
-        {!backendUnavailable && status && !configured && (
-          <div className="empty-state">
-            <IconStorageArray />
-            <strong>ExaGrid non configuré</strong>
-            {admin ? (
-              <span>Renseignez l'accès SNMP à l'appliance dans la section Configuration ci-dessous.</span>
-            ) : (
-              <span>Seul un administrateur peut configurer l'accès SNMP à l'appliance ExaGrid.</span>
-            )}
-          </div>
-        )}
-
-        {unreachable && (
-          <div className="error-banner" style={{ marginBottom: 16 }}>
-            L'appliance ExaGrid est configurée mais ne répond pas en SNMP
-            {status?.lastPoll ? ` (dernier essai : ${new Date(status.lastPoll.at).toLocaleString("fr-FR")})` : ""}.
-            Aucune valeur n'est affichée tant qu'elle reste injoignable.
-          </div>
-        )}
-
-        {showData && status && (
-          <>
-            <ExagridAlarmBanner {...(readings?.alarm ? { alarm: readings.alarm } : {})} />
-
-            {!readings && (
-              <div className="exagrid-note" style={{ marginTop: 12 }}>
-                L'appliance répond mais aucune valeur de la MIB n'a été relevée lors du dernier poll.
-              </div>
-            )}
-
-            <h3 className="exagrid-section-title">Occupation</h3>
-            <div className="exagrid-meters">
-              <ExagridMeter label="Zone d'atterrissage (landing)" zone={readings?.landing} />
-              <ExagridMeter label="Zone de rétention" zone={readings?.retention} />
-            </div>
-
-            <h3 className="exagrid-section-title">Données de sauvegarde</h3>
-            <div className="exagrid-tiles">
-              <ExagridTile
-                label="Disponibles pour restauration"
-                value={formatBytes(readings?.backupData.availableForRestoreBytes)}
-                hint="volume de sauvegardes restaurables"
-              />
-              <ExagridTile
-                label="Consommées en rétention"
-                value={formatBytes(readings?.backupData.retentionConsumedBytes)}
-                hint="après déduplication et compression"
-              />
-            </div>
-
-            <h3 className="exagrid-section-title">Files d'attente</h3>
-            <div className="exagrid-tiles">
-              <ExagridTile
-                label="En attente de déduplication"
-                value={formatBytes(readings?.pendingDeduplication.bytes)}
-                hint={`Ancienneté : ${formatAge(readings?.pendingDeduplication.ageSeconds)}`}
-                hintClass={ageSeverityClass(readings?.pendingDeduplication.ageSeconds)}
-              />
-              <ExagridTile
-                label="En attente de réplication"
-                value={formatBytes(readings?.pendingReplication.bytes)}
-                hint={`Ancienneté : ${formatAge(readings?.pendingReplication.ageSeconds)}`}
-                hintClass={ageSeverityClass(readings?.pendingReplication.ageSeconds)}
-                title="Une ancienneté de réplication qui grandit signale un retard de copie hors site."
-              />
-            </div>
-
-            {status.lastPoll && (
-              <p className="exagrid-poll">
-                Dernier relevé SNMP : {new Date(status.lastPoll.at).toLocaleString("fr-FR")}
-                {status.lastPoll.reachable ? " — réussi" : " — échoué"}
-              </p>
-            )}
-          </>
-        )}
-
-        {admin && (
-          <div style={{ marginTop: configured ? 32 : 0 }}>
-            <ExagridConfigSection />
-          </div>
-        )}
-      </div>
-    </div>
+    </section>
   );
 }

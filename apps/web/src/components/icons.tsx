@@ -343,7 +343,7 @@ export function IconHostMachine({ className }: IconProps) {
   );
 }
 
-/** Serveur/contrôleur de domaine (façon rack empilé) — nœud "ad-server" du graphe de topologie et
+/** Serveur/contrôleur de domaine (façon rack empilé) — réglage DNS Active Directory et
  * page de configuration DNS AD, distincte de IconVm (poste virtuel Nutanix). */
 export function IconServer({ className }: IconProps) {
   return base(
