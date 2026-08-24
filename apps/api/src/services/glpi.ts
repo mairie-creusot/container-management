@@ -364,7 +364,13 @@ async function initSession(cfg: SetupGlpiConfig): Promise<string> {
     Authorization: authHeader(cfg),
   });
   if (result.status < 200 || result.status >= 300) {
-    throw new GlpiError(describeGlpiError(cfg, result, "l'ouverture de session"), result.status);
+    // Cause n°1 d'un 403 ici : l'URL saisie oublie « apirest.php », la requête tombe alors sur la
+    // racine web de GLPI, qui refuse (constaté sur 172.16.8.22 le 24/08/2026).
+    const indice =
+      result.status === 403 && !cfg.apiUrl.includes("apirest.php")
+        ? ` — l'URL saisie ne contient pas "apirest.php" : essayez "${normalizedApiUrl(cfg.apiUrl)}apirest.php".`
+        : "";
+    throw new GlpiError(`${describeGlpiError(cfg, result, "l'ouverture de session")}${indice}`, result.status);
   }
   const token = (result.data as { session_token?: unknown } | null)?.session_token;
   if (typeof token !== "string" || !token) {
