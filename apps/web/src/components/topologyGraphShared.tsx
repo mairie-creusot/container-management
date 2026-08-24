@@ -988,14 +988,9 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
   // l'icône + le point de statut — évite un canevas illisible une fois dézoomé sur toute l'infra.
   const zoom = useStore(zoomSelector);
   const isCompact = zoom < ZOOM_DETAIL_THRESHOLD;
-  const networkIds = (node.attachments ?? [])
-    .filter((a) => a.kind === "network" && a.networkId)
-    .map((a) => a.networkId!)
-    .join(" ");
   return (
     <div
       className={`topology-node topology-node--${node.kind}${node.kind === "host" && node.hostKind ? ` topology-node--host-${node.hostKind}` : ""} topology-node--${node.status}${node.orphan ? " topology-node--orphan" : ""}${selected ? " is-selected" : ""}${isCompact ? " topology-node--compact" : ""}${node.actionPending ? " topology-node--pending" : ""}${node.deletePending ? " topology-node--deleting" : ""}`}
-      data-networks={networkIds}
       title={isCompact ? node.label : undefined}
     >
       {ports.map((port) => (
@@ -1327,6 +1322,7 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
                 key={attachment.id}
                 type="button"
                 className={`topology-drawer topology-drawer--${attachment.kind} nodrag nopan`}
+                {...(isNetwork && attachment.networkId ? { "data-network-id": attachment.networkId } : {})}
                 // Empilement : chaque tiroir supplémentaire glisse un cran plus bas ET un cran plus
                 // "derrière" — l'index pilote le z-index négatif (le 1er tiroir devant le 2e, etc.),
                 // le décalage vertical est porté par le flux normal du conteneur flex.

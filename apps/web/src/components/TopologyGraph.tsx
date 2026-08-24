@@ -2616,19 +2616,20 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   // NetworkConnectPopover ci-dessus : SEUL chemin de rattachement depuis que les réseaux ne sont
   // plus des nœuds du graphe (plus rien à viser au glisser-déposer).
   const [networkConnectPopover, setNetworkConnectPopover] = useState<{ containerId: string; x: number; y: number } | null>(null);
-  // Mise en évidence des nœuds partageant le réseau survolé — ce que montrait d'un coup d'œil
-  // l'ancien nœud réseau. Appliquée directement au DOM, JAMAIS par un état React : reconstruire
-  // les nœuds à chaque survol faisait réordonner le DOM par React Flow sous le curseur, ce qui
-  // relançait un survol, en boucle (clignotement signalé le 24/08/2026).
+  // Survoler un tiroir réseau allume les tiroirs du MÊME réseau sur les autres cartes — ce que
+  // montrait d'un coup d'œil l'ancien nœud réseau. Jamais la carte entière : son contour est celui
+  // de la sélection, l'effet se lisait comme « tout est sélectionné ». Appliqué directement au DOM,
+  // JAMAIS par un état React : reconstruire les nœuds à chaque survol faisait réordonner le DOM par
+  // React Flow sous le curseur, ce qui relançait un survol, en boucle (24/08/2026).
   const hoveredNetworkRef = useRef<string | null>(null);
   const highlightNetworkPeers = useCallback((networkId: string | null) => {
     hoveredNetworkRef.current = networkId;
-    for (const el of document.querySelectorAll(".topology-node--net-highlight")) {
-      el.classList.remove("topology-node--net-highlight");
+    for (const el of document.querySelectorAll(".topology-drawer--net-peer")) {
+      el.classList.remove("topology-drawer--net-peer");
     }
     if (!networkId) return;
-    for (const el of document.querySelectorAll(`.topology-node[data-networks~="${CSS.escape(networkId)}"]`)) {
-      el.classList.add("topology-node--net-highlight");
+    for (const el of document.querySelectorAll(`.topology-drawer[data-network-id="${CSS.escape(networkId)}"]`)) {
+      el.classList.add("topology-drawer--net-peer");
     }
   }, []);
   // Popover de montage (voir MountVolumePopover : deux cibles, volume existant ou volume neuf).

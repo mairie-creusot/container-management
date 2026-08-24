@@ -883,9 +883,13 @@
    GraphNodeCallbacks#onAttachmentHover, topologyGraphShared.tsx) — compense la disparition du nœud
    réseau, qui montrait d'un coup d'œil qui le partageait. Contour violet + halo, aucun déplacement
    (rien ne doit bouger sous le pointeur pendant un simple survol). */
-.topology-node--net-highlight {
-  border-color: var(--accent-end);
-  box-shadow: 0 0 0 2px rgba(124, 92, 252, 0.35), 0 8px 24px rgba(124, 92, 252, 0.18);
+/* Tiroirs du même réseau que celui survolé ailleurs : même rendu que le survol, pour qu'ils se
+   lisent comme « ceux-là aussi ». Volontairement sur le tiroir et pas sur la carte — le contour de
+   la carte est celui de la sélection. */
+.topology-drawer--net-peer {
+  background: var(--color-surface-3);
+  color: var(--color-text);
+  border-color: rgba(124, 92, 252, 0.45);
 }
 
 @keyframes topology-drawer-slide {
