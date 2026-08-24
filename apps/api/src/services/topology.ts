@@ -1013,11 +1013,19 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
     // peuvent cibler le même conteneur (rare mais valide), d'où un tableau. HTTPS : Caddy sert
     // désormais toujours en TLS interne pour les routes proxyfiées (voir reverseProxy.ts en-tête).
     const domainsByContainerId = new Map<string, string[]>();
+    // Routes visant une adresse "hôte:port" plutôt qu'un conteneur (cas de QUAI se servant
+    // lui-même) : le port publié sur cet hôte identifie le conteneur qui répond réellement.
+    const subdomainsByPublishedPort = new Map<number, string[]>();
     for (const route of proxyRoutes) {
-      if (!route.targetContainerId) continue;
-      const list = domainsByContainerId.get(route.targetContainerId) ?? [];
-      list.push(`https://${route.subdomain}`);
-      domainsByContainerId.set(route.targetContainerId, list);
+      if (route.targetContainerId) {
+        const list = domainsByContainerId.get(route.targetContainerId) ?? [];
+        list.push(`https://${route.subdomain}`);
+        domainsByContainerId.set(route.targetContainerId, list);
+      } else if (route.targetHost && route.targetPort) {
+        const list = subdomainsByPublishedPort.get(route.targetPort) ?? [];
+        list.push(`https://${route.subdomain}`);
+        subdomainsByPublishedPort.set(route.targetPort, list);
+      }
     }
 
     // Snapshot d'utilisation par conteneur, en parallèle (chaque appel est déjà borné par un
@@ -1060,8 +1068,10 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
       // subtitle exposé au frontend, badge MàJ dispo) plutôt que de répéter l'appel trois fois.
       const image = ensureImageTag(c.Image);
       const vulnSummary = vulnSummaryByImage.get(image) ?? null;
-      const domains = domainsByContainerId.get(c.Id);
-      const publishedPorts = domains?.length ? undefined : publishedHttpPorts(c.Ports);
+      const published = publishedHttpPorts(c.Ports);
+      const viaPublishedPort = published.flatMap((port) => subdomainsByPublishedPort.get(port) ?? []);
+      const domains = domainsByContainerId.get(c.Id) ?? (viaPublishedPort.length > 0 ? viaPublishedPort : undefined);
+      const publishedPorts = domains?.length ? undefined : published;
       nodes.push({
         id: containerNodeId,
         kind: "container",

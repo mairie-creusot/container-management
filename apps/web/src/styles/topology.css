@@ -812,13 +812,14 @@
   margin-top: -10px;
 }
 
+/* Aucun déplacement au survol : le tiroir dépasse de quelques pixels sous la carte, et un
+   translate le faisait sortir de sous le curseur — la sortie annulait le survol, qui replaçait le
+   tiroir sous le curseur, en boucle (clignotement signalé le 24/08/2026). Retour visuel par la
+   couleur uniquement. */
 .topology-drawer:hover {
   background: var(--color-surface-3);
   color: var(--color-text);
   border-color: rgba(245, 165, 36, 0.45);
-  /* Le tiroir "sort" légèrement de sous la carte au survol — translate vertical pur, il reste
-     derrière la carte (le stacking context est porté par le wrapper React Flow, pas par lui). */
-  transform: translateY(2px);
 }
 
 /* Tiroir RÉSEAU : violet (couleur historique de l'ancien nœud/handle réseau) plutôt que l'ambre du
@@ -828,7 +829,7 @@
 }
 
 .topology-drawer:active {
-  transform: translateY(1px);
+  background: var(--color-surface-2);
 }
 
 .topology-drawer__icon {
@@ -2468,6 +2469,7 @@
   flex-direction: column;
   gap: 4px;
   margin-top: 6px;
+  margin-bottom: 10px;
 }
 
 .topology-node__domain {
