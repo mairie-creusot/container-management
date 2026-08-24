@@ -8,9 +8,16 @@
  *
  * "Lu/non lu" est un simple curseur temporel (`readAllBeforeIso`) plutôt qu'un ensemble d'ids
  * lus : marquer "tout lu" (voir markAllNotificationsRead) fixe ce curseur à l'instant présent,
- * et un événement est considéré lu s'il est antérieur ou égal à ce curseur — cohérent avec le
+ * et un événement est considéré lu s'il est STRICTEMENT antérieur à ce curseur — cohérent avec le
  * comportement du bouton existant (notificationsSlice.ts#markAllRead côté web), qui marque tout
  * ce qui est actuellement visible comme lu, pas des événements choisis individuellement.
+ *
+ * Deux précautions rendent ce curseur FIABLE malgré la résolution à la milliseconde (sans elles,
+ * un événement enregistré dans la même milliseconde que le clic était marqué lu sans avoir jamais
+ * été affiché — échec réel en CI le 24/08/2026, invisible en local car plus lent) :
+ *  - les horodatages émis ici sont STRICTEMENT croissants (voir nextTimestamp) ;
+ *  - le curseur est l'horodatage du PLUS RÉCENT événement connu au moment du clic, pas "maintenant"
+ *    — tout événement postérieur est donc forcément strictement supérieur, donc non lu.
  *
  * Comme auditLog.ts : ce module ne doit jamais lancer d'exception vers l'appelant, une panne
  * d'écriture/lecture ne doit jamais faire échouer le cycle du watchdog ni une requête HTTP.
@@ -24,6 +31,15 @@ import { dispatchNotificationEvent } from "./notificationDispatch.js";
 import type { SystemNotificationEvent, SystemNotificationKind } from "../types.js";
 
 const MAX_EVENTS_RETURNED = 300;
+
+/** Dernière milliseconde émise — garantit des horodatages strictement croissants (voir en-tête). */
+let lastEmittedMs = 0;
+
+function nextTimestamp(): string {
+  const now = Date.now();
+  lastEmittedMs = now > lastEmittedMs ? now : lastEmittedMs + 1;
+  return new Date(lastEmittedMs).toISOString();
+}
 
 function resolvedNotificationsLogPath(): string {
   // Même dossier que config.json/audit-log.jsonl (CONFIG_PATH) — voir auditLog.ts.
@@ -43,7 +59,7 @@ export interface RecordNotificationInput {
 /** Ajoute un événement au journal — jamais appelé directement par une route, seulement par le watchdog. */
 export async function recordNotificationEvent(entry: RecordNotificationInput): Promise<void> {
   try {
-    const event: Omit<SystemNotificationEvent, "read"> = { id: randomUUID(), timestamp: new Date().toISOString(), ...entry };
+    const event: Omit<SystemNotificationEvent, "read"> = { id: randomUUID(), timestamp: nextTimestamp(), ...entry };
     const filePath = resolvedNotificationsLogPath();
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.appendFile(filePath, `${JSON.stringify(event)}\n`, { encoding: "utf-8", mode: 0o600 });
@@ -99,13 +115,13 @@ export async function listNotificationEvents(since?: string): Promise<SystemNoti
  */
 export async function markAllNotificationsRead(): Promise<void> {
   try {
+    // Curseur = horodatage du plus récent événement CONNU, jamais "maintenant" (voir en-tête) :
+    // sans événement, "maintenant" fait l'affaire, il n'y a rien à marquer.
+    const known = await listNotificationEvents();
+    const cursor = known[0]?.timestamp ?? new Date().toISOString();
     const filePath = resolvedReadStatePath();
     await fs.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.writeFile(
-      filePath,
-      JSON.stringify({ readAllBeforeIso: new Date().toISOString() }, null, 2),
-      { encoding: "utf-8", mode: 0o600 },
-    );
+    await fs.writeFile(filePath, JSON.stringify({ readAllBeforeIso: cursor }, null, 2), { encoding: "utf-8", mode: 0o600 });
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn(`[notifications] failed to persist read state: ${err instanceof Error ? err.message : String(err)}`);
