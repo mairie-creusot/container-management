@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,6 +9,19 @@ import path from "node:path";
 // registre de modules par fichier de test).
 const tmpConfigPath = path.join(os.tmpdir(), `quai-api-test-config-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
 process.env.CONFIG_PATH = tmpConfigPath;
+
+// L'annuaire est SIMULÉ : un vrai `ldap://annuaire.test` déclenchait une résolution DNS dont
+// l'échec arrivait APRÈS la fin du test, en exception non gérée — vitest sortait alors en erreur
+// alors que tous les tests passaient (constaté en CI le 24/08/2026). Ici on veut vérifier la
+// logique de la route, pas la couche réseau.
+vi.mock("../src/services/ldap.js", () => ({
+  testLdapConnection: vi.fn(async () => ({ ok: false, message: "annuaire injoignable (simulé)" })),
+  authenticate: vi.fn(async () => {
+    throw new Error("non utilisé dans ce fichier de test");
+  }),
+  diagnoseLdapAccount: vi.fn(async () => ({ outcome: "not-found" })),
+  LdapAuthError: class LdapAuthError extends Error {},
+}));
 
 const { buildServer } = await import("../src/index.js");
 const { signSessionToken } = await import("../src/services/session.js");
