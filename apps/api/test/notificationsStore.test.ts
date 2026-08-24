@@ -3,10 +3,14 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// CONFIG_PATH isolé (même pattern que setup.test.ts) : notificationsStore.ts écrit
-// notifications-log.jsonl/notifications-read-state.json à côté de CONFIG_PATH — sans cet
-// isolement, ces tests pollueraient apps/api/data/ en développement réel.
-const tmpConfigPath = path.join(os.tmpdir(), `quai-api-test-config-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
+// CONFIG_PATH isolé dans un SOUS-DOSSIER dédié : notificationsStore.ts écrit
+// notifications-log.jsonl/notifications-read-state.json à côté de CONFIG_PATH. Un simple fichier
+// unique dans os.tmpdir() ne suffisait pas — le DOSSIER restait partagé avec toutes les autres
+// suites, qui enregistrent elles aussi des notifications : "marquer tout comme lu" pouvait alors
+// s'appliquer à un événement écrit par une autre suite exécutée en parallèle (échec réel en CI le
+// 24/08/2026, invisible en local où l'ordre d'exécution différait).
+const tmpDataDir = path.join(os.tmpdir(), `quai-api-test-notifications-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+const tmpConfigPath = path.join(tmpDataDir, "config.json");
 process.env.CONFIG_PATH = tmpConfigPath;
 
 const { recordNotificationEvent, listNotificationEvents, markAllNotificationsRead } = await import(
@@ -14,9 +18,7 @@ const { recordNotificationEvent, listNotificationEvents, markAllNotificationsRea
 );
 
 afterAll(async () => {
-  await fs.rm(tmpConfigPath, { force: true });
-  await fs.rm(path.join(path.dirname(tmpConfigPath), "notifications-log.jsonl"), { force: true });
-  await fs.rm(path.join(path.dirname(tmpConfigPath), "notifications-read-state.json"), { force: true });
+  await fs.rm(tmpDataDir, { recursive: true, force: true });
 });
 
 describe("notificationsStore", () => {

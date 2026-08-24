@@ -15,6 +15,7 @@ import {
   IconGlobe,
   IconServer,
   IconBackup,
+  IconCertificate,
   IconLifebuoy,
   IconPhone,
   IconStorageArray,
@@ -31,6 +32,7 @@ const ICONS: Partial<Record<ViewId, (props: { className?: string }) => JSX.Eleme
   exagrid: IconStorageArray,
   threecx: IconPhone,
   glpi: IconLifebuoy,
+  certificates: IconCertificate,
   notifications: IconBell,
   audit: IconHistory,
 };

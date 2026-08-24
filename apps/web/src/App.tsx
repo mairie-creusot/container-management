@@ -30,6 +30,7 @@ const HycuPage = lazy(() => import("@/features/hycu/HycuPage"));
 const ExagridPage = lazy(() => import("@/features/exagrid/ExagridPage"));
 const ThreecxPage = lazy(() => import("@/features/threecx/ThreecxPage"));
 const GlpiPage = lazy(() => import("@/features/glpi/GlpiPage"));
+const CertificatesPage = lazy(() => import("@/features/certificates/CertificatesPage"));
 
 // Notifications système (watchdog proactif côté API — nouvelle version d'image, intégration
 // devenue injoignable/de nouveau joignable) : câblé ici plutôt que dans une page précise, pour
@@ -85,6 +86,8 @@ function renderView(view: string) {
       return <ThreecxPage />;
     case "glpi":
       return <GlpiPage />;
+    case "certificates":
+      return <CertificatesPage />;
     default:
       return <OverviewPage />;
   }

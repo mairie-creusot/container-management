@@ -27,6 +27,7 @@ import hycuReducer from "@/features/hycu/hycuSlice";
 import exagridReducer from "@/features/exagrid/exagridSlice";
 import threecxReducer from "@/features/threecx/threecxSlice";
 import glpiReducer from "@/features/glpi/glpiSlice";
+import certificatesReducer from "@/features/certificates/certificatesSlice";
 import templatesReducer from "@/features/templates/templatesSlice";
 import { errorNotificationMiddleware } from "@/features/notifications/errorNotificationMiddleware";
 
@@ -60,6 +61,7 @@ export const store = configureStore({
     exagrid: exagridReducer,
     threecx: threecxReducer,
     glpi: glpiReducer,
+    certificates: certificatesReducer,
     templates: templatesReducer,
   },
   middleware: (getDefaultMiddleware) => getDefaultMiddleware().concat(errorNotificationMiddleware),

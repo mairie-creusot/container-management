@@ -19,6 +19,7 @@ import auditRoutes from "./routes/audit.js";
 import authRoutes from "./routes/auth.js";
 import automationRoutes from "./routes/automation.js";
 import backupsRoutes from "./routes/backups.js";
+import certificatesRoutes from "./routes/certificates.js";
 import consoleRoutes from "./routes/console.js";
 import containerLogsRoutes from "./routes/containerLogs.js";
 import containersRoutes from "./routes/containers.js";
@@ -53,6 +54,7 @@ import topologyRoutes from "./routes/topology.js";
 import volumesRoutes from "./routes/volumes.js";
 import { startAutomationEngine } from "./services/automationEngine.js";
 import { startBackupScheduler } from "./services/backupScheduler.js";
+import { startCertificatesReconciler } from "./services/certificatesReconciler.js";
 import { startCronJobsScheduler } from "./services/cronJobsScheduler.js";
 import { startGitopsReconciler } from "./services/gitopsReconciler.js";
 import { startMetricsCollector } from "./services/metricsCollector.js";
@@ -111,6 +113,7 @@ export function buildServer() {
   void fastify.register(lxcRoutes);
   void fastify.register(reverseProxyRoutes);
   void fastify.register(adDnsRoutes);
+  void fastify.register(certificatesRoutes);
   void fastify.register(consoleRoutes);
   void fastify.register(githubRoutes);
   void fastify.register(githubWebhookRoutes);
@@ -156,6 +159,11 @@ async function main(): Promise<void> {
   // et disparaît à chaque redémarrage de celui-ci (voir services/reverseProxyReconciler.ts).
   const stopReverseProxyReconciler = startReverseProxyReconciler();
 
+  // Renouvellement automatique des certificats AD CS avant expiration + première émission pour les
+  // sous-domaines qui n'en ont pas encore (voir services/certificatesReconciler.ts) : même câblage,
+  // démarré seulement ici pour ne jamais contacter l'autorité de certification pendant les tests.
+  const stopCertificatesReconciler = startCertificatesReconciler();
+
   // Scan automatique en tâche de fond des images RÉELLEMENT déployées (conteneurs running) qui
   // n'ont jamais été scannées ou dont le dernier scan réussi est trop ancien (voir
   // services/scanScheduler.ts — cron de rafraîchissement périodique, PAS un edge-triggered comme
@@ -197,6 +205,7 @@ async function main(): Promise<void> {
     stopWatchdog();
     stopGitopsReconciler();
     stopReverseProxyReconciler();
+    stopCertificatesReconciler();
     stopScanScheduler();
     stopMetricsCollector();
     stopCronJobsScheduler();

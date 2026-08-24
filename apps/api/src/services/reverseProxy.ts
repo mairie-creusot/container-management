@@ -49,6 +49,13 @@
  * nom qu'il ne connaît pas encore) ; une fois ce fichier ci poussé au moins une fois, c'est LUI qui
  * fait autorité sur la config TLS réelle (POST /load remplace tout, y compris `apps.tls`).
  *
+ * Depuis l'intégration AD CS (services/certificates.ts), l'autorité interne n'est plus le seul
+ * émetteur : un sujet pour lequel QUAI détient un certificat AD CS valide est servi AVEC ce
+ * certificat (`apps.tls.certificates.load_pem`) et retiré des `subjects` de l'autorité interne —
+ * les autres sujets sont strictement inchangés. Comme tout le reste, ces certificats sont
+ * reconstruits à CHAQUE push par buildDesiredCaddyConfig() : /load remplaçant l'intégralité de la
+ * config, rien ne survivrait à un push qui ne serait pas produit par cette fonction.
+ *
  * SÉCURITÉ DE L'API D'ADMIN CADDY (`:2019`) — risque de mouvement latéral ACCEPTÉ, documenté ici
  * plutôt que « corrigé » (finding M2, docs/reports/security-audit-2026-08-12.md) : la seule
  * protection de cette API est la liste blanche `admin.origins` (anti-CSRF navigateur, PAS une
@@ -71,6 +78,7 @@ import path from "node:path";
 import { config } from "../config.js";
 import { getContainerNetworkAddress } from "./docker.js";
 import { pushDnsRecord, removeDnsRecord } from "./adDns.js";
+import { getServableCertificates, type ServableCertificate } from "./certificates.js";
 import { getEffectiveAdDnsConfig } from "./setupStore.js";
 import type { AdDnsSyncResult, ReverseProxyRoute, ReverseProxyStatus } from "../types.js";
 
@@ -366,10 +374,20 @@ export async function resolveUpstream(route: ReverseProxyRoute): Promise<string 
 /** Adresses d'écoute du serveur "quai" — comparées telles quelles par le réconciliateur. */
 const QUAI_SERVER_LISTEN = [":80", ":443"];
 
+/** Certificat déjà émis, fourni tel quel à Caddy (`tls.certificates.load_pem`, tableau de paires
+ * PEM certificat/clé) — voir services/certificates.ts. */
+interface CaddyPemCertificate {
+  certificate: string;
+  key: string;
+}
+
 interface CaddyLoadBody {
   admin: { listen: string; origins: string[] };
   apps: {
-    tls: { automation: { policies: [{ subjects: string[]; issuers: [{ module: "internal" }] }] } };
+    tls: {
+      certificates?: { load_pem: CaddyPemCertificate[] };
+      automation?: { policies: [{ subjects: string[]; issuers: [{ module: "internal" }] }] };
+    };
     http: { servers: { quai: { listen: string[]; routes: CaddyRoute[] } } };
   };
 }
@@ -379,6 +397,8 @@ export interface DesiredCaddyConfig {
   body: CaddyLoadBody;
   subdomains: string[];
   listen: string[];
+  /** Sujets servis avec un certificat AD CS au lieu de l'autorité interne de Caddy. */
+  adcsSubjects: string[];
 }
 
 /**
@@ -435,19 +455,44 @@ export async function buildDesiredCaddyConfig(): Promise<DesiredCaddyConfig> {
   const adminAuthority = new URL(config.reverseProxy.caddyAdminUrl).host;
   const adminOrigins = Array.from(new Set([adminAuthority, "localhost:2019", "127.0.0.1:2019", "[::1]:2019"]));
 
+  // Un sujet disposant d'un certificat AD CS valide (services/certificates.ts) est servi AVEC ce
+  // certificat au lieu de l'autorité interne : c'est ce qui supprime le cadenas rouge, la racine
+  // AD CS étant déjà approuvée par les postes via stratégie de groupe. Les autres sujets gardent
+  // exactement le comportement précédent. Reconstruit à chaque push comme le reste de la config.
+  const adcsBySubject = new Map<string, ServableCertificate>();
+  try {
+    for (const certificate of await getServableCertificates()) {
+      adcsBySubject.set(certificate.subject.toLowerCase(), certificate);
+    }
+  } catch {
+    // Store de certificats illisible : on retombe intégralement sur l'autorité interne plutôt
+    // que de faire échouer un push (jamais de service coupé pour un problème de certificats).
+  }
+  const loadPem: CaddyPemCertificate[] = [];
+  const internalSubjects: string[] = [];
+  const adcsSubjects: string[] = [];
+  for (const subject of tlsSubjects) {
+    const match = adcsBySubject.get(subject.toLowerCase());
+    if (match) {
+      loadPem.push({ certificate: match.certificatePem, key: match.privateKeyPem });
+      adcsSubjects.push(subject);
+    } else {
+      internalSubjects.push(subject);
+    }
+  }
+
   const body: CaddyLoadBody = {
     admin: { listen: "0.0.0.0:2019", origins: adminOrigins },
     apps: {
-      // Émission de certificat par l'AUTORITÉ INTERNE de Caddy (jamais ACME/Let's Encrypt — voir
-      // le commentaire de tête de fichier) pour chaque sous-domaine réellement configuré + une
-      // entrée fixe "localhost" (utile pour vérifier que le TLS marche même sans route). `subjects`
-      // reconstruit à chaque push comme le reste : une route supprimée n'a plus de certificat émis
-      // pour elle au push suivant (Caddy garde le certificat déjà émis en cache jusqu'à expiration,
-      // mais n'en émet plus de nouveau pour ce nom une fois retiré des subjects).
+      // Sujets SANS certificat AD CS : émission par l'AUTORITÉ INTERNE de Caddy (jamais
+      // ACME/Let's Encrypt — voir le commentaire de tête de fichier), comme avant. La policy est
+      // omise si tous les sujets ont un certificat AD CS : un `subjects` vide signifierait "tous"
+      // pour Caddy et réactiverait l'autorité interne par-dessus.
       tls: {
-        automation: {
-          policies: [{ subjects: Array.from(tlsSubjects), issuers: [{ module: "internal" }] }],
-        },
+        ...(loadPem.length > 0 ? { certificates: { load_pem: loadPem } } : {}),
+        ...(internalSubjects.length > 0
+          ? { automation: { policies: [{ subjects: internalSubjects, issuers: [{ module: "internal" as const }] }] as [{ subjects: string[]; issuers: [{ module: "internal" }] }] } }
+          : {}),
       },
       http: {
         servers: {
@@ -460,7 +505,7 @@ export async function buildDesiredCaddyConfig(): Promise<DesiredCaddyConfig> {
     },
   };
 
-  return { body, subdomains, listen: [...QUAI_SERVER_LISTEN] };
+  return { body, subdomains, listen: [...QUAI_SERVER_LISTEN], adcsSubjects };
 }
 
 /**

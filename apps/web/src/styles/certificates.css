@@ -1,0 +1,94 @@
+/* Page Certificats (autorité AD CS) — réutilise .stat-card/.card/.field de components.css. */
+.certificates-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.certificates-stat--warn {
+  border-color: var(--color-warning, #b78103);
+}
+
+.certificates-stat--crit {
+  border-color: var(--color-danger, #c8321f);
+}
+
+.certificates-reconciliation {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.certificates-reconciliation__hint {
+  color: var(--color-text-muted);
+  font-size: 12.5px;
+}
+
+.certificates-issue {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.certificates-issue input {
+  flex: 1 1 280px;
+  min-width: 220px;
+}
+
+.certificates-toolbar-hint {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+/* Un certificat expiré ne doit jamais passer inaperçu dans la liste. */
+.certificates-row--expired {
+  background: color-mix(in srgb, var(--color-danger, #c8321f) 8%, transparent);
+}
+
+.certificates-error {
+  color: var(--color-danger, #c8321f);
+  display: inline-block;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.certificates-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.certificates-actions__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.certificates-actions__buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.certificates-config {
+  margin-top: 20px;
+}
+
+.certificates-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}

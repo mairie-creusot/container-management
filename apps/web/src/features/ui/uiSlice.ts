@@ -16,7 +16,8 @@ export type ViewId =
   | "hycu"
   | "exagrid"
   | "threecx"
-  | "glpi";
+  | "glpi"
+  | "certificates";
 
 interface UiState {
   currentView: ViewId;
@@ -73,6 +74,7 @@ export const NAV_ITEMS: { id: ViewId; label: string }[] = [
   { id: "exagrid", label: "Stockage de sauvegarde" },
   { id: "threecx", label: "Téléphonie" },
   { id: "glpi", label: "Assistance GLPI" },
+  { id: "certificates", label: "Certificats" },
 ];
 
 const PAGE_TITLES: Partial<Record<ViewId, string>> = {

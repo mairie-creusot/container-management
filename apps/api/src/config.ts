@@ -208,6 +208,21 @@ export const config = {
     requestTimeoutMs: readNumber("AD_DNS_TIMEOUT_MS", 10000),
     recordTtlSeconds: readNumber("AD_DNS_RECORD_TTL_SECONDS", 300),
   },
+  certificates: {
+    // Certificats TLS émis par l'autorité AD CS interne de la mairie (voir services/certificates.ts).
+    // Clés privées chiffrées au repos comme secrets.json, même répertoire/pattern.
+    storePath: readString("CERTIFICATES_PATH", "./data/certificates.json"),
+    requestTimeoutMs: readNumber("CERTIFICATES_REQUEST_TIMEOUT_MS", 15000),
+    // Marge de renouvellement par défaut (surchargeable par la config d'intégration).
+    renewBeforeDays: readNumber("CERTIFICATES_RENEW_BEFORE_DAYS", 30),
+    // Intervalle de la boucle de renouvellement (voir services/certificatesReconciler.ts) : un
+    // certificat AD CS vit des mois, inutile de sonder plus souvent que quelques heures.
+    reconcileIntervalMs: readNumber("CERTIFICATES_RECONCILE_INTERVAL_MS", 6 * 60 * 60 * 1000),
+    // L'autorité AD CS présente son propre certificat, émis par elle-même : le conteneur API ne
+    // la connaît pas tant que sa racine n'y est pas installée — même périmètre limité et même
+    // principe que hycu/nutanix.tlsRejectUnauthorized, jamais NODE_TLS_REJECT_UNAUTHORIZED global.
+    tlsRejectUnauthorized: readBoolean("CERTIFICATES_TLS_REJECT_UNAUTHORIZED", false),
+  },
   github: {
     // Intégration GitOps GitHub (cf. ARCHITECTURE.md, chapitre "Intégration GitHub") : jeton
     // (PAT) persisté chiffré au repos, même pattern/répertoire que secrets.json.

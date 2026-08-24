@@ -155,6 +155,36 @@ export interface SetupAdDnsConfig {
   targetIp: string;
 }
 
+/**
+ * Autorité de certification interne AD CS de la mairie (voir services/certificates.ts) — même
+ * emplacement et même cycle de vie que SetupHycuConfig ci-dessus (configurable/retirable via
+ * /api/certificates/config). `password` est le mot de passe du compte de service autorisé à
+ * s'inscrire sur le site d'inscription web `certsrv` : chiffré au repos, jamais renvoyé par une
+ * route, jamais journalisé.
+ */
+export type CertificateEnrollmentMethod = "certsrv";
+
+export interface SetupCertificatesConfig {
+  // URL du site d'inscription web AD CS (ex: "https://ca.lecreusot.priv/certsrv").
+  caUrl: string;
+  // Absente dans une config écrite avant l'ajout d'une seconde voie : lue comme "certsrv".
+  method?: CertificateEnrollmentMethod;
+  // Nom du modèle de certificat AD CS (ex: "WebServer").
+  template: string;
+  username: string;
+  // password : chiffré au repos (voir encryptSecrets ci-dessous), comme hycu.password.
+  password: string;
+  // Marge de renouvellement en jours ; absent = config.certificates.renewBeforeDays.
+  renewBeforeDays?: number;
+  // Taille de clé RSA ; absent = 2048 (minimum usuel d'un modèle AD CS moderne).
+  keySize?: number;
+  // Émettre automatiquement un certificat pour tout sous-domaine du reverse proxy qui n'en a pas
+  // encore. Absent = true.
+  autoEnroll?: boolean;
+  // Absent = défaut config.certificates.tlsRejectUnauthorized. Pas un secret.
+  tlsRejectUnauthorized?: boolean;
+}
+
 export interface SetupRegistryConfig {
   kind: RegistryKind;
   name: string;
@@ -196,6 +226,7 @@ export interface SetupConfig {
   exagrid?: SetupExagridConfig;
   registries?: SetupRegistryConfig[];
   adDns?: SetupAdDnsConfig;
+  certificates?: SetupCertificatesConfig;
 }
 
 let cache: SetupConfig | null = null;
@@ -287,6 +318,9 @@ function encryptSecrets(cfg: SetupConfig): SetupConfig {
     ...(cfg.adDns?.password
       ? { adDns: { ...cfg.adDns, password: encryptSecretIfNeeded(cfg.adDns.password) } }
       : {}),
+    ...(cfg.certificates?.password
+      ? { certificates: { ...cfg.certificates, password: encryptSecretIfNeeded(cfg.certificates.password) } }
+      : {}),
     ...(cfg.registries
       ? {
           registries: cfg.registries.map((r) => ({
@@ -309,6 +343,7 @@ function hasLegacyPlaintextSecret(cfg: SetupConfig): boolean {
   if (cfg.threecx && [cfg.threecx.clientSecret, cfg.threecx.password].some((s) => s && !isEncrypted(s))) return true;
   if (cfg.exagrid && [cfg.exagrid.community, cfg.exagrid.authKey, cfg.exagrid.privKey].some((s) => s && !isEncrypted(s))) return true;
   if (cfg.adDns?.password && !isEncrypted(cfg.adDns.password)) return true;
+  if (cfg.certificates?.password && !isEncrypted(cfg.certificates.password)) return true;
   if (cfg.registries?.some((r) => (r.password && !isEncrypted(r.password)) || (r.token && !isEncrypted(r.token)))) {
     return true;
   }
@@ -717,6 +752,42 @@ export async function setAdDnsConfig(input: SetupAdDnsConfig): Promise<SetupConf
 export async function clearAdDnsConfig(): Promise<SetupConfig> {
   const current = await getCurrent();
   const { adDns: _removed, ...rest } = current;
+  const next: SetupConfig = rest;
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/** Config AD CS effective (mot de passe déchiffré), ou `null` si jamais configurée — même
+ * principe que getEffectiveHycuConfig (aucun bootstrap par variable d'environnement : l'URL de
+ * l'autorité et le compte de service sont toujours saisis explicitement). */
+export async function getEffectiveCertificatesConfig(): Promise<SetupCertificatesConfig | null> {
+  const current = await getCurrent();
+  if (!current.certificates) return null;
+  // Migration à la lecture : une config écrite avant l'ajout du champ reste en "certsrv".
+  return {
+    ...current.certificates,
+    password: decryptSecret(current.certificates.password),
+    method: current.certificates.method ?? "certsrv",
+  };
+}
+
+/** PUT /api/certificates/config — configure/remplace l'autorité AD CS (mot de passe chiffré avant
+ * écriture), n'affecte aucune autre section — même principe que setHycuConfig ci-dessus. */
+export async function setCertificatesConfig(input: SetupCertificatesConfig): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const next: SetupConfig = encryptSecrets({ ...current, certificates: input });
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/** DELETE /api/certificates/config — retire la configuration AD CS. Les certificats DÉJÀ émis
+ * restent stockés et continuent d'être servis par Caddy jusqu'à leur expiration (on ne casse
+ * jamais TLS en retirant une config) ; seuls l'émission et le renouvellement s'arrêtent. */
+export async function clearCertificatesConfig(): Promise<SetupConfig> {
+  const current = await getCurrent();
+  const { certificates: _removed, ...rest } = current;
   const next: SetupConfig = rest;
   await writeToDisk(next);
   cache = next;
