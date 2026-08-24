@@ -115,6 +115,50 @@ async function sendEmail(email: NonNullable<EffectiveNotificationChannel["email"
   });
 }
 
+/**
+ * Telegram Bot API : POST https://api.telegram.org/bot<jeton>/sendMessage, corps
+ * `{ chat_id, text }`. Le jeton fait partie de l'URL — il ne doit JAMAIS apparaître dans un
+ * message d'erreur, d'où l'URL remplacée par un libellé fixe dans le rapport d'échec. Un refus
+ * répond 200 ou 4xx avec `{ ok: false, description }` : les deux sont traités comme un échec.
+ */
+async function sendTelegram(telegram: { botToken: string; chatId: string }, event: Omit<SystemNotificationEvent, "read">): Promise<void> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.notificationChannels.requestTimeoutMs);
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${telegram.botToken}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: telegram.chatId,
+        text: `[QUAI] ${levelLabel(event.level)} — ${event.message}`,
+        disable_web_page_preview: true,
+      }),
+      signal: controller.signal,
+    });
+    const raw = await response.text().catch(() => "");
+    let description = "";
+    try {
+      const parsed = JSON.parse(raw) as { ok?: boolean; description?: string };
+      if (parsed.ok === false) description = parsed.description ?? "refus sans motif";
+    } catch {
+      description = response.ok ? "" : raw.slice(0, 300);
+    }
+    if (!response.ok || description) {
+      throw new Error(`HTTP ${response.status}${description ? `: ${description}` : ""}`);
+    }
+  } catch (err) {
+    const reason =
+      err instanceof Error && err.name === "AbortError"
+        ? `timed out after ${config.notificationChannels.requestTimeoutMs}ms`
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    throw new Error(`api.telegram.org (jeton masqué): ${reason}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 /** Envoi RÉEL vers un seul canal — lève en cas d'échec (l'appelant décide de logger/avaler). */
 async function sendToChannel(channel: EffectiveNotificationChannel, event: Omit<SystemNotificationEvent, "read">): Promise<void> {
   if (channel.kind === "webhook" && channel.webhook) {
@@ -128,6 +172,10 @@ async function sendToChannel(channel: EffectiveNotificationChannel, event: Omit<
   if (channel.kind === "discord" && channel.discord) {
     const content = `**[QUAI] ${levelLabel(event.level)}** — ${event.message}`.slice(0, DISCORD_CONTENT_MAX_LENGTH);
     await postJson(channel.discord.webhookUrl, { content });
+    return;
+  }
+  if (channel.kind === "telegram" && channel.telegram) {
+    await sendTelegram(channel.telegram, event);
     return;
   }
   if (channel.kind === "email" && channel.email) {

@@ -107,6 +107,35 @@ describe("notificationChannelsStore — CRUD", () => {
     await store.deleteNotificationChannel(created.id);
   });
 
+  it("telegram : le jeton est chiffré au repos, jamais renvoyé, et conservé si le patch ne le fournit pas", async () => {
+    const created = await store.createNotificationChannel({
+      kind: "telegram",
+      name: "telegram-test",
+      enabled: true,
+      telegram: { botToken: "123456789:AAsecret-token", chatId: "42" },
+    });
+    // La vue "safe" expose le destinataire (pas un secret) mais jamais le jeton.
+    expect(created.telegram).toEqual({ chatId: "42", hasBotToken: true });
+    expect(JSON.stringify(created)).not.toContain("AAsecret-token");
+
+    const updated = await store.updateNotificationChannel(created.id, { telegram: { chatId: "-1001234567890" } });
+    expect(updated?.telegram).toEqual({ chatId: "-1001234567890", hasBotToken: true });
+
+    const effective = await store.getEffectiveNotificationChannel(created.id);
+    expect(effective?.telegram).toEqual({ botToken: "123456789:AAsecret-token", chatId: "-1001234567890" });
+
+    await store.deleteNotificationChannel(created.id);
+  });
+
+  it("telegram : refuse une création sans jeton ou sans destinataire", async () => {
+    await expect(
+      store.createNotificationChannel({ kind: "telegram", name: "x", enabled: true, telegram: { botToken: "", chatId: "42" } }),
+    ).rejects.toThrow(/botToken/);
+    await expect(
+      store.createNotificationChannel({ kind: "telegram", name: "x", enabled: true, telegram: { botToken: "t", chatId: "" } }),
+    ).rejects.toThrow(/chatId/);
+  });
+
   it("404s (undefined) when updating/deleting an unknown id", async () => {
     expect(await store.updateNotificationChannel("does-not-exist", { name: "x" })).toBeUndefined();
     expect(await store.deleteNotificationChannel("does-not-exist")).toBe(false);

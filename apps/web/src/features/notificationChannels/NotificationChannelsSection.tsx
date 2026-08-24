@@ -17,6 +17,7 @@ const KIND_LABEL: Record<NotificationChannelKind, string> = {
   webhook: "Webhook générique",
   slack: "Slack",
   discord: "Discord",
+  telegram: "Telegram",
   email: "Email (SMTP)",
 };
 
@@ -43,6 +44,8 @@ interface FormState {
   webhookUrl: string;
   slackWebhookUrl: string;
   discordWebhookUrl: string;
+  telegramBotToken: string;
+  telegramChatId: string;
   smtpHost: string;
   smtpPort: string;
   smtpUsername: string;
@@ -61,6 +64,8 @@ const EMPTY_FORM: FormState = {
   webhookUrl: "",
   slackWebhookUrl: "",
   discordWebhookUrl: "",
+  telegramBotToken: "",
+  telegramChatId: "",
   smtpHost: "",
   smtpPort: "587",
   smtpUsername: "",
@@ -129,6 +134,7 @@ export default function NotificationChannelsSection() {
       enabled: channel.enabled,
       levels: channel.filter?.levels ?? [],
       kinds: channel.filter?.kinds ?? [],
+      ...(channel.telegram ? { telegramChatId: channel.telegram.chatId } : {}),
       ...(channel.email
         ? {
             smtpHost: channel.email.smtpHost,
@@ -166,6 +172,9 @@ export default function NotificationChannelsSection() {
       ...(form.kind === "webhook" ? { webhook: { url: form.webhookUrl.trim() } } : {}),
       ...(form.kind === "slack" ? { slack: { webhookUrl: form.slackWebhookUrl.trim() } } : {}),
       ...(form.kind === "discord" ? { discord: { webhookUrl: form.discordWebhookUrl.trim() } } : {}),
+      ...(form.kind === "telegram"
+        ? { telegram: { botToken: form.telegramBotToken.trim(), chatId: form.telegramChatId.trim() } }
+        : {}),
       ...(form.kind === "email"
         ? {
             email: {
@@ -187,6 +196,10 @@ export default function NotificationChannelsSection() {
     if (form.kind === "webhook") return editingId ? true : !!form.webhookUrl.trim();
     if (form.kind === "slack") return editingId ? true : !!form.slackWebhookUrl.trim();
     if (form.kind === "discord") return editingId ? true : !!form.discordWebhookUrl.trim();
+    if (form.kind === "telegram") {
+      // En édition, le chat peut être changé seul (le jeton déjà enregistré est conservé).
+      return editingId ? !!form.telegramChatId.trim() : !!form.telegramBotToken.trim() && !!form.telegramChatId.trim();
+    }
     if (form.kind === "email") {
       return !!(form.smtpHost.trim() && form.fromAddress.trim() && form.toAddress.trim());
     }
@@ -325,6 +338,42 @@ export default function NotificationChannelsSection() {
               />
               {editingId && <p className="create-container-hint">Laisser vide pour conserver l'URL déjà enregistrée.</p>}
             </div>
+          )}
+
+          {form.kind === "telegram" && (
+            <>
+              <div className="field">
+                <label htmlFor="channel-telegram-token">Jeton du bot</label>
+                <input
+                  id="channel-telegram-token"
+                  type="password"
+                  autoComplete="new-password"
+                  value={form.telegramBotToken}
+                  onChange={(event) => setForm((f) => ({ ...f, telegramBotToken: event.target.value }))}
+                  placeholder="123456789:AA…"
+                  {...(editingId ? {} : { required: true })}
+                />
+                <p className="create-container-hint">
+                  {editingId
+                    ? "Laisser vide pour conserver le jeton déjà enregistré."
+                    : "Obtenu auprès de @BotFather sur Telegram."}
+                </p>
+              </div>
+              <div className="field">
+                <label htmlFor="channel-telegram-chat">Destinataire (chat_id)</label>
+                <input
+                  id="channel-telegram-chat"
+                  value={form.telegramChatId}
+                  onChange={(event) => setForm((f) => ({ ...f, telegramChatId: event.target.value }))}
+                  placeholder="ex : 123456789 ou -1001234567890 pour un groupe"
+                  required
+                />
+                <p className="create-container-hint">
+                  Le bot doit avoir été démarré par ce destinataire (ou ajouté au groupe) : Telegram interdit à un bot
+                  d'écrire le premier.
+                </p>
+              </div>
+            </>
           )}
 
           {form.kind === "email" && (

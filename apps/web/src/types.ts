@@ -1152,7 +1152,7 @@ export interface SystemNotificationEvent {
 // (watchdog + réconciliateur GitOps + scanScheduler) est aussi routé, en fire-and-forget, vers
 // chaque canal actif dont le filtre matche — jamais bloquant, jamais d'exception remontée.
 
-export type NotificationChannelKind = "webhook" | "slack" | "discord" | "email";
+export type NotificationChannelKind = "webhook" | "slack" | "discord" | "email" | "telegram";
 
 /** Filtre optionnel appliqué à un canal — absent/vide = tous les niveaux/types d'événement. */
 export interface NotificationChannelFilter {
@@ -1171,6 +1171,10 @@ export interface NotificationChannelSlackRef {
 }
 export interface NotificationChannelDiscordRef {
   hasWebhookUrl: boolean;
+}
+export interface NotificationChannelTelegramRef {
+  chatId: string;
+  hasBotToken: boolean;
 }
 export interface NotificationChannelEmailRef {
   smtpHost: string;
@@ -1192,6 +1196,7 @@ export interface NotificationChannelRef {
   webhook?: NotificationChannelWebhookRef;
   slack?: NotificationChannelSlackRef;
   discord?: NotificationChannelDiscordRef;
+  telegram?: NotificationChannelTelegramRef;
   email?: NotificationChannelEmailRef;
   createdAt: string; // ISO 8601
   updatedAt: string; // ISO 8601

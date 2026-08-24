@@ -8,7 +8,7 @@ import type {
 } from "@/types";
 
 /** Corps commun POST/PATCH — voir apps/api/src/routes/notificationChannels.ts. Les champs de config
- * spécifiques au type (webhook/slack/discord/email) sont volontairement optionnels : un PATCH peut
+ * spécifiques au type (webhook/slack/discord/telegram/email) sont volontairement optionnels : un PATCH peut
  * ne toucher qu'au nom/statut/filtre sans reposter la config du canal. */
 export interface NotificationChannelFormInput {
   kind: NotificationChannelKind;
@@ -19,6 +19,7 @@ export interface NotificationChannelFormInput {
   webhook?: { url?: string };
   slack?: { webhookUrl?: string };
   discord?: { webhookUrl?: string };
+  telegram?: { botToken?: string; chatId?: string };
   email?: {
     smtpHost?: string;
     smtpPort?: number;

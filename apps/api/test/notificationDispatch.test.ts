@@ -107,6 +107,38 @@ describe("notificationDispatch — ne journalise/ne persiste/ne renvoie jamais l
     expect(loggedText).toContain("discord.com");
   });
 
+  it("Telegram : le jeton du bot n'apparaît jamais dans un message d'échec (il est dans l'URL)", async () => {
+    getEffectiveNotificationChannelMock.mockResolvedValue(
+      fakeChannel({ kind: "telegram", telegram: { botToken: SECRET_TOKEN, chatId: "123456789" } }),
+    );
+
+    const result = await sendTestNotification("chan-1");
+
+    expect(result.ok).toBe(false);
+    expect(result.message).not.toContain(SECRET_TOKEN);
+    expect(result.message).toContain("api.telegram.org");
+  });
+
+  it("Telegram : un refus de l'API ({ ok: false }) est un échec, même en HTTP 200", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ok: false, description: "Bad Request: chat not found" }),
+    });
+    getEffectiveNotificationChannelMock.mockResolvedValue(
+      fakeChannel({ kind: "telegram", telegram: { botToken: SECRET_TOKEN, chatId: "999" } }),
+    );
+
+    const result = await sendTestNotification("chan-1");
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("chat not found");
+    expect(result.message).not.toContain(SECRET_TOKEN);
+    const [url, init] = fetchMock.mock.calls.at(-1)!;
+    expect(String(url)).toBe(`https://api.telegram.org/bot${SECRET_TOKEN}/sendMessage`);
+    expect(JSON.parse(String((init as { body: string }).body)).chat_id).toBe("999");
+  });
+
   it("une URL de webhook malformée ne provoque jamais un throw non maîtrisé (repli explicite, jamais l'URL brute)", async () => {
     getEffectiveNotificationChannelMock.mockResolvedValue(
       fakeChannel({ kind: "webhook", webhook: { url: "pas-une-url-valide" } }),

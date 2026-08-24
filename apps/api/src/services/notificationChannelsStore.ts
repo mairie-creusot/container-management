@@ -42,6 +42,10 @@ export interface StoredSlackConfig {
 export interface StoredDiscordConfig {
   webhookUrl: string; // chiffré au repos
 }
+export interface StoredTelegramConfig {
+  botToken: string; // chiffré au repos
+  chatId: string;
+}
 export interface StoredEmailConfig {
   smtpHost: string;
   smtpPort: number;
@@ -61,6 +65,7 @@ interface StoredNotificationChannel {
   webhook?: StoredWebhookConfig;
   slack?: StoredSlackConfig;
   discord?: StoredDiscordConfig;
+  telegram?: StoredTelegramConfig;
   email?: StoredEmailConfig;
   createdAt: string;
   updatedAt: string;
@@ -76,6 +81,7 @@ export interface EffectiveNotificationChannel {
   webhook?: { url: string };
   slack?: { webhookUrl: string };
   discord?: { webhookUrl: string };
+  telegram?: { botToken: string; chatId: string };
   email?: {
     smtpHost: string;
     smtpPort: number;
@@ -127,6 +133,9 @@ function toRef(channel: StoredNotificationChannel): NotificationChannelRef {
     ...(channel.webhook ? { webhook: { hasUrl: Boolean(channel.webhook.url) } } : {}),
     ...(channel.slack ? { slack: { hasWebhookUrl: Boolean(channel.slack.webhookUrl) } } : {}),
     ...(channel.discord ? { discord: { hasWebhookUrl: Boolean(channel.discord.webhookUrl) } } : {}),
+    ...(channel.telegram
+      ? { telegram: { chatId: channel.telegram.chatId, hasBotToken: Boolean(channel.telegram.botToken) } }
+      : {}),
     ...(channel.email
       ? {
           email: {
@@ -155,6 +164,9 @@ function toEffective(channel: StoredNotificationChannel): EffectiveNotificationC
     ...(channel.webhook ? { webhook: { url: decryptSecret(channel.webhook.url) } } : {}),
     ...(channel.slack ? { slack: { webhookUrl: decryptSecret(channel.slack.webhookUrl) } } : {}),
     ...(channel.discord ? { discord: { webhookUrl: decryptSecret(channel.discord.webhookUrl) } } : {}),
+    ...(channel.telegram
+      ? { telegram: { botToken: decryptSecret(channel.telegram.botToken), chatId: channel.telegram.chatId } }
+      : {}),
     ...(channel.email
       ? {
           email: {
@@ -180,6 +192,10 @@ export interface SlackConfigInput {
 export interface DiscordConfigInput {
   webhookUrl: string;
 }
+export interface TelegramConfigInput {
+  botToken: string;
+  chatId: string;
+}
 export interface EmailConfigInput {
   smtpHost: string;
   smtpPort: number;
@@ -198,6 +214,7 @@ export interface NotificationChannelInput {
   webhook?: WebhookConfigInput;
   slack?: SlackConfigInput;
   discord?: DiscordConfigInput;
+  telegram?: TelegramConfigInput;
   email?: EmailConfigInput;
 }
 
@@ -236,6 +253,15 @@ function assertValidInput(input: NotificationChannelInput, requireCredentials: b
       throw new NotificationChannelValidationError('discord.webhookUrl is required for kind "discord"');
     }
     if (input.discord?.webhookUrl) assertValidUrl(input.discord.webhookUrl, "discord.webhookUrl");
+  } else if (input.kind === "telegram") {
+    // Aucune URL à valider : l'API Telegram est toujours api.telegram.org, seuls le jeton du bot
+    // et le destinataire varient.
+    if (requireCredentials && !input.telegram?.botToken?.trim()) {
+      throw new NotificationChannelValidationError('telegram.botToken is required for kind "telegram"');
+    }
+    if (requireCredentials && !input.telegram?.chatId?.trim()) {
+      throw new NotificationChannelValidationError('telegram.chatId is required for kind "telegram"');
+    }
   } else if (input.kind === "email") {
     const email = input.email;
     if (requireCredentials) {
@@ -257,6 +283,9 @@ function encryptSlack(input: SlackConfigInput): StoredSlackConfig {
 }
 function encryptDiscord(input: DiscordConfigInput): StoredDiscordConfig {
   return { webhookUrl: encryptSecretIfNeeded(input.webhookUrl.trim()) };
+}
+function encryptTelegram(input: TelegramConfigInput): StoredTelegramConfig {
+  return { botToken: encryptSecretIfNeeded(input.botToken.trim()), chatId: input.chatId.trim() };
 }
 function encryptEmail(input: EmailConfigInput): StoredEmailConfig {
   return {
@@ -300,6 +329,7 @@ export async function createNotificationChannel(input: NotificationChannelInput)
   const webhook = input.kind === "webhook" && input.webhook ? encryptWebhook(input.webhook) : undefined;
   const slack = input.kind === "slack" && input.slack ? encryptSlack(input.slack) : undefined;
   const discord = input.kind === "discord" && input.discord ? encryptDiscord(input.discord) : undefined;
+  const telegram = input.kind === "telegram" && input.telegram ? encryptTelegram(input.telegram) : undefined;
   const email = input.kind === "email" && input.email ? encryptEmail(input.email) : undefined;
   const created: StoredNotificationChannel = {
     id: randomUUID(),
@@ -310,6 +340,7 @@ export async function createNotificationChannel(input: NotificationChannelInput)
     ...(webhook ? { webhook } : {}),
     ...(slack ? { slack } : {}),
     ...(discord ? { discord } : {}),
+    ...(telegram ? { telegram } : {}),
     ...(email ? { email } : {}),
     createdAt: now,
     updatedAt: now,
@@ -336,6 +367,7 @@ export interface NotificationChannelPatch {
   webhook?: Partial<WebhookConfigInput>;
   slack?: Partial<SlackConfigInput>;
   discord?: Partial<DiscordConfigInput>;
+  telegram?: Partial<TelegramConfigInput>;
   email?: Partial<EmailConfigInput>;
 }
 
@@ -376,6 +408,20 @@ export async function updateNotificationChannel(
     nextDiscord = encryptDiscord({ webhookUrl: patch.discord.webhookUrl });
   }
 
+  let nextTelegram = existing.telegram;
+  if (existing.kind === "telegram" && patch.telegram) {
+    // Jeton vide = on conserve celui déjà chiffré, même convention que le mot de passe SMTP.
+    const chatId = patch.telegram.chatId?.trim() ? patch.telegram.chatId.trim() : (existing.telegram?.chatId ?? "");
+    if (!chatId) throw new NotificationChannelValidationError("telegram.chatId is required");
+    nextTelegram = {
+      botToken: patch.telegram.botToken?.trim()
+        ? encryptSecretIfNeeded(patch.telegram.botToken.trim())
+        : (existing.telegram?.botToken ?? ""),
+      chatId,
+    };
+    if (!nextTelegram.botToken) throw new NotificationChannelValidationError("telegram.botToken is required");
+  }
+
   let nextEmail = existing.email;
   if (existing.kind === "email" && patch.email) {
     const smtpPort = patch.email.smtpPort ?? existing.email?.smtpPort ?? 587;
@@ -410,6 +456,7 @@ export async function updateNotificationChannel(
     ...(nextWebhook ? { webhook: nextWebhook } : {}),
     ...(nextSlack ? { slack: nextSlack } : {}),
     ...(nextDiscord ? { discord: nextDiscord } : {}),
+    ...(nextTelegram ? { telegram: nextTelegram } : {}),
     ...(nextEmail ? { email: nextEmail } : {}),
     createdAt: existing.createdAt,
     updatedAt: new Date().toISOString(),

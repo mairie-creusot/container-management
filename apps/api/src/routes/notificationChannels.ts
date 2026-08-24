@@ -4,7 +4,7 @@
  *                                                 ouvert à toute session authentifiée (même
  *                                                 principe que GET /api/remote-environments).
  * POST   /api/notification-channels           — { kind, name, enabled, filter?, webhook?|slack?|
- *                                                 discord?|email? }, admin uniquement.
+ *                                                 discord?|telegram?|email? }, admin uniquement.
  * PATCH  /api/notification-channels/:id       — modifie nom/actif/filtre/config du canal, admin
  *                                                 uniquement.
  * DELETE /api/notification-channels/:id       — admin uniquement.
@@ -32,6 +32,7 @@ import {
 import type {
   DiscordConfigInput,
   EmailConfigInput,
+  TelegramConfigInput,
   SlackConfigInput,
   WebhookConfigInput,
 } from "../services/notificationChannelsStore.js";
@@ -47,10 +48,11 @@ interface ChannelBody {
   webhook?: Partial<WebhookConfigInput>;
   slack?: Partial<SlackConfigInput>;
   discord?: Partial<DiscordConfigInput>;
+  telegram?: Partial<TelegramConfigInput>;
   email?: Partial<EmailConfigInput>;
 }
 
-const VALID_KINDS: NotificationChannelKind[] = ["webhook", "slack", "discord", "email"];
+const VALID_KINDS: NotificationChannelKind[] = ["webhook", "slack", "discord", "telegram", "email"];
 
 /** true (et réponse 403 déjà envoyée) si la session n'a pas le rôle admin — même garde que adDns.ts/secrets.ts. */
 function rejectIfNotAdmin(request: FastifyRequest, reply: FastifyReply): boolean {
@@ -87,6 +89,9 @@ export default async function notificationChannelsRoutes(fastify: FastifyInstanc
         ...(body.webhook?.url !== undefined ? { webhook: { url: body.webhook.url } } : {}),
         ...(body.slack?.webhookUrl !== undefined ? { slack: { webhookUrl: body.slack.webhookUrl } } : {}),
         ...(body.discord?.webhookUrl !== undefined ? { discord: { webhookUrl: body.discord.webhookUrl } } : {}),
+        ...(body.telegram?.botToken !== undefined || body.telegram?.chatId !== undefined
+          ? { telegram: { botToken: body.telegram?.botToken ?? "", chatId: body.telegram?.chatId ?? "" } }
+          : {}),
         ...(body.email?.smtpHost !== undefined
           ? {
               email: {
@@ -125,6 +130,7 @@ export default async function notificationChannelsRoutes(fastify: FastifyInstanc
           ...(body.webhook !== undefined ? { webhook: body.webhook } : {}),
           ...(body.slack !== undefined ? { slack: body.slack } : {}),
           ...(body.discord !== undefined ? { discord: body.discord } : {}),
+          ...(body.telegram !== undefined ? { telegram: body.telegram } : {}),
           ...(body.email !== undefined ? { email: body.email } : {}),
         });
         if (!updated) {
