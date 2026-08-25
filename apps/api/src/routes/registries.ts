@@ -151,7 +151,7 @@ export default async function registriesRoutes(fastify: FastifyInstance): Promis
     // risque de divergence entre le compteur et l'explorateur de catalogue pour le même registry.
     const localImages = await getLocalDockerImages();
     const org = resolveRegistryOrg(persisted, localImages);
-    const result = await listRegistryRepositories(persisted.kind, org);
+    const result = await listRegistryRepositories(persisted.kind, org, persisted.url);
     return reply.send(result);
   });
 

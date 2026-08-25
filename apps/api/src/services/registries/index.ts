@@ -73,7 +73,7 @@ export function diagnosticFromError(label: string, err: unknown): string {
  * était dupliquée ici ET dans registriesStore.ts, un risque de divergence future entre le
  * compteur "images suivies" et l'explorateur de catalogue pour le même registry.
  */
-export async function listRegistryRepositories(kind: RegistryKind, org?: string): Promise<RegistryCatalogResult> {
+export async function listRegistryRepositories(kind: RegistryKind, org?: string, url?: string): Promise<RegistryCatalogResult> {
   switch (kind) {
     case "ghcr": {
       if (!org) {
@@ -99,8 +99,23 @@ export async function listRegistryRepositories(kind: RegistryKind, org?: string)
         return { repositories: [], diagnostic: diagnosticFromError("Docker Hub", err) };
       }
     }
-    case "gitlab":
-      return { repositories: [], diagnostic: "GitLab Registry : exploration du catalogue non encore implémentée." };
+    case "gitlab": {
+      if (!org) {
+        return {
+          repositories: [],
+          diagnostic:
+            "GitLab : aucun groupe/namespace renseigné — indiquez-le via l'icône engrenage du registry (champ « Organisation/Namespace »).",
+        };
+      }
+      if (!url) {
+        return { repositories: [], diagnostic: "GitLab : URL de l'instance absente de la configuration du registry." };
+      }
+      try {
+        return { repositories: await gitlab.listGroupRepositories(url, org) };
+      } catch (err) {
+        return { repositories: [], diagnostic: diagnosticFromError("GitLab", err) };
+      }
+    }
     case "harbor":
       return { repositories: [], diagnostic: "Harbor : exploration du catalogue non encore implémentée." };
     default: {

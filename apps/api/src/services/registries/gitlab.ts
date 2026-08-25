@@ -14,7 +14,7 @@
 import { config } from "../../config.js";
 import { demoStore } from "../demoData.js";
 import { getEffectiveRegistryCredentialsForImage } from "../setupStore.js";
-import { fetchJson, RegistryHttpError } from "./http.js";
+import { fetchJson, RegistryCredentialsMissingError, RegistryHttpError } from "./http.js";
 
 interface GitlabRegistryRepository {
   id: number;
@@ -78,5 +78,45 @@ export async function listTags(image: string): Promise<string[]> {
       console.warn(`[gitlab] listTags("${image}") failed (${err.message}), falling back to demo data`);
     }
     return demoFallbackTags(image);
+  }
+}
+
+/**
+ * Dépôts du registre RÉELLEMENT présents dans un groupe GitLab
+ * (GET /groups/:id/registry/repositories) — `location` porte déjà la référence complète de
+ * l'image, telle qu'un `docker pull` l'attend, y compris quand le registre est servi sous un
+ * autre nom d'hôte que l'instance (cas d'un GitLab publié derrière un reverse proxy).
+ *
+ * `baseUrl` est l'URL de l'INSTANCE GitLab, pas celle du registre : c'est l'API GitLab qui
+ * répond ici. Un namespace qui n'est pas un groupe (projet isolé, espace personnel) déclenche un
+ * repli sur l'API de projet plutôt qu'un échec sec.
+ */
+export async function listGroupRepositories(baseUrl: string, namespace: string): Promise<string[]> {
+  // authHeaders rapproche par HÔTE (plusieurs instances GitLab possibles) : on lui passe donc
+  // l'hôte, pas l'URL complète.
+  const headers = await authHeaders(baseUrl.replace(/^https?:\/\//, "").replace(/\/.*$/, ""));
+  if (!headers["PRIVATE-TOKEN"]) {
+    throw new RegistryCredentialsMissingError(
+      "aucun jeton GitLab configuré — ajoutez-en un via l'icône engrenage du registry (jeton d'accès avec la portée read_api)",
+    );
+  }
+  const apiBase = `${baseUrl.replace(/\/+$/, "")}/api/v4`;
+  const encoded = encodeURIComponent(namespace);
+  const query = "per_page=100";
+  try {
+    const repositories = await fetchJson<GitlabRegistryRepository[]>(
+      `${apiBase}/groups/${encoded}/registry/repositories?${query}`,
+      { headers },
+    );
+    return repositories.map((r) => r.location);
+  } catch (err) {
+    if (err instanceof RegistryHttpError && err.status === 404) {
+      const repositories = await fetchJson<GitlabRegistryRepository[]>(
+        `${apiBase}/projects/${encoded}/registry/repositories?${query}`,
+        { headers },
+      );
+      return repositories.map((r) => r.location);
+    }
+    throw err;
   }
 }
