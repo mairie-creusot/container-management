@@ -269,12 +269,14 @@ interface ScanResult {
   trigger?: ScanTrigger;
 }
 
-// Graphe de topologie (voir chapitre dédié plus bas) — nœuds "conteneur"/"volume"/"network"
-// (Docker) + "nutanix-vm" (VMs Nutanix, ajouté en même temps que GET /api/nutanix/vms ci-dessous).
-type TopologyNodeKind = "container" | "volume" | "network" | "nutanix-vm";
+// Graphe de topologie (voir chapitre dédié plus bas) — nœuds "conteneur"/"volume" (Docker) +
+// "nutanix-vm" (VMs Nutanix). PAS de kind "network" (retiré le 24/08/2026) : un réseau est un
+// "tiroir" (TopologyNodeAttachment) sous la carte du nœud qui y est réellement rattaché, jamais un
+// nœud ni une arête — il porte nom, driver, IP réellement attribuée (VLAN côté Nutanix).
+type TopologyNodeKind = "container" | "volume" | "nutanix-vm";
 
 interface TopologyNode {
-  id: string;                   // ex: "container:<id>", "volume:<name>", "network:<id>", "nutanix-vm:<uuid>"
+  id: string;                   // ex: "container:<id>", "volume:<name>", "nutanix-vm:<uuid>"
   kind: TopologyNodeKind;
   label: string;
   subtitle: string;             // image/driver pour Docker, cluster physique pour une VM Nutanix
@@ -685,11 +687,13 @@ côté API :
 1. **Connexions par capacité, ports typés.** Chaque type de nœud déclare la liste des « ports »
    qu'il expose dans une table `NODE_CAPABILITIES` (id, capacité, côté source/target, position,
    couleur reprise des variables déjà utilisées pour l'icône du même type de nœud — pas de couleur
-   ajoutée) : un conteneur expose un port `network` (source, connexion réelle vers un network) et
-   un port `volume-mount` (target, informatif seulement — Docker ne permet pas de modifier les
-   montages sans recréer le conteneur) ; un volume expose un port `provide` ; un network expose un
-   port `attach`. La compatibilité entre deux ports (et l'action déclenchée — `docker network
-   connect` réel ou simple message d'info) est décrite dans une seconde table `CAPABILITY_DEFS`.
+   ajoutée) : un conteneur expose un port `volume-mount` (target) ; un volume expose un port
+   `provide`. Les capacités `network`/`attach` ont été RETIRÉES le 24/08/2026 en même temps que le
+   kind de nœud "network" : un réseau étant devenu un tiroir sous la carte, un fil n'avait plus
+   aucune cible à viser — le rattachement/la création d'un réseau bridge passent par le bouton ＋
+   (ou "Connecter à un réseau…" du menu) du conteneur, POST `/api/networks[/:id/connect]` réels.
+   La compatibilité entre deux ports (et l'action déclenchée) est décrite dans une seconde table
+   `CAPABILITY_DEFS`.
    `classifyConnection`/`isValidConnection`/`handleConnect` ne lisent que ces deux tables : ajouter
    un futur 4e type de nœud (ex : registry) ne demande que de lui déclarer ses propres ports, sans
    toucher à cette logique. Chaque port est un `<Handle>` React Flow distinct, visuellement propre
