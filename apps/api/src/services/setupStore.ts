@@ -189,6 +189,24 @@ export interface SetupRegistryConfig {
   org?: string;
 }
 
+/**
+ * Intégration GÉNÉRIQUE (greffon) : le socle ignore totalement la forme de `config` — il ne connaît
+ * que les CHEMINS de champs secrets déclarés par l'appelant (`secretFields`, ex: "token" ou
+ * "auth.password"), seuls champs chiffrés au repos. `secretFields` est persisté avec l'entrée pour
+ * que le socle sache quoi rechiffrer/masquer plus tard sans que la déclaration lui soit redonnée.
+ * Section ouverte : ajouter ou retirer une intégration ne touche plus ce fichier.
+ *
+ * Chemins imbriqués SUPPORTÉS (objets simples uniquement) ; traverser un tableau ne l'est pas
+ * ("endpoints.0.apiKey") et une telle déclaration est REFUSÉE à l'écriture plutôt que d'écrire le
+ * secret en clair sans le dire : un greffon dont les secrets vivent dans une liste doit les
+ * remonter dans des champs nommés.
+ */
+export interface SetupIntegrationEntry {
+  enabled: boolean;
+  config: Record<string, unknown>;
+  secretFields?: string[];
+}
+
 export interface SetupConfig {
   completed: boolean;
   /**
@@ -212,6 +230,9 @@ export interface SetupConfig {
   registries?: SetupRegistryConfig[];
   adDns?: SetupAdDnsConfig;
   certificates?: SetupCertificatesConfig;
+  // Intégrations greffons, indexées par identifiant de greffon. Coexiste avec les champs typés
+  // ci-dessus, qui restent la voie des intégrations historiques (aucune migration ici).
+  integrations?: Record<string, SetupIntegrationEntry>;
 }
 
 let cache: SetupConfig | null = null;
@@ -266,6 +287,112 @@ function mapThreecxSecrets(cfg: SetupThreecxConfig, transform: (value: string) =
   };
 }
 
+// Clés refusées partout (identifiant de greffon comme segment de chemin secret) : leur présence
+// dans une construction d'objet dynamique n'a aucun usage légitime ici.
+const UNSAFE_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** "auth.password" -> ["auth", "password"] ; `null` si le chemin est inutilisable (vide, segment
+ * vide, clé dangereuse). Refusé à l'écriture, simplement ignoré en lecture. */
+function parseSecretPath(field: unknown): string[] | null {
+  if (typeof field !== "string") return null;
+  const segments = field.split(".");
+  if (segments.some((s) => s.length === 0 || UNSAFE_KEYS.has(s))) return null;
+  return segments;
+}
+
+/** Défensif : config.json peut avoir été édité à la main ou écrit par une version antérieure. */
+function normalizeIntegrationEntry(raw: unknown): SetupIntegrationEntry {
+  if (!isPlainObject(raw)) return { enabled: false, config: {} };
+  const storedFields: unknown = raw.secretFields;
+  const storedConfig: unknown = raw.config;
+  const fields: string[] = Array.isArray(storedFields) ? storedFields.filter((f) => typeof f === "string") : [];
+  return {
+    enabled: raw.enabled === true,
+    config: isPlainObject(storedConfig) ? storedConfig : {},
+    ...(fields.length > 0 ? { secretFields: fields } : {}),
+  };
+}
+
+function secretPathsOf(entry: SetupIntegrationEntry): string[][] {
+  const paths: string[][] = [];
+  for (const field of entry.secretFields ?? []) {
+    const segments = parseSecretPath(field);
+    if (segments) paths.push(segments);
+  }
+  return paths;
+}
+
+/** Valeur au chemin `segments`, `undefined` dès qu'un maillon manque ou n'est pas un objet simple. */
+function readAtPath(root: Record<string, unknown>, segments: string[]): unknown {
+  let current: unknown = root;
+  for (const segment of segments) {
+    if (!isPlainObject(current)) return undefined;
+    current = current[segment];
+  }
+  return current;
+}
+
+/**
+ * Diagnostic d'un chemin secret sur une configuration donnée, à l'écriture :
+ *  - "ok" : feuille atteignable et chiffrable (chaîne), ou branche simplement non renseignée ;
+ *  - "blocked" : un maillon existe mais n'est pas un objet simple (tableau, chaîne…) — le chemin
+ *    ne peut pas être chiffré, on refuse au lieu de laisser le secret en clair silencieusement ;
+ *  - "not-a-string" : la feuille existe mais n'est pas chiffrable.
+ */
+function inspectSecretPath(root: Record<string, unknown>, segments: string[]): "ok" | "blocked" | "not-a-string" {
+  let current: unknown = root;
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    if (!isPlainObject(current)) return "blocked";
+    const next = current[segments[i]!];
+    if (next === undefined || next === null) return "ok";
+    current = next;
+  }
+  if (!isPlainObject(current)) return "blocked";
+  const leaf = current[segments[segments.length - 1]!];
+  if (leaf === undefined || leaf === null || typeof leaf === "string") return "ok";
+  return "not-a-string";
+}
+
+/** Applique `transform` à la chaîne non vide située au chemin `segments` (copie ; `node` inchangé
+ * si le chemin n'aboutit pas — un champ secret déclaré mais absent n'est jamais une erreur). */
+function mapAtPath(
+  node: Record<string, unknown>,
+  segments: string[],
+  transform: (value: string) => string,
+): Record<string, unknown> {
+  const [head, ...rest] = segments;
+  if (head === undefined) return node;
+  const child = node[head];
+  if (rest.length === 0) {
+    if (typeof child !== "string" || child.length === 0) return node;
+    return { ...node, [head]: transform(child) };
+  }
+  if (!isPlainObject(child)) return node;
+  const mapped = mapAtPath(child, rest, transform);
+  return mapped === child ? node : { ...node, [head]: mapped };
+}
+
+function mapIntegrationSecrets(entry: SetupIntegrationEntry, transform: (value: string) => string): SetupIntegrationEntry {
+  const config = secretPathsOf(entry).reduce((acc, segments) => mapAtPath(acc, segments, transform), entry.config);
+  return { ...entry, config };
+}
+
+function mapAllIntegrationSecrets(
+  integrations: Record<string, SetupIntegrationEntry>,
+  transform: (value: string) => string,
+): Record<string, SetupIntegrationEntry> {
+  const out: Record<string, SetupIntegrationEntry> = {};
+  for (const [id, raw] of Object.entries(integrations)) {
+    if (UNSAFE_KEYS.has(id)) continue;
+    out[id] = mapIntegrationSecrets(normalizeIntegrationEntry(raw), transform);
+  }
+  return out;
+}
+
 /**
  * Chiffre (si besoin) tous les champs secrets d'une config avant écriture disque.
  * Utilise des spreads conditionnels (pas `champ: cfg.champ && {...}`) car exactOptionalPropertyTypes
@@ -304,7 +431,17 @@ function encryptSecrets(cfg: SetupConfig): SetupConfig {
           })),
         }
       : {}),
+    ...(cfg.integrations ? { integrations: mapAllIntegrationSecrets(cfg.integrations, encryptSecretIfNeeded) } : {}),
   };
+}
+
+/** true si un champ secret DÉCLARÉ d'une intégration générique est encore en clair sur disque. */
+function hasPlaintextIntegrationSecret(raw: unknown): boolean {
+  const entry = normalizeIntegrationEntry(raw);
+  return secretPathsOf(entry).some((segments) => {
+    const value = readAtPath(entry.config, segments);
+    return typeof value === "string" && value.length > 0 && !isEncrypted(value);
+  });
 }
 
 /** true si la config chargée depuis le disque contient encore un secret en clair (ancien format). */
@@ -320,6 +457,7 @@ function hasLegacyPlaintextSecret(cfg: SetupConfig): boolean {
   if (cfg.registries?.some((r) => (r.password && !isEncrypted(r.password)) || (r.token && !isEncrypted(r.token)))) {
     return true;
   }
+  if (cfg.integrations && Object.values(cfg.integrations).some(hasPlaintextIntegrationSecret)) return true;
   return false;
 }
 
@@ -370,11 +508,24 @@ export async function hasEverCompletedSetup(): Promise<boolean> {
   return (await getCurrent()).everCompleted === true;
 }
 
-export type SetupCandidate = Omit<SetupConfig, "completed" | "everCompleted">;
+export type SetupCandidate = Omit<SetupConfig, "completed" | "everCompleted" | "integrations">;
 
-/** POST /api/setup/complete — persiste la config candidate (secrets chiffrés) et marque l'assistant terminé. */
+/**
+ * POST /api/setup/complete — persiste la config candidate (secrets chiffrés) et marque l'assistant
+ * terminé. Les intégrations greffons sont CONSERVÉES telles quelles : l'assistant ne les présente
+ * pas, les rejouer ne doit pas les effacer, et une section `integrations` glissée dans le corps de
+ * la requête est ignorée (la seule voie d'écriture est setIntegrationConfig, qui exige la
+ * déclaration des champs secrets à chiffrer).
+ */
 export async function completeSetup(candidate: SetupCandidate): Promise<SetupConfig> {
-  const next: SetupConfig = encryptSecrets({ ...candidate, completed: true, everCompleted: true });
+  const current = await getCurrent();
+  const { integrations: _fromBody, ...fromCandidate } = candidate as SetupCandidate & { integrations?: unknown };
+  const next: SetupConfig = encryptSecrets({
+    ...fromCandidate,
+    ...(current.integrations ? { integrations: current.integrations } : {}),
+    completed: true,
+    everCompleted: true,
+  });
   await writeToDisk(next);
   cache = next;
   return next;
@@ -900,4 +1051,197 @@ export async function getEffectiveRegistryCredentialsForImage(
   if (candidates.length === 1) return decryptRegistryCredentials(first);
   const match = findBestRegistryMatch(kind, target, candidates);
   return decryptRegistryCredentials(match ?? first);
+}
+
+/* --- Intégrations génériques (greffons) ------------------------------------------------------ */
+
+/** Configuration déchiffrée : réservée au code serveur qui appelle réellement l'intégration. */
+export interface EffectiveIntegrationConfig {
+  enabled: boolean;
+  config: Record<string, unknown>;
+}
+
+/** Vue destinée aux routes : chaque champ secret est remplacé, à sa place exacte, par un booléen
+ * `has<Champ>` (même convention que les intégrations typées, ex: routes/glpi.ts#toPublicConfig). */
+export interface SafeIntegrationConfig {
+  enabled: boolean;
+  config: Record<string, unknown>;
+}
+
+/** `password` -> `hasPassword`. */
+function presenceFlagName(key: string): string {
+  return `has${key.charAt(0).toUpperCase()}${key.slice(1)}`;
+}
+
+/** Retire la feuille désignée par `segments` et pose le booléen de présence à côté d'elle. Un
+ * parent absent n'est jamais inventé : sans conteneur, pas de champ, donc pas de booléen. */
+function stripSecretAtPath(node: Record<string, unknown>, segments: string[]): Record<string, unknown> {
+  const [head, ...rest] = segments;
+  if (head === undefined) return node;
+  if (rest.length === 0) {
+    const value = node[head];
+    const out: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(node)) {
+      if (key !== head) out[key] = child;
+    }
+    out[presenceFlagName(head)] = typeof value === "string" && value.length > 0;
+    return out;
+  }
+  const child = node[head];
+  if (!isPlainObject(child)) return node;
+  const stripped = stripSecretAtPath(child, rest);
+  return stripped === child ? node : { ...node, [head]: stripped };
+}
+
+/** Filet de sécurité indépendant de la déclaration : aucune valeur chiffrée ne sort de la vue sûre,
+ * même si `secretFields` a changé depuis l'écriture. Hors objet (élément de tableau) aucun booléen
+ * frère n'est nommable : la valeur est remplacée par `null`. */
+function stripEncryptedDeep(value: unknown): unknown {
+  if (typeof value === "string") return isEncrypted(value) ? null : value;
+  if (Array.isArray(value)) return value.map(stripEncryptedDeep);
+  if (!isPlainObject(value)) return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (typeof child === "string" && isEncrypted(child)) {
+      out[presenceFlagName(key)] = true;
+      continue;
+    }
+    out[key] = stripEncryptedDeep(child);
+  }
+  return out;
+}
+
+function toSafeIntegrationConfig(raw: unknown): SafeIntegrationConfig {
+  const entry = normalizeIntegrationEntry(raw);
+  const declaredStripped = secretPathsOf(entry).reduce((acc, segments) => stripSecretAtPath(acc, segments), entry.config);
+  const swept = stripEncryptedDeep(declaredStripped);
+  return { enabled: entry.enabled, config: isPlainObject(swept) ? swept : {} };
+}
+
+function requireIntegrationId(pluginId: string): string {
+  const id = typeof pluginId === "string" ? pluginId.trim() : "";
+  if (!id || UNSAFE_KEYS.has(id)) throw new Error(`Invalid integration id: "${String(pluginId)}"`);
+  return id;
+}
+
+function findIntegrationEntry(current: SetupConfig, pluginId: string): SetupIntegrationEntry | null {
+  const id = typeof pluginId === "string" ? pluginId.trim() : "";
+  const all = current.integrations;
+  if (!id || !all || !Object.hasOwn(all, id)) return null;
+  return normalizeIntegrationEntry(all[id]);
+}
+
+async function writeIntegrations(
+  current: SetupConfig,
+  integrations: Record<string, SetupIntegrationEntry>,
+): Promise<SetupConfig> {
+  const next: SetupConfig = encryptSecrets({ ...current, integrations });
+  await writeToDisk(next);
+  cache = next;
+  return next;
+}
+
+/**
+ * Écrit la configuration d'un greffon. `secretFields` déclare les CHEMINS des champs à chiffrer au
+ * repos ("token", "auth.password") — seuls ceux-là sont chiffrés, le socle n'interprète rien
+ * d'autre. Un champ déclaré mais absent (ou vide, ou `null`) est ignoré sans erreur ; un chemin
+ * malformé, non traversable (tableau) ou dont la feuille n'est pas une chaîne est REFUSÉ, sans
+ * rien persister — jamais de secret laissé en clair par accident.
+ * `enabled` est conservé s'il existait, sinon `true` — écrire une configuration active
+ * l'intégration, comme les champs typés (setHycuConfig & co). Renvoie la vue SÛRE de l'entrée.
+ */
+export async function setIntegrationConfig(
+  pluginId: string,
+  config: Record<string, unknown>,
+  secretFields: string[] = [],
+): Promise<SafeIntegrationConfig> {
+  const id = requireIntegrationId(pluginId);
+  if (!isPlainObject(config)) throw new Error(`Integration "${id}" config must be a plain object`);
+
+  const fields: string[] = [];
+  const paths: string[][] = [];
+  for (const field of Array.isArray(secretFields) ? secretFields : []) {
+    const trimmed = typeof field === "string" ? field.trim() : "";
+    const segments = parseSecretPath(trimmed);
+    if (!segments) throw new Error(`Invalid secret field path "${String(field)}" for integration "${id}"`);
+    if (fields.includes(trimmed)) continue;
+    fields.push(trimmed);
+    paths.push(segments);
+  }
+  for (const segments of paths) {
+    const status = inspectSecretPath(config, segments);
+    if (status === "blocked") {
+      throw new Error(
+        `Secret field "${segments.join(".")}" of integration "${id}" is not reachable through plain objects`,
+      );
+    }
+    if (status === "not-a-string") {
+      throw new Error(`Secret field "${segments.join(".")}" of integration "${id}" must be a string`);
+    }
+  }
+
+  const current = await getCurrent();
+  const existing = findIntegrationEntry(current, id);
+  const entry: SetupIntegrationEntry = {
+    enabled: existing?.enabled ?? true,
+    config: { ...config }, // copie : le cache ne partage pas l'objet de l'appelant
+    ...(fields.length > 0 ? { secretFields: fields } : {}),
+  };
+  const next = await writeIntegrations(current, { ...(current.integrations ?? {}), [id]: entry });
+  return toSafeIntegrationConfig(next.integrations?.[id]);
+}
+
+/** Configuration déchiffrée d'un greffon, ou `null` s'il n'a jamais été configuré. Ne JAMAIS
+ * renvoyer ce résultat par une route : passer par getSafeIntegrationConfig. */
+export async function getEffectiveIntegrationConfig(pluginId: string): Promise<EffectiveIntegrationConfig | null> {
+  const entry = findIntegrationEntry(await getCurrent(), pluginId);
+  if (!entry) return null;
+  const decrypted = mapIntegrationSecrets(entry, decryptSecret);
+  return { enabled: decrypted.enabled, config: decrypted.config };
+}
+
+/** Vue sans aucun secret (voir SafeIntegrationConfig) — la seule qui doit sortir par une route. */
+export async function getSafeIntegrationConfig(pluginId: string): Promise<SafeIntegrationConfig | null> {
+  const entry = findIntegrationEntry(await getCurrent(), pluginId);
+  return entry ? toSafeIntegrationConfig(entry) : null;
+}
+
+/** Toutes les intégrations génériques configurées, en vue sûre, indexées par identifiant. */
+export async function listSafeIntegrationConfigs(): Promise<Record<string, SafeIntegrationConfig>> {
+  const current = await getCurrent();
+  const out: Record<string, SafeIntegrationConfig> = {};
+  for (const [id, raw] of Object.entries(current.integrations ?? {})) {
+    if (UNSAFE_KEYS.has(id)) continue;
+    out[id] = toSafeIntegrationConfig(raw);
+  }
+  return out;
+}
+
+/** Active/désactive un greffon SANS toucher à sa configuration (secrets compris). `null` si le
+ * greffon n'a aucune configuration écrite : on ne crée jamais une entrée vide à la volée. */
+export async function setIntegrationEnabled(pluginId: string, enabled: boolean): Promise<SafeIntegrationConfig | null> {
+  const id = requireIntegrationId(pluginId);
+  const current = await getCurrent();
+  const existing = findIntegrationEntry(current, id);
+  if (!existing) return null;
+  const next = await writeIntegrations(current, { ...(current.integrations ?? {}), [id]: { ...existing, enabled } });
+  return toSafeIntegrationConfig(next.integrations?.[id]);
+}
+
+/** Supprime la configuration d'un greffon (retour à "jamais configuré"). `false` si rien à
+ * supprimer — jamais une exception pour un double appel. */
+export async function clearIntegrationConfig(pluginId: string): Promise<boolean> {
+  const id = requireIntegrationId(pluginId);
+  const current = await getCurrent();
+  if (!current.integrations || !Object.hasOwn(current.integrations, id)) return false;
+  const rest: Record<string, SetupIntegrationEntry> = {};
+  for (const [key, value] of Object.entries(current.integrations)) {
+    if (key !== id) rest[key] = value;
+  }
+  const { integrations: _dropped, ...withoutIntegrations } = current;
+  const next: SetupConfig =
+    Object.keys(rest).length > 0 ? { ...withoutIntegrations, integrations: rest } : withoutIntegrations;
+  await writeToDisk(next);
+  cache = next;
+  return true;
 }

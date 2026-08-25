@@ -1,0 +1,18 @@
+{
+  "name": "@quai/plugin-contract",
+  "version": "0.1.0",
+  "private": true,
+  "description": "QUAI — contrat des greffons d'intégration : types et validateurs purs, sans dépendance à Fastify ni à Docker.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ]
+}

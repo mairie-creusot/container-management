@@ -14,6 +14,7 @@ import { pathToFileURL } from "node:url";
 import { config } from "./config.js";
 import auditPlugin from "./plugins/audit.js";
 import authPlugin from "./plugins/auth.js";
+import { registerBuiltinPlugins } from "./plugins/builtins.js";
 import adDnsRoutes from "./routes/adDns.js";
 import auditRoutes from "./routes/audit.js";
 import authRoutes from "./routes/auth.js";
@@ -49,6 +50,7 @@ import setupRoutes from "./routes/setup.js";
 import templatesRoutes from "./routes/templates.js";
 import threecxRoutes from "./routes/threecx.js";
 import packagesRoutes from "./routes/packages.js";
+import pluginsRoutes from "./routes/plugins.js";
 import topologyRoutes from "./routes/topology.js";
 import volumesRoutes from "./routes/volumes.js";
 import { startAutomationEngine } from "./services/automationEngine.js";
@@ -73,6 +75,9 @@ function buildLoggerOptions(): NonNullable<FastifyServerOptions["logger"]> {
 
 export function buildServer() {
   const fastify = Fastify({ logger: buildLoggerOptions() });
+
+  // Greffons d'intégration : enregistrement STATIQUE, avant toute route (voir plugins/builtins.ts).
+  registerBuiltinPlugins();
 
   const corsOrigins = config.server.corsOrigin.split(",").map((origin) => origin.trim());
   void fastify.register(cors, {
@@ -122,6 +127,7 @@ export function buildServer() {
   void fastify.register(backupsRoutes);
   void fastify.register(automationRoutes);
   void fastify.register(serviceModulesRoutes);
+  void fastify.register(pluginsRoutes);
 
   // /health : chemin attendu par les healthchecks Docker et les probes Kubernetes (voir deploy/).
   // /healthz : alias conservé au cas où un outil externe le suppose (convention courante).

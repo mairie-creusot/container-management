@@ -6,13 +6,14 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "nodemon --legacy-watch --delay 1 --watch src --ext ts,json --exec tsx src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build:contract": "tsc -p ../../packages/plugin-contract/tsconfig.json",
+    "dev": "pnpm run build:contract && nodemon --legacy-watch --delay 1 --watch src --ext ts,json --exec tsx src/index.ts",
+    "build": "pnpm run build:contract && tsc -p tsconfig.json",
     "start": "node dist/index.js",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "tsc -p tsconfig.json --noEmit"
+    "test": "pnpm run build:contract && vitest run",
+    "test:watch": "pnpm run build:contract && vitest",
+    "typecheck": "pnpm run build:contract && tsc -p tsconfig.json --noEmit",
+    "lint": "pnpm run build:contract && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.637.0",
@@ -21,6 +22,7 @@
     "@fastify/multipart": "^8.3.1",
     "@fastify/websocket": "^10.0.1",
     "@kubernetes/client-node": "^0.21.0",
+    "@quai/plugin-contract": "workspace:*",
     "@quai/wasm-core": "workspace:*",
     "dockerode": "^4.0.2",
     "fastify": "^4.28.1",

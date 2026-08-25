@@ -1057,6 +1057,50 @@
   margin: 0;
 }
 
+/* Formulaire généré depuis un schéma de greffon (components/SchemaForm.tsx) — reprend .card,
+   .field, .btn ; seules la pile, la barre d'actions et la case à cocher manquaient en générique. */
+.schema-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.schema-form__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.schema-form__checkbox {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13.5px;
+  color: var(--color-text);
+}
+
+.schema-form__checkbox input[type="checkbox"] {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.schema-form__checkbox > span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.schema-form__rejected {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.schema-form__rejected ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
 .login-card .btn-primary {
   justify-content: center;
   padding: 10px 14px;

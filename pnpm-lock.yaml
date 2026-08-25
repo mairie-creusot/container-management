@@ -28,6 +28,9 @@ importers:
       '@kubernetes/client-node':
         specifier: ^0.21.0
         version: 0.21.0
+      '@quai/plugin-contract':
+        specifier: workspace:*
+        version: link:../../packages/plugin-contract
       '@quai/wasm-core':
         specifier: workspace:*
         version: link:../../packages/wasm-core
@@ -186,6 +189,8 @@ importers:
       vitest:
         specifier: ^2.0.5
         version: 2.1.9(@types/node@24.13.3)(jsdom@25.0.1)
+
+  packages/plugin-contract: {}
 
   packages/wasm-core: {}
 
