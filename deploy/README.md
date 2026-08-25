@@ -300,6 +300,29 @@ Deux remarques :
 - Évitez le caractère `$` dans les mots de passe : Docker Compose l'interprète dans un fichier
   `.env`. Si c'est inévitable, doublez-le (`$$`).
 
+### 6.4.1 Faire confiance aux autorités internes (`INTERNAL_CA_BUNDLE_B64`, facultatif)
+
+L'API appelle des services internes en HTTPS (GLPI, registry GitLab, futurs sous-domaines publiés).
+Le conteneur ne connaît que les autorités publiques : un certificat émis par l'AD CS de la
+collectivité, ou auto-signé, fait échouer l'appel **avant toute authentification** — `fetch failed`
+côté GLPI, `DEPTH_ZERO_SELF_SIGNED_CERT` côté registry GitLab (constaté le 25/08/2026).
+
+Rassemblez les certificats concernés dans un seul fichier PEM (racine AD CS, et le certificat
+auto-signé de chaque service qui n'en a pas encore reçu un), puis créez la variable CI/CD
+`INTERNAL_CA_BUNDLE_B64` avec son contenu encodé :
+
+```
+base64 -w0 internal-ca.pem
+```
+
+Le prochain déploiement intègre ce bundle à l'image de l'API (`NODE_EXTRA_CA_CERTS`), **en plus**
+des autorités publiques. Variable absente = comportement inchangé. Un contenu qui n'est pas un PEM
+fait échouer le build plutôt que de livrer une image qui ne ferait confiance à rien.
+
+Récupérer la racine de l'AD CS : `https://hdvad1.lecreusot.priv/certsrv` → « Télécharger un
+certificat d'autorité de certification » → format Base 64. Récupérer un certificat auto-signé
+présenté par un service : `echo | openssl s_client -connect hote:port 2>/dev/null | openssl x509`.
+
 ### 6.5 Configuration du runner
 
 Le runner doit tourner **sur la machine 172.16.13.2**, en exécuteur Docker, avec le socket Docker de

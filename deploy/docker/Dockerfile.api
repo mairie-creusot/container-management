@@ -91,6 +91,24 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-ins
         dnsutils \
     && rm -rf /var/lib/apt/lists/*
 
+# Autorités de certification INTERNES (AD CS de la collectivité, certificat auto-signé d'un
+# service interne...). Sans elles, tout appel HTTPS vers un service interne échoue avant
+# l'authentification — « fetch failed » côté GLPI, DEPTH_ZERO_SELF_SIGNED_CERT côté registry
+# GitLab (constaté le 25/08/2026). Fourni en base64 pour traverser sans dommage les variables
+# CI et le fichier d'environnement du compose ; vide = comportement inchangé. Le `grep` final fait
+# échouer le build plutôt que de livrer une image qui ne ferait silencieusement confiance à rien.
+ARG INTERNAL_CA_BUNDLE_B64=""
+RUN mkdir -p /etc/ssl/quai \
+    && if [ -n "$INTERNAL_CA_BUNDLE_B64" ]; then \
+        echo "$INTERNAL_CA_BUNDLE_B64" | base64 -d > /etc/ssl/quai/internal-ca.pem \
+        && chmod 644 /etc/ssl/quai/internal-ca.pem \
+        && grep -q "BEGIN CERTIFICATE" /etc/ssl/quai/internal-ca.pem; \
+    else \
+        : > /etc/ssl/quai/internal-ca.pem; \
+    fi
+# Lu par Node en PLUS du magasin public : un bundle absent est simplement ignoré.
+ENV NODE_EXTRA_CA_CERTS=/etc/ssl/quai/internal-ca.pem
+
 WORKDIR /app
 
 # node:22-slim fournit déjà un utilisateur non-root "node" (uid 1000) prêt

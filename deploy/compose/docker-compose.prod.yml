@@ -26,6 +26,11 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.api
+      args:
+        # Autorités internes (racine AD CS, certificat auto-signé d'un service interne) en base64 —
+        # sans elles, tout appel HTTPS de QUAI vers un service interne échoue avant l'authentification.
+        # Vide = image identique à avant. Voir deploy/README.md.
+        INTERNAL_CA_BUNDLE_B64: "${INTERNAL_CA_BUNDLE_B64:-}"
     restart: unless-stopped
     environment:
       NODE_ENV: production

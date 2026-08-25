@@ -200,6 +200,10 @@ deploiement:production:
         # alors « connection refused », constaté le 24/08/2026). Lu sur la machine plutôt que
         # codé en dur — le GID varie d'une distribution à l'autre.
         printf 'DOCKER_GID=%s\n' "$(stat -c '%g' /var/run/docker.sock)"
+        # Facultatif : autorités de certification internes, en base64 (voir deploy/README.md).
+        # Absent = les services internes en HTTPS restent injoignables depuis l'API, le reste
+        # fonctionne à l'identique.
+        printf 'INTERNAL_CA_BUNDLE_B64=%s\n' "${INTERNAL_CA_BUNDLE_B64:-}"
       } > "$COMPOSE_ENV_FILE"
       chmod 600 "$COMPOSE_ENV_FILE"
       echo "$(wc -l < "$COMPOSE_ENV_FILE") variables écrites dans un fichier temporaire du job."
