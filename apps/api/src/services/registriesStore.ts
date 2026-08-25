@@ -23,6 +23,7 @@ import { getLocalDockerImages } from "./docker.js";
 import type { LocalDockerImage } from "./docker.js";
 import { registryKindFromImageName, testRegistryConnection, diagnosticFromError } from "./registries/index.js";
 import { listOrgPackages } from "./registries/ghcr.js";
+import { listGroupRepositories } from "./registries/gitlab.js";
 import type { Registry, RegistryKind } from "../types.js";
 
 /** "ghcr.io/mairie-creusot/foo" -> "mairie-creusot" — repli de dernier recours quand aucune org
@@ -126,6 +127,26 @@ async function buildRegistryView(persisted: SetupRegistryConfig, index: number):
           trackedImages: localCount,
           lastSyncAt: null,
           statusDetail: diagnosticFromError("GHCR", err),
+        };
+      }
+    }
+  }
+  // Même raisonnement pour GitLab depuis que son catalogue est interrogeable (25/08/2026) : sans
+  // ça, la carte affichait le nombre d'images du même type déjà tirées EN LOCAL pendant que
+  // l'explorateur, lui, montrait le vrai contenu du registre — deux chiffres justes mais
+  // contradictoires à l'écran.
+  if (persisted.kind === "gitlab") {
+    const org = resolveRegistryOrg(persisted, localImages);
+    if (org) {
+      try {
+        trackedImages = (await listGroupRepositories(persisted.url, org)).length;
+      } catch (err) {
+        return {
+          ...base,
+          status: "error",
+          trackedImages: localCount,
+          lastSyncAt: null,
+          statusDetail: diagnosticFromError("GitLab", err),
         };
       }
     }
