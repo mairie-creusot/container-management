@@ -15,6 +15,7 @@
  * silencieuse.
  * Lecture pour tout rôle authentifié (session exigée par la garde globale plugins/auth.ts).
  *
+ * La configuration est celle du GREFFON "3cx" (plugins/threecx/config.ts), stockée par le socle.
  * GET    /api/3cx/config      — config courante REDACTÉE (jamais la clé API ni le mot de passe).
  * PUT    /api/3cx/config      — configure/remplace (admin) — teste RÉELLEMENT la connexion avant
  *                                d'enregistrer, jamais persisté à l'aveugle.
@@ -33,7 +34,7 @@ import {
   testThreecxConnection,
 } from "../services/threecx.js";
 import type { ThreecxConnectionCandidate } from "../services/threecx.js";
-import { clearThreecxConfig, getEffectiveThreecxConfig, setThreecxConfig } from "../services/setupStore.js";
+import { loadThreecxPluginConfig, removeThreecxPluginConfig, saveThreecxPluginConfig } from "../plugins/threecx/config.js";
 import type { SetupThreecxConfig, ThreecxAuthMode } from "../services/setupStore.js";
 
 /** Même garde locale admin que routes/hycu.ts#rejectIfNotAdmin. */
@@ -121,7 +122,7 @@ export default async function threecxRoutes(fastify: FastifyInstance): Promise<v
   });
 
   fastify.get("/api/3cx/config", async (_request, reply) => {
-    const current = await getEffectiveThreecxConfig();
+    const current = await loadThreecxPluginConfig();
     return reply.send(current ? { configured: true, config: toPublicConfig(current) } : { configured: false });
   });
 
@@ -129,7 +130,7 @@ export default async function threecxRoutes(fastify: FastifyInstance): Promise<v
     if (rejectIfNotAdmin(request, reply)) return;
 
     const body = request.body ?? {};
-    const existing = await getEffectiveThreecxConfig();
+    const existing = await loadThreecxPluginConfig();
     const baseUrl = body.baseUrl?.trim() ?? "";
     const authMode = resolveAuthMode(body.authMode, existing?.authMode ?? "client-credentials");
     // Secret vide/absent = conserver l'existant (même convention que PUT /api/hycu/config).
@@ -149,15 +150,15 @@ export default async function threecxRoutes(fastify: FastifyInstance): Promise<v
       return reply.code(400).send({ error: test.message });
     }
 
-    const saved = await setThreecxConfig(candidate);
-    return reply.send({ configured: true, config: toPublicConfig(saved.threecx!) });
+    await saveThreecxPluginConfig(candidate);
+    return reply.send({ configured: true, config: toPublicConfig(candidate) });
   });
 
   fastify.post<{ Body: ThreecxConfigBody }>("/api/3cx/config/test", async (request, reply) => {
     if (rejectIfNotAdmin(request, reply)) return;
 
     const body = request.body ?? {};
-    const existing = await getEffectiveThreecxConfig();
+    const existing = await loadThreecxPluginConfig();
     const baseUrl = body.baseUrl?.trim() || existing?.baseUrl || "";
     // Le mode TESTÉ est celui demandé dans le corps — jamais celui déjà enregistré s'ils diffèrent.
     const authMode = resolveAuthMode(body.authMode, existing?.authMode ?? "client-credentials");
@@ -170,7 +171,7 @@ export default async function threecxRoutes(fastify: FastifyInstance): Promise<v
   fastify.delete("/api/3cx/config", async (request, reply) => {
     if (rejectIfNotAdmin(request, reply)) return;
 
-    await clearThreecxConfig();
+    await removeThreecxPluginConfig();
     // Le jeton en cache appartenait à la config retirée : il ne doit plus servir.
     resetThreecxCaches();
     return reply.send({ ok: true });

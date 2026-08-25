@@ -41,7 +41,8 @@
 
 import { promises as dnsPromises, Resolver } from "node:dns";
 import { isIPv4 } from "node:net";
-import { getEffectiveAdDnsConfig, getEffectiveThreecxConfig } from "./setupStore.js";
+import { getEffectiveAdDnsConfig } from "./setupStore.js";
+import { loadThreecxPluginConfig } from "../plugins/threecx/config.js";
 import { getThreecxActiveCalls, getThreecxExtensions, getThreecxQueues, getThreecxStatus, isThreecxConfigured } from "./threecx.js";
 import { lastKnownDnsSync, listRoutes } from "./reverseProxy.js";
 import { getManualBinding, listManualBindings } from "./serviceBindingsStore.js";
@@ -563,7 +564,7 @@ export const threecxModuleProvider: ServiceModuleProvider = {
   description: "Postes, files d'attente et appels en cours du PBX (lecture seule) — un appel est une arête vivante.",
   isConfigured: () => isThreecxConfigured(),
   configuredHosts: async () => {
-    const cfg = await getEffectiveThreecxConfig();
+    const cfg = await loadThreecxPluginConfig();
     if (!cfg?.baseUrl) return [];
     try {
       return [new URL(cfg.baseUrl).hostname];

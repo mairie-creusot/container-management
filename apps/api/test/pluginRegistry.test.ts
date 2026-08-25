@@ -404,9 +404,11 @@ describe("contrat de greffon", () => {
 });
 
 describe("registre de greffons", () => {
-  it("n'enregistre AUCUN greffon au démarrage (le greffon d'exemple n'est pas une intégration)", () => {
+  it("n'enregistre au démarrage que les greffons réels (le greffon d'exemple n'en est pas un)", () => {
     app = buildServer();
-    expect(listPlugins()).toEqual([]);
+    // Seules les intégrations RÉELLEMENT migrées (plugins/builtins.ts) sont enregistrées.
+    expect(listPlugins().map((plugin) => plugin.manifest.id)).toEqual(["3cx"]);
+    expect(getPlugin("example")).toBeUndefined();
   });
 
   it("enregistre le greffon d'exemple et le retrouve par son identifiant", () => {
@@ -456,11 +458,11 @@ describe("GET /api/plugins", () => {
     expect(response.statusCode).toBe(401);
   });
 
-  it("renvoie une liste vide tant qu'aucun greffon n'est enregistré", async () => {
+  it("n'expose que les greffons réellement enregistrés, jamais une liste d'exemples", async () => {
     app = buildServer();
     const response = await app.inject({ method: "GET", url: "/api/plugins", cookies: cookieFor(["viewer"]) });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({ plugins: [] });
+    expect((response.json() as { plugins: Array<{ id: string }> }).plugins.map((plugin) => plugin.id)).toEqual(["3cx"]);
   });
 
   it("expose le manifeste public, sans le moindre secret ni valeur de configuration", async () => {
@@ -476,8 +478,8 @@ describe("GET /api/plugins", () => {
     expect(response.statusCode).toBe(200);
 
     const body = response.json() as { plugins: Array<Record<string, unknown>> };
-    expect(body.plugins).toHaveLength(1);
-    const manifest = body.plugins[0]!;
+    const manifest = body.plugins.find((plugin) => plugin.id === "example")!;
+    expect(manifest, "le greffon d'exemple enregistré à la main doit être exposé").toBeDefined();
     expect(Object.keys(manifest).sort()).toEqual(
       ["auditLabels", "configSchema", "coreApi", "id", "name", "permissions", "secretFields", "version"],
     );

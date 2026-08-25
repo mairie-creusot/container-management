@@ -96,7 +96,10 @@ vi.mock("node:https", () => ({
 const { buildServer } = await import("../src/index.js");
 const { config } = await import("../src/config.js");
 const { signSessionToken } = await import("../src/services/session.js");
-const { setThreecxConfig, clearThreecxConfig, getEffectiveThreecxConfig, getCurrent } = await import("../src/services/setupStore.js");
+const { setThreecxConfig, getEffectiveThreecxConfig, getCurrent, getSafeIntegrationConfig } = await import("../src/services/setupStore.js");
+const { loadThreecxPluginConfig, removeThreecxPluginConfig, saveThreecxPluginConfig, THREECX_PLUGIN_ID } = await import(
+  "../src/plugins/threecx/config.js"
+);
 const { getThreecxActiveCalls, getThreecxStatus, lastKnownThreecxPoll, resetThreecxCaches } = await import("../src/services/threecx.js");
 
 afterAll(async () => {
@@ -115,7 +118,8 @@ afterEach(async () => {
   authHeadersByKey.clear();
   queriesByKey.clear();
   resetThreecxCaches();
-  await clearThreecxConfig();
+  // Retire l'entrée du greffon ET tout reliquat du champ typé : aucun test n'hérite d'un PBX.
+  await removeThreecxPluginConfig();
 });
 
 function adminCookie() {
@@ -136,18 +140,29 @@ const USERS_KEY = "GET /xapi/v1/Users";
 const QUEUES_KEY = "GET /xapi/v1/Queues";
 const SYSTEM_STATUS_KEY = "GET /xapi/v1/SystemStatus";
 
+/** Config du GREFFON "3cx" — la voie normale depuis la migration (stockage générique). */
 async function seedThreecxConfig(): Promise<void> {
-  await setThreecxConfig({ baseUrl: "https://pbx.exemple.fr:5001", clientId: "quai-xapi", clientSecret: CLIENT_SECRET });
+  await saveThreecxPluginConfig({
+    baseUrl: "https://pbx.exemple.fr:5001",
+    authMode: "client-credentials",
+    clientId: "quai-xapi",
+    clientSecret: CLIENT_SECRET,
+  });
 }
 
 /** Config en mode identifiant/mot de passe (extension avec droits propriétaire système). */
 async function seedUserThreecxConfig(): Promise<void> {
-  await setThreecxConfig({
+  await saveThreecxPluginConfig({
     baseUrl: "https://pbx.exemple.fr:5001",
     authMode: "user",
     username: "900",
     password: USER_PASSWORD,
   });
+}
+
+/** Config telle qu'une version ANTÉRIEURE au greffon l'écrivait : champ typé, sans authMode. */
+async function seedLegacyThreecxConfig(): Promise<void> {
+  await setThreecxConfig({ baseUrl: "https://pbx.exemple.fr:5001", clientId: "quai-xapi", clientSecret: CLIENT_SECRET });
 }
 
 function seedToken(expiresIn = 3600): void {
@@ -542,17 +557,49 @@ describe("Service 3CX — mode identifiant/mot de passe (GetAccessToken)", () =>
   });
 });
 
-describe("Service 3CX — migration d'une config sans authMode", () => {
-  it("une config déjà enregistrée sans authMode reste en client-credentials", async () => {
-    await seedThreecxConfig();
+describe("Greffon 3CX — reprise de la configuration déjà enregistrée dans le champ typé", () => {
+  it("une config écrite avant le greffon est reprise telle quelle, sans rien ressaisir", async () => {
+    await seedLegacyThreecxConfig();
+    // Le champ typé n'a jamais porté d'authMode : la valeur par défaut est explicitée à la reprise.
     expect((await getCurrent()).threecx?.authMode).toBeUndefined();
 
-    const effective = await getEffectiveThreecxConfig();
-    expect(effective).toMatchObject({ authMode: "client-credentials", clientId: "quai-xapi", clientSecret: CLIENT_SECRET });
+    const effective = await loadThreecxPluginConfig();
+    expect(effective).toMatchObject({
+      baseUrl: "https://pbx.exemple.fr:5001",
+      authMode: "client-credentials",
+      clientId: "quai-xapi",
+      clientSecret: CLIENT_SECRET,
+    });
+  });
+
+  it("le champ typé est RETIRÉ une fois repris — plus aucune config de secours sur disque", async () => {
+    await seedLegacyThreecxConfig();
+    await loadThreecxPluginConfig();
+
+    expect((await getCurrent()).threecx).toBeUndefined();
+    expect(await getEffectiveThreecxConfig()).toBeNull();
+    // La config vit désormais sous l'identifiant du greffon, et elle reste complète.
+    expect(await loadThreecxPluginConfig()).toMatchObject({ clientId: "quai-xapi", clientSecret: CLIENT_SECRET });
+  });
+
+  it("le secret repris est chiffré au repos et ne ressort jamais de la vue sûre", async () => {
+    await seedLegacyThreecxConfig();
+    await loadThreecxPluginConfig();
+
+    const entry = (await getCurrent()).integrations?.[THREECX_PLUGIN_ID];
+    expect(entry?.secretFields).toEqual(["clientSecret", "password"]);
+    const storedSecret = entry?.config.clientSecret;
+    expect(typeof storedSecret).toBe("string");
+    expect(storedSecret).not.toBe(CLIENT_SECRET);
+    expect(String(storedSecret).startsWith("enc:v1:")).toBe(true);
+
+    const safe = await getSafeIntegrationConfig(THREECX_PLUGIN_ID);
+    expect(safe?.config).toMatchObject({ clientId: "quai-xapi", hasClientSecret: true });
+    expect(JSON.stringify(safe)).not.toContain(CLIENT_SECRET);
   });
 
   it("elle continue de s'authentifier sur /connect/token, jamais sur GetAccessToken", async () => {
-    await seedThreecxConfig();
+    await seedLegacyThreecxConfig();
     seedToken();
     seedActiveCalls();
     seedUsers();
@@ -565,11 +612,56 @@ describe("Service 3CX — migration d'une config sans authMode", () => {
   });
 
   it("GET /api/3cx/config expose authMode=client-credentials pour cette config", async () => {
-    await seedThreecxConfig();
+    await seedLegacyThreecxConfig();
     app = buildServer();
 
     const response = await app.inject({ method: "GET", url: "/api/3cx/config", cookies: adminCookie() });
     expect(response.json()).toMatchObject({ configured: true, config: { authMode: "client-credentials" } });
+  });
+
+  it("une config de greffon déjà écrite l'emporte sur le champ typé, qui est retiré sans être lu", async () => {
+    await seedThreecxConfig();
+    await setThreecxConfig({ baseUrl: "https://ancien-pbx.exemple.fr:5001", clientId: "ancien", clientSecret: "ancienne-cle" });
+
+    const effective = await loadThreecxPluginConfig();
+    expect(effective).toMatchObject({ baseUrl: "https://pbx.exemple.fr:5001", clientId: "quai-xapi" });
+    expect((await getCurrent()).threecx).toBeUndefined();
+  });
+
+  it("retirer la configuration ne fait pas ressusciter le champ typé", async () => {
+    await seedLegacyThreecxConfig();
+    app = buildServer();
+
+    const del = await app.inject({ method: "DELETE", url: "/api/3cx/config", cookies: adminCookie() });
+    expect(del.json()).toEqual({ ok: true });
+
+    const cfg = await app.inject({ method: "GET", url: "/api/3cx/config", cookies: adminCookie() });
+    expect(cfg.json()).toEqual({ configured: false });
+    expect((await getCurrent()).threecx).toBeUndefined();
+    expect(await loadThreecxPluginConfig()).toBeNull();
+  });
+
+  it("PUT écrit dans le stockage générique et efface le champ typé", async () => {
+    await seedLegacyThreecxConfig();
+    seedToken();
+    queueResponse(ACTIVE_CALLS_KEY, { value: [] });
+    app = buildServer();
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/3cx/config",
+      cookies: adminCookie(),
+      payload: { baseUrl: "https://pbx2.exemple.fr:5001", clientId: "quai-xapi" },
+    });
+    expect(response.statusCode).toBe(200);
+    expect((await getCurrent()).threecx).toBeUndefined();
+    expect(await loadThreecxPluginConfig()).toMatchObject({
+      baseUrl: "https://pbx2.exemple.fr:5001",
+      authMode: "client-credentials",
+      clientId: "quai-xapi",
+      // Secret laissé vide : celui déjà enregistré est conservé à travers la reprise.
+      clientSecret: CLIENT_SECRET,
+    });
   });
 });
 

@@ -54,7 +54,7 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { URL } from "node:url";
 import { config } from "../config.js";
-import { getEffectiveThreecxConfig } from "./setupStore.js";
+import { isThreecxConfigComplete, loadThreecxPluginConfig, normalizeThreecxAuthMode } from "../plugins/threecx/config.js";
 import type { SetupThreecxConfig, ThreecxAuthMode } from "./setupStore.js";
 
 /** Un interlocuteur d'un appel en cours — dérivé de Pbx.ActiveCall.Caller/Callee (le schéma XAPI
@@ -248,7 +248,7 @@ function scrubSecrets(message: string, secrets: string[]): string {
 }
 
 function authModeOf(cfg: SetupThreecxConfig): ThreecxAuthMode {
-  return cfg.authMode === "user" ? "user" : "client-credentials";
+  return normalizeThreecxAuthMode(cfg.authMode);
 }
 
 interface RawHttpResponse {
@@ -611,15 +611,11 @@ function recordPoll(reachable: boolean): void {
   lastPollOutcome = { reachable, at: new Date().toISOString() };
 }
 
-/** Une config n'est utilisable que si les identifiants du MODE choisi sont présents. */
-function isThreecxConfigComplete(cfg: SetupThreecxConfig): boolean {
-  if (!cfg.baseUrl) return false;
-  return authModeOf(cfg) === "user" ? Boolean(cfg.username && cfg.password) : Boolean(cfg.clientId && cfg.clientSecret);
-}
-
-/** Config 3CX effective si complète, sinon `null` — garde "jamais configuré". */
+/** Config 3CX effective si complète, sinon `null` — garde "jamais configuré". La config vient du
+ * stockage générique des greffons (plugins/threecx/config.ts), qui reprend au passage celle déjà
+ * enregistrée dans l'ancien champ typé. */
 async function loadThreecxConfig(): Promise<SetupThreecxConfig | null> {
-  const effective = await getEffectiveThreecxConfig();
+  const effective = await loadThreecxPluginConfig();
   if (!effective || !isThreecxConfigComplete(effective)) return null;
   return effective;
 }

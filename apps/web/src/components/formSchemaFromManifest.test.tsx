@@ -16,12 +16,14 @@ interface ManifestFixture {
 }
 
 /**
- * Manifeste du formulaire RÉEL de features/threecx/ThreecxConfigSection.tsx : libellés, aides,
- * exemples et bascule de mode repris tels quels, rien n'est inventé.
+ * Manifeste RÉEL du greffon 3CX — copie de apps/api/src/plugins/threecx/index.ts, exactement ce que
+ * GET /api/plugins renvoie. Il décrit le formulaire de features/threecx/ThreecxConfigSection.tsx :
+ * libellés, aides, exemples et bascule de mode repris tels quels, rien n'est inventé.
  */
 const THREECX: ManifestFixture = {
   configSchema: {
     type: "object",
+    title: "PBX 3CX",
     properties: {
       baseUrl: {
         type: "string",
@@ -34,11 +36,17 @@ const THREECX: ManifestFixture = {
         type: "string",
         title: "Comment QUAI s'authentifie auprès du PBX",
         enum: ["client-credentials", "user"],
+        enumLabels: [
+          "ClientID et clé API (point de routage)",
+          "Identifiant et mot de passe (extension propriétaire système)",
+        ],
         default: "client-credentials",
       },
       clientId: {
         type: "string",
         title: "ClientID — DN du point de routage",
+        description:
+          "Point de routage créé dans Admin Console → Integrations > API, option « XAPI Access Enabled » activée.",
         showIf: { field: "authMode", equals: "client-credentials" },
       },
       clientSecret: {
@@ -49,6 +57,8 @@ const THREECX: ManifestFixture = {
       username: {
         type: "string",
         title: "Identifiant (extension avec droits propriétaire système)",
+        description:
+          "Extension du PBX disposant des droits d'administration système : sans eux, le jeton est délivré mais le XAPI refuse les requêtes.",
         showIf: { field: "authMode", equals: "user" },
       },
       password: {
@@ -65,6 +75,7 @@ const THREECX: ManifestFixture = {
       },
     },
     required: ["baseUrl", "clientId", "clientSecret", "username", "password"],
+    additionalProperties: false,
   },
   secretFields: ["clientSecret", "password"],
 };
@@ -197,7 +208,15 @@ describe("adaptateur — 3CX", () => {
 
     const [baseUrl, authMode, , clientSecret] = schema.fields;
     expect(baseUrl).toMatchObject({ label: "URL de base du PBX", required: true, placeholder: "https://pbx.exemple.fr:5001" });
-    expect(authMode).toMatchObject({ type: "enum", default: "client-credentials" });
+    // enumLabels : le choix s'affiche en clair, jamais la valeur brute « client-credentials ».
+    expect(authMode).toMatchObject({
+      type: "enum",
+      default: "client-credentials",
+      options: [
+        { value: "client-credentials", label: "ClientID et clé API (point de routage)" },
+        { value: "user", label: "Identifiant et mot de passe (extension propriétaire système)" },
+      ],
+    });
     // Secret déduit de secretFields, jamais du schéma : format password et aucune valeur transportée.
     expect(clientSecret).toEqual({
       name: "clientSecret",
@@ -219,7 +238,13 @@ describe("adaptateur — 3CX", () => {
     expect(screen.queryByLabelText("Mot de passe")).toBeNull();
     expect(input(/Vérifier le certificat TLS du PBX/).checked).toBe(true);
 
-    fireEvent.change(screen.getByLabelText("Comment QUAI s'authentifie auprès du PBX"), { target: { value: "user" } });
+    const mode = screen.getByLabelText("Comment QUAI s'authentifie auprès du PBX");
+    expect([...mode.querySelectorAll("option")].map((option) => option.textContent)).toEqual([
+      "ClientID et clé API (point de routage)",
+      "Identifiant et mot de passe (extension propriétaire système)",
+    ]);
+
+    fireEvent.change(mode, { target: { value: "user" } });
 
     expect(screen.queryByLabelText("ClientID — DN du point de routage")).toBeNull();
     expect(screen.queryByLabelText("Clé API")).toBeNull();
