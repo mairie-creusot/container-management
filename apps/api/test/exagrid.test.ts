@@ -444,6 +444,28 @@ describe("Config ExaGrid — test avant persistance, chiffrement au repos, aucun
     expect(cfg.json()).toEqual({ configured: false });
   });
 
+  it("PUT trapsOnly : appliance qui n'expose aucun agent interrogeable — enregistrée sans interrogation", async () => {
+    // Cas réel du 24/08/2026 : l'ExaGrid de la mairie n'a que « SNMP Traps », aucun agent à
+    // interroger. Refuser l'enregistrement rendait ses alarmes inexploitables.
+    pendingError = new Error("Request timed out");
+    getCalls.length = 0;
+    app = buildServer();
+
+    const response = await app.inject({
+      method: "PUT",
+      url: "/api/exagrid/config",
+      cookies: adminCookie(),
+      payload: { host: "172.20.0.101", port: 161, version: "2c", community: V2C_COMMUNITY, trapsOnly: true },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ configured: true, config: { host: "172.20.0.101" } });
+    // Aucune interrogation tentée : c'est tout l'objet du mode.
+    expect(getCalls).toHaveLength(0);
+    // Et le secret n'est jamais renvoyé, comme pour un enregistrement ordinaire.
+    expect(JSON.stringify(response.json())).not.toContain(V2C_COMMUNITY);
+  });
+
   it("PUT : un hôte qui répond en SNMP sans servir l'EXAGRID-MIB est refusé (pas un ExaGrid)", async () => {
     app = buildServer();
     const response = await app.inject({

@@ -7,7 +7,10 @@
  *                                    { configured: false } si jamais configuré (tout rôle authentifié).
  * GET    /api/exagrid/config      — config courante SANS aucun secret (tout rôle authentifié).
  * PUT    /api/exagrid/config      — configure/remplace (admin) — teste RÉELLEMENT la session SNMP
- *                                    avant d'enregistrer, jamais persisté à l'aveugle.
+ *                                    avant d'enregistrer, jamais persisté à l'aveugle, SAUF si
+ *                                    l'appelant demande explicitement `trapsOnly` (appliance sans
+ *                                    agent interrogeable, qui ne fait qu'émettre des traps).
+ * GET    /api/exagrid/traps       — traps réellement reçus (tout rôle authentifié).
  * POST   /api/exagrid/config/test — teste une config candidate SANS persister (admin).
  * DELETE /api/exagrid/config      — retire la configuration (admin).
  */
@@ -50,6 +53,8 @@ interface ExagridConfigBody {
   authKey?: string;
   privProtocol?: string;
   privKey?: string;
+  /** Enregistre sans exiger une interrogation réussie — appliance qui ne fait qu'émettre des traps. */
+  trapsOnly?: boolean;
 }
 
 function pickAllowed<T extends string>(value: unknown, allowed: readonly T[]): T | undefined {
@@ -127,8 +132,13 @@ export default async function exagridRoutes(fastify: FastifyInstance): Promise<v
     if (invalid) return reply.code(400).send({ error: invalid });
 
     // Teste réellement la session SNMP avant d'enregistrer — jamais persisté à l'aveugle.
-    const test = await testExagridConnection(candidate);
-    if (!test.ok) return reply.code(400).send({ error: test.message });
+    // Exception explicite et DEMANDÉE par l'appelant : certaines versions d'ExaGrid n'exposent
+    // aucun agent interrogeable et ne font qu'ÉMETTRE des traps (constaté le 24/08/2026). Refuser
+    // l'enregistrement empêchait alors de déclarer l'appliance, donc d'exploiter ses alarmes.
+    if (request.body?.trapsOnly !== true) {
+      const test = await testExagridConnection(candidate);
+      if (!test.ok) return reply.code(400).send({ error: test.message });
+    }
 
     await setExagridConfig(candidate);
     return reply.send({ configured: true, config: toExagridEndpoint(candidate) } satisfies ExagridConfigStatus);

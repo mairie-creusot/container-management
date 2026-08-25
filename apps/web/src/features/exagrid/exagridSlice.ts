@@ -30,6 +30,9 @@ export interface ExagridConfigFormInput {
   authKey?: string;
   privProtocol?: ExagridPrivProtocol;
   privKey?: string;
+  /** Enregistre l'appliance sans exiger une interrogation réussie : elle ne fait qu'émettre des
+   * traps. Les jauges de capacité resteront vides, seules les alarmes reçues seront exploitables. */
+  trapsOnly?: boolean;
 }
 
 type LoadStatus = "idle" | "loading" | "ready" | "error";

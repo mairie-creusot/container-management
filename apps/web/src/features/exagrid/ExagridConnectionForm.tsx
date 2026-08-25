@@ -167,11 +167,11 @@ export default function ExagridConnectionForm({ onSaved }: { onSaved?: () => voi
     await dispatch(testExagridConfig(input));
   }
 
-  async function handleSave(event: FormEvent) {
+  async function handleSave(event: FormEvent, trapsOnly = false) {
     event.preventDefault();
     const input = currentInput();
     if (!input) return;
-    const result = await dispatch(saveExagridConfig(input));
+    const result = await dispatch(saveExagridConfig(trapsOnly ? { ...input, trapsOnly: true } : input));
     if (saveExagridConfig.fulfilled.match(result)) {
       setEditing(false);
       dispatch(clearExagridTestResult());
@@ -240,7 +240,23 @@ export default function ExagridConnectionForm({ onSaved }: { onSaved?: () => voi
         </div>
       )}
 
-      {configError && <div className="error-banner" style={{ marginBottom: 16 }}>{configError}</div>}
+      {configError && (
+        <div className="error-banner" style={{ marginBottom: 16 }}>
+          {configError}
+          {/* Cas réel : certaines versions d'ExaGrid n'exposent aucun agent interrogeable et ne
+              font qu'émettre des traps — l'échec du test ne doit alors pas empêcher de déclarer
+              l'appliance, sinon ses alarmes restent inexploitables. */}
+          <div style={{ marginTop: 10 }}>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={(event) => void handleSave(event, true)}>
+              Enregistrer quand même, pour recevoir ses alarmes
+            </button>
+            <p className="create-container-hint" style={{ marginTop: 6 }}>
+              À utiliser si l'appliance n'expose pas d'agent SNMP interrogeable : QUAI affichera les traps qu'elle
+              envoie, mais aucune donnée de capacité, de déduplication ni de réplication.
+            </p>
+          </div>
+        </div>
+      )}
 
       {testResult && (
         <div className={testResult.ok ? "success-banner" : "error-banner"} style={{ marginBottom: 16 }}>
