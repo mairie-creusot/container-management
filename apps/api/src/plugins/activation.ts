@@ -2,9 +2,10 @@
  * Activation d'un greffon — `enabled` du stockage générique des intégrations, LU par le socle.
  *
  * Désactiver n'efface rien : la configuration (secrets compris) reste écrite, et réactiver la
- * retrouve telle quelle. Un greffon désactivé n'est simplement plus consommé par le socle — sa
- * contribution au graphe disparaît (plugins/hycu/graph.ts, plugins/nutanix/graph.ts), sans qu'un
- * seul appel réseau soit tenté vers l'intégration.
+ * retrouve telle quelle. Un greffon désactivé n'est pas seulement « plus consommé » : son module
+ * n'est même pas IMPORTÉ (plugins/loader.ts lit cet état AVANT tout `await import(...)`). Il n'a
+ * donc ni tâche prête à tourner, ni contribution au graphe, sans qu'un seul appel réseau soit tenté
+ * vers l'intégration.
  *
  * La désactivation est un état EXPLICITE : une entrée existe et porte `enabled: false`. L'ABSENCE
  * d'entrée n'en est pas une — un greffon dont la configuration vit encore dans un champ typé hérité

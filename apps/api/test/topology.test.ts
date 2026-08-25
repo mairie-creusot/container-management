@@ -1,7 +1,23 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { promises as fs } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { NutanixVm, DockerHostInfo, Environment } from "../src/types.js";
 import type { RemoteDockerEnvironmentRef } from "../src/services/remoteDockerStore.js";
 import type { EffectiveLxcConfig } from "../src/services/lxcStore.js";
+
+/**
+ * CONFIG_PATH isolé : le graphe agrège désormais les contributions des GREFFONS RÉELLEMENT chargés
+ * (services/topology.ts#collectPluginGraphParts), et un greffon reçoit sa configuration. Sans cette
+ * isolation, ces tests liraient le config.json de développement — donc dépendraient de ce qui est
+ * configuré sur la machine. Le greffon HYCU y est configuré une fois pour toutes ci-dessous : c'est
+ * l'état RÉEL dans lequel une appliance peut renvoyer un instantané (lui-même mocké, l'appliance de
+ * production n'est jamais contactée). Nutanix, lui, lit sa propre configuration via
+ * `isNutanixConfigured()`, mocké par test comme avant.
+ */
+const tmpDir = path.join(os.tmpdir(), `quai-topology-test-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+process.env.CONFIG_PATH = path.join(tmpDir, "config.json");
+process.env.CONFIG_ENCRYPTION_KEY = "7".repeat(64);
 
 /**
  * Docker forcé injoignable (isDockerReachable -> false) : getTopology() prend alors le chemin de
@@ -40,12 +56,21 @@ const getNutanixHostsMock = vi.fn<[], Promise<import("../src/types.js").NutanixH
 // explicitement par les tests dédiés à getTopology()#nutanixLastPoll ci-dessous.
 const lastKnownNutanixPollMock = vi.fn<[], import("../src/services/nutanix.js").NutanixPollOutcome | null>();
 
+// Le greffon Nutanix importe aussi les BORNES réelles de ce module (elles décrivent l'entrée de ses
+// actions) : un mock qui les omet fait échouer son import, donc disparaître sa contribution au
+// graphe — et onze tests de ce fichier avec elle. Valeurs reprises telles quelles du service.
 vi.mock("../src/services/nutanix.js", () => ({
   isNutanixConfigured: () => isNutanixConfiguredMock(),
   getNutanixVms: () => getNutanixVmsMock(),
   getNutanixClusters: () => getNutanixClustersMock(),
   getNutanixHosts: () => getNutanixHostsMock(),
   lastKnownNutanixPoll: () => lastKnownNutanixPollMock(),
+  NUTANIX_DISK_MIN_SIZE_MIB: 1024,
+  NUTANIX_DISK_MAX_SIZE_MIB: 2 * 1024 * 1024,
+  NUTANIX_MAX_VCPUS: 64,
+  NUTANIX_MAX_CORES_PER_VCPU: 16,
+  NUTANIX_MIN_MEMORY_MIB: 256,
+  NUTANIX_MAX_MEMORY_MIB: 1024 * 1024,
 }));
 
 // Isolation des nœuds "host" Docker distant/LXD (voir services/topology.ts) : sans ce mock,
@@ -82,6 +107,15 @@ vi.mock("../src/services/hycu.js", async (importOriginal) => {
 });
 
 const { getTopology } = await import("../src/services/topology.js");
+const { saveHycuPluginConfig } = await import("../src/plugins/hycu/config.js");
+
+// Le greffon HYCU est CONFIGURÉ (sans quoi il ne contribue rien, exactement comme en production) —
+// l'instantané, lui, reste entièrement mocké par test : aucune requête ne part vers l'appliance.
+await saveHycuPluginConfig({ url: "https://172.20.0.100:8443", username: "quai-ro", password: "hycu-secret" });
+
+afterAll(async () => {
+  await fs.rm(tmpDir, { recursive: true, force: true });
+});
 
 // Défauts "rien configuré" pour CHAQUE test — les describe dédiés aux nœuds "host" ci-dessous
 // écrasent explicitement ce qu'il leur faut ; les tests VM Nutanix existants n'ont, eux, rien à

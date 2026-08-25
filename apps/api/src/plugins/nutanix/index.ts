@@ -6,10 +6,10 @@
  *
  * MANQUES DU CONTRAT constatés en migrant cette intégration (rien n'est contourné ici) :
  *  1. `permissions.network` ne sait pas désigner l'hôte SAISI (`prismCentralUrl`) : déclaré `[]`.
- *  2. Une action n'a NI schéma d'entrée NI libellé de danger : rien ne distingue "démarrer" de
- *     "supprimer définitivement", et aucun formulaire ne peut être déduit pour `vm.migrate`
- *     (uuid + hôte cible) ou `vm.add-disk` (taille bornée). Les bornes réelles (1 Gio à 2 Tio,
- *     64 vCPU…) restent invisibles du socle.
+ *  2. COMBLÉ (contrat 1.1, voir ACTION_SPECS plus bas) : une action décrit désormais son entrée,
+ *     son niveau de danger, sa confirmation et le nœud qu'elle vise. Reste hors de portée du
+ *     sous-ensemble de schéma : une entrée IMBRIQUÉE (`vm.create` et son `guestCustomization`) et
+ *     la règle « au moins l'un des trois champs » de `vm.update-compute`.
  *  3. Le téléversement d'image (flux binaire) et la console VNC (WebSocket bidirectionnel) ne
  *     sont PAS exprimables en `(input: unknown) => Promise<unknown>` : ils restent hors `actions`,
  *     servis par routes/nutanix.ts.
@@ -25,7 +25,7 @@
  *     nœud "nutanix-cluster" est un ENVIRONNEMENT.
  */
 
-import type { Plugin, PluginGraphContribution, PluginTestResult, ServiceModuleSnapshot } from "@quai/plugin-contract";
+import type { Plugin, PluginActionSpec, PluginGraphContribution, PluginTestResult, ServiceModuleSnapshot } from "@quai/plugin-contract";
 import type { ServiceModuleEntity, ServiceModuleEntityStatus, ServiceModuleRelation } from "@quai/plugin-contract";
 import {
   addNutanixVmDisk,
@@ -39,6 +39,12 @@ import {
   lastKnownNutanixPoll,
   migrateNutanixVm,
   NutanixActionError,
+  NUTANIX_DISK_MAX_SIZE_MIB,
+  NUTANIX_DISK_MIN_SIZE_MIB,
+  NUTANIX_MAX_CORES_PER_VCPU,
+  NUTANIX_MAX_MEMORY_MIB,
+  NUTANIX_MAX_VCPUS,
+  NUTANIX_MIN_MEMORY_MIB,
   restartNutanixVm,
   startNutanixVm,
   stopNutanixVm,
@@ -71,6 +77,144 @@ const AUDIT_LABELS: Record<string, string> = {
   "vm.update-compute": "Modifier vCPU/mémoire d'une VM Nutanix",
   "vm.create": "Créer une VM Nutanix",
   "image.create": "Ajouter une image au catalogue Nutanix depuis une URL",
+};
+
+/**
+ * DESCRIPTION des actions (contrat 1.1) — entrée, danger, confirmation, rattachement au graphe.
+ * Les bornes sont celles que services/nutanix.ts fait RÉELLEMENT respecter (constantes importées,
+ * jamais recopiées) ; le service reste seul juge, ce schéma ne fait que les rendre visibles du
+ * socle et déductibles en formulaire.
+ *
+ * `servedByCore` sur chaque action de VM : l'écran actuel les sert déjà, avec plus que ne saurait
+ * en faire un formulaire générique — état "action en cours" et convergence d'alimentation pour
+ * démarrer/arrêter/redémarrer, liste RÉELLE des subnets pour la carte réseau, confirmation par
+ * saisie du nom pour la suppression. Elles passent donc par la voie générique côté SERVEUR (route,
+ * validation, audit) sans rien changer à l'écran, exactement comme demandé.
+ *
+ * `vm.create` n'est PAS décrite : son entrée porte un objet imbriqué (`guestCustomization`, avec un
+ * mot de passe cloud-init) que le sous-ensemble de schéma ne sait ni décrire à plat ni protéger.
+ * Elle reste exécutable, entrée transmise telle quelle, comme avant.
+ */
+const ACTION_SPECS: Record<string, PluginActionSpec> = {
+  "vm.start": {
+    severity: "safe",
+    target: { nodeKind: "nutanix-vm", field: "uuid", when: [{ field: "status", equals: ["stopped"] }], servedByCore: "nutanix-vm-start" },
+  },
+  "vm.stop": {
+    severity: "caution",
+    confirm: {
+      title: "Arrêter la VM",
+      message: `Confirmer l'arrêt GRACIEUX (ACPI) de "{cible}" ? Les services qu'elle héberge seront interrompus.`,
+      confirmLabel: "Arrêter",
+    },
+    target: { nodeKind: "nutanix-vm", field: "uuid", when: [{ field: "status", equals: ["running"] }], servedByCore: "nutanix-vm-stop" },
+  },
+  "vm.restart": {
+    severity: "caution",
+    confirm: {
+      title: "Redémarrer la VM",
+      message: `Confirmer le redémarrage GRACIEUX de "{cible}" ? Les services qu'elle héberge seront brièvement interrompus.`,
+      confirmLabel: "Redémarrer",
+    },
+    target: { nodeKind: "nutanix-vm", field: "uuid", when: [{ field: "status", equals: ["running"] }], servedByCore: "nutanix-vm-restart" },
+  },
+  "vm.delete": {
+    severity: "destructive",
+    confirm: {
+      title: "Supprimer cette VM",
+      message: `Confirmer la suppression définitive de "{cible}" ? Cette action est irréversible et détruit réellement la VM sur Prism Central.`,
+      confirmLabel: "Supprimer définitivement",
+      retype: true,
+    },
+    // Absente du menu du graphe DEPUIS TOUJOURS : la confirmation lourde vit dans le panneau de
+    // détail, seule source de vérité de l'action la plus destructrice du dépôt.
+    target: { nodeKind: "nutanix-vm", field: "uuid", servedByCore: "panneau de détail du nœud (saisie du nom de la VM)" },
+  },
+  "vm.migrate": {
+    severity: "caution",
+    input: {
+      type: "object",
+      properties: {
+        targetHostUuid: {
+          type: "string",
+          title: "Hôte de destination",
+          description: "UUID d'un autre hôte AHV du MÊME cluster — Prism refuse toute autre destination.",
+        },
+      },
+      required: ["targetHostUuid"],
+    },
+    // Migration à chaud : elle se déclenche en faisant GLISSER la VM sur un hôte du graphe, geste
+    // qui désigne l'hôte de destination bien mieux qu'un UUID à saisir.
+    target: { nodeKind: "nutanix-vm", field: "uuid", servedByCore: "glisser-déposer d'une VM sur un hôte du graphe" },
+  },
+  "vm.add-disk": {
+    severity: "caution",
+    input: {
+      type: "object",
+      properties: {
+        sizeMib: {
+          type: "number",
+          title: "Taille du disque (Mio)",
+          description: `De ${NUTANIX_DISK_MIN_SIZE_MIB} Mio (1 Gio) à ${NUTANIX_DISK_MAX_SIZE_MIB} Mio (2 Tio) — garde-fou QUAI, entier attendu.`,
+          minimum: NUTANIX_DISK_MIN_SIZE_MIB,
+          maximum: NUTANIX_DISK_MAX_SIZE_MIB,
+        },
+      },
+      required: ["sizeMib"],
+    },
+    target: { nodeKind: "nutanix-vm", field: "uuid", servedByCore: "nutanix-vm-add-disk" },
+  },
+  "vm.add-nic": {
+    severity: "caution",
+    input: {
+      type: "object",
+      properties: {
+        subnetUuid: {
+          type: "string",
+          title: "Subnet / VLAN",
+          description: "UUID d'un subnet réel du cluster (GET /api/nutanix/subnets).",
+        },
+      },
+      required: ["subnetUuid"],
+    },
+    target: { nodeKind: "nutanix-vm", field: "uuid", servedByCore: "nutanix-vm-add-nic" },
+  },
+  "vm.update-compute": {
+    severity: "caution",
+    // Les trois champs sont facultatifs, mais le service en exige AU MOINS UN — règle que le
+    // sous-ensemble de schéma ne sait pas exprimer, arbitrée par updateNutanixVmCompute seul.
+    input: {
+      type: "object",
+      properties: {
+        numVcpus: { type: "number", title: "vCPU (sockets)", minimum: 1, maximum: NUTANIX_MAX_VCPUS },
+        numCoresPerVcpu: { type: "number", title: "Cœurs par vCPU", minimum: 1, maximum: NUTANIX_MAX_CORES_PER_VCPU },
+        memoryMib: {
+          type: "number",
+          title: "Mémoire (Mio)",
+          minimum: NUTANIX_MIN_MEMORY_MIB,
+          maximum: NUTANIX_MAX_MEMORY_MIB,
+        },
+      },
+    },
+    target: { nodeKind: "nutanix-vm", field: "uuid", servedByCore: "nutanix-vm-edit-compute" },
+  },
+  "image.create": {
+    severity: "safe",
+    // Aucun nœud du graphe : le catalogue d'images vit dans la page Environnements.
+    input: {
+      type: "object",
+      properties: {
+        name: { type: "string", title: "Nom de l'image" },
+        sourceUri: {
+          type: "string",
+          title: "URL source",
+          description: "Adresse depuis laquelle Prism Central télécharge lui-même l'image.",
+          examples: ["https://exemple.fr/debian-13.qcow2"],
+        },
+      },
+      required: ["name", "sourceUri"],
+    },
+  },
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -203,6 +347,7 @@ export const nutanixPlugin: Plugin = {
       graphNodeKinds: [...NUTANIX_GRAPH_NODE_KINDS],
     },
     auditLabels: AUDIT_LABELS,
+    actions: ACTION_SPECS,
   },
 
   configStore: nutanixConfigStore,

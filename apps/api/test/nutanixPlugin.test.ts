@@ -193,8 +193,10 @@ describe("Greffon Nutanix — manifeste", () => {
     expect(() => registerPlugin(nutanixPlugin)).not.toThrow();
   });
 
-  it("est réellement branché dans les greffons du socle", () => {
+  it("est réellement branché dans les greffons du socle", async () => {
     app = buildServer();
+    // Chargement ASYNCHRONE des seuls greffons actifs (onReady, voir plugins/loader.ts).
+    await app.ready();
     expect(listPlugins().map((plugin) => plugin.manifest.id)).toContain(NUTANIX_PLUGIN_ID);
   });
 
@@ -252,6 +254,47 @@ describe("Greffon Nutanix — manifeste", () => {
     for (const name of actions) {
       expect(typeof nutanixPlugin.actions?.[name], name).toBe("function");
     }
+  });
+
+  it("décrit ses actions de VM : entrée bornée, danger, confirmation, cible", () => {
+    const specs = manifest.actions ?? {};
+    // Les six actions de VM du menu du graphe, plus la migration, le compute et le catalogue.
+    expect(Object.keys(specs).sort()).toEqual(
+      ["image.create", "vm.add-disk", "vm.add-nic", "vm.delete", "vm.migrate", "vm.restart", "vm.start", "vm.stop", "vm.update-compute"].sort(),
+    );
+    // vm.create reste NON décrite : son entrée porte un objet imbriqué (guestCustomization) que le
+    // sous-ensemble de schéma ne sait ni décrire à plat ni protéger.
+    expect(specs["vm.create"]).toBeUndefined();
+
+    for (const [name, spec] of Object.entries(specs)) {
+      if (name === "image.create") continue;
+      expect(spec.target?.nodeKind, name).toBe("nutanix-vm");
+      expect(spec.target?.field, name).toBe("uuid");
+      // Toutes servies par un écran EXISTANT : aucune entrée de menu n'est ajoutée par cette voie.
+      expect(spec.target?.servedByCore, name).toBeTruthy();
+      expect(spec.target?.menuLabel, name).toBeUndefined();
+    }
+
+    // Bornes RÉELLES du service (services/nutanix.ts), pas des valeurs de confort.
+    const disk = specs["vm.add-disk"]?.input?.properties?.sizeMib;
+    expect(disk).toMatchObject({ type: "number", minimum: 1024, maximum: 2 * 1024 * 1024 });
+    expect(specs["vm.add-disk"]?.input?.required).toEqual(["sizeMib"]);
+    const compute = specs["vm.update-compute"]?.input?.properties ?? {};
+    expect(compute.numVcpus).toMatchObject({ minimum: 1, maximum: 64 });
+    expect(compute.numCoresPerVcpu).toMatchObject({ minimum: 1, maximum: 16 });
+    expect(compute.memoryMib).toMatchObject({ minimum: 256, maximum: 1024 * 1024 });
+    // Aucun champ obligatoire : le service arbitre lui-même « au moins l'un des trois ».
+    expect(specs["vm.update-compute"]?.input?.required).toBeUndefined();
+
+    // Suppression : la SEULE à exiger la confirmation forte, comme l'écran actuel.
+    expect(specs["vm.delete"]?.severity).toBe("destructive");
+    expect(specs["vm.delete"]?.confirm?.retype).toBe(true);
+    expect(specs["vm.delete"]?.confirm?.message).toContain("{cible}");
+    expect(specs["vm.start"]?.confirm).toBeUndefined();
+    expect(specs["vm.stop"]?.confirm?.confirmLabel).toBe("Arrêter");
+    // Mêmes conditions d'affichage que le contrat de nœud du web (démarrer/arrêter exclusifs).
+    expect(specs["vm.start"]?.target?.when).toEqual([{ field: "status", equals: ["stopped"] }]);
+    expect(specs["vm.stop"]?.target?.when).toEqual([{ field: "status", equals: ["running"] }]);
   });
 
   it("n'exposera JAMAIS en action ce que le contrat ne sait pas transporter (flux binaire, WebSocket)", () => {

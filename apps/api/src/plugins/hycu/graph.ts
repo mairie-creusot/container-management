@@ -2,13 +2,12 @@
  * Contribution de HYCU au graphe de topologie — la partie du greffon qui n'est PAS tabulaire.
  *
  * Deux niveaux, volontairement séparés :
- *  1. `buildHycuGraph` : ce que le CONTRAT sait exprimer (PluginGraphContribution) à partir d'un
- *     instantané HYCU réel, plus les annotations de VM que le contrat ne sait PAS exprimer
- *     (voir HycuVmGraphAnnotation ci-dessous) ;
- *  2. `hycuTopologyParts` : la colle côté socle qui projette cette contribution sur les types du
- *     graphe (TopologyNode/TopologyEdge) et applique les annotations. Elle vit ici tant que le
- *     socle ne sait pas consommer `Plugin#graph()` lui-même — c'est le seul endroit qui connaît à
- *     la fois le contrat et le graphe.
+ *  1. `buildHycuGraph` : la RÈGLE, à partir d'un instantané HYCU réel — nœud, arêtes et annotations
+ *     de VM. Une seule implémentation, partagée par les deux voies ci-dessous ;
+ *  2. `hycuGraphContribution` : ce que le socle consomme (Plugin#graph), en deux temps — le nœud de
+ *     l'appliance d'abord, puis `link()` une fois TOUS les greffons passés, seul moment où les VMs
+ *     Nutanix existent (voir PluginGraphContext). `hycuTopologyParts` en reste la vue directe, pour
+ *     un appelant qui a déjà les nœuds VM sous la main.
  *
  * Sens de l'arête "protects" : de la VM Nutanix VERS l'appliance (la VM porte la sortie, HYCU n'a
  * que des entrées) — choix délibéré du 25/08/2026, à ne pas inverser.
@@ -25,7 +24,14 @@
  * dans le graphe.
  */
 
-import type { PluginGraphContribution, PluginGraphEdge, PluginGraphNode } from "@quai/plugin-contract";
+import type {
+  PluginGraphAnnotation,
+  PluginGraphContext,
+  PluginGraphContribution,
+  PluginGraphEdge,
+  PluginGraphLinks,
+  PluginGraphNode,
+} from "@quai/plugin-contract";
 import { getHycuTopologySnapshot, hycuVmProtectionState, lastKnownHycuPoll } from "../../services/hycu.js";
 import type { HycuPollOutcome, HycuTopologySnapshot } from "../../services/hycu.js";
 import type { HycuVmProtectionState, TopologyEdge, TopologyNode } from "../../types.js";
@@ -38,8 +44,16 @@ export const HYCU_GRAPH_NODE_KIND = "hycu-appliance";
 /** Au plus un nœud : une seule appliance HYCU peut être configurée. */
 export const HYCU_NODE_ID = "hycu-appliance:main";
 
-/** Nœud DÉJÀ présent dans le graphe auquel le greffon peut se raccrocher. Le contrat ne prévoit
- * rien de tel : sans ce contexte, `graph()` ne peut désigner aucune VM sans l'inventer. */
+/**
+ * Type de nœud contribué par le greffon NUTANIX, tel qu'il le déclare publiquement dans son
+ * manifeste (`permissions.graphNodeKinds`) — c'est par ce vocabulaire, jamais en important son
+ * code, que HYCU retrouve les VMs à relier à ses sauvegardes. Nutanix absent ou en pause : aucune
+ * VM dans le contexte, donc aucune arête, jamais une erreur.
+ */
+const NUTANIX_VM_GRAPH_NODE_KIND = "nutanix-vm";
+
+/** Nœud DÉJÀ présent dans le graphe auquel le greffon se raccroche — fourni par le contexte de la
+ * phase 2 (PluginGraphContext), qui porte les nœuds de TOUS les greffons. */
 export interface HycuGraphVmNode {
   /** id du nœud de graphe ("nutanix-vm:<uuid>"). */
   id: string;
@@ -48,8 +62,9 @@ export interface HycuGraphVmNode {
 }
 
 /**
- * Ce que HYCU pose SUR un nœud VM existant. Hors contrat : `PluginGraphAttachment` décrit un tiroir
- * (kind/label/subtitle) sous une carte, pas l'enrichissement d'un nœud contribué par un autre.
+ * Ce que HYCU pose SUR un nœud VM existant, dans le vocabulaire du greffon. Sa forme CONTRACTUELLE
+ * est `PluginGraphAnnotation` (nodeId + champs recopiés sur le nœud), produite par `hycuGraphLinks`
+ * ci-dessous : le socle n'a plus à connaître les quatre champs de protection par leur nom.
  */
 export interface HycuVmGraphAnnotation {
   nodeId: string;
@@ -65,9 +80,15 @@ export interface HycuGraphResult {
   vmAnnotations: HycuVmGraphAnnotation[];
 }
 
-function applianceNode(snapshot: HycuTopologySnapshot, lastPoll: HycuPollOutcome | null): PluginGraphNode {
+/**
+ * Compteurs RÉELS du dernier poll — les mêmes valeurs servent deux fois, jamais deux calculs :
+ * `details` en est la vue portable du contrat (n'importe quel consommateur y lit des paires
+ * clé/valeur), `fields` la charge utile que le socle recopie telle quelle sur le nœud du graphe.
+ * Elles coïncident ici parce que les compteurs HYCU sont déjà des champs de TopologyNode.
+ */
+function applianceCounters(snapshot: HycuTopologySnapshot, lastPoll: HycuPollOutcome | null): Record<string, string | number> {
   const counts = snapshot.counts;
-  const details: Record<string, string | number> = {
+  return {
     ...(counts
       ? {
           hycuVmTotal: counts.vms,
@@ -79,6 +100,10 @@ function applianceNode(snapshot: HycuTopologySnapshot, lastPoll: HycuPollOutcome
       : {}),
     ...(lastPoll ? { hycuLastPollAt: lastPoll.at } : {}),
   };
+}
+
+function applianceNode(snapshot: HycuTopologySnapshot, lastPoll: HycuPollOutcome | null): PluginGraphNode {
+  const details = applianceCounters(snapshot, lastPoll);
   return {
     id: HYCU_NODE_ID,
     kind: HYCU_GRAPH_NODE_KIND,
@@ -86,6 +111,10 @@ function applianceNode(snapshot: HycuTopologySnapshot, lastPoll: HycuPollOutcome
     subtitle: snapshot.url,
     status: snapshot.reachable ? "running" : "stopped",
     ...(Object.keys(details).length > 0 ? { details } : {}),
+    // L'appliance se rattache au nœud MASTER sans être un ENVIRONNEMENT : elle n'héberge rien, elle
+    // protège. Le socle n'a plus à connaître "hycu-appliance" pour le savoir.
+    rootAttachment: "integration",
+    fields: { ...details },
   };
 }
 
@@ -184,10 +213,13 @@ function toTopologyEdge(edge: PluginGraphEdge): TopologyEdge | null {
 }
 
 /**
- * Nœud + arêtes HYCU pour services/topology.ts, annotations POSÉES sur les nœuds VM fournis (comme
- * avant la migration : une seule source de vérité par nœud, pas de table parallèle à recroiser côté
+ * Vue DIRECTE : nœud + arêtes HYCU projetés sur les types du graphe, annotations POSÉES sur les
+ * nœuds VM fournis (une seule source de vérité par nœud, pas de table parallèle à recroiser côté
  * frontend). Aucun nœud tant que HYCU n'a jamais été configuré (`null` du snapshot) ; nœud
  * "stopped" sans compteur ni arête si configuré mais injoignable.
+ *
+ * Ce n'est plus la voie du socle — il agrège `Plugin#graph()` (services/topology.ts) — mais elle
+ * s'appuie sur EXACTEMENT le même calcul (`buildHycuGraph`) : les deux ne peuvent pas diverger.
  */
 export async function hycuTopologyParts(
   nutanixVmNodes: TopologyNode[],
@@ -215,10 +247,50 @@ export async function hycuTopologyParts(
   return { nodes, edges };
 }
 
-/** Contribution du greffon SANS contexte de graphe (voir Plugin#graph) : le nœud seul. */
+/** Forme CONTRACTUELLE de l'annotation : les quatre champs de protection, tels quels, sur le nœud
+ * VM visé. Aucun n'est inventé — un champ que HYCU n'a pas rapporté reste absent. */
+function annotationOf(annotation: HycuVmGraphAnnotation): PluginGraphAnnotation {
+  return {
+    nodeId: annotation.nodeId,
+    fields: {
+      hycuProtection: annotation.protection,
+      ...(annotation.policyName ? { hycuPolicyName: annotation.policyName } : {}),
+      ...(annotation.complianceStatus ? { hycuComplianceStatus: annotation.complianceStatus } : {}),
+      ...(annotation.lastBackupAt ? { hycuLastBackupAt: annotation.lastBackupAt } : {}),
+    },
+  };
+}
+
+/**
+ * PHASE 2 : le graphe complet est là, les VMs Nutanix aussi. Le rapprochement (uuid, puis nom exact
+ * non ambigu — voir buildHycuGraph) est fait ICI, par le greffon qui connaît la règle, jamais par le
+ * socle. `snapshot` est celui de la phase 1, capturé par la fermeture : l'appliance n'est JAMAIS
+ * interrogée une seconde fois dans le même cycle.
+ */
+function hycuGraphLinks(
+  snapshot: HycuTopologySnapshot,
+  lastPoll: HycuPollOutcome | null,
+  context: PluginGraphContext,
+): PluginGraphLinks {
+  const vmNodes = context
+    .nodesOfKind(NUTANIX_VM_GRAPH_NODE_KIND)
+    .map((node) => ({ id: node.id, label: node.label }));
+  const { contribution, vmAnnotations } = buildHycuGraph(snapshot, lastPoll, vmNodes);
+  return { edges: contribution.edges, annotations: vmAnnotations.map(annotationOf) };
+}
+
+/**
+ * Contribution du greffon (voir Plugin#graph) : le nœud de l'appliance en phase 1, puis `link` pour
+ * relier les VMs sauvegardées en phase 2. Pas de `link` quand il n'y a rien à contribuer — une
+ * contribution vide reste littéralement vide.
+ */
 export async function hycuGraphContribution(): Promise<PluginGraphContribution> {
   if (await isPluginDisabled(HYCU_PLUGIN_ID)) return { nodes: [], edges: [], attachments: [] };
   const snapshot = await getHycuTopologySnapshot();
   if (!snapshot) return { nodes: [], edges: [], attachments: [] };
-  return buildHycuGraph(snapshot, lastKnownHycuPoll(), []).contribution;
+  const lastPoll = lastKnownHycuPoll();
+  return {
+    ...buildHycuGraph(snapshot, lastPoll, []).contribution,
+    link: (context) => hycuGraphLinks(snapshot, lastPoll, context),
+  };
 }

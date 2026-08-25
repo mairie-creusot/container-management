@@ -7,7 +7,7 @@
 import { cloneJson, isPlainObject, resolveSchemaField } from "./jsonSchema.js";
 import type { JSONSchema } from "./jsonSchema.js";
 import { CORE_API_VERSION } from "./manifest.js";
-import type { Plugin, PluginManifest, PluginPermissions, PublicPluginManifest } from "./manifest.js";
+import type { Plugin, PluginActionSpec, PluginManifest, PluginPermissions, PublicPluginManifest } from "./manifest.js";
 import { isSemver, parseSemverRange, satisfiesSemverRange } from "./semver.js";
 
 export interface PluginValidationIssue {
@@ -35,8 +35,26 @@ const SHOW_IF_KEYS = ["field", "equals"];
 const ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const KIND_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const HOST_PATTERN = /^(?:\*\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?$/i;
-const MANIFEST_KEYS = ["id", "name", "version", "coreApi", "configSchema", "secretFields", "permissions", "auditLabels"];
+const MANIFEST_KEYS = ["id", "name", "version", "coreApi", "configSchema", "secretFields", "permissions", "auditLabels", "actions"];
 const PERMISSION_KEYS = ["network", "mutates", "graphNodeKinds"];
+const ACTION_SPEC_KEYS = ["input", "severity", "confirm", "target"];
+const ACTION_CONFIRM_KEYS = ["title", "message", "confirmLabel", "retype"];
+const ACTION_TARGET_KEYS = ["nodeKind", "field", "menuLabel", "when", "servedByCore"];
+const ACTION_CONDITION_KEYS = ["field", "equals", "notEquals", "present"];
+const ACTION_SEVERITIES = ["safe", "caution", "destructive"];
+/** "vm.start", "create-ticket", "image.create" — les formes réellement en service. */
+const ACTION_NAME_PATTERN = /^[a-z0-9]+(?:[-.][a-z0-9]+)*$/;
+
+/**
+ * Où porter un refus. `code` reste STABLE (jeté en test, en journal) même quand `field` désigne une
+ * action précise : "actionInput.showIf.type" sur le champ "actions.vm.add-disk.input.properties.x".
+ */
+interface SchemaScope {
+  code: string;
+  field: string;
+}
+
+const CONFIG_SCHEMA_SCOPE: SchemaScope = { code: "configSchema", field: "configSchema" };
 
 /** Reproduit la valeur fautive dans le message sans jamais déverser un objet entier. */
 function describe(value: unknown): string {
@@ -94,15 +112,16 @@ function checkCondition(
   name: string,
   property: Record<string, unknown>,
   properties: Record<string, unknown>,
+  scope: SchemaScope,
   issues: PluginValidationIssue[],
 ): void {
   const showIf = property.showIf;
   if (showIf === undefined) return;
-  const field = `configSchema.properties.${name}.showIf`;
+  const field = `${scope.field}.properties.${name}.showIf`;
 
   if (!isPlainObject(showIf)) {
     issues.push({
-      code: "configSchema.showIf.type",
+      code: `${scope.code}.showIf.type`,
       field,
       message: `showIf doit être un objet { field, equals }, reçu ${describe(showIf)}.`,
     });
@@ -111,7 +130,7 @@ function checkCondition(
   for (const key of Object.keys(showIf)) {
     if (!SHOW_IF_KEYS.includes(key)) {
       issues.push({
-        code: "configSchema.showIf.unknownKey",
+        code: `${scope.code}.showIf.unknownKey`,
         field: `${field}.${key}`,
         message: `Clé inconnue dans showIf : "${key}" — clés autorisées : ${SHOW_IF_KEYS.join(", ")}.`,
       });
@@ -121,7 +140,7 @@ function checkCondition(
   const target = showIf.field;
   if (typeof target !== "string" || target.trim().length === 0) {
     issues.push({
-      code: "configSchema.showIf.field",
+      code: `${scope.code}.showIf.field`,
       field: `${field}.field`,
       message: `showIf.field doit nommer une propriété du même schéma, reçu ${describe(target)}.`,
     });
@@ -129,7 +148,7 @@ function checkCondition(
   }
   if (target === name) {
     issues.push({
-      code: "configSchema.showIf.self",
+      code: `${scope.code}.showIf.self`,
       field: `${field}.field`,
       message: `La propriété "${name}" ne peut pas conditionner son affichage à elle-même.`,
     });
@@ -139,15 +158,15 @@ function checkCondition(
   const controller = properties[target];
   if (!isPlainObject(controller)) {
     issues.push({
-      code: "configSchema.showIf.unknown",
+      code: `${scope.code}.showIf.unknown`,
       field: `${field}.field`,
-      message: `showIf désigne la propriété "${target}", absente de configSchema.properties.`,
+      message: `showIf désigne la propriété "${target}", absente de ${scope.field}.properties.`,
     });
     return;
   }
   if (controller.showIf !== undefined) {
     issues.push({
-      code: "configSchema.showIf.chain",
+      code: `${scope.code}.showIf.chain`,
       field: `${field}.field`,
       message: `Dépendance en chaîne non supportée : "${name}" dépend de "${target}", elle-même conditionnelle.`,
     });
@@ -157,7 +176,7 @@ function checkCondition(
   const kind = targetKind(controller);
   if (kind === "unusable") {
     issues.push({
-      code: "configSchema.showIf.target",
+      code: `${scope.code}.showIf.target`,
       field: `${field}.field`,
       message:
         `La propriété "${target}" (type ${describe(controller.type)}) ne peut pas piloter une condition d'affichage : ` +
@@ -169,7 +188,7 @@ function checkCondition(
   const expected = showIf.equals;
   if (expected === undefined) {
     issues.push({
-      code: "configSchema.showIf.equals",
+      code: `${scope.code}.showIf.equals`,
       field: `${field}.equals`,
       message: `showIf.equals est obligatoire : sans valeur attendue, la condition ne peut pas être évaluée.`,
     });
@@ -180,7 +199,7 @@ function checkCondition(
     const values = Array.isArray(controller.enum) ? controller.enum : [];
     if (!values.includes(expected)) {
       issues.push({
-        code: "configSchema.showIf.equalsEnum",
+        code: `${scope.code}.showIf.equalsEnum`,
         field: `${field}.equals`,
         message:
           `showIf.equals vaut ${describe(expected)}, qui ne figure pas dans l'énumération de "${target}" ` +
@@ -193,7 +212,7 @@ function checkCondition(
   const actual = typeof expected;
   if (actual !== kind) {
     issues.push({
-      code: "configSchema.showIf.equalsType",
+      code: `${scope.code}.showIf.equalsType`,
       field: `${field}.equals`,
       message: `La propriété "${target}" est de type ${kind} : showIf.equals doit l'être aussi, reçu ${describe(expected)}.`,
     });
@@ -201,29 +220,29 @@ function checkCondition(
 }
 
 /** Conditions d'affichage : lisibles UNIQUEMENT sur une propriété de premier niveau. */
-function checkConditions(schema: JSONSchema, issues: PluginValidationIssue[]): void {
+function checkConditions(schema: JSONSchema, scope: SchemaScope, issues: PluginValidationIssue[]): void {
   const properties: Record<string, unknown> = schema.properties ?? {};
 
   if (schema.showIf !== undefined) {
     issues.push({
-      code: "configSchema.showIf.placement",
-      field: "configSchema.showIf",
-      message: "showIf se porte sur une propriété de configSchema, jamais sur le schéma racine lui-même.",
+      code: `${scope.code}.showIf.placement`,
+      field: `${scope.field}.showIf`,
+      message: `showIf se porte sur une propriété de ${scope.field}, jamais sur le schéma racine lui-même.`,
     });
   }
 
   for (const [name, property] of Object.entries(properties)) {
     if (!isPlainObject(property)) continue;
     const nested: string[] = [];
-    collectNestedConditions(property, `configSchema.properties.${name}`, nested);
+    collectNestedConditions(property, `${scope.field}.properties.${name}`, nested);
     for (const path of nested) {
       issues.push({
-        code: "configSchema.showIf.placement",
+        code: `${scope.code}.showIf.placement`,
         field: path,
-        message: `showIf n'est lu que sur une propriété de premier niveau de configSchema : à "${path}", il serait ignoré.`,
+        message: `showIf n'est lu que sur une propriété de premier niveau de ${scope.field} : à "${path}", il serait ignoré.`,
       });
     }
-    checkCondition(name, property, properties, issues);
+    checkCondition(name, property, properties, scope, issues);
   }
 }
 
@@ -246,46 +265,336 @@ const RENDERABLE_KEYWORDS = [
 
 /** Le sous-ensemble RÉELLEMENT affichable — doit rester aligné avec l'adaptateur du web
  * (apps/web/src/components/formSchemaFromManifest.ts et ses cas réels 3CX/GLPI/AD CS). */
-function checkRenderable(schema: JSONSchema, secretFields: string[], issues: PluginValidationIssue[]): void {
+function checkRenderable(schema: JSONSchema, secretFields: string[], scope: SchemaScope, issues: PluginValidationIssue[]): void {
   const properties: Record<string, unknown> = schema.properties ?? {};
   const secrets = new Set(secretFields);
 
   for (const [name, raw] of Object.entries(properties)) {
     if (!isPlainObject(raw)) continue;
     const property = raw as Record<string, unknown>;
-    const field = `configSchema.properties.${name}`;
-    const push = (code: string, message: string) => issues.push({ code, field, message });
+    const field = `${scope.field}.properties.${name}`;
+    const push = (suffix: string, message: string) => issues.push({ code: `${scope.code}.${suffix}`, field, message });
 
     for (const keyword of Object.keys(property)) {
       if (!RENDERABLE_KEYWORDS.includes(keyword)) {
-        push("configSchema.notRenderable", `Mot-clé "${keyword}" : aucun formulaire ne saurait le respecter.`);
+        push("notRenderable", `Mot-clé "${keyword}" : aucun formulaire ne saurait le respecter.`);
       }
     }
 
     const type = property["type"];
     const isEnum = Array.isArray(property["enum"]);
     if (!isEnum && type !== "string" && type !== "number" && type !== "boolean") {
-      push("configSchema.notRenderable", `type ${describe(type)} : seuls string, number, boolean et enum sont saisissables.`);
+      push("notRenderable", `type ${describe(type)} : seuls string, number, boolean et enum sont saisissables.`);
     }
     if (property["format"] !== undefined && property["format"] !== "password") {
-      push("configSchema.notRenderable", `format ${describe(property["format"])} : seul "password" est reconnu.`);
+      push("notRenderable", `format ${describe(property["format"])} : seul "password" est reconnu.`);
     }
     if (secrets.has(name) && type !== "string") {
-      push("configSchema.notRenderable", "un champ secret se saisit toujours en texte.");
+      push("notRenderable", "un champ secret se saisit toujours en texte.");
     }
 
     const labels = property["enumLabels"];
     if (labels !== undefined) {
       const values = property["enum"];
       if (!Array.isArray(labels) || labels.some((label) => typeof label !== "string" || label.trim() === "")) {
-        push("configSchema.enumLabels", `enumLabels doit être un tableau de libellés non vides, reçu ${describe(labels)}.`);
+        push("enumLabels", `enumLabels doit être un tableau de libellés non vides, reçu ${describe(labels)}.`);
       } else if (!Array.isArray(values)) {
-        push("configSchema.enumLabels", "enumLabels ne se porte que sur une propriété qui déclare enum.");
+        push("enumLabels", "enumLabels ne se porte que sur une propriété qui déclare enum.");
       } else if (labels.length !== values.length) {
-        push("configSchema.enumLabels", `enumLabels compte ${labels.length} libellés pour ${values.length} valeurs.`);
+        push("enumLabels", `enumLabels compte ${labels.length} libellés pour ${values.length} valeurs.`);
       }
     }
   }
+}
+
+function checkActionCondition(raw: unknown, field: string, issues: PluginValidationIssue[]): void {
+  if (!isPlainObject(raw)) {
+    issues.push({
+      code: "actions.when",
+      field,
+      message: `Condition d'affichage invalide : objet { field, equals?, notEquals?, present? } attendu, reçu ${describe(raw)}.`,
+    });
+    return;
+  }
+  for (const key of Object.keys(raw)) {
+    if (!ACTION_CONDITION_KEYS.includes(key)) {
+      issues.push({
+        code: "actions.when",
+        field: `${field}.${key}`,
+        message: `Clé inconnue dans une condition : "${key}" — clés autorisées : ${ACTION_CONDITION_KEYS.join(", ")}.`,
+      });
+    }
+  }
+  if (typeof raw.field !== "string" || raw.field.trim().length === 0) {
+    issues.push({
+      code: "actions.when",
+      field: `${field}.field`,
+      message: `Condition sans champ : indiquez le champ du nœud à consulter (ex "status"), reçu ${describe(raw.field)}.`,
+    });
+  }
+  for (const key of ["equals", "notEquals"] as const) {
+    const values = raw[key];
+    if (values !== undefined && !Array.isArray(values)) {
+      issues.push({ code: "actions.when", field: `${field}.${key}`, message: `${key} doit être un tableau de valeurs, reçu ${describe(values)}.` });
+    }
+  }
+  if (raw.present !== undefined && typeof raw.present !== "boolean") {
+    issues.push({ code: "actions.when", field: `${field}.present`, message: `present doit être un booléen, reçu ${describe(raw.present)}.` });
+  }
+}
+
+function checkActionConfirm(raw: unknown, field: string, hasTarget: boolean, issues: PluginValidationIssue[]): void {
+  if (!isPlainObject(raw)) {
+    issues.push({
+      code: "actions.confirm",
+      field,
+      message: `confirm doit être un objet { title, message, confirmLabel, retype? }, reçu ${describe(raw)}.`,
+    });
+    return;
+  }
+  for (const key of Object.keys(raw)) {
+    if (!ACTION_CONFIRM_KEYS.includes(key)) {
+      issues.push({
+        code: "actions.confirm",
+        field: `${field}.${key}`,
+        message: `Clé inconnue dans confirm : "${key}" — clés autorisées : ${ACTION_CONFIRM_KEYS.join(", ")}.`,
+      });
+    }
+  }
+  for (const key of ["title", "message", "confirmLabel"] as const) {
+    const value = raw[key];
+    if (typeof value !== "string" || value.trim().length === 0) {
+      issues.push({
+        code: "actions.confirm",
+        field: `${field}.${key}`,
+        message: `confirm.${key} doit être un texte non vide — une confirmation muette ne confirme rien, reçu ${describe(value)}.`,
+      });
+    }
+  }
+  if (raw.retype !== undefined) {
+    if (typeof raw.retype !== "boolean") {
+      issues.push({ code: "actions.confirm", field: `${field}.retype`, message: `confirm.retype doit être un booléen, reçu ${describe(raw.retype)}.` });
+    } else if (raw.retype && !hasTarget) {
+      // Sans cible, il n'y a aucun nom à retaper : la confirmation forte serait inapplicable.
+      issues.push({
+        code: "actions.confirm",
+        field: `${field}.retype`,
+        message: "confirm.retype exige un target : c'est le libellé du nœud visé que l'utilisateur doit retaper.",
+      });
+    }
+  }
+}
+
+function checkActionTarget(
+  raw: unknown,
+  field: string,
+  input: JSONSchema | undefined,
+  graphNodeKinds: string[],
+  issues: PluginValidationIssue[],
+): void {
+  if (!isPlainObject(raw)) {
+    issues.push({
+      code: "actions.target",
+      field,
+      message: `target doit être un objet { nodeKind, field, menuLabel, … }, reçu ${describe(raw)}.`,
+    });
+    return;
+  }
+  for (const key of Object.keys(raw)) {
+    if (!ACTION_TARGET_KEYS.includes(key)) {
+      issues.push({
+        code: "actions.target",
+        field: `${field}.${key}`,
+        message: `Clé inconnue dans target : "${key}" — clés autorisées : ${ACTION_TARGET_KEYS.join(", ")}.`,
+      });
+    }
+  }
+
+  const nodeKind = raw.nodeKind;
+  if (typeof nodeKind !== "string" || !KIND_PATTERN.test(nodeKind)) {
+    issues.push({
+      code: "actions.target",
+      field: `${field}.nodeKind`,
+      message: `target.nodeKind doit être un type de nœud en minuscules, reçu ${describe(nodeKind)}.`,
+    });
+  } else if (!graphNodeKinds.includes(nodeKind)) {
+    issues.push({
+      code: "actions.target",
+      field: `${field}.nodeKind`,
+      message:
+        `target.nodeKind vaut "${nodeKind}", absent de permissions.graphNodeKinds : une action ne se propose que sur ` +
+        `un type de nœud que ce greffon contribue réellement.`,
+    });
+  }
+
+  const targetField = raw.field;
+  if (typeof targetField !== "string" || targetField.trim().length === 0) {
+    issues.push({
+      code: "actions.target",
+      field: `${field}.field`,
+      message: `target.field doit nommer la propriété d'entrée qui reçoit l'identifiant du nœud, reçu ${describe(targetField)}.`,
+    });
+  } else if (input?.properties && Object.hasOwn(input.properties, targetField)) {
+    // La cible vient du nœud sur lequel on a fait un clic droit : la faire ressaisir ouvrirait la
+    // porte à jouer l'action sur une AUTRE machine que celle affichée.
+    issues.push({
+      code: "actions.target",
+      field: `${field}.field`,
+      message: `target.field "${targetField}" figure aussi dans input.properties : la cible vient du nœud visé, elle ne se saisit jamais.`,
+    });
+  }
+
+  const hasMenu = raw.menuLabel !== undefined;
+  const hasServed = raw.servedByCore !== undefined;
+  if (hasMenu && (typeof raw.menuLabel !== "string" || raw.menuLabel.trim().length === 0)) {
+    issues.push({
+      code: "actions.target",
+      field: `${field}.menuLabel`,
+      message: `target.menuLabel doit être un libellé non vide : une entrée de menu doit être lisible, reçu ${describe(raw.menuLabel)}.`,
+    });
+  }
+  if (hasMenu && hasServed) {
+    issues.push({
+      code: "actions.target",
+      field: `${field}.menuLabel`,
+      message: "target déclare menuLabel ET servedByCore : l'action serait proposée deux fois dans le même menu.",
+    });
+  }
+  if (!hasMenu && !hasServed) {
+    issues.push({
+      code: "actions.target",
+      field,
+      message:
+        "target doit déclarer menuLabel (l'entrée de menu proposée) ou servedByCore (ce qui rend déjà cette action " +
+        "à l'écran) : sans l'un des deux, l'action est rattachée à un nœud sans que rien ne l'y propose.",
+    });
+  }
+
+  if (raw.when !== undefined) {
+    if (!Array.isArray(raw.when)) {
+      issues.push({
+        code: "actions.when",
+        field: `${field}.when`,
+        message: `target.when doit être un tableau de conditions, reçu ${describe(raw.when)}.`,
+      });
+    } else {
+      const conditions: unknown[] = raw.when;
+      conditions.forEach((condition, index) => checkActionCondition(condition, `${field}.when[${index}]`, issues));
+    }
+  }
+
+  if (raw.servedByCore !== undefined && (typeof raw.servedByCore !== "string" || raw.servedByCore.trim().length === 0)) {
+    issues.push({
+      code: "actions.target",
+      field: `${field}.servedByCore`,
+      message: `target.servedByCore doit nommer l'entrée du cœur qui rend déjà cette action, reçu ${describe(raw.servedByCore)}.`,
+    });
+  }
+}
+
+/**
+ * Description des actions. Une action non décrite reste exécutable (entrée transmise telle quelle),
+ * mais une description FAUSSE est refusée en bloc : elle produirait un formulaire inexploitable ou
+ * une entrée de menu qui ne mène nulle part.
+ */
+function checkActions(
+  raw: unknown,
+  permissions: PluginPermissions | undefined,
+  issues: PluginValidationIssue[],
+): Record<string, PluginActionSpec> | undefined {
+  if (!isPlainObject(raw)) {
+    issues.push({ code: "actions.type", field: "actions", message: `actions doit être un objet { nom: description }, reçu ${describe(raw)}.` });
+    return undefined;
+  }
+
+  const names = Object.keys(raw);
+  if (names.length > 0 && permissions?.mutates !== true) {
+    issues.push({
+      code: "actions.readOnly",
+      field: "permissions.mutates",
+      message: `Le manifeste décrit des actions (${names.join(", ")}) sans permissions.mutates : le socle impose alors la lecture seule.`,
+    });
+  }
+
+  const graphNodeKinds = permissions?.graphNodeKinds ?? [];
+  const specs: Record<string, PluginActionSpec> = {};
+
+  for (const name of names) {
+    const field = `actions.${name}`;
+    if (!ACTION_NAME_PATTERN.test(name)) {
+      issues.push({
+        code: "actions.name",
+        field,
+        message: `Nom d'action invalide : "${name}" — minuscules, chiffres, tirets et points (ex. "vm.start", "create-ticket").`,
+      });
+    }
+
+    const spec = raw[name];
+    if (!isPlainObject(spec)) {
+      issues.push({ code: "actions.spec", field, message: `La description de l'action "${name}" doit être un objet, reçu ${describe(spec)}.` });
+      continue;
+    }
+    for (const key of Object.keys(spec)) {
+      if (!ACTION_SPEC_KEYS.includes(key)) {
+        issues.push({
+          code: "actions.unknownKey",
+          field: `${field}.${key}`,
+          message: `Clé inconnue dans la description d'une action : "${key}" — clés autorisées : ${ACTION_SPEC_KEYS.join(", ")}.`,
+        });
+      }
+    }
+
+    let input: JSONSchema | undefined;
+    if (spec.input !== undefined) {
+      input = asObjectSchema(spec.input);
+      if (!input) {
+        issues.push({
+          code: "actions.input",
+          field: `${field}.input`,
+          message: `input doit être un schéma JSON d'objet : { "type": "object", "properties": { … } } — reçu ${describe(spec.input)}.`,
+        });
+      } else {
+        const scope: SchemaScope = { code: "actionInput", field: `${field}.input` };
+        const declared = Object.keys(input.properties ?? {});
+        for (const [index, required] of (stringArray(input.required) ?? []).entries()) {
+          if (!declared.includes(required)) {
+            issues.push({
+              code: "actionInput.required",
+              field: `${field}.input.required[${index}]`,
+              message: `input.required désigne "${required}", absent de input.properties.`,
+            });
+          }
+        }
+        checkConditions(input, scope, issues);
+        // Aucun secretField pour une entrée d'action : rien ne la chiffre, rien ne la caviarde.
+        checkRenderable(input, [], scope, issues);
+        for (const [property, node] of Object.entries(input.properties ?? {})) {
+          if (isPlainObject(node) && node["format"] !== undefined) {
+            issues.push({
+              code: "actionInput.secret",
+              field: `${field}.input.properties.${property}`,
+              message: "Une entrée d'action ne porte aucun secret : rien ne la chiffre au repos ni ne la caviarde à l'écran.",
+            });
+          }
+        }
+      }
+    }
+
+    if (spec.severity !== undefined && (typeof spec.severity !== "string" || !ACTION_SEVERITIES.includes(spec.severity))) {
+      issues.push({
+        code: "actions.severity",
+        field: `${field}.severity`,
+        message: `Niveau de danger inconnu : ${describe(spec.severity)} — attendu ${ACTION_SEVERITIES.join(", ")}.`,
+      });
+    }
+
+    if (spec.target !== undefined) checkActionTarget(spec.target, `${field}.target`, input, graphNodeKinds, issues);
+    if (spec.confirm !== undefined) checkActionConfirm(spec.confirm, `${field}.confirm`, spec.target !== undefined, issues);
+
+    specs[name] = cloneJson(spec) as PluginActionSpec;
+  }
+
+  return specs;
 }
 
 export function validateManifest(input: unknown, options: ValidationOptions = {}): ManifestValidationResult {
@@ -369,11 +678,11 @@ export function validateManifest(input: unknown, options: ValidationOptions = {}
         });
       }
     }
-    checkConditions(schema, issues);
+    checkConditions(schema, CONFIG_SCHEMA_SCOPE, issues);
   }
 
   const secretFields = stringArray(input.secretFields);
-  if (schema) checkRenderable(schema, secretFields ?? [], issues);
+  if (schema) checkRenderable(schema, secretFields ?? [], CONFIG_SCHEMA_SCOPE, issues);
   if (!secretFields) {
     issues.push({
       code: "secretFields.type",
@@ -512,6 +821,8 @@ export function validateManifest(input: unknown, options: ValidationOptions = {}
     }
   }
 
+  const actionSpecs = input.actions === undefined ? undefined : checkActions(input.actions, permissions, issues);
+
   if (issues.length > 0) return { ok: false, issues };
 
   return {
@@ -525,6 +836,7 @@ export function validateManifest(input: unknown, options: ValidationOptions = {}
       secretFields: [...(secretFields ?? [])],
       permissions: permissions ?? {},
       auditLabels: auditLabels ?? {},
+      ...(actionSpecs !== undefined ? { actions: actionSpecs } : {}),
     },
   };
 }
@@ -596,7 +908,17 @@ export function validatePlugin(input: unknown, options: ValidationOptions = {}):
   }
 
   if (manifestResult.ok) {
-    const { permissions, auditLabels } = manifestResult.manifest;
+    const { permissions, auditLabels, actions: declared } = manifestResult.manifest;
+    // Une action décrite mais jamais implémentée offrirait une entrée de menu qui ne mène nulle part.
+    for (const name of Object.keys(declared ?? {})) {
+      if (!actionNames.includes(name)) {
+        issues.push({
+          code: "actions.notImplemented",
+          field: `actions.${name}`,
+          message: `Le manifeste décrit l'action "${name}", que le greffon n'implémente pas.`,
+        });
+      }
+    }
     if (actionNames.length > 0 && permissions.mutates !== true) {
       issues.push({
         code: "actions.readOnly",
@@ -651,5 +973,8 @@ export function publicManifest(manifest: PluginManifest): PublicPluginManifest {
     secretFields: [...manifest.secretFields],
     permissions,
     auditLabels: { ...manifest.auditLabels },
+    // La description des actions n'a AUCUNE valeur à expurger (aucun secret n'y est admis, voir
+    // checkActions) : l'interface en a besoin en entier pour déduire menus et formulaires.
+    ...(manifest.actions !== undefined ? { actions: cloneJson(manifest.actions) } : {}),
   };
 }

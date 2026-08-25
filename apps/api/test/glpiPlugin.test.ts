@@ -133,9 +133,12 @@ describe("Greffon GLPI — manifeste", () => {
     expect(() => registerPlugin(glpiPlugin)).not.toThrow();
   });
 
-  it("est réellement branché dans les greffons du socle", () => {
-    expect(BUILTIN_PLUGINS.map((plugin) => plugin.manifest.id)).toContain(GLPI_PLUGIN_ID);
+  it("est réellement branché dans les greffons du socle", async () => {
+    expect(BUILTIN_PLUGINS.map((entry) => entry.id)).toContain(GLPI_PLUGIN_ID);
     app = buildServer();
+    // Le chargement est ASYNCHRONE depuis qu'il n'importe que les greffons actifs (onReady,
+    // voir plugins/loader.ts) — `ready()` est exactement ce qu'attend le serveur avant de servir.
+    await app.ready();
     expect(listPlugins().map((plugin) => plugin.manifest.id)).toContain(GLPI_PLUGIN_ID);
   });
 

@@ -1,7 +1,10 @@
 /**
  * Registre des GREFFONS d'intégration (à ne pas confondre avec les plugins Fastify auth.ts/audit.ts
- * de ce dossier). Enregistrement STATIQUE au démarrage : aucun chargement dynamique depuis le
- * disque à ce stade. Un manifeste non conforme au contrat est refusé en bloc, avec son motif.
+ * de ce dossier). Un manifeste non conforme au contrat est refusé en bloc, avec son motif.
+ *
+ * Le registre ne contient QUE les greffons réellement chargés : c'est plugins/loader.ts qui décide
+ * lesquels importer (les actifs) et qui les retire d'ici dès qu'ils sont mis en pause. Un greffon
+ * absent de ce registre n'a donc pas seulement disparu de l'écran — son module n'est pas chargé.
  */
 
 import { CORE_API_VERSION, publicManifest, validatePlugin } from "@quai/plugin-contract";
@@ -43,6 +46,13 @@ export function registerPlugin(candidate: unknown): Plugin {
 
   registry.set(id, plugin);
   return plugin;
+}
+
+/** Retire un greffon mis en pause. `false` s'il n'était pas enregistré — jamais une exception :
+ * désactiver deux fois de suite n'est pas une erreur. Le module déjà importé reste dans le cache de
+ * modules de Node (on ne peut pas l'en sortir), mais plus rien ne l'appelle. */
+export function unregisterPlugin(id: string): boolean {
+  return registry.delete(id);
 }
 
 export function listPlugins(): Plugin[] {

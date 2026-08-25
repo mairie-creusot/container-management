@@ -8,6 +8,38 @@ export interface PluginPermissions {
   graphNodeKinds?: string[] | undefined;
 }
 
+/** Miroir de PluginActionSpec (packages/plugin-contract/src/manifest.ts) — description d'une action
+ * telle qu'elle traverse le réseau. `input` reste `unknown` : il n'est exploité qu'après conversion
+ * par formSchemaFromManifest, seul juge de ce qui est réellement affichable. */
+export interface PluginActionCondition {
+  field: string;
+  equals?: (string | number | boolean | null)[];
+  notEquals?: (string | number | boolean | null)[];
+  present?: boolean;
+}
+
+export interface PluginActionConfirmation {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  retype?: boolean;
+}
+
+export interface PluginActionTarget {
+  nodeKind: string;
+  field: string;
+  menuLabel?: string;
+  when?: PluginActionCondition[];
+  servedByCore?: string;
+}
+
+export interface PluginActionSpec {
+  input?: unknown;
+  severity?: "safe" | "caution" | "destructive";
+  confirm?: PluginActionConfirmation;
+  target?: PluginActionTarget;
+}
+
 /** Miroir de PluginManifest (packages/plugin-contract) — manifeste public, sans aucune valeur. */
 export interface PluginManifest {
   id: string;
@@ -18,6 +50,8 @@ export interface PluginManifest {
   secretFields: string[];
   permissions: PluginPermissions;
   auditLabels: Record<string, string>;
+  /** Absent pour un greffon qui ne décrit pas ses actions (contrat antérieur à 1.1). */
+  actions?: Record<string, PluginActionSpec>;
 }
 
 export interface PluginSummary {

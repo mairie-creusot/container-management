@@ -14,7 +14,7 @@ import { pathToFileURL } from "node:url";
 import { config } from "./config.js";
 import auditPlugin from "./plugins/audit.js";
 import authPlugin from "./plugins/auth.js";
-import { registerBuiltinPlugins } from "./plugins/builtins.js";
+import { loadActivePlugins } from "./plugins/loader.js";
 import adDnsRoutes from "./routes/adDns.js";
 import auditRoutes from "./routes/audit.js";
 import authRoutes from "./routes/auth.js";
@@ -76,8 +76,19 @@ function buildLoggerOptions(): NonNullable<FastifyServerOptions["logger"]> {
 export function buildServer() {
   const fastify = Fastify({ logger: buildLoggerOptions() });
 
-  // Greffons d'intégration : enregistrement STATIQUE, avant toute route (voir plugins/builtins.ts).
-  registerBuiltinPlugins();
+  // Greffons d'intégration : chargés À LA DEMANDE juste avant que le serveur ne serve, et
+  // UNIQUEMENT ceux qui ne sont pas en pause (voir plugins/loader.ts). Un `onReady` plutôt qu'un
+  // appel ici : l'état d'activation se lit sur le disque, donc de façon asynchrone. Le chargeur ne
+  // lève jamais — un greffon fâché ne doit pas empêcher l'API de démarrer.
+  fastify.addHook("onReady", async () => {
+    const outcome = await loadActivePlugins();
+    for (const failure of outcome.failed) {
+      fastify.log.error(`Greffon "${failure.id}" non chargé : ${failure.reason}`);
+    }
+    if (outcome.paused.length > 0) {
+      fastify.log.info(`Greffons en pause, non chargés : ${outcome.paused.join(", ")}`);
+    }
+  });
 
   const corsOrigins = config.server.corsOrigin.split(",").map((origin) => origin.trim());
   void fastify.register(cors, {

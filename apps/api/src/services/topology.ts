@@ -40,9 +40,14 @@
  * voir serviceModules.ts#resolveAutomaticBindings, qui ne lie rien dans ce cas). La configuration
  * AD/DNS elle-même vit dans les Réglages (web), et son module se rattache maintenant à la VRAIE VM.
  *
- * Nœud "hycu-appliance" (voir getHycuTopologyParts ci-dessous) : le contrôleur de sauvegarde HYCU
- * réel — aucun nœud tant qu'il n'a jamais été configuré, LECTURE SEULE stricte. Seul émetteur
- * d'arêtes `kind: "protects"` allant des VMs Nutanix réellement sauvegardées vers lui.
+ * Nœud "hycu-appliance" (voir plugins/hycu/graph.ts) : le contrôleur de sauvegarde HYCU réel —
+ * aucun nœud tant qu'il n'a jamais été configuré, LECTURE SEULE stricte. Seul émetteur d'arêtes
+ * `kind: "protects"` allant des VMs Nutanix réellement sauvegardées vers lui.
+ *
+ * NUTANIX, HYCU et tout greffon à venir n'entrent PAS ici par leur nom : ils contribuent au graphe
+ * par le contrat (`Plugin#graph()`), et ce fichier agrège leurs contributions sans en connaître une
+ * seule — voir la section « Contributions des GREFFONS au graphe » plus bas. Les deux paragraphes
+ * ci-dessus décrivent donc ce que ces greffons produisent, pas ce que ce fichier calcule.
  *
  * Nœuds "host" (kind "host", champ `hostKind` — voir plugins/nutanix/graph.ts,
  * getRemoteDockerHostNodes/getLxcHostNodes ci-dessous) : une machine/cluster HÔTE réelle, PAS une
@@ -101,8 +106,9 @@ import { getImages } from "./images.js";
 import { listGitOpsFiles } from "./gitops.js";
 import { listAllScans } from "./scan.js";
 import { lastKnownNutanixPoll } from "./nutanix.js";
-import { getNutanixTopologyParts } from "../plugins/nutanix/graph.js";
-import { hycuTopologyParts } from "../plugins/hycu/graph.js";
+import { configStoreOf } from "../plugins/configStore.js";
+import { ensurePluginsLoaded } from "../plugins/loader.js";
+import { listPlugins } from "../plugins/registry.js";
 import { listRoutes } from "./reverseProxy.js";
 import { listGroups } from "./topologyGroupsStore.js";
 import { listRemoteDockerEnvironments } from "./remoteDockerStore.js";
@@ -116,6 +122,7 @@ import { listRuns } from "./iac/runner.js";
 import { listTemplates } from "./templates.js";
 import { listAutomationEdges, listAutomationNodes } from "./automationStore.js";
 import type { AutomationNode } from "./automationStore.js";
+import type { Plugin, PluginGraphContext, PluginGraphContribution, PluginGraphNode } from "@quai/plugin-contract";
 import type {
   AutomationActionConfig,
   AutomationTriggerSource,
@@ -125,6 +132,8 @@ import type {
   Topology,
   TopologyEdge,
   TopologyNode,
+  TopologyNodeAttachment,
+  TopologyNodeKind,
 } from "../types.js";
 
 /**
@@ -222,20 +231,315 @@ function containerMatchesGitOpsFile(containerName: string, filePath: string): bo
   return base === name || base.includes(name) || name.includes(base);
 }
 
-/**
- * Nœuds VM Nutanix + nœuds "host" (cluster physique ET, niveau intermédiaire, hôte physique AHV) +
- * arêtes réelles qui les relient : entièrement portés par le GREFFON Nutanix depuis sa migration
- * (voir plugins/nutanix/graph.ts, qui garde la hiérarchie cluster -> hôte -> VM, les identifiants
- * de nœuds et les règles de rattachement à l'identique).
+/* --- Contributions des GREFFONS au graphe ----------------------------------------------------
+ *
+ * Ce fichier ne connaît plus AUCUNE intégration par son nom : il collecte les contributions de tous
+ * les greffons chargés qui implémentent `Plugin#graph()`, et les projette sur TopologyNode/
+ * TopologyEdge. Ajouter une intégration au graphe n'exige plus une ligne ici.
+ *
+ * En DEUX temps, pour que l'ordre des greffons ne décide de rien :
+ *  1. chaque greffon contribue SES nœuds/arêtes/tiroirs, sans rien savoir des autres ;
+ *  2. une fois la phase 1 terminée, chaque greffon qui a fourni un `link` est rappelé avec le
+ *     graphe COMPLET (PluginGraphContext) et rend ses arêtes vers les nœuds des autres, plus ses
+ *     annotations (c'est ainsi que HYCU relie ses sauvegardes aux VMs Nutanix — la règle de
+ *     rapprochement reste chez HYCU, le socle ne fait aucune jointure à sa place).
+ *
+ * Rien n'est ignoré en silence : tout refus (identifiant manquant, type de nœud que le graphe ne
+ * sait pas rendre, arête vers un nœud absent, contribution qui lève) laisse une trace [greffons].
  */
 
+/** Types de nœuds que le graphe sait rendre — un `kind` hors de cette liste est refusé plutôt que
+ * poussé tel quel vers un frontend qui ne saurait pas le dessiner. */
+const PROJECTABLE_NODE_KINDS = new Set<string>([
+  "container",
+  "volume",
+  "nutanix-vm",
+  "host",
+  "cron-job",
+  "backup",
+  "iac-workspace",
+  "image-template",
+  "gitops-source",
+  "automation-trigger",
+  "automation-condition",
+  "automation-action",
+  "hycu-appliance",
+] satisfies TopologyNodeKind[]);
+
+const PROJECTABLE_EDGE_KINDS = new Set<string>([
+  "mount",
+  "hosts",
+  "automation-flow",
+  "uses-artifact",
+  "protects",
+] satisfies TopologyEdge["kind"][]);
+
+const PROJECTABLE_NODE_STATUSES = new Set<string>(["running", "stopped", "restarting", "neutral"] satisfies TopologyNode["status"][]);
+
+const PROJECTABLE_ATTACHMENT_KINDS = new Set<string>(["volume", "network"] satisfies TopologyNodeAttachment["kind"][]);
+
+/** En-tête d'un nœud : l'identité, jamais modifiable par une charge utile ni par une annotation. */
+const NODE_HEADER_KEYS: ReadonlySet<string> = new Set(["id", "kind", "label", "subtitle", "status"]);
+
+export interface PluginGraphParts {
+  nodes: TopologyNode[];
+  /** Arêtes de la phase 1 : ce que chaque greffon relie CHEZ LUI. */
+  edges: TopologyEdge[];
+  /** Arêtes de la phase 2 : ce qu'un greffon relie chez un AUTRE (HYCU -> VMs Nutanix). */
+  linkEdges: TopologyEdge[];
+  /** Nœuds contribués qui sont des ENVIRONNEMENTS (rattachés au master ET comptés comme tels). */
+  environmentNodeIds: string[];
+  /** Nœuds contribués rattachés au master SANS être des environnements (une appliance n'héberge rien). */
+  integrationNodeIds: string[];
+}
+
+function emptyPluginGraphParts(): PluginGraphParts {
+  return { nodes: [], edges: [], linkEdges: [], environmentNodeIds: [], integrationNodeIds: [] };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function reasonOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function traceIgnored(pluginId: string, what: string, why: string): void {
+  console.warn(`[greffons] contribution au graphe de "${pluginId}" — ${what} ignoré : ${why}`);
+}
+
 /**
- * Nœud "hycu-appliance" + arêtes "protects" VM Nutanix -> HYCU + annotation de protection posée SUR
- * les nœuds VM déjà construits : entièrement porté par le GREFFON HYCU depuis sa migration (voir
- * plugins/hycu/graph.ts, qui garde le mécanisme et les règles de rapprochement à l'identique).
+ * Projection d'un nœud contribué. `fields` est recopié TEL QUEL : c'est la seule façon de porter ce
+ * que le contrat ne sait pas décrire (disques, cartes réseau réelles, placement confirmé…), et
+ * c'est aussi ce qui permet à un greffon dont le vocabulaire est plus fin que celui du graphe de se
+ * projeter — "nutanix-cluster" devient un nœud "host" portant `hostKind`. L'identité (id, label,
+ * subtitle, status), elle, vient toujours du contrat : `fields` ne peut pas la détourner.
  */
-async function getHycuTopologyParts(nutanixVmNodes: TopologyNode[]): Promise<{ nodes: TopologyNode[]; edges: TopologyEdge[] }> {
-  return await hycuTopologyParts(nutanixVmNodes);
+function projectPluginNode(plugin: Plugin, node: unknown, taken: ReadonlyMap<string, TopologyNode>): TopologyNode | null {
+  const pluginId = plugin.manifest.id;
+  if (!isRecord(node)) {
+    traceIgnored(pluginId, "un nœud", "ce n'est pas un objet");
+    return null;
+  }
+  const id = typeof node.id === "string" ? node.id : "";
+  if (id.length === 0) {
+    traceIgnored(pluginId, "un nœud", "il n'a pas d'identifiant");
+    return null;
+  }
+  if (taken.has(id)) {
+    traceIgnored(pluginId, `le nœud "${id}"`, "cet identifiant est déjà porté par un autre nœud du graphe");
+    return null;
+  }
+  const declaredKinds = plugin.manifest.permissions.graphNodeKinds ?? [];
+  if (typeof node.kind !== "string" || !declaredKinds.includes(node.kind)) {
+    traceIgnored(pluginId, `le nœud "${id}"`, `son type ${JSON.stringify(node.kind)} n'est pas déclaré dans permissions.graphNodeKinds`);
+    return null;
+  }
+  if (typeof node.label !== "string" || typeof node.subtitle !== "string") {
+    traceIgnored(pluginId, `le nœud "${id}"`, "label et subtitle doivent être des chaînes");
+    return null;
+  }
+  if (typeof node.status !== "string" || !PROJECTABLE_NODE_STATUSES.has(node.status)) {
+    traceIgnored(pluginId, `le nœud "${id}"`, `son état ${JSON.stringify(node.status)} n'est pas un état de nœud du graphe`);
+    return null;
+  }
+  const fields = isRecord(node.fields) ? node.fields : {};
+  const kind = typeof fields.kind === "string" ? fields.kind : node.kind;
+  if (!PROJECTABLE_NODE_KINDS.has(kind)) {
+    traceIgnored(pluginId, `le nœud "${id}"`, `le graphe ne sait pas rendre un nœud de type ${JSON.stringify(kind)}`);
+    return null;
+  }
+  // Le socle ne réinterprète pas `fields` : il le recopie. D'où la conversion explicite — c'est le
+  // greffon qui répond de la justesse des champs qu'il porte, comme il répond de ses données.
+  return {
+    ...fields,
+    id,
+    kind,
+    label: node.label,
+    subtitle: node.subtitle,
+    status: node.status,
+  } as unknown as TopologyNode;
+}
+
+function projectPluginEdge(pluginId: string, edge: unknown, nodeById: ReadonlyMap<string, TopologyNode>): TopologyEdge | null {
+  if (!isRecord(edge)) {
+    traceIgnored(pluginId, "une arête", "ce n'est pas un objet");
+    return null;
+  }
+  const id = typeof edge.id === "string" ? edge.id : "";
+  if (id.length === 0) {
+    traceIgnored(pluginId, "une arête", "elle n'a pas d'identifiant");
+    return null;
+  }
+  if (typeof edge.kind !== "string" || !PROJECTABLE_EDGE_KINDS.has(edge.kind)) {
+    traceIgnored(pluginId, `l'arête "${id}"`, `le graphe ne sait pas rendre une arête de type ${JSON.stringify(edge.kind)}`);
+    return null;
+  }
+  // Jamais d'arête vers un identifiant supposé : les deux bouts doivent exister RÉELLEMENT parmi
+  // les nœuds contribués (le greffon qui les apporte peut être absent ou en pause).
+  if (typeof edge.source !== "string" || !nodeById.has(edge.source) || typeof edge.target !== "string" || !nodeById.has(edge.target)) {
+    traceIgnored(pluginId, `l'arête "${id}"`, "elle relie un nœud absent du graphe");
+    return null;
+  }
+  return { id, source: edge.source, target: edge.target, kind: edge.kind } as TopologyEdge;
+}
+
+/** Le graphe figé de la phase 1, tel que la phase 2 le voit — identique pour TOUS les greffons,
+ * quel que soit leur ordre. */
+function buildGraphContext(nodes: readonly PluginGraphNode[]): PluginGraphContext {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const byKind = new Map<string, PluginGraphNode[]>();
+  for (const node of nodes) {
+    const list = byKind.get(node.kind) ?? [];
+    list.push(node);
+    byKind.set(node.kind, list);
+  }
+  return {
+    nodes,
+    nodesOfKind: (kind: string) => byKind.get(kind) ?? [],
+    node: (id: string) => byId.get(id),
+  };
+}
+
+/** Contribution d'un greffon, ou `null` si elle est inutilisable — avec sa trace, jamais un silence. */
+async function pluginContribution(plugin: Plugin): Promise<PluginGraphContribution | null> {
+  const pluginId = plugin.manifest.id;
+  const graph = plugin.graph;
+  if (typeof graph !== "function") return null;
+  try {
+    // Le greffon reçoit SA configuration, comme le veut le contrat. Séquentiel volontairement :
+    // `load()` peut REPRENDRE un champ typé hérité, donc écrire (voir routes/plugins.ts).
+    const config = await configStoreOf(plugin).load();
+    const contribution: unknown = await graph.call(plugin, config);
+    if (!isRecord(contribution) || !Array.isArray(contribution.nodes) || !Array.isArray(contribution.edges)) {
+      traceIgnored(pluginId, "toute la contribution", "elle n'a pas la forme { nodes, edges, attachments }");
+      return null;
+    }
+    return contribution as unknown as PluginGraphContribution;
+  } catch (err) {
+    traceIgnored(pluginId, "toute la contribution", reasonOf(err));
+    return null;
+  }
+}
+
+/**
+ * Nœuds, arêtes, tiroirs et annotations de TOUS les greffons chargés — voir l'en-tête de section.
+ * Exportée pour les tests d'agrégation, qui enregistrent des greffons factices plutôt que de
+ * dépendre d'une intégration réelle.
+ */
+export async function collectPluginGraphParts(): Promise<PluginGraphParts> {
+  // Charge à la volée les greffons actifs : un greffon en pause n'est pas chargé, donc n'est pas
+  // ici, donc ne contribue rien — sans qu'une seule ligne le nomme.
+  await ensurePluginsLoaded();
+
+  const collected: { plugin: Plugin; contribution: PluginGraphContribution }[] = [];
+  for (const plugin of listPlugins()) {
+    const contribution = await pluginContribution(plugin);
+    if (contribution) collected.push({ plugin, contribution });
+  }
+
+  const parts = emptyPluginGraphParts();
+  const nodeById = new Map<string, TopologyNode>();
+  const contractNodes: PluginGraphNode[] = [];
+
+  // --- Phase 1 : les nœuds de chacun.
+  for (const { plugin, contribution } of collected) {
+    for (const node of contribution.nodes) {
+      const projected = projectPluginNode(plugin, node, nodeById);
+      if (!projected) continue;
+      parts.nodes.push(projected);
+      nodeById.set(projected.id, projected);
+      contractNodes.push(node);
+      if (node.rootAttachment === "environment") parts.environmentNodeIds.push(projected.id);
+      else if (node.rootAttachment === "integration") parts.integrationNodeIds.push(projected.id);
+    }
+  }
+
+  // --- Tiroirs : la charge utile verbatim (`fields.attachments`) prime, car elle seule porte VLAN,
+  // IP réelle et uuid de subnet ; `contribution.attachments` (vue portable du contrat) ne sert que
+  // pour les nœuds qui n'en ont pas.
+  const nodesWithVerbatimAttachments = new Set([...nodeById.values()].filter((n) => n.attachments !== undefined).map((n) => n.id));
+  const portableAttachments = new Map<string, TopologyNodeAttachment[]>();
+  for (const { plugin, contribution } of collected) {
+    const pluginId = plugin.manifest.id;
+    for (const attachment of Array.isArray(contribution.attachments) ? contribution.attachments : []) {
+      if (!isRecord(attachment)) continue;
+      const nodeId = typeof attachment.nodeId === "string" ? attachment.nodeId : "";
+      if (!nodeById.has(nodeId)) {
+        traceIgnored(pluginId, "un tiroir", `il vise le nœud ${JSON.stringify(attachment.nodeId)}, absent du graphe`);
+        continue;
+      }
+      if (nodesWithVerbatimAttachments.has(nodeId)) continue;
+      if (typeof attachment.kind !== "string" || !PROJECTABLE_ATTACHMENT_KINDS.has(attachment.kind)) {
+        traceIgnored(pluginId, "un tiroir", `le graphe ne sait pas rendre un tiroir de type ${JSON.stringify(attachment.kind)}`);
+        continue;
+      }
+      if (typeof attachment.id !== "string" || typeof attachment.label !== "string" || typeof attachment.subtitle !== "string") {
+        traceIgnored(pluginId, "un tiroir", "id, label et subtitle doivent être des chaînes");
+        continue;
+      }
+      const list = portableAttachments.get(nodeId) ?? [];
+      list.push({ kind: attachment.kind, id: attachment.id, label: attachment.label, subtitle: attachment.subtitle } as TopologyNodeAttachment);
+      portableAttachments.set(nodeId, list);
+    }
+  }
+  for (const [nodeId, list] of portableAttachments) {
+    const node = nodeById.get(nodeId);
+    if (node) node.attachments = list;
+  }
+
+  // --- Arêtes de la phase 1.
+  for (const { plugin, contribution } of collected) {
+    for (const edge of contribution.edges) {
+      const projected = projectPluginEdge(plugin.manifest.id, edge, nodeById);
+      if (projected) parts.edges.push(projected);
+    }
+  }
+
+  // --- Phase 2 : chacun relie/annote les nœuds des autres, à partir du MÊME graphe figé.
+  const context = buildGraphContext(contractNodes);
+  for (const { plugin, contribution } of collected) {
+    const link = contribution.link;
+    if (typeof link !== "function") continue;
+    const pluginId = plugin.manifest.id;
+    let links: unknown;
+    try {
+      links = await link.call(contribution, context);
+    } catch (err) {
+      traceIgnored(pluginId, "ses liens vers les autres greffons", reasonOf(err));
+      continue;
+    }
+    if (!isRecord(links)) {
+      traceIgnored(pluginId, "ses liens vers les autres greffons", "ils n'ont pas la forme { edges, annotations }");
+      continue;
+    }
+    for (const edge of Array.isArray(links.edges) ? links.edges : []) {
+      const projected = projectPluginEdge(pluginId, edge, nodeById);
+      if (projected) parts.linkEdges.push(projected);
+    }
+    for (const annotation of Array.isArray(links.annotations) ? links.annotations : []) {
+      if (!isRecord(annotation) || !isRecord(annotation.fields)) {
+        traceIgnored(pluginId, "une annotation", "elle n'a pas la forme { nodeId, fields }");
+        continue;
+      }
+      const target = typeof annotation.nodeId === "string" ? nodeById.get(annotation.nodeId) : undefined;
+      if (!target) {
+        traceIgnored(pluginId, "une annotation", `elle vise le nœud ${JSON.stringify(annotation.nodeId)}, absent du graphe`);
+        continue;
+      }
+      for (const [key, value] of Object.entries(annotation.fields)) {
+        // Une annotation ENRICHIT une carte : elle ne la renomme pas et ne la requalifie pas.
+        if (NODE_HEADER_KEYS.has(key)) {
+          traceIgnored(pluginId, `l'annotation "${key}" sur ${target.id}`, "l'identité d'un nœud n'appartient qu'au greffon qui l'a contribué");
+          continue;
+        }
+        (target as unknown as Record<string, unknown>)[key] = value;
+      }
+    }
+  }
+
+  return parts;
 }
 
 /**
@@ -628,17 +932,15 @@ function publishedHttpPorts(ports: { PublicPort?: number; Type?: string }[] | un
 export async function getTopology(scope: TopologyScope = "full"): Promise<Topology> {
   const docker = await getClient();
   const external = scope === "full";
-  const { vmNodes: nutanixVmNodes, hostNodes: nutanixHostNodes, hostEdges: nutanixHostEdges } = external
-    ? await getNutanixTopologyParts()
-    : { vmNodes: [], hostNodes: [], hostEdges: [] };
+  // Contributions des GREFFONS chargés (voir collectPluginGraphParts ci-dessus) : sources EXTERNES
+  // lentes — appels HTTPS réels vers Prism Central, l'appliance HYCU… — jamais dans le premier
+  // rendu `?scope=local`.
+  const pluginParts = external ? await collectPluginGraphParts() : emptyPluginGraphParts();
   // Nœuds "host" Docker distant/LXD : indépendants eux aussi de la joignabilité du démon LOCAL
   // (ce sont d'autres hôtes) — récupérés que Docker local soit joignable ou non, même principe que
-  // Nutanix ci-dessus.
+  // les greffons ci-dessus.
   const remoteDockerHostNodes = external ? await getRemoteDockerHostNodes() : [];
   const lxcHostNodes = external ? await getLxcHostNodes() : [];
-  // Appliance HYCU : source EXTERNE lente au même titre que Nutanix (appels HTTPS réels) — jamais
-  // dans le premier rendu `?scope=local`, et annotée APRÈS les VMs Nutanix dont elle dépend.
-  const hycuParts = external ? await getHycuTopologyParts(nutanixVmNodes) : { nodes: [], edges: [] };
   const localDockerNode = await getLocalDockerEnvNode();
   // Racine MASTER "QUAI" : chaque ENVIRONNEMENT (Docker local/distant, cluster Nutanix, LXD) s'y
   // rattache par une arête "hosts" — jamais les nœuds hors-infra (cron, backup, iac,
@@ -646,7 +948,9 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
   const environmentNodeIds = [
     localDockerNode.id,
     ...remoteDockerHostNodes.map((n) => n.id),
-    ...nutanixHostNodes.filter((n) => n.hostKind === "nutanix-cluster").map((n) => n.id),
+    // Un cluster Nutanix EST un environnement — c'est le greffon qui le déclare
+    // (PluginGraphNode#rootAttachment), ce fichier n'a plus à connaître son type de nœud.
+    ...pluginParts.environmentNodeIds,
     ...lxcHostNodes.map((n) => n.id),
   ];
   const masterNode: TopologyNode = {
@@ -657,9 +961,10 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
     subtitle: `${environmentNodeIds.length} environnement${environmentNodeIds.length > 1 ? "s" : ""}`,
     status: "running",
   };
-  // L'appliance HYCU se rattache elle aussi au master (intégration à part entière) mais ne compte
-  // PAS comme un environnement dans le sous-titre ci-dessus : elle n'héberge rien.
-  const masterEdges: TopologyEdge[] = [...environmentNodeIds, ...hycuParts.nodes.map((n) => n.id)].map((id) => ({
+  // Une appliance (HYCU aujourd'hui) se rattache elle aussi au master — intégration à part entière
+  // — mais ne compte PAS comme un environnement dans le sous-titre ci-dessus : elle n'héberge rien.
+  // Là encore, c'est le greffon qui le déclare (rootAttachment "integration").
+  const masterEdges: TopologyEdge[] = [...environmentNodeIds, ...pluginParts.integrationNodeIds].map((id) => ({
     id: `hosts:quai-master:${id}`,
     source: QUAI_MASTER_NODE_ID,
     target: id,
@@ -693,8 +998,7 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
   const staticNodes: TopologyNode[] = [
     masterNode,
     localDockerNode,
-    ...nutanixVmNodes,
-    ...nutanixHostNodes,
+    ...pluginParts.nodes,
     ...remoteDockerHostNodes,
     ...lxcHostNodes,
     ...cronJobNodes,
@@ -703,19 +1007,18 @@ export async function getTopology(scope: TopologyScope = "full"): Promise<Topolo
     ...imageTemplateParts.nodes,
     ...gitopsSourceNodes,
     ...automationParts.nodes,
-    ...hycuParts.nodes,
   ];
   const staticEdges: TopologyEdge[] = [
     ...masterEdges,
-    ...nutanixHostEdges,
+    ...pluginParts.edges,
     ...automationParts.edges,
     ...imageTemplateParts.edges,
-    ...hycuParts.edges,
+    ...pluginParts.linkEdges,
   ];
   // Dernier essai RÉEL de rafraîchissement Nutanix (voir services/nutanix.ts#lastKnownNutanixPoll,
-  // mis à jour PAR getNutanixTopologyParts ci-dessus via getNutanixVms) — lu APRÈS, jamais avant,
-  // l'appel qui vient de le produire. `undefined` (jamais un objet vide fabriqué) tant que Nutanix
-  // n'a jamais été configuré ou jamais encore pollé depuis le démarrage du process.
+  // mis à jour par la contribution du greffon Nutanix ci-dessus, via getNutanixVms) — lu APRÈS,
+  // jamais avant, l'appel qui vient de le produire. `undefined` (jamais un objet vide fabriqué)
+  // tant que Nutanix n'a jamais été configuré ou jamais encore pollé depuis le démarrage.
   const nutanixLastPoll = lastKnownNutanixPoll() ?? undefined;
   const empty: Topology = {
     nodes: staticNodes,

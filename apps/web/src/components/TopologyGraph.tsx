@@ -143,6 +143,19 @@ import {
   type GroupNodeData,
   type PortSpec,
 } from "@/components/topologyGraphShared";
+// Actions DÉCLARÉES par les greffons (PluginManifest#actions, contrat 1.1) : le menu contextuel
+// d'un nœud les propose en plus de celles du cœur, et POST /api/plugins/:id/actions/:actionId les
+// exécute. Le formulaire d'une action à paramètres est DÉDUIT de son schéma, comme celui d'une
+// configuration de greffon.
+import SchemaForm from "@/components/SchemaForm";
+import TypeToConfirmDialog from "@/components/TypeToConfirmDialog";
+import {
+  pluginActionConfirmMessage,
+  pluginActionForm,
+  pluginActionsForNode,
+  runPluginAction,
+  type ResolvedPluginAction,
+} from "@/features/plugins/pluginActions";
 import type {
   AutomationActionConfig,
   AutomationTriggerSource,
@@ -2521,6 +2534,56 @@ function NutanixComputePopover({ vmNode, x, y, onClose }: NutanixVmPopoverProps)
   );
 }
 
+// --- Action DÉCLARÉE par un greffon (contrat 1.1) -----------------------------------------------
+// Le greffon décrit son entrée avec le même sous-ensemble de schéma que sa configuration : le
+// formulaire en est DÉDUIT (SchemaForm + formSchemaFromManifest), aucun écran écrit à la main par
+// intégration. La confirmation, si le manifeste en exige une, est demandée par l'appelant APRÈS la
+// saisie (`onSubmit` ci-dessous) — jamais un appel réel sur le seul clic de soumission.
+
+interface PluginActionPopoverProps {
+  action: ResolvedPluginAction;
+  nodeLabel: string;
+  x: number;
+  y: number;
+  busy: boolean;
+  onSubmit: (values: Record<string, unknown>) => void;
+  onClose: () => void;
+}
+
+function PluginActionPopover({ action, nodeLabel, x, y, busy, onSubmit, onClose }: PluginActionPopoverProps) {
+  const { ref, style } = useDismiss(onClose, x, y);
+  const form = useMemo(() => pluginActionForm(action), [action]);
+
+  return (
+    <div className="graph-popover" style={style} ref={ref}>
+      <div className="graph-popover__title">{`${action.label} — « ${nodeLabel} »`}</div>
+      {form && !form.ok && (
+        // Schéma non convertible : on le DIT, avec ses motifs, plutôt que d'afficher un formulaire
+        // tronqué qui enverrait une entrée incomplète à une action mutante.
+        <div className="error-banner" role="alert">
+          <p>{`Le greffon « ${action.pluginName} » décrit une entrée que ce formulaire ne sait pas rendre :`}</p>
+          <ul>
+            {form.problems.map((problem, index) => (
+              <li key={`${index}-${problem}`}>{problem}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {form !== null && form.ok && (
+        <SchemaForm
+          schema={form.schema}
+          idPrefix={`graph-plugin-action-${action.pluginId}-${action.actionId}`}
+          submitLabel={action.confirm ? "Continuer…" : action.label}
+          submittingLabel="…"
+          submitting={busy}
+          onCancel={onClose}
+          onSubmit={(values) => onSubmit(values as Record<string, unknown>)}
+        />
+      )}
+    </div>
+  );
+}
+
 interface TopologyGraphProps {
   height?: number;
   onSelectNode?: (node: TopologyNode | null) => void;
@@ -2645,6 +2708,22 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   const [nutanixDiskPopover, setNutanixDiskPopover] = useState<{ node: TopologyNode; x: number; y: number } | null>(null);
   const [nutanixNicPopover, setNutanixNicPopover] = useState<{ node: TopologyNode; x: number; y: number } | null>(null);
   const [nutanixComputePopover, setNutanixComputePopover] = useState<{ node: TopologyNode; x: number; y: number } | null>(null);
+  // Action déclarée par un greffon : formulaire déduit de son schéma (popover), confirmation FORTE
+  // (retaper le nom de la cible) quand le manifeste l'exige, et verrou "en cours" le temps de
+  // l'appel — voir features/plugins/pluginActions.ts.
+  const [pluginActionPopover, setPluginActionPopover] = useState<{
+    action: ResolvedPluginAction;
+    node: TopologyNode;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [pluginRetypeConfirm, setPluginRetypeConfirm] = useState<{
+    action: ResolvedPluginAction;
+    node: TopologyNode;
+    input: Record<string, unknown>;
+  } | null>(null);
+  const [pluginActionBusy, setPluginActionBusy] = useState(false);
+  const pluginSummaries = useAppSelector((s) => s.plugins.items);
   // Fabrique de templates : popover "Voir les builds" + modale "Déployer en VM" d'un nœud template.
   const [templateBuildsPopover, setTemplateBuildsPopover] = useState<{
     templateId: string;
@@ -3486,6 +3565,56 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     if (runNutanixVmAction.fulfilled.match(result)) dispatch(fetchTopology());
   }
 
+  /**
+   * Exécution RÉELLE d'une action de greffon (POST /api/plugins/:id/actions/:actionId) — appelée
+   * uniquement une fois la confirmation obtenue, jamais au clic sur l'entrée de menu. La cible est
+   * l'identifiant NU du nœud (uuid de VM…), le préfixe de kind ne quitte jamais l'interface.
+   */
+  async function executePluginAction(action: ResolvedPluginAction, node: TopologyNode, input: Record<string, unknown>) {
+    setPluginActionBusy(true);
+    const outcome = await runPluginAction({
+      pluginId: action.pluginId,
+      actionId: action.actionId,
+      nodeId: idWithoutPrefix(node.id),
+      input,
+    });
+    setPluginActionBusy(false);
+    if (!outcome.ok) {
+      dispatch(pushNotification({ level: "error", message: outcome.message }));
+      return;
+    }
+    setPluginActionPopover(null);
+    dispatch(pushNotification({ level: "success", message: `${action.label} — « ${node.label} »` }));
+    // L'état réel (alimentation, placement, matériel) est recalculé côté serveur au prochain poll.
+    dispatch(fetchTopology());
+  }
+
+  /**
+   * Confirmation d'abord, telle que le manifeste la déclare : forte (retaper le nom de la cible),
+   * simple, ou aucune — puis l'exécution. Filet de sécurité : une action déclarée DESTRUCTRICE sans
+   * texte de confirmation en obtient quand même une (générique, sans rien inventer sur ce qu'elle
+   * fait) — un greffon ne peut pas supprimer sans qu'on ait dit oui.
+   */
+  async function requestPluginAction(action: ResolvedPluginAction, node: TopologyNode, input: Record<string, unknown>) {
+    const spec = action.confirm;
+    if (spec?.retype) {
+      setPluginRetypeConfirm({ action, node, input });
+      return;
+    }
+    if (spec || action.severity === "destructive") {
+      const ok = await confirm({
+        title: spec?.title ?? action.label,
+        description: spec
+          ? pluginActionConfirmMessage(spec.message, node.label)
+          : `Confirmer « ${action.label} » sur "${node.label}" ? Cette action est déclarée destructrice par le greffon « ${action.pluginName} » et s'exécute réellement.`,
+        confirmLabel: spec?.confirmLabel ?? action.label,
+        variant: action.severity === "safe" ? "default" : "danger",
+      });
+      if (!ok) return;
+    }
+    await executePluginAction(action, node, input);
+  }
+
   async function handleRemoveVolume(name: string) {
     const ok = await confirm({
       title: "Supprimer le volume",
@@ -3883,6 +4012,25 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
         : {}),
     };
     items.push(...buildNodeMenuItems(node, allowedHandlers));
+
+    // Actions DÉCLARÉES par les greffons, à la suite de celles du cœur. Réservées aux admins :
+    // c'est la seule autorisation qu'accepte le canal d'exécution (POST /api/plugins/:id/actions/
+    // :actionId), autant ne pas proposer une entrée qui répondrait 403. Une action déjà servie par
+    // le cœur (`target.servedByCore`) n'y figure pas — voir pluginActionsForNode : les entrées
+    // Nutanix du menu restent EXACTEMENT celles d'avant.
+    if (admin) {
+      for (const action of pluginActionsForNode(pluginSummaries, node)) {
+        items.push({
+          label: action.label,
+          ...(action.severity === "destructive" ? { danger: true } : {}),
+          onClick: () => {
+            // Action à paramètres : le formulaire déduit de son schéma s'ouvre d'abord.
+            if (action.input !== undefined) setPluginActionPopover({ action, node, x, y });
+            else void requestPluginAction(action, node, {});
+          },
+        });
+      }
+    }
     return items;
   }
 
@@ -4335,6 +4483,41 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           onClose={() => setAttachEnvPopover(null)}
         />
       )}
+
+      {/* Action de greffon à paramètres : formulaire DÉDUIT du schéma déclaré, puis confirmation
+          si le manifeste en exige une (jamais d'appel réel sur le seul clic de soumission). */}
+      {pluginActionPopover && (
+        <PluginActionPopover
+          action={pluginActionPopover.action}
+          nodeLabel={pluginActionPopover.node.label}
+          x={pluginActionPopover.x}
+          y={pluginActionPopover.y}
+          busy={pluginActionBusy}
+          onSubmit={(values) => void requestPluginAction(pluginActionPopover.action, pluginActionPopover.node, values)}
+          onClose={() => setPluginActionPopover(null)}
+        />
+      )}
+
+      {/* Confirmation FORTE exigée par le manifeste (`confirm.retype`) : le nom exact de la cible
+          doit être retapé — même dialogue que la suppression d'une VM Nutanix. */}
+      <TypeToConfirmDialog
+        open={pluginRetypeConfirm !== null}
+        title={pluginRetypeConfirm?.action.confirm?.title ?? ""}
+        description={
+          pluginRetypeConfirm
+            ? pluginActionConfirmMessage(pluginRetypeConfirm.action.confirm?.message ?? "", pluginRetypeConfirm.node.label)
+            : undefined
+        }
+        expectedValue={pluginRetypeConfirm?.node.label ?? ""}
+        confirmLabel={pluginRetypeConfirm?.action.confirm?.confirmLabel ?? "Confirmer"}
+        onConfirm={() => {
+          const pending = pluginRetypeConfirm;
+          setPluginRetypeConfirm(null);
+          if (pending) void executePluginAction(pending.action, pending.node, pending.input);
+        }}
+        onCancel={() => setPluginRetypeConfirm(null)}
+      />
+
 
       {remoteEnvModalOpen && <RemoteEnvironmentCreateModal open onClose={() => setRemoteEnvModalOpen(false)} />}
 

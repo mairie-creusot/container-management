@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeAction, directoryDisplayNames } from "@/features/audit/auditMessage";
+import { describeAction, directoryDisplayNames, pluginAuditLabels } from "@/features/audit/auditMessage";
 import type { AuditEvent } from "@/types";
 
 function event(method: string, path: string, extra: Partial<AuditEvent> = {}): AuditEvent {
@@ -85,6 +85,11 @@ const MUTATING_ROUTES: [string, string][] = [
   ["POST", "/api/nutanix/vms/uuid-1/disks"],
   ["POST", "/api/nutanix/vms/uuid-1/nics"],
   ["DELETE", "/api/nutanix/vms/uuid-1"],
+  ["PUT", "/api/plugins/nutanix/config"],
+  ["POST", "/api/plugins/nutanix/config/test"],
+  ["DELETE", "/api/plugins/nutanix/config"],
+  ["PUT", "/api/plugins/nutanix/enabled"],
+  ["POST", "/api/plugins/nutanix/actions/vm.start"],
   ["PUT", "/api/lxc/config"],
   ["DELETE", "/api/lxc/config"],
   ["POST", "/api/remote-environments"],
@@ -144,6 +149,40 @@ describe("journal de traçabilité : phrases lisibles", () => {
       "a effectué une action sur les certificats",
     );
     expect(describeAction(event("POST", "/api/inconnu-total"))).toBe("a effectué une action d'administration");
+  });
+
+  /** Canal d'exécution générique des greffons : le chemin ne porte QUE l'identifiant de l'action,
+   * c'est le libellé du manifeste (GET /api/plugins) qui le rend lisible. */
+  it("nomme une action de greffon par le libellé de son manifeste", () => {
+    const labels = pluginAuditLabels([
+      {
+        manifest: {
+          id: "nutanix",
+          name: "Virtualisation Nutanix",
+          auditLabels: { "vm.start": "Démarrer une VM Nutanix", "vm.delete": "Supprimer définitivement une VM Nutanix" },
+        },
+      },
+    ]);
+
+    expect(describeAction(event("POST", "/api/plugins/nutanix/actions/vm.start"), labels)).toBe(
+      "a exécuté « Démarrer une VM Nutanix »",
+    );
+    expect(describeAction(event("POST", "/api/plugins/nutanix/actions/vm.delete"), labels)).toBe(
+      "a exécuté « Supprimer définitivement une VM Nutanix »",
+    );
+    expect(describeAction(event("PUT", "/api/plugins/nutanix/enabled"), labels)).toBe(
+      "a activé ou désactivé le greffon « Virtualisation Nutanix »",
+    );
+  });
+
+  it("reste lisible sans libellé connu : l'identifiant réel, jamais un libellé inventé", () => {
+    const message = describeAction(event("POST", "/api/plugins/nutanix/actions/vm.start"));
+    expect(message).toBe("a exécuté l'action « vm.start » du greffon « nutanix »");
+
+    const labels = pluginAuditLabels([{ manifest: { id: "nutanix", name: "Virtualisation Nutanix", auditLabels: {} } }]);
+    expect(describeAction(event("POST", "/api/plugins/nutanix/actions/vm.inconnue"), labels)).toBe(
+      "a exécuté l'action « vm.inconnue » du greffon « Virtualisation Nutanix »",
+    );
   });
 
   it("distingue une connexion réussie d'un échec", () => {

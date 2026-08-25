@@ -5,7 +5,7 @@ import { usePagination } from "@/hooks/usePagination";
 import Pagination from "@/components/Pagination";
 import { SkeletonTable } from "@/components/Skeleton";
 import type { AuditEvent } from "@/types";
-import { describeAction, directoryDisplayNames } from "@/features/audit/auditMessage";
+import { describeAction, directoryDisplayNames, pluginAuditLabels } from "@/features/audit/auditMessage";
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString("fr-FR", {
@@ -23,6 +23,10 @@ export default function AuditPage() {
   const { items, status, error } = useAppSelector((s) => s.audit);
   const { page, totalPages, pageItems, setPage, pageSize, setPageSize } = usePagination(items, 25);
   const displayNames = useMemo(() => directoryDisplayNames(items), [items]);
+  // Libellés des actions de greffons (GET /api/plugins, chargé une fois au démarrage par App.tsx) :
+  // sans eux, une ligne du canal générique n'afficherait que l'identifiant brut de l'action.
+  const plugins = useAppSelector((s) => s.plugins.items);
+  const actionLabels = useMemo(() => pluginAuditLabels(plugins), [plugins]);
 
   useEffect(() => {
     dispatch(fetchAuditLog());
@@ -62,7 +66,7 @@ export default function AuditPage() {
                   <tr key={event.id}>
                     <td className="cell-mono">{formatDate(event.timestamp)}</td>
                     <td className="cell-primary">{displayNames.get(event.actor) ?? event.actorDisplayName}</td>
-                    <td>{describeAction(event)}</td>
+                    <td>{describeAction(event, actionLabels)}</td>
                     <td>
                       <span className={`chip ${event.ok ? "chip--accent" : "chip--danger"}`}>
                         {event.ok ? "OK" : `Échec (${event.statusCode})`}

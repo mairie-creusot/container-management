@@ -52,10 +52,13 @@ describe("Greffon 3CX — manifeste", () => {
     expect(() => registerPlugin(threecxPlugin)).not.toThrow();
   });
 
-  it("est réellement branché dans les greffons du socle", () => {
+  it("est réellement branché dans les greffons du socle", async () => {
     // D'autres intégrations ont été migrées depuis : la liste reste EXACTE, jamais un « contient 3cx ».
-    expect(BUILTIN_PLUGINS.map((plugin) => plugin.manifest.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
+    // Le catalogue ne porte que des identifiants : le module d'un greffon n'est importé que s'il est
+    // actif (voir plugins/builtins.ts et plugins/loader.ts).
+    expect(BUILTIN_PLUGINS.map((entry) => entry.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
     app = buildServer();
+    await app.ready();
     expect(listPlugins().map((plugin) => plugin.manifest.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
   });
 

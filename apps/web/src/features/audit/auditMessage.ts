@@ -45,6 +45,7 @@ const RESOURCE_LABELS: Record<string, string> = {
   notifications: "les notifications",
   nutanix: "Nutanix",
   packages: "les paquets",
+  plugins: "les greffons",
   registries: "les registries",
   "remote-environments": "les environnements Docker distants",
   "reverse-proxy": "la publication",
@@ -57,14 +58,39 @@ const RESOURCE_LABELS: Record<string, string> = {
   volumes: "les volumes",
 };
 
+/** Ce qu'il faut d'un manifeste de greffon pour nommer ses actions dans le journal. */
+export interface PluginAuditLabels {
+  /** Nom lisible du greffon ("Virtualisation Nutanix"). */
+  name: string;
+  /** PluginManifest#auditLabels : identifiant d'action -> libellé français. */
+  auditLabels: Record<string, string>;
+}
+
+/** Table id de greffon -> libellés, telle que la construit AuditPage depuis GET /api/plugins. */
+export function pluginAuditLabels(
+  plugins: readonly { manifest: { id: string; name: string; auditLabels?: Record<string, string> } }[],
+): Map<string, PluginAuditLabels> {
+  const byId = new Map<string, PluginAuditLabels>();
+  for (const { manifest } of plugins) {
+    byId.set(manifest.id, { name: manifest.name, auditLabels: manifest.auditLabels ?? {} });
+  }
+  return byId;
+}
+
 /**
  * Traduit une entrée du journal en phrase française. Aucun verbe HTTP ni chemin d'API ne doit
  * jamais apparaître à l'écran : une route non reconnue tombe sur un repli lisible, et le test
  * auditMessage.test.ts vérifie que TOUTES les routes mutantes réelles ont leur phrase.
  * Ne touche jamais au corps de la requête (jamais journalisé côté API — ces routes transportent
  * des identifiants et des mots de passe, voir services/auditLog.ts).
+ *
+ * `plugins` : libellés des manifestes RÉELLEMENT chargés (GET /api/plugins). Le canal d'exécution
+ * générique (POST /api/plugins/:id/actions/:actionId) n'a que son chemin dans le journal — c'est
+ * `auditLabels` du manifeste qui le nomme. Table absente (liste pas encore chargée, greffon retiré
+ * depuis) : la phrase reste lisible, avec l'identifiant brut de l'action plutôt qu'un libellé
+ * inventé.
  */
-export function describeAction(event: AuditEvent): string {
+export function describeAction(event: AuditEvent, plugins?: ReadonlyMap<string, PluginAuditLabels>): string {
   const { method, path } = event;
   const segments = path.split("/").filter(Boolean); // ["api", "containers", ":id", "start"]
   const [, resource, idOrAction, subAction, subId] = segments;
@@ -175,6 +201,21 @@ export function describeAction(event: AuditEvent): string {
       if (method === "POST" && !subAction) return "a créé une VM Nutanix";
       if (method === "DELETE") return `a supprimé la VM Nutanix ${shortId(subAction)}`;
     }
+  }
+  if (resource === "plugins" && idOrAction) {
+    const plugin = plugins?.get(idOrAction);
+    const pluginName = plugin?.name ?? idOrAction;
+    if (subAction === "actions" && subId) {
+      const actionId = decodeURIComponent(subId);
+      const label = plugin?.auditLabels[actionId];
+      // Le libellé du manifeste se suffit à lui-même ("Démarrer une VM Nutanix") — le greffon n'est
+      // rappelé que lorsqu'aucun libellé n'est connu, pour que la ligne reste identifiable.
+      return label ? `a exécuté « ${label} »` : `a exécuté l'action « ${actionId} » du greffon « ${pluginName} »`;
+    }
+    if (subAction === "config" && subId === "test") return `a testé la connexion du greffon « ${pluginName} »`;
+    if (subAction === "config" && method === "PUT") return `a configuré le greffon « ${pluginName} »`;
+    if (subAction === "config" && method === "DELETE") return `a retiré la configuration du greffon « ${pluginName} »`;
+    if (subAction === "enabled") return `a activé ou désactivé le greffon « ${pluginName} »`;
   }
   if (resource === "lxc") {
     if (idOrAction === "config" && method === "PUT") return "a configuré l'hôte LXD";

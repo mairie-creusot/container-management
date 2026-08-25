@@ -25,7 +25,9 @@ const {
   resetPluginRegistryForTests,
 } = await import("../src/plugins/registry.js");
 const { examplePlugin } = await import("../src/plugins/example/index.js");
-const { CORE_API_VERSION, publicManifest, validateManifest, validatePlugin } = await import("@quai/plugin-contract");
+const { CORE_API_VERSION, publicManifest, validateActionInput, validateManifest, validatePlugin } = await import(
+  "@quai/plugin-contract"
+);
 type PluginValidationIssue = { code: string; field: string; message: string };
 
 afterAll(async () => {
@@ -116,11 +118,14 @@ describe("contrat de manifeste", () => {
     expect(issue.message).toContain(CORE_API_VERSION);
   });
 
+  // Socle en 1.1.0 depuis l'ajout de `actions` au manifeste : une plage figée sur 1.0 exact
+  // (« ~1.0 », « 1.0.0 ») n'est plus satisfaite, alors que « ^1.0 » — la plage de TOUS les greffons
+  // du dépôt — l'est toujours, ce que vérifie la première boucle.
   it("accepte les plages réellement satisfaites par la version du socle", () => {
-    for (const coreApi of ["^1.0", "~1.0", "1.0.0", "1.0"]) {
+    for (const coreApi of ["^1.0", "~1.1", "1.1.0", "1.1"]) {
       expect(validateManifest({ ...validManifest(), coreApi }).ok, coreApi).toBe(true);
     }
-    for (const coreApi of ["^0.9", "~1.1", "2.0.0"]) {
+    for (const coreApi of ["^0.9", "~1.0", "1.0.0", "2.0.0"]) {
       expect(validateManifest({ ...validManifest(), coreApi }).ok, coreApi).toBe(false);
     }
   });
@@ -401,11 +406,228 @@ describe("contrat de greffon", () => {
     plugin.graph = async () => ({ nodes: [], edges: [], attachments: [] });
     expect(issueWithCode(validatePlugin(plugin), "graph.nodeKinds").message).toContain("graphNodeKinds");
   });
+
+  it("refuse une action DÉCRITE que le greffon n'implémente pas", () => {
+    const plugin = validPlugin();
+    const manifest = validManifest();
+    manifest.permissions = { mutates: true, graphNodeKinds: ["appliance"] };
+    manifest.auditLabels = { restart: "Redémarrage de l'appliance" };
+    manifest.actions = { restart: { severity: "caution" } };
+    plugin.manifest = manifest;
+
+    expect(issueWithCode(validatePlugin(plugin), "actions.notImplemented").message).toContain("restart");
+
+    plugin.actions = { restart: async () => undefined };
+    expect(validatePlugin(plugin).ok).toBe(true);
+  });
+});
+
+/**
+ * DESCRIPTION d'une action (contrat 1.1) : ce que le socle valide À L'ENREGISTREMENT — l'entrée,
+ * le danger, la confirmation et le rattachement au graphe. Un greffon dont la description est
+ * fausse est refusé en bloc, jamais chargé pour se révéler inutilisable au premier clic droit.
+ */
+describe("contrat : description des actions", () => {
+  /** Manifeste MUTANT prêt à recevoir une description d'action. */
+  function mutantManifest(actions: Record<string, unknown>): Record<string, unknown> {
+    return {
+      ...validManifest(),
+      permissions: { network: [], mutates: true, graphNodeKinds: ["appliance-vm"] },
+      auditLabels: { "vm.stop": "Arrêt d'une VM" },
+      actions,
+    };
+  }
+
+  const target = { nodeKind: "appliance-vm", field: "uuid", menuLabel: "Arrêter" };
+
+  it("accepte une description complète et la conserve dans le manifeste validé", () => {
+    const result = validateManifest(
+      mutantManifest({
+        "vm.stop": {
+          severity: "destructive",
+          confirm: { title: "Arrêter la VM", message: `Arrêter "{cible}" ?`, confirmLabel: "Arrêter", retype: true },
+          input: {
+            type: "object",
+            properties: { sizeMib: { type: "number", title: "Taille (Mio)", minimum: 1024, maximum: 2048 } },
+            required: ["sizeMib"],
+          },
+          target: { ...target, when: [{ field: "status", equals: ["running"] }] },
+        },
+      }),
+    );
+
+    expect(result.ok, result.ok ? "" : JSON.stringify(result.issues)).toBe(true);
+    if (!result.ok) return;
+    const spec = result.manifest.actions?.["vm.stop"];
+    expect(spec?.severity).toBe("destructive");
+    expect(spec?.confirm?.retype).toBe(true);
+    expect(spec?.target?.when).toEqual([{ field: "status", equals: ["running"] }]);
+    // Le manifeste PUBLIC la transporte en entier : l'interface en déduit menu et formulaire.
+    expect(publicManifest(result.manifest).actions?.["vm.stop"]?.input).toEqual(spec?.input);
+  });
+
+  it("refuse une description d'action sur un greffon en lecture seule", () => {
+    const manifest = mutantManifest({ "vm.stop": { target } });
+    manifest.permissions = { network: [], mutates: false, graphNodeKinds: ["appliance-vm"] };
+    expect(issueWithCode(validateManifest(manifest), "actions.readOnly").message).toContain("lecture seule");
+  });
+
+  it("refuse un niveau de danger inventé", () => {
+    const issue = issueWithCode(validateManifest(mutantManifest({ "vm.stop": { severity: "apocalyptique", target } })), "actions.severity");
+    expect(issue.message).toContain("apocalyptique");
+  });
+
+  it("refuse une entrée hors du sous-ensemble affichable — le MÊME que configSchema", () => {
+    const nested = mutantManifest({
+      "vm.stop": { target, input: { type: "object", properties: { guest: { type: "object", properties: {} } } } },
+    });
+    expect(issueWithCode(validateManifest(nested), "actionInput.notRenderable").field).toBe(
+      "actions.vm.stop.input.properties.guest",
+    );
+
+    const badLabels = mutantManifest({
+      "vm.stop": { target, input: { type: "object", properties: { mode: { type: "string", enum: ["a", "b"], enumLabels: ["A"] } } } },
+    });
+    expect(issueWithCode(validateManifest(badLabels), "actionInput.enumLabels").message).toContain("1 libellés");
+  });
+
+  it("accepte showIf dans une entrée d'action, avec les mêmes règles que configSchema", () => {
+    const ok = mutantManifest({
+      "vm.stop": {
+        target,
+        input: {
+          type: "object",
+          properties: {
+            mode: { type: "string", enum: ["dur", "gracieux"], enumLabels: ["Dur", "Gracieux"] },
+            delaiSecondes: { type: "number", title: "Délai", showIf: { field: "mode", equals: "gracieux" } },
+          },
+        },
+      },
+    });
+    expect(validateManifest(ok).ok).toBe(true);
+
+    const inconnu = mutantManifest({
+      "vm.stop": {
+        target,
+        input: { type: "object", properties: { delai: { type: "number", showIf: { field: "absent", equals: "x" } } } },
+      },
+    });
+    expect(issueWithCode(validateManifest(inconnu), "actionInput.showIf.unknown").field).toBe(
+      "actions.vm.stop.input.properties.delai.showIf.field",
+    );
+  });
+
+  it("refuse un secret dans l'entrée d'une action : rien ne le chiffre ni ne le caviarde", () => {
+    const manifest = mutantManifest({
+      "vm.stop": { target, input: { type: "object", properties: { motDePasse: { type: "string", format: "password" } } } },
+    });
+    expect(issueWithCode(validateManifest(manifest), "actionInput.secret").message).toContain("secret");
+  });
+
+  it("refuse un rattachement à un type de nœud que le greffon ne contribue pas", () => {
+    const manifest = mutantManifest({ "vm.stop": { target: { ...target, nodeKind: "container" } } });
+    expect(issueWithCode(validateManifest(manifest), "actions.target").message).toContain("graphNodeKinds");
+  });
+
+  it("refuse que la CIBLE soit aussi un champ à saisir", () => {
+    const manifest = mutantManifest({
+      "vm.stop": { target, input: { type: "object", properties: { uuid: { type: "string", title: "UUID" } } } },
+    });
+    expect(issueWithCode(validateManifest(manifest), "actions.target").message).toContain("ne se saisit jamais");
+  });
+
+  it("exige qu'un rattachement dise s'il propose une entrée de menu ou ce qui la sert déjà", () => {
+    const muet = mutantManifest({ "vm.stop": { target: { nodeKind: "appliance-vm", field: "uuid" } } });
+    expect(issueWithCode(validateManifest(muet), "actions.target").message).toContain("servedByCore");
+
+    const double = mutantManifest({ "vm.stop": { target: { ...target, servedByCore: "core-vm-stop" } } });
+    expect(issueWithCode(validateManifest(double), "actions.target").message).toContain("deux fois");
+
+    const servi = mutantManifest({ "vm.stop": { target: { nodeKind: "appliance-vm", field: "uuid", servedByCore: "core-vm-stop" } } });
+    expect(validateManifest(servi).ok).toBe(true);
+  });
+
+  it("refuse une confirmation muette, et une confirmation FORTE sans cible à retaper", () => {
+    const muette = mutantManifest({ "vm.stop": { target, confirm: { title: "", message: "", confirmLabel: "" } } });
+    expect(issueWithCode(validateManifest(muette), "actions.confirm").message).toContain("non vide");
+
+    const sansCible = mutantManifest({
+      "vm.stop": { confirm: { title: "T", message: "M", confirmLabel: "C", retype: true } },
+    });
+    expect(issueWithCode(validateManifest(sansCible), "actions.confirm").message).toContain("retaper");
+  });
+
+  it("refuse une clé inconnue plutôt que de l'ignorer en silence", () => {
+    const manifest = mutantManifest({ "vm.stop": { target, dangereux: true } });
+    expect(issueWithCode(validateManifest(manifest), "actions.unknownKey").field).toBe("actions.vm.stop.dangereux");
+  });
+
+  it("un manifeste sans description d'action reste valide : la description est facultative", () => {
+    const result = validateManifest(validManifest());
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.manifest.actions).toBeUndefined();
+  });
+});
+
+/** Validation de l'ENTRÉE d'une action contre le schéma déclaré — ce que le socle refuse avant
+ * qu'une action MUTANTE ne soit jouée sur une machine réelle. */
+describe("contrat : entrée d'une action", () => {
+  const schema = {
+    type: "object" as const,
+    properties: {
+      mode: { type: "string" as const, enum: ["gracieux", "dur"], default: "gracieux" },
+      delaiSecondes: { type: "number" as const, title: "Délai", minimum: 5, maximum: 600, showIf: { field: "mode", equals: "gracieux" } },
+      force: { type: "boolean" as const, title: "Forcer" },
+    },
+    required: ["mode"],
+  };
+
+  it("retient les valeurs valides et applique les valeurs par défaut déclarées", () => {
+    const result = validateActionInput(schema, { delaiSecondes: 30, force: true });
+    expect(result).toEqual({ ok: true, input: { mode: "gracieux", delaiSecondes: 30, force: true } });
+  });
+
+  it("écarte un champ masqué par sa condition, comme le ferait le formulaire", () => {
+    const result = validateActionInput(schema, { mode: "dur", delaiSecondes: 30 });
+    expect(result).toEqual({ ok: true, input: { mode: "dur" } });
+  });
+
+  it("refuse un champ inconnu, un type faux, une valeur hors bornes et un choix hors énumération", () => {
+    for (const [candidate, expected] of [
+      [{ ailleurs: 1 }, "ailleurs"],
+      [{ delaiSecondes: "trente" }, "Délai"],
+      [{ delaiSecondes: 1 }, "minimum 5"],
+      [{ delaiSecondes: 900 }, "maximum 600"],
+      [{ mode: "brutal" }, "hors des choix"],
+    ] as Array<[Record<string, unknown>, string]>) {
+      const result = validateActionInput(schema, candidate);
+      expect(result.ok, JSON.stringify(candidate)).toBe(false);
+      if (result.ok) continue;
+      expect(result.issues.map((issue) => issue.message).join(" ; "), JSON.stringify(candidate)).toContain(expected);
+    }
+  });
+
+  it("refuse un champ obligatoire laissé vide, jamais complété d'office", () => {
+    const strict = { type: "object" as const, properties: { nom: { type: "string" as const, title: "Nom" } }, required: ["nom"] };
+    for (const candidate of [{}, { nom: "" }, undefined]) {
+      const result = validateActionInput(strict, candidate);
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.issues[0]?.message).toContain("Nom est obligatoire");
+    }
+  });
+
+  it("une action sans entrée déclarée ne retient rien", () => {
+    expect(validateActionInput(undefined, { quoiQueCeSoit: 1 })).toEqual({ ok: true, input: {} });
+    expect(validateActionInput({ type: "object", properties: {} }, {}).ok).toBe(true);
+  });
 });
 
 describe("registre de greffons", () => {
-  it("n'enregistre au démarrage que les greffons réels (le greffon d'exemple n'en est pas un)", () => {
+  it("n'enregistre au démarrage que les greffons réels (le greffon d'exemple n'en est pas un)", async () => {
     app = buildServer();
+    // Le chargement des greffons ACTIFS est asynchrone (onReady, voir plugins/loader.ts) : aucun
+    // module de greffon n'est importé avant que le serveur ne soit prêt.
+    await app.ready();
     // Seules les intégrations RÉELLEMENT migrées (plugins/builtins.ts) sont enregistrées.
     expect(listPlugins().map((plugin) => plugin.manifest.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
     expect(getPlugin("example")).toBeUndefined();

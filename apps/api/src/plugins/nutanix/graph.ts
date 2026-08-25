@@ -249,16 +249,40 @@ function contractDetails(node: TopologyNode): Record<string, string | number> {
   return details;
 }
 
+/** Ce que le nœud porte EN PLUS de son en-tête (id/label/subtitle/status) : tout le reste du
+ * TopologyNode déjà construit, `kind`/`hostKind`/disques/cartes réseau/tiroirs compris. Le socle le
+ * recopie tel quel sur le nœud du graphe (PluginGraphNode#fields) — c'est ce qui rend la projection
+ * SANS PERTE, là où `details` (chaînes et nombres, libellés humains) ne pouvait pas la porter. */
+const NODE_HEADER_KEYS: ReadonlySet<string> = new Set(["id", "label", "subtitle", "status"]);
+
+function contractFields(node: TopologyNode): Record<string, unknown> {
+  const fields: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (!NODE_HEADER_KEYS.has(key)) fields[key] = value;
+  }
+  return fields;
+}
+
 /**
  * La MÊME hiérarchie cluster -> hôte -> VM, exprimée dans le contrat de greffon : mêmes
- * identifiants de nœuds et d'arêtes qu'aujourd'hui, donc la même forme de graphe. Les tiroirs
- * réseau deviennent des `attachments` (le contrat n'y transporte ni IP, ni VLAN, ni uuid de
- * subnet — voir index.ts).
+ * identifiants de nœuds et d'arêtes qu'aujourd'hui, donc la même forme de graphe.
+ *
+ * Deux façons de décrire un même nœud, volontairement :
+ *  - `details` : la vue PORTABLE (libellés humains), lisible par n'importe quel consommateur du
+ *    contrat, incapable de transporter un disque ou une carte réseau ;
+ *  - `fields` : la charge utile recopiée telle quelle par le socle, seule à préserver le couple
+ *    (kind "host", hostKind "nutanix-cluster"/"nutanix-host"), les disques, les VLAN/IP réels.
+ * Même remarque pour les tiroirs : `attachments` en est la vue portable (voir index.ts, manque
+ * n°5), `fields.attachments` la version réelle que l'écran consomme.
+ *
+ * `rootAttachment` (nouveau) répond au manque n°8 : un cluster Nutanix EST un environnement, il se
+ * rattache donc au nœud MASTER — le socle n'a plus à savoir que "nutanix-cluster" en est un.
  */
 export async function nutanixGraphContribution(): Promise<PluginGraphContribution> {
   const { vmNodes, hostNodes, hostEdges } = await getNutanixTopologyParts();
 
-  const nodes: PluginGraphNode[] = [...hostNodes, ...vmNodes].map((node) => {
+  // VMs puis hôtes : le MÊME ordre que celui dans lequel le graphe les listait avant l'agrégation.
+  const nodes: PluginGraphNode[] = [...vmNodes, ...hostNodes].map((node) => {
     const details = contractDetails(node);
     return {
       id: node.id,
@@ -267,6 +291,8 @@ export async function nutanixGraphContribution(): Promise<PluginGraphContributio
       subtitle: node.subtitle,
       status: node.status,
       ...(Object.keys(details).length > 0 ? { details } : {}),
+      ...(node.hostKind === "nutanix-cluster" ? { rootAttachment: "environment" as const } : {}),
+      fields: contractFields(node),
     };
   });
 

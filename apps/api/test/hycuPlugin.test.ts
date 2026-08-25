@@ -115,9 +115,11 @@ describe("Greffon HYCU — manifeste", () => {
     expect(() => registerPlugin(hycuPlugin)).not.toThrow();
   });
 
-  it("est réellement branché dans les greffons du socle", () => {
-    expect(BUILTIN_PLUGINS.map((plugin) => plugin.manifest.id)).toContain(HYCU_PLUGIN_ID);
+  it("est réellement branché dans les greffons du socle", async () => {
+    expect(BUILTIN_PLUGINS.map((entry) => entry.id)).toContain(HYCU_PLUGIN_ID);
     app = buildServer();
+    // Chargement ASYNCHRONE des seuls greffons actifs (onReady, voir plugins/loader.ts).
+    await app.ready();
     expect(listPlugins().map((plugin) => plugin.manifest.id)).toContain(HYCU_PLUGIN_ID);
   });
 

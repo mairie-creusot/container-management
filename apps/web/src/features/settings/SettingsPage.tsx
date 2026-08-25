@@ -1,3 +1,4 @@
+import { useMemo, type ComponentType } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import { canAdminister } from "@/features/auth/authSlice";
 import { openSettingsSection, pageTitle, setCurrentView } from "@/features/ui/uiSlice";
@@ -5,16 +6,16 @@ import { resetSetup } from "@/features/setup/setupSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import { IconInfo, IconSettings } from "@/components/icons";
 import {
-  SETTINGS_SECTIONS,
+  buildSettingsSections,
   settingsSectionMeta,
   type SettingsSectionMeta,
 } from "@/features/settings/settingsSections";
-import NutanixConfigSection from "@/features/clusters/NutanixConfigSection";
+import PluginEnableCard from "@/features/settings/PluginEnableCard";
+import PluginSettingsSection from "@/features/settings/PluginSettingsSection";
 import AdDnsConfigSection, { LdapAccountDiagnosticSection } from "@/features/adDns/AdDnsConfigSection";
 import ThreecxConfigSection from "@/features/threecx/ThreecxConfigSection";
 import GlpiConfigSection from "@/features/glpi/GlpiConfigSection";
 import NotificationChannelsSection from "@/features/notificationChannels/NotificationChannelsSection";
-import HycuConnectionForm from "@/features/hycu/HycuConnectionForm";
 import CertificateAuthorityForm from "@/features/certificates/CertificateAuthorityForm";
 
 /** Assistant de premier lancement (LDAP, Docker/Kubernetes, registries) — la seule configuration
@@ -99,13 +100,33 @@ function PendingSection({ meta }: { meta: SettingsSectionMeta }) {
   );
 }
 
+/**
+ * Greffons dont le formulaire reste écrit à la main : leur manifeste ne porte pas encore tout ce
+ * que l'écran actuel montre (3CX : conditions de licence XAPI ; GLPI : vérification des options de
+ * recherche). L'interrupteur, lui, est le générique — le formulaire seul est propre à l'intégration.
+ */
+const HAND_WRITTEN_PLUGIN_FORMS: Record<string, ComponentType> = {
+  "3cx": ThreecxConfigSection,
+  glpi: GlpiConfigSection,
+};
+
+function PluginSection({ pluginId }: { pluginId: string }) {
+  const HandWritten = HAND_WRITTEN_PLUGIN_FORMS[pluginId];
+  if (!HandWritten) return <PluginSettingsSection pluginId={pluginId} />;
+  return (
+    <>
+      <PluginEnableCard pluginId={pluginId} />
+      <HandWritten />
+    </>
+  );
+}
+
 function SectionBody({ meta }: { meta: SettingsSectionMeta }) {
+  if (meta.pluginId !== undefined) return <PluginSection pluginId={meta.pluginId} />;
   if (meta.pendingOn) return <PendingSection meta={meta} />;
   switch (meta.id) {
     case "setup":
       return <SetupWizardSection />;
-    case "nutanix":
-      return <NutanixConfigSection />;
     case "ad-dns":
       return (
         <>
@@ -113,12 +134,6 @@ function SectionBody({ meta }: { meta: SettingsSectionMeta }) {
           <LdapAccountDiagnosticSection />
         </>
       );
-    case "threecx":
-      return <ThreecxConfigSection />;
-    case "glpi":
-      return <GlpiConfigSection />;
-    case "hycu":
-      return <HycuConnectionForm />;
     case "certificates":
       return <CertificateAuthorityForm />;
     case "notification-channels":
@@ -129,15 +144,16 @@ function SectionBody({ meta }: { meta: SettingsSectionMeta }) {
 }
 
 /**
- * Page Réglages — TOUTES les configurations d'intégration au même endroit, une section par
- * intégration, réservée aux administrateurs. Chaque section monte le composant de configuration
- * réutilisable de l'intégration : les pages métier n'affichent plus leur propre formulaire, elles
- * renvoient ici quand la configuration manque.
+ * Page Réglages — TOUTES les configurations d'intégration au même endroit, réservée aux
+ * administrateurs. Les sections de greffons viennent de GET /api/plugins et leur formulaire est
+ * déduit du manifeste ; les autres montent le composant de configuration du cœur.
  */
 export default function SettingsPage() {
   const dispatch = useAppDispatch();
   const session = useAppSelector((s) => s.auth.session);
   const activeId = useAppSelector((s) => s.ui.settingsSection);
+  const plugins = useAppSelector((s) => s.plugins);
+  const sections = useMemo(() => buildSettingsSections(plugins), [plugins]);
   const admin = canAdminister(session);
 
   if (!admin) {
@@ -154,13 +170,13 @@ export default function SettingsPage() {
     );
   }
 
-  const active = settingsSectionMeta(activeId);
+  const active = settingsSectionMeta(activeId, sections);
 
   return (
     <div className="workspace">
       <div className="page-content settings-layout">
         <nav className="settings-rail" aria-label="Réglages par intégration">
-          {SETTINGS_SECTIONS.map((section) => {
+          {sections.map((section) => {
             const Icon = section.icon;
             return (
               <button

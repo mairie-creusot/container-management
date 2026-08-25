@@ -11,6 +11,12 @@ export { CORE_API_VERSION } from "./manifest.js";
 export type {
   Plugin,
   PluginAction,
+  PluginActionCondition,
+  PluginActionConfirmation,
+  PluginActionSeverity,
+  PluginActionSpec,
+  PluginActionStateValue,
+  PluginActionTarget,
   PluginConfigStore,
   PluginGraphAttachment,
   PluginGraphContribution,
@@ -21,6 +27,11 @@ export type {
   PluginTestResult,
   PublicPluginManifest,
 } from "./manifest.js";
+
+export { validateActionInput } from "./actionInput.js";
+export type { ActionInputIssue, ActionInputResult } from "./actionInput.js";
+
+export type { PluginGraphAnnotation, PluginGraphContext, PluginGraphLinks } from "./graph.js";
 
 export { cloneJson, isPlainObject, resolveSchemaField } from "./jsonSchema.js";
 export type { JSONSchema, JSONSchemaCondition, JSONSchemaType } from "./jsonSchema.js";
