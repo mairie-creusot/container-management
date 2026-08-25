@@ -11,7 +11,7 @@ import {
   fetchHycuVms,
   type HycuTab,
 } from "@/features/hycu/hycuSlice";
-import { fetchExagridConfig, fetchExagridStatus } from "@/features/exagrid/exagridSlice";
+import { fetchExagridConfig, fetchExagridStatus, fetchExagridTraps } from "@/features/exagrid/exagridSlice";
 import { canAdminister } from "@/features/auth/authSlice";
 import DataTable, { type DataTableColumn } from "@/components/DataTable";
 import StatusPill from "@/components/StatusPill";
@@ -37,7 +37,7 @@ import {
   matchExagridTargets,
   type ExagridMatchKind,
 } from "@/features/dataProtection/backupsModel";
-import type { HycuEvent, HycuJob, HycuPolicy, HycuTarget, HycuVm } from "@/types";
+import type { ExagridTrap, HycuEvent, HycuJob, HycuPolicy, HycuTarget, HycuVm } from "@/types";
 
 // Les identifiants d'onglet restent ceux de HycuTab : le menu contextuel du nœud HYCU du graphe
 // demande déjà "jobs" (voir TopologyGraph.tsx) et doit continuer d'ouvrir le bon onglet.
@@ -102,6 +102,7 @@ export default function BackupsPage() {
     configured: exagridConfigured,
     config: exagridConfig,
     configLoad: exagridConfigLoad,
+    traps: exagridTraps,
   } = useAppSelector((s) => s.exagrid);
   const session = useAppSelector((s) => s.auth.session);
   const admin = canAdminister(session);
@@ -112,7 +113,11 @@ export default function BackupsPage() {
   useEffect(() => {
     if (summaryStatus === "idle") dispatch(fetchHycuStatus());
     if (hycuConfigStatus === "idle") dispatch(fetchHycuConfig());
-    if (exagridLoad === "idle") dispatch(fetchExagridStatus());
+    if (exagridLoad === "idle") {
+      dispatch(fetchExagridStatus());
+    dispatch(fetchExagridTraps());
+      dispatch(fetchExagridTraps());
+    }
     if (exagridConfigLoad === "idle") dispatch(fetchExagridConfig());
   }, [dispatch, summaryStatus, hycuConfigStatus, exagridLoad, exagridConfigLoad]);
 
@@ -398,6 +403,28 @@ export default function BackupsPage() {
         searchable: false,
         className: "cell-mono",
         render: (row) => formatDateMs(row.item.endTimeInMillis),
+      },
+    ],
+    [],
+  );
+
+  const trapColumns = useMemo<DataTableColumn<ExagridTrap>[]>(
+    () => [
+      {
+        key: "recu",
+        label: "Reçu le",
+        accessor: (row) => row.receivedAt,
+        render: (row) => new Date(row.receivedAt).toLocaleString("fr-FR"),
+        className: "cell-mono",
+      },
+      { key: "emetteur", label: "Émetteur", accessor: (row) => row.source, className: "cell-mono" },
+      { key: "notification", label: "Notification", accessor: (row) => row.trapOid ?? "", render: (row) => row.trapOid ?? "—" },
+      {
+        key: "detail",
+        label: "Détail",
+        accessor: (row) => row.varbinds.map((v) => `${v.oid} = ${v.value}`).join(" "),
+        render: (row) =>
+          row.varbinds.length === 0 ? "—" : row.varbinds.map((v) => `${v.oid} = ${v.value}`).join(" · "),
       },
     ],
     [],
@@ -701,6 +728,32 @@ export default function BackupsPage() {
               <div className="empty-state">Chargement de l'état de l'appliance…</div>
             )}
             {exagridShowData && exagridStatus && <ExagridReadingsPanel status={exagridStatus} />}
+
+            {/* Alarmes poussées par l'appliance : indépendantes du poll, elles arrivent même quand
+                l'agent SNMP interrogeable est inactif — c'est alors la seule donnée réelle. */}
+            <section className="panel">
+              <header className="panel__header">
+                <h3>Alarmes reçues de l'appliance</h3>
+                <p className="panel__subtitle">
+                  Traps SNMP envoyés par l'ExaGrid (Configuration &gt; SNMP Traps sur l'appliance). Un trap signale un
+                  événement : il ne porte ni occupation, ni taux de déduplication, ni retard de réplication.
+                </p>
+              </header>
+              {exagridTraps.length === 0 ? (
+                <div className="empty-state">
+                  Aucun trap reçu depuis le dernier démarrage de QUAI. L'appliance doit pointer vers cet hôte sur le
+                  port 162.
+                </div>
+              ) : (
+                <DataTable
+                  rows={exagridTraps}
+                  columns={trapColumns}
+                  rowKey={(row) => `${row.receivedAt}-${row.source}-${row.trapOid ?? ""}`}
+                  searchable
+                  searchPlaceholder="Rechercher (emetteur:172.20.0.101, notification:…)"
+                />
+              )}
+            </section>
           </>
         )}
       </div>

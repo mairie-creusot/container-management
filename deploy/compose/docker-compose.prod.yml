@@ -49,6 +49,10 @@ services:
       LDAP_SEARCH_FILTER: ${LDAP_SEARCH_FILTER}
       LDAP_GROUP_ROLE_MAP: ${LDAP_GROUP_ROLE_MAP}
       LDAP_DEFAULT_ROLE: ${LDAP_DEFAULT_ROLE:-viewer}
+    ports:
+      # Traps SNMP poussés par l'appliance ExaGrid vers <hôte>:162. Publié vers un port > 1024 dans
+      # le conteneur : l'API tourne sous l'utilisateur non root "node", incapable de se lier au 162.
+      - "${QUAI_SNMP_TRAP_PORT:-162}:1162/udp"
     volumes:
       # Données persistantes : config.json chiffré, secrets, journal d'audit, catalogue de
       # templates, workspaces Infra-as-code, positions du graphe. Le Dockerfile crée /app/data

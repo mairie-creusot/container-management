@@ -27,6 +27,7 @@ import {
 import type { ExagridConfigStatus, ExagridSnmpVersion } from "../services/exagrid.js";
 import { clearExagridConfig, getEffectiveExagridConfig, setExagridConfig } from "../services/setupStore.js";
 import type { SetupExagridConfig } from "../services/setupStore.js";
+import { listExagridTraps } from "../services/exagridTraps.js";
 
 /** Même garde locale admin que routes/hycu.ts — les identifiants SNMP donnent accès à l'état de
  * toute l'infrastructure de sauvegarde. */
@@ -102,6 +103,12 @@ export default async function exagridRoutes(fastify: FastifyInstance): Promise<v
     const status = await getExagridStatus();
     const lastPoll = lastKnownExagridPoll();
     return reply.send({ ...status, ...(lastPoll ? { lastPoll } : {}) });
+  });
+
+  // Traps réellement reçus de l'appliance (Configuration > SNMP Traps côté ExaGrid). Distinct de
+  // /status, qui vient du poll : un trap est un événement, il ne porte aucune donnée de capacité.
+  fastify.get("/api/exagrid/traps", async (_request, reply) => {
+    return reply.send({ traps: listExagridTraps() });
   });
 
   fastify.get("/api/exagrid/config", async (_request, reply) => {

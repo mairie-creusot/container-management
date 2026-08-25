@@ -13,6 +13,7 @@ import type {
   ExagridSecurityLevel,
   ExagridSnmpVersion,
   ExagridStatusSummary,
+  ExagridTrap,
   ExagridTestResult,
 } from "@/types";
 
@@ -163,6 +164,7 @@ function normalizeConfig(raw: unknown): ExagridConfigStatus {
 
 interface ExagridState {
   status: ExagridStatusSummary | null;
+  traps: ExagridTrap[];
   statusLoad: LoadStatus;
   statusError: string | null;
   /** Route absente côté API (404) — intégration pas encore déployée, distinct d'une erreur. */
@@ -179,6 +181,7 @@ interface ExagridState {
 
 const initialState: ExagridState = {
   status: null,
+  traps: [],
   statusLoad: "idle",
   statusError: null,
   backendUnavailable: false,
@@ -200,6 +203,13 @@ export const fetchExagridStatus = createAsyncThunk<ExagridFetchResult<ExagridSta
   "exagrid/fetchStatus",
   async () => readOrDescribe("/exagrid/status", "Impossible de lire l'état de l'appliance ExaGrid.", normalizeStatus),
 );
+
+/** GET /api/exagrid/traps — alarmes poussées par l'appliance, seule source réelle tant que son
+ * agent SNMP interrogeable n'est pas activé. */
+export const fetchExagridTraps = createAsyncThunk<ExagridTrap[]>("exagrid/fetchTraps", async () => {
+  const body = await apiGet<{ traps?: ExagridTrap[] }>("/exagrid/traps");
+  return body.traps ?? [];
+});
 
 export const fetchExagridConfig = createAsyncThunk<ExagridFetchResult<ExagridConfigStatus>>(
   "exagrid/fetchConfig",
@@ -330,6 +340,9 @@ const exagridSlice = createSlice({
       })
       .addCase(disableExagrid.pending, (state) => {
         state.clearing = true;
+      })
+      .addCase(fetchExagridTraps.fulfilled, (state, action) => {
+        state.traps = action.payload;
       })
       .addCase(disableExagrid.fulfilled, (state) => {
         state.clearing = false;

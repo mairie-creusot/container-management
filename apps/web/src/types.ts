@@ -1746,6 +1746,16 @@ export interface ExagridPollOutcome {
 }
 
 /** GET /api/exagrid/status */
+/** Trap SNMP réellement reçu de l'appliance (GET /api/exagrid/traps) — un événement poussé par
+ * elle, jamais une mesure : aucune donnée de capacité n'y figure. */
+export interface ExagridTrap {
+  receivedAt: string;
+  source: string;
+  trapOid?: string;
+  uptimeSeconds?: number;
+  varbinds: { oid: string; value: string }[];
+}
+
 export interface ExagridStatusSummary {
   configured: boolean;
   reachable?: boolean;

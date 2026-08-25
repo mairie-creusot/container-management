@@ -131,6 +131,9 @@ export const config = {
     // `retries` est le nombre de RENVOIS de la requête après le premier essai (net-snmp).
     requestTimeoutMs: readNumber("EXAGRID_SNMP_TIMEOUT_MS", 5000),
     retries: readNumber("EXAGRID_SNMP_RETRIES", 1),
+    // Écoute des traps poussés par l'appliance. > 1024 : l'API tourne sous un utilisateur non
+    // root, qui ne peut pas se lier au 162 — c'est le compose qui publie 162/udp vers ce port.
+    trapListenPort: readNumber("EXAGRID_TRAP_PORT", 1162),
   },
   registries: {
     requestTimeoutMs: readNumber("REGISTRY_REQUEST_TIMEOUT_MS", 5000),
