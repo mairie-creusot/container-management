@@ -15,7 +15,7 @@ deploy/
 .github/workflows/build.yml   GitHub (secours) : build + push GHCR — § 5
 ```
 
-**Dépôt principal : le GitLab de la mairie** (`https://172.16.13.2:4443/`). GitHub reste en
+**Dépôt principal : le GitLab de la mairie** (`https://gitlab.lecreusot.priv/`, publié derrière QUAI depuis le 25/08/2026, certificat AD CS — voir § 6.3). GitHub reste en
 secours, son workflow est toujours valide et n'a pas été touché.
 
 ## 0. Piloter Docker : socket local vs Docker distant (TLS)
@@ -149,7 +149,7 @@ Le pipeline a deux étapes :
 | --- | --- | --- | --- |
 | `controle` | `controle:api` | `tsc --noEmit` puis `vitest run` sur `@quai/api` | à chaque push / merge request |
 | `controle` | `controle:web` | `tsc --noEmit` puis `vitest run` sur `@quai/web` | à chaque push / merge request |
-| `deploiement` | `deploiement:production` | construit les images de prod et `docker compose up -d` sur l'hôte | branche par défaut uniquement, **bouton manuel** |
+| `deploiement` | `deploiement:production` | construit les images de prod et `docker compose up -d` sur l'hôte | branche par défaut uniquement, **automatique** si les deux contrôles sont verts |
 
 `packages/wasm-core` (Rust) n'est pas testé dans l'étape de contrôle : ces jobs tournent dans une
 image Node sans toolchain Rust. Son binding est compilé dans le stage `rust-builder` de
@@ -210,50 +210,63 @@ git push -u origin main
 
 Par la suite, pousser sur les deux quand c'est utile : `git push origin main && git push github main`.
 
-### 6.3 Certificat auto-signé du GitLab de la mairie
+### 6.3 GitLab publié derrière QUAI, certificat émis par l'AD CS
 
-Deux solutions existent, elles ne se valent pas.
+Depuis le 25/08/2026, GitLab n'expose plus son propre TLS : il est publié comme n'importe quel
+autre service, derrière le reverse proxy de QUAI, qui présente un certificat émis et **renouvelé
+automatiquement** par l'autorité de la collectivité. Plus aucun certificat auto-signé à approuver,
+ni côté poste de développement, ni côté runner.
 
-**A. Approuver le certificat (retenue).** On récupère le certificat du serveur et on l'installe
-comme autorité de confiance. La vérification TLS reste active : une interception ou une usurpation
-de `172.16.13.2` est toujours détectée. Un peu plus long à mettre en place, c'est le seul
-inconvénient.
+Deux routes existent dans la page Publication :
 
-Récupérer le certificat depuis n'importe quelle machine du réseau :
+| Sous-domaine | Cible | Rôle |
+|---|---|---|
+| `gitlab.lecreusot.priv` | `172.16.13.2:8090` | interface web et API |
+| `registry.lecreusot.priv` | `172.16.13.2:5050` | registre d'images |
 
-```bash
-openssl s_client -showcerts -connect 172.16.13.2:4443 </dev/null 2>/dev/null \
-  | openssl x509 -outform PEM > gitlab-mairie.crt
+Côté GitLab (`docker-compose.yml` de la pile GitLab), la configuration correspondante :
+
+```ruby
+external_url 'https://gitlab.lecreusot.priv'
+nginx['listen_port'] = 80
+nginx['listen_https'] = false
+nginx['proxy_set_headers'] = { 'X-Forwarded-Proto' => 'https', 'X-Forwarded-Ssl' => 'on' }
+gitlab_rails['trusted_proxies'] = ['172.16.13.2']
+registry_external_url 'https://registry.lecreusot.priv'
+registry_nginx['listen_port'] = 5050
+registry_nginx['listen_https'] = false
 ```
 
-Côté poste de développement (pour `git clone` / `git push`) :
+**Cibler l'hôte, pas le conteneur.** Caddy et GitLab vivent sur deux réseaux Docker distincts,
+entre lesquels Docker bloque le trafic : une route visant l'IP du conteneur GitLab répondrait 502.
+D'où les cibles `172.16.13.2:<port publié>`.
 
-```bash
-sudo cp gitlab-mairie.crt /usr/local/share/ca-certificates/ && sudo update-ca-certificates
-# ou, sans toucher au système :
-git config --global http."https://172.16.13.2:4443/".sslCAInfo /chemin/absolu/gitlab-mairie.crt
+**Le runner a besoin de la racine AD CS**, car il tourne sous Linux et ne connaît que les autorités
+publiques. Trois pièges rencontrés lors de la bascule, dans l'ordre où ils se présentent :
+
+1. Le service GitLab déclare `hostname: 'gitlab.lecreusot.priv'` (et parfois un alias réseau du
+   même nom) : à l'intérieur du réseau Docker, ce nom résout vers le **conteneur**, où plus rien
+   n'écoute en 443. Forcer le passage par le proxy avec `extra_hosts: ["gitlab.lecreusot.priv:172.16.13.2"]`
+   sur le service `gitlab-runner`.
+2. L'image du runner n'installe dans le magasin système que le fichier nommé exactement
+   `certs/ca.crt` — un certificat nommé d'après l'hôte n'y est pas repris.
+3. Le runner lit **aussi** `certs/<hôte>.crt` de lui-même, et un PEM exporté depuis Windows peut
+   être refusé par son analyseur là où OpenSSL l'accepte (`Failed to parse PEM`). Le normaliser :
+   `openssl x509 -in fichier -outform PEM -out fichier.clean`.
+
+Récupérer la racine depuis n'importe quelle machine du domaine :
+
+```powershell
+$c = Get-ChildItem Cert:\LocalMachine\Root | Where-Object { $_.Subject -like "*HDVAD1-CA-ROOT*" }
+"-----BEGIN CERTIFICATE-----`n" + [Convert]::ToBase64String($c.RawData,'InsertLineBreaks') + "`n-----END CERTIFICATE-----" | Set-Content adcs-root.pem -Encoding ascii
 ```
 
-Côté runner, au moment de l'enregistrement : `--tls-ca-file /etc/gitlab-runner/certs/gitlab-mairie.crt`
-(voir 6.5). Le runner transmet alors le certificat aux jobs dans la variable
-`CI_SERVER_TLS_CA_FILE`, que `.gitlab-ci.yml` installe automatiquement dans le magasin de
-certificats de chaque job. Rien d'autre à faire.
+Vérifier qu'elle valide bien le certificat servi (sujet et émetteur identiques = c'est une racine) :
 
-Si l'enregistrement du runner ne peut pas être refait, créer à la place une variable CI/CD de type
-**File** nommée `QUAI_GITLAB_CA_PEM` contenant le certificat : le pipeline l'utilise de la même
-façon.
-
-**B. Désactiver la vérification (`GIT_SSL_NO_VERIFY=true`), à éviter.** Il suffit de créer une
-variable CI/CD `GIT_SSL_NO_VERIFY` = `true`. C'est une ligne, ça marche tout de suite — et ça
-supprime toute vérification d'identité du serveur pour tous les jobs : n'importe quelle machine
-capable de se faire passer pour 172.16.13.2 (ARP, DNS interne) recevrait le trafic Git du runner,
-jetons de job compris, sans qu'aucun avertissement n'apparaisse. Acceptable au plus comme
-dépannage ponctuel sur un réseau maîtrisé, jamais comme configuration définitive. `.gitlab-ci.yml`
-ne l'active pas.
-
-Note pour plus tard : si vous utilisez un jour le **registre d'images** de ce GitLab, c'est le
-démon Docker de l'hôte qui devra faire confiance au certificat, pas le job — copier le fichier dans
-`/etc/docker/certs.d/172.16.13.2:4443/ca.crt` puis `sudo systemctl restart docker`.
+```bash
+echo | openssl s_client -connect gitlab.lecreusot.priv:443 2>/dev/null | openssl x509 > /tmp/leaf.pem
+openssl verify -CAfile adcs-root.pem /tmp/leaf.pem   # doit répondre OK
+```
 
 ### 6.4 Variables CI/CD à créer
 
