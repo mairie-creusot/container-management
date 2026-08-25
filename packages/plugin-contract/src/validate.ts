@@ -31,6 +31,7 @@ export interface ValidationOptions {
   coreApiVersion?: string | undefined;
 }
 
+const SHOW_IF_KEYS = ["field", "equals"];
 const ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const KIND_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const HOST_PATTERN = /^(?:\*\.)?[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?(?::\d{1,5})?$/i;
@@ -57,6 +58,234 @@ function asObjectSchema(value: unknown): JSONSchema | undefined {
   if (!isPlainObject(value)) return undefined;
   if (value.type !== "object" || !isPlainObject(value.properties)) return undefined;
   return value as unknown as JSONSchema;
+}
+
+/** Ce qu'une propriété peut PILOTER dans une condition — détermine le type attendu de `equals`. */
+type ConditionTargetKind = "string" | "number" | "boolean" | "enum" | "unusable";
+
+function targetKind(property: Record<string, unknown>): ConditionTargetKind {
+  if (Array.isArray(property.enum)) return "enum";
+  if (property.type === "string") return "string";
+  if (property.type === "number" || property.type === "integer") return "number";
+  if (property.type === "boolean") return "boolean";
+  return "unusable";
+}
+
+/** Chemins des showIf enfouis SOUS une propriété, où le formulaire ne les lirait jamais. */
+function collectNestedConditions(node: unknown, path: string, found: string[]): void {
+  if (!isPlainObject(node)) return;
+  const properties = node.properties;
+  if (isPlainObject(properties)) {
+    for (const [key, child] of Object.entries(properties)) {
+      const childPath = `${path}.properties.${key}`;
+      if (isPlainObject(child) && child.showIf !== undefined) found.push(childPath);
+      collectNestedConditions(child, childPath, found);
+    }
+  }
+  const items = node.items;
+  if (isPlainObject(items)) {
+    const itemsPath = `${path}.items`;
+    if (items.showIf !== undefined) found.push(itemsPath);
+    collectNestedConditions(items, itemsPath, found);
+  }
+}
+
+function checkCondition(
+  name: string,
+  property: Record<string, unknown>,
+  properties: Record<string, unknown>,
+  issues: PluginValidationIssue[],
+): void {
+  const showIf = property.showIf;
+  if (showIf === undefined) return;
+  const field = `configSchema.properties.${name}.showIf`;
+
+  if (!isPlainObject(showIf)) {
+    issues.push({
+      code: "configSchema.showIf.type",
+      field,
+      message: `showIf doit être un objet { field, equals }, reçu ${describe(showIf)}.`,
+    });
+    return;
+  }
+  for (const key of Object.keys(showIf)) {
+    if (!SHOW_IF_KEYS.includes(key)) {
+      issues.push({
+        code: "configSchema.showIf.unknownKey",
+        field: `${field}.${key}`,
+        message: `Clé inconnue dans showIf : "${key}" — clés autorisées : ${SHOW_IF_KEYS.join(", ")}.`,
+      });
+    }
+  }
+
+  const target = showIf.field;
+  if (typeof target !== "string" || target.trim().length === 0) {
+    issues.push({
+      code: "configSchema.showIf.field",
+      field: `${field}.field`,
+      message: `showIf.field doit nommer une propriété du même schéma, reçu ${describe(target)}.`,
+    });
+    return;
+  }
+  if (target === name) {
+    issues.push({
+      code: "configSchema.showIf.self",
+      field: `${field}.field`,
+      message: `La propriété "${name}" ne peut pas conditionner son affichage à elle-même.`,
+    });
+    return;
+  }
+
+  const controller = properties[target];
+  if (!isPlainObject(controller)) {
+    issues.push({
+      code: "configSchema.showIf.unknown",
+      field: `${field}.field`,
+      message: `showIf désigne la propriété "${target}", absente de configSchema.properties.`,
+    });
+    return;
+  }
+  if (controller.showIf !== undefined) {
+    issues.push({
+      code: "configSchema.showIf.chain",
+      field: `${field}.field`,
+      message: `Dépendance en chaîne non supportée : "${name}" dépend de "${target}", elle-même conditionnelle.`,
+    });
+    return;
+  }
+
+  const kind = targetKind(controller);
+  if (kind === "unusable") {
+    issues.push({
+      code: "configSchema.showIf.target",
+      field: `${field}.field`,
+      message:
+        `La propriété "${target}" (type ${describe(controller.type)}) ne peut pas piloter une condition d'affichage : ` +
+        `seuls un texte, un nombre, un booléen ou une énumération le peuvent.`,
+    });
+    return;
+  }
+
+  const expected = showIf.equals;
+  if (expected === undefined) {
+    issues.push({
+      code: "configSchema.showIf.equals",
+      field: `${field}.equals`,
+      message: `showIf.equals est obligatoire : sans valeur attendue, la condition ne peut pas être évaluée.`,
+    });
+    return;
+  }
+
+  if (kind === "enum") {
+    const values = Array.isArray(controller.enum) ? controller.enum : [];
+    if (!values.includes(expected)) {
+      issues.push({
+        code: "configSchema.showIf.equalsEnum",
+        field: `${field}.equals`,
+        message:
+          `showIf.equals vaut ${describe(expected)}, qui ne figure pas dans l'énumération de "${target}" ` +
+          `(${values.map((value) => describe(value)).join(", ")}).`,
+      });
+    }
+    return;
+  }
+
+  const actual = typeof expected;
+  if (actual !== kind) {
+    issues.push({
+      code: "configSchema.showIf.equalsType",
+      field: `${field}.equals`,
+      message: `La propriété "${target}" est de type ${kind} : showIf.equals doit l'être aussi, reçu ${describe(expected)}.`,
+    });
+  }
+}
+
+/** Conditions d'affichage : lisibles UNIQUEMENT sur une propriété de premier niveau. */
+function checkConditions(schema: JSONSchema, issues: PluginValidationIssue[]): void {
+  const properties: Record<string, unknown> = schema.properties ?? {};
+
+  if (schema.showIf !== undefined) {
+    issues.push({
+      code: "configSchema.showIf.placement",
+      field: "configSchema.showIf",
+      message: "showIf se porte sur une propriété de configSchema, jamais sur le schéma racine lui-même.",
+    });
+  }
+
+  for (const [name, property] of Object.entries(properties)) {
+    if (!isPlainObject(property)) continue;
+    const nested: string[] = [];
+    collectNestedConditions(property, `configSchema.properties.${name}`, nested);
+    for (const path of nested) {
+      issues.push({
+        code: "configSchema.showIf.placement",
+        field: path,
+        message: `showIf n'est lu que sur une propriété de premier niveau de configSchema : à "${path}", il serait ignoré.`,
+      });
+    }
+    checkCondition(name, property, properties, issues);
+  }
+}
+
+/** Mots-clés qu'un formulaire généré sait honorer. Tout le reste est refusé À L'ENREGISTREMENT :
+ * sans cette barrière, un greffon s'installe puis se révèle inconfigurable au premier écran. */
+const RENDERABLE_KEYWORDS = [
+  "type",
+  "title",
+  "description",
+  "enum",
+  "enumLabels",
+  "default",
+  "examples",
+  "format",
+  "minimum",
+  "maximum",
+  "minLength",
+  "showIf",
+];
+
+/** Le sous-ensemble RÉELLEMENT affichable — doit rester aligné avec l'adaptateur du web
+ * (apps/web/src/components/formSchemaFromManifest.ts et ses cas réels 3CX/GLPI/AD CS). */
+function checkRenderable(schema: JSONSchema, secretFields: string[], issues: PluginValidationIssue[]): void {
+  const properties: Record<string, unknown> = schema.properties ?? {};
+  const secrets = new Set(secretFields);
+
+  for (const [name, raw] of Object.entries(properties)) {
+    if (!isPlainObject(raw)) continue;
+    const property = raw as Record<string, unknown>;
+    const field = `configSchema.properties.${name}`;
+    const push = (code: string, message: string) => issues.push({ code, field, message });
+
+    for (const keyword of Object.keys(property)) {
+      if (!RENDERABLE_KEYWORDS.includes(keyword)) {
+        push("configSchema.notRenderable", `Mot-clé "${keyword}" : aucun formulaire ne saurait le respecter.`);
+      }
+    }
+
+    const type = property["type"];
+    const isEnum = Array.isArray(property["enum"]);
+    if (!isEnum && type !== "string" && type !== "number" && type !== "boolean") {
+      push("configSchema.notRenderable", `type ${describe(type)} : seuls string, number, boolean et enum sont saisissables.`);
+    }
+    if (property["format"] !== undefined && property["format"] !== "password") {
+      push("configSchema.notRenderable", `format ${describe(property["format"])} : seul "password" est reconnu.`);
+    }
+    if (secrets.has(name) && type !== "string") {
+      push("configSchema.notRenderable", "un champ secret se saisit toujours en texte.");
+    }
+
+    const labels = property["enumLabels"];
+    if (labels !== undefined) {
+      const values = property["enum"];
+      if (!Array.isArray(labels) || labels.some((label) => typeof label !== "string" || label.trim() === "")) {
+        push("configSchema.enumLabels", `enumLabels doit être un tableau de libellés non vides, reçu ${describe(labels)}.`);
+      } else if (!Array.isArray(values)) {
+        push("configSchema.enumLabels", "enumLabels ne se porte que sur une propriété qui déclare enum.");
+      } else if (labels.length !== values.length) {
+        push("configSchema.enumLabels", `enumLabels compte ${labels.length} libellés pour ${values.length} valeurs.`);
+      }
+    }
+  }
 }
 
 export function validateManifest(input: unknown, options: ValidationOptions = {}): ManifestValidationResult {
@@ -140,9 +369,11 @@ export function validateManifest(input: unknown, options: ValidationOptions = {}
         });
       }
     }
+    checkConditions(schema, issues);
   }
 
   const secretFields = stringArray(input.secretFields);
+  if (schema) checkRenderable(schema, secretFields ?? [], issues);
   if (!secretFields) {
     issues.push({
       code: "secretFields.type",

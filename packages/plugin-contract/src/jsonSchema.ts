@@ -6,6 +6,18 @@
  */
 export type JSONSchemaType = "object" | "array" | "string" | "number" | "integer" | "boolean" | "null";
 
+/**
+ * Extension QUAI au sous-ensemble : dépendance SIMPLE, un seul niveau — « cette propriété n'est
+ * demandée que si telle autre vaut X ». JSON Schema exprimerait cela par if/then, hors sous-ensemble
+ * et intraduisible en formulaire ; sans ce mot-clé, aucun manifeste ne saurait décrire la bascule
+ * jeton/compte de service de 3CX, de GLPI ou d'AD CS.
+ */
+export interface JSONSchemaCondition {
+  /** Nom d'une AUTRE propriété du même objet — jamais un chemin pointé. */
+  field: string;
+  equals: string | number | boolean;
+}
+
 export interface JSONSchema {
   type?: JSONSchemaType | undefined;
   title?: string | undefined;
@@ -14,6 +26,9 @@ export interface JSONSchema {
   required?: string[] | undefined;
   items?: JSONSchema | undefined;
   enum?: unknown[] | undefined;
+  /** Libellés affichés pour `enum`, dans le MÊME ordre. Sans eux, l'écran montre la valeur brute
+   * ("user-token" au lieu de « Jeton utilisateur »). */
+  enumLabels?: string[] | undefined;
   default?: unknown;
   const?: unknown;
   examples?: unknown[] | undefined;
@@ -24,6 +39,8 @@ export interface JSONSchema {
   minimum?: number | undefined;
   maximum?: number | undefined;
   additionalProperties?: boolean | undefined;
+  /** Uniquement sur une propriété de PREMIER niveau de configSchema (voir validateManifest). */
+  showIf?: JSONSchemaCondition | undefined;
 }
 
 /** Chemin pointé ("proxy.token") pour atteindre un champ imbriqué — `undefined` si absent du schéma. */

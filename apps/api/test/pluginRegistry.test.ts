@@ -170,6 +170,187 @@ describe("contrat de manifeste", () => {
   });
 });
 
+/** Schéma d'objet nu — les libellés ne concernent pas le contrat, seule la FORME est validée ici. */
+function objectSchema(properties: Record<string, unknown>, required?: string[]): Record<string, unknown> {
+  return { type: "object", properties, ...(required ? { required } : {}) };
+}
+
+/** Manifeste dont seul le configSchema varie : secretFields vidé pour n'éprouver que le schéma. */
+function manifestWithSchema(configSchema: unknown, secretFields: string[] = []): Record<string, unknown> {
+  return { ...validManifest(), configSchema, secretFields };
+}
+
+describe("condition d'affichage (showIf)", () => {
+  const mode = { type: "string", enum: ["client-credentials", "user"], default: "client-credentials" };
+
+  it("accepte les bascules RÉELLES de 3CX, GLPI et AD CS", () => {
+    const threecx = objectSchema(
+      {
+        baseUrl: { type: "string" },
+        authMode: mode,
+        clientId: { type: "string", showIf: { field: "authMode", equals: "client-credentials" } },
+        clientSecret: { type: "string", showIf: { field: "authMode", equals: "client-credentials" } },
+        username: { type: "string", showIf: { field: "authMode", equals: "user" } },
+        password: { type: "string", showIf: { field: "authMode", equals: "user" } },
+        tlsRejectUnauthorized: { type: "boolean", default: true },
+      },
+      ["baseUrl", "clientId", "clientSecret", "username", "password"],
+    );
+    expect(validateManifest(manifestWithSchema(threecx, ["clientSecret", "password"])).ok).toBe(true);
+
+    const glpi = objectSchema(
+      {
+        apiUrl: { type: "string" },
+        appToken: { type: "string" },
+        authMode: { type: "string", enum: ["user-token", "credentials"], default: "user-token" },
+        userToken: { type: "string", showIf: { field: "authMode", equals: "user-token" } },
+        username: { type: "string", showIf: { field: "authMode", equals: "credentials" } },
+        password: { type: "string", showIf: { field: "authMode", equals: "credentials" } },
+      },
+      ["apiUrl", "appToken", "userToken", "username", "password"],
+    );
+    expect(validateManifest(manifestWithSchema(glpi, ["appToken", "userToken", "password"])).ok).toBe(true);
+
+    const certificates = objectSchema(
+      {
+        caUrl: { type: "string" },
+        template: { type: "string", default: "WebServer" },
+        accountSource: { type: "string", enum: ["directory", "dedicated"], default: "directory" },
+        username: { type: "string", showIf: { field: "accountSource", equals: "dedicated" } },
+        password: { type: "string", showIf: { field: "accountSource", equals: "dedicated" } },
+        renewBeforeDays: { type: "number", minimum: 1 },
+        autoEnroll: { type: "boolean", default: true },
+      },
+      ["caUrl", "template", "username", "password"],
+    );
+    expect(validateManifest(manifestWithSchema(certificates, ["password"])).ok).toBe(true);
+  });
+
+  it("accepte une condition portée par un booléen ou par un nombre", () => {
+    const schema = objectSchema({
+      tls: { type: "boolean", default: true },
+      port: { type: "number" },
+      caBundle: { type: "string", showIf: { field: "tls", equals: true } },
+      pipeline: { type: "string", showIf: { field: "port", equals: 8443 } },
+    });
+    expect(validateManifest(manifestWithSchema(schema)).ok).toBe(true);
+  });
+
+  it("refuse un showIf qui n'est pas un objet { field, equals }", () => {
+    const issue = issueWithCode(
+      validateManifest(manifestWithSchema(objectSchema({ authMode: mode, token: { type: "string", showIf: "authMode" } }))),
+      "configSchema.showIf.type",
+    );
+    expect(issue.field).toBe("configSchema.properties.token.showIf");
+  });
+
+  it("refuse une clé inconnue dans showIf plutôt que de l'ignorer", () => {
+    const schema = objectSchema({
+      authMode: mode,
+      token: { type: "string", showIf: { field: "authMode", equals: "user", equalsAny: ["user"] } },
+    });
+    expect(issueWithCode(validateManifest(manifestWithSchema(schema)), "configSchema.showIf.unknownKey").message).toContain(
+      "equalsAny",
+    );
+  });
+
+  it("refuse une condition sans champ visé, ou visant la propriété elle-même", () => {
+    const sansChamp = objectSchema({ token: { type: "string", showIf: { equals: "user" } } });
+    expect(issueWithCode(validateManifest(manifestWithSchema(sansChamp)), "configSchema.showIf.field").message).toContain(
+      "showIf.field",
+    );
+
+    const surSoi = objectSchema({ token: { type: "string", showIf: { field: "token", equals: "user" } } });
+    expect(issueWithCode(validateManifest(manifestWithSchema(surSoi)), "configSchema.showIf.self").message).toContain("token");
+  });
+
+  it("refuse une condition visant une propriété non déclarée", () => {
+    const schema = objectSchema({ token: { type: "string", showIf: { field: "authMode", equals: "user" } } });
+    const issue = issueWithCode(validateManifest(manifestWithSchema(schema)), "configSchema.showIf.unknown");
+    expect(issue.message).toContain("authMode");
+    expect(issue.message).toContain("configSchema.properties");
+  });
+
+  it("refuse une dépendance en CHAÎNE : le champ visé ne peut pas être lui-même conditionnel", () => {
+    const schema = objectSchema({
+      authMode: mode,
+      username: { type: "string", showIf: { field: "authMode", equals: "user" } },
+      password: { type: "string", showIf: { field: "username", equals: "1000" } },
+    });
+    const issue = issueWithCode(validateManifest(manifestWithSchema(schema)), "configSchema.showIf.chain");
+    expect(issue.message).toContain("password");
+    expect(issue.message).toContain("username");
+  });
+
+  it("refuse une condition sans valeur attendue", () => {
+    const schema = objectSchema({ authMode: mode, token: { type: "string", showIf: { field: "authMode" } } });
+    expect(issueWithCode(validateManifest(manifestWithSchema(schema)), "configSchema.showIf.equals").message).toContain(
+      "obligatoire",
+    );
+  });
+
+  it("refuse une valeur attendue du mauvais type", () => {
+    const surBooleen = objectSchema({
+      tls: { type: "boolean", default: true },
+      caBundle: { type: "string", showIf: { field: "tls", equals: "true" } },
+    });
+    expect(issueWithCode(validateManifest(manifestWithSchema(surBooleen)), "configSchema.showIf.equalsType").message).toContain(
+      "boolean",
+    );
+
+    const surNombre = objectSchema({
+      port: { type: "number" },
+      pipeline: { type: "string", showIf: { field: "port", equals: "8443" } },
+    });
+    expect(issueWithCode(validateManifest(manifestWithSchema(surNombre)), "configSchema.showIf.equalsType").message).toContain(
+      "number",
+    );
+  });
+
+  it("refuse une valeur absente de l'énumération visée", () => {
+    const schema = objectSchema({ authMode: mode, token: { type: "string", showIf: { field: "authMode", equals: "oauth" } } });
+    const issue = issueWithCode(validateManifest(manifestWithSchema(schema)), "configSchema.showIf.equalsEnum");
+    expect(issue.message).toContain("oauth");
+    expect(issue.message).toContain("client-credentials");
+  });
+
+  it("refuse une condition pilotée par une propriété qui ne peut pas l'être", () => {
+    const schema = objectSchema({
+      hosts: { type: "array", items: { type: "string" } },
+      token: { type: "string", showIf: { field: "hosts", equals: "a" } },
+    });
+    expect(issueWithCode(validateManifest(manifestWithSchema(schema)), "configSchema.showIf.target").message).toContain(
+      "ne peut pas piloter",
+    );
+  });
+
+  it("refuse un showIf enfoui, là où le formulaire ne le lirait jamais", () => {
+    const nested = objectSchema({
+      authMode: mode,
+      proxy: { type: "object", properties: { host: { type: "string", showIf: { field: "authMode", equals: "user" } } } },
+    });
+    const issue = issueWithCode(validateManifest(manifestWithSchema(nested)), "configSchema.showIf.placement");
+    expect(issue.field).toBe("configSchema.properties.proxy.properties.host");
+
+    const racine = { ...objectSchema({ authMode: mode }), showIf: { field: "authMode", equals: "user" } };
+    expect(issueWithCode(validateManifest(manifestWithSchema(racine)), "configSchema.showIf.placement").field).toBe(
+      "configSchema.showIf",
+    );
+  });
+
+  it("le manifeste public conserve les conditions : le formulaire du web en dépend", () => {
+    const schema = objectSchema({
+      authMode: mode,
+      clientSecret: { type: "string", showIf: { field: "authMode", equals: "client-credentials" } },
+    });
+    const result = validateManifest(manifestWithSchema(schema, ["clientSecret"]));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const properties = publicManifest(result.manifest).configSchema.properties ?? {};
+    expect(properties.clientSecret?.showIf).toEqual({ field: "authMode", equals: "client-credentials" });
+  });
+});
+
 describe("contrat de greffon", () => {
   function validPlugin(): Record<string, unknown> {
     return {

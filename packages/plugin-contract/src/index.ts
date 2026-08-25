@@ -22,7 +22,7 @@ export type {
 } from "./manifest.js";
 
 export { cloneJson, isPlainObject, resolveSchemaField } from "./jsonSchema.js";
-export type { JSONSchema, JSONSchemaType } from "./jsonSchema.js";
+export type { JSONSchema, JSONSchemaCondition, JSONSchemaType } from "./jsonSchema.js";
 
 export { isSemver, parseSemver, parseSemverRange, satisfiesSemverRange } from "./semver.js";
 export type { Semver, SemverRange, SemverRangeOperator } from "./semver.js";
