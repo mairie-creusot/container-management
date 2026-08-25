@@ -84,11 +84,12 @@ async function dropLegacyConfig(): Promise<void> {
  */
 async function adoptLegacyConfig(): Promise<void> {
   if (!(await hasLegacyConfig())) return;
+  // Le champ typé ne peut REAPPARAITRE que si l'assistant de configuration vient de le réécrire :
+  // il porte donc une saisie plus récente que l'entrée du greffon et l'emporte. L'ignorer ferait
+  // perdre silencieusement des identifiants que l'utilisateur vient de saisir.
   const legacy = await getEffectiveNutanixConfig();
-  if (legacy && !(await getEffectiveIntegrationConfig(NUTANIX_PLUGIN_ID))) {
-    await setIntegrationConfig(NUTANIX_PLUGIN_ID, toStored(legacy), NUTANIX_SECRET_FIELDS);
-  }
-  await clearNutanixConfig();
+  if (legacy) await setIntegrationConfig(NUTANIX_PLUGIN_ID, toStored(legacy), NUTANIX_SECRET_FIELDS);
+  await dropLegacyConfig();
 }
 
 /**

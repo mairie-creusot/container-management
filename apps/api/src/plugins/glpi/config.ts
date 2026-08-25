@@ -102,11 +102,12 @@ async function dropLegacyConfig(): Promise<void> {
  */
 async function adoptLegacyConfig(): Promise<void> {
   if (!(await hasLegacyConfig())) return;
+  // Le champ typé ne peut REAPPARAITRE que si l'assistant de configuration vient de le réécrire :
+  // il porte donc une saisie plus récente que l'entrée du greffon et l'emporte. L'ignorer ferait
+  // perdre silencieusement des identifiants que l'utilisateur vient de saisir.
   const legacy = await getEffectiveGlpiConfig();
-  if (legacy && !(await getEffectiveIntegrationConfig(GLPI_PLUGIN_ID))) {
-    await setIntegrationConfig(GLPI_PLUGIN_ID, toStored(legacy), GLPI_SECRET_FIELDS);
-  }
-  await clearGlpiConfig();
+  if (legacy) await setIntegrationConfig(GLPI_PLUGIN_ID, toStored(legacy), GLPI_SECRET_FIELDS);
+  await dropLegacyConfig();
 }
 
 /**

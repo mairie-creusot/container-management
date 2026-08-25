@@ -300,11 +300,15 @@ describe("Greffon Nutanix — reprise de la configuration déjà enregistrée", 
     expect((await getCurrent()).nutanix).toBeUndefined();
   });
 
-  it("si les deux coexistent, l'entrée du greffon fait foi et le champ typé est retiré", async () => {
-    await saveNutanixPluginConfig({ ...REAL_CONFIG, username: "quai-svc" });
-    await setNutanixConfig({ ...REAL_CONFIG, username: "ancien-compte" });
+  // Le champ typé ne peut réapparaître que si l'assistant vient de le réécrire : il porte alors une
+  // saisie PLUS RÉCENTE que l'entrée du greffon. L'ignorer perdrait des identifiants tout juste
+  // saisis — exactement ce que ferait l'étape « Orchestrateurs » de l'assistant.
+  it("rejouer l'assistant avec de nouveaux identifiants les fait gagner sur l'entrée du greffon", async () => {
+    await saveNutanixPluginConfig({ ...REAL_CONFIG, username: "ancien-compte" });
+    await setNutanixConfig({ ...REAL_CONFIG, username: "nouveau-compte" });
 
-    expect(await loadNutanixPluginConfig()).toEqual({ ...REAL_CONFIG, username: "quai-svc" });
+    expect(await loadNutanixPluginConfig()).toEqual({ ...REAL_CONFIG, username: "nouveau-compte" });
+    // Et le champ typé est retiré, pour ne pas redevenir une configuration de secours.
     expect((await getCurrent()).nutanix).toBeUndefined();
   });
 

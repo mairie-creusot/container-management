@@ -423,11 +423,16 @@ describe("Greffon GLPI — reprise de la configuration déjà enregistrée dans 
     expect(JSON.stringify(safe)).not.toContain(APP_TOKEN);
   });
 
-  it("une config de greffon déjà écrite l'emporte sur le champ typé, qui est retiré sans être lu", async () => {
+  // Le champ typé ne réapparaît que si l'assistant vient de le réécrire : sa saisie est la plus
+  // récente et l'emporte, faute de quoi des identifiants tout juste saisis seraient perdus.
+  it("un champ typé réécrit après coup l'emporte, puis est retiré", async () => {
     await saveGlpiPluginConfig({ apiUrl: API_URL, appToken: APP_TOKEN, userToken: USER_TOKEN });
-    await setGlpiConfig({ apiUrl: "http://ancien-glpi.test/apirest.php", appToken: "ancien-app-token", userToken: "ancien-jeton" });
+    await setGlpiConfig({ apiUrl: "http://nouveau-glpi.test/apirest.php", appToken: "nouvel-app-token", userToken: "nouveau-jeton" });
 
-    await expect(loadGlpiPluginConfig()).resolves.toMatchObject({ apiUrl: API_URL, userToken: USER_TOKEN });
+    await expect(loadGlpiPluginConfig()).resolves.toMatchObject({
+      apiUrl: "http://nouveau-glpi.test/apirest.php",
+      userToken: "nouveau-jeton",
+    });
     expect((await getCurrent()).glpi).toBeUndefined();
   });
 

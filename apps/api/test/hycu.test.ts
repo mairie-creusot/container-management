@@ -534,11 +534,13 @@ describe("Config HYCU — reprise du champ typé par le greffon", () => {
     expect(JSON.stringify(safe)).not.toContain("hycu-secret");
   });
 
-  it("une config de greffon déjà écrite l'emporte sur le champ typé, qui est retiré sans être lu", async () => {
+  // Le champ typé ne réapparaît que si l'assistant vient de le réécrire : sa saisie l'emporte donc,
+  // sinon des identifiants tout juste saisis disparaîtraient sans un mot.
+  it("un champ typé réécrit après coup l'emporte, puis est retiré", async () => {
     await seedHycuConfig();
-    await setHycuConfig({ url: "https://ancienne-appliance:8443", username: "ancien", password: "ancien-secret" });
+    await setHycuConfig({ url: "https://nouvelle-appliance:8443", username: "nouveau", password: "nouveau-secret" });
 
-    expect(await loadHycuPluginConfig()).toMatchObject({ url: "https://172.20.0.100:8443", username: "quai-ro" });
+    expect(await loadHycuPluginConfig()).toMatchObject({ url: "https://nouvelle-appliance:8443", username: "nouveau" });
     expect((await getCurrent()).hycu).toBeUndefined();
   });
 

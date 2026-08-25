@@ -619,12 +619,14 @@ describe("Greffon 3CX — reprise de la configuration déjà enregistrée dans l
     expect(response.json()).toMatchObject({ configured: true, config: { authMode: "client-credentials" } });
   });
 
-  it("une config de greffon déjà écrite l'emporte sur le champ typé, qui est retiré sans être lu", async () => {
+  // Le champ typé ne réapparaît que si l'assistant vient de le réécrire : sa saisie est donc PLUS
+  // RÉCENTE et l'emporte, sinon des identifiants tout juste saisis seraient perdus en silence.
+  it("un champ typé réécrit après coup l'emporte, puis est retiré", async () => {
     await seedThreecxConfig();
-    await setThreecxConfig({ baseUrl: "https://ancien-pbx.exemple.fr:5001", clientId: "ancien", clientSecret: "ancienne-cle" });
+    await setThreecxConfig({ baseUrl: "https://nouveau-pbx.exemple.fr:5001", clientId: "nouveau", clientSecret: "nouvelle-cle" });
 
     const effective = await loadThreecxPluginConfig();
-    expect(effective).toMatchObject({ baseUrl: "https://pbx.exemple.fr:5001", clientId: "quai-xapi" });
+    expect(effective).toMatchObject({ baseUrl: "https://nouveau-pbx.exemple.fr:5001", clientId: "nouveau" });
     expect((await getCurrent()).threecx).toBeUndefined();
   });
 
