@@ -250,7 +250,7 @@ describe("GET /api/registries vs GET /api/registries/:id/repositories — cohér
     expect(registry.statusDetail).toBe(repos.diagnostic);
   });
 
-  it("sans org explicite ni username exploitable : les deux routes s'accordent aussi sur « rien de résolu » (pas de contradiction)", async () => {
+  it("sans org explicite ni username exploitable : les deux vues s'accordent sur le même motif d'échec, jamais sur un « connecté, 0 image » trompeur", async () => {
     app = buildServer();
     await completeSetup({
       registries: [
@@ -274,9 +274,14 @@ describe("GET /api/registries vs GET /api/registries/:id/repositories — cohér
       url: "/api/registries",
       cookies: { [config.session.cookieName]: adminToken },
     });
-    const [registry] = listRes.json() as Array<{ id: string; status: string; trackedImages: number }>;
-    expect(registry.status).toBe("connected"); // hôte joignable, rien de plus à valider sans org
-    expect(registry.trackedImages).toBe(0); // pas de démon Docker dans cet environnement de test
+    const [registry] = listRes.json() as Array<{ id: string; status: string; trackedImages: number; statusDetail?: string }>;
+    // Depuis le 25/08/2026, le compteur affiche le CATALOGUE DISTANT et rien d'autre : quand il ne
+    // peut pas être listé, la carte le dit au lieu d'annoncer "connecté, 0 image" — état qui laissait
+    // croire à un registry réellement vide. L'esprit du test est conservé : les deux vues doivent
+    // s'accorder, et elles s'accordent désormais sur le même motif d'échec.
+    expect(registry.status).toBe("error");
+    expect(registry.statusDetail).toContain("aucune organisation");
+    expect(registry.trackedImages).toBe(0);
 
     const reposRes = await app.inject({
       method: "GET",

@@ -371,8 +371,6 @@ export default function BackupsPage() {
             <span className="bkp-integration__name">Contrôleur HYCU</span>
             <StatusPill {...hycuPill} />
           </span>
-            )}
-          </span>
           {admin && (
             <span className="bkp-integrations__action">
               <OpenSettingsButton label="Réglages des intégrations" />
