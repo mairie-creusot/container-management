@@ -15,7 +15,6 @@ import ThreecxConfigSection from "@/features/threecx/ThreecxConfigSection";
 import GlpiConfigSection from "@/features/glpi/GlpiConfigSection";
 import NotificationChannelsSection from "@/features/notificationChannels/NotificationChannelsSection";
 import HycuConnectionForm from "@/features/hycu/HycuConnectionForm";
-import ExagridConnectionForm from "@/features/exagrid/ExagridConnectionForm";
 import CertificateAuthorityForm from "@/features/certificates/CertificateAuthorityForm";
 
 /** Assistant de premier lancement (LDAP, Docker/Kubernetes, registries) — la seule configuration
@@ -120,8 +119,6 @@ function SectionBody({ meta }: { meta: SettingsSectionMeta }) {
       return <GlpiConfigSection />;
     case "hycu":
       return <HycuConnectionForm />;
-    case "exagrid":
-      return <ExagridConnectionForm />;
     case "certificates":
       return <CertificateAuthorityForm />;
     case "notification-channels":

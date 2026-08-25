@@ -21,9 +21,7 @@ import {
 import type { RegistryPatch, SetupRegistryConfig } from "./setupStore.js";
 import { getLocalDockerImages } from "./docker.js";
 import type { LocalDockerImage } from "./docker.js";
-import { registryKindFromImageName, testRegistryConnection, diagnosticFromError } from "./registries/index.js";
-import { listOrgPackages } from "./registries/ghcr.js";
-import { listGroupRepositories } from "./registries/gitlab.js";
+import { listRegistryRepositories, testRegistryConnection } from "./registries/index.js";
 import type { Registry, RegistryKind } from "../types.js";
 
 /** "ghcr.io/mairie-creusot/foo" -> "mairie-creusot" — repli de dernier recours quand aucune org
@@ -71,8 +69,9 @@ export function resolveRegistryOrg(persisted: SetupRegistryConfig, localImages: 
 }
 
 async function buildRegistryView(persisted: SetupRegistryConfig, index: number): Promise<Registry> {
+  // Les images locales ne servent plus qu'à DÉDUIRE l'organisation d'un registry qui ne l'a pas
+  // explicitée (voir resolveRegistryOrg) — jamais à compter ce que contient le registry.
   const localImages = await getLocalDockerImages();
-  const localCount = localImages.filter((img) => registryKindFromImageName(img.name) === persisted.kind).length;
   const base = {
     id: `reg-${persisted.kind}-${index}`,
     kind: persisted.kind,
@@ -91,66 +90,21 @@ async function buildRegistryView(persisted: SetupRegistryConfig, index: number):
   // le second registry comme "connecté"/"error" avec le statut du premier au lieu du sien.
   const credentials = decryptRegistryCredentials(persisted);
   if (!credentials?.username && !credentials?.password && !credentials?.token) {
-    return { ...base, status: "unconfigured", trackedImages: localCount, lastSyncAt: null };
+    return { ...base, status: "unconfigured", trackedImages: 0, lastSyncAt: null };
   }
 
   const test = await testRegistryConnection(persisted.kind, persisted.url, credentials.token ?? credentials.password);
 
-  // "Images suivies" = le vrai catalogue distant quand on peut l'interroger (ex: GHCR via
-  // l'API GitHub Packages), pas seulement ce qui a déjà été tiré localement — sinon un
-  // registry avec 11 packages distants mais 2 images pull_ées localement affichait "2",
-  // trompeur pour un registry qu'on vient de configurer.
-  let trackedImages = localCount;
-  if (persisted.kind === "ghcr") {
-    const org = resolveRegistryOrg(persisted, localImages);
-    if (org) {
-      try {
-        const packages = await listOrgPackages(org);
-        if (packages.length > 0) trackedImages = packages.length;
-      } catch (err) {
-        // Bug réel corrigé le 14/08/2026 (retour utilisateur : GET /api/registries répondait
-        // "connected"/trackedImages=3 pour un registry dont GET .../repositories répondait
-        // "GHCR : identifiants invalides ou expirés (401)" pour le MÊME registry — CONTRADICTOIRE).
-        // Root-causé en lisant le code : ce `catch` avalait silencieusement l'échec et laissait
-        // `trackedImages` sur `localCount` (le nombre d'images ghcr.io déjà tirées EN LOCAL, sans
-        // rapport avec le vrai catalogue distant) tout en laissant `status` à "connected" (basé
-        // uniquement sur `testRegistryConnection`, qui ne fait que vérifier que ghcr.io répond à
-        // une requête HTTP, jamais que les identifiants sont valides — voir testRegistryConnection
-        // ci-dessus). Un registry dont les identifiants sont RÉELLEMENT rejetés par l'API GitHub
-        // Packages (401/403) ne peut plus se présenter comme "connected" ici : on bascule sur le
-        // même statut d'erreur ET le même message concret (diagnosticFromError, déjà utilisé par
-        // l'explorateur de catalogue) que ce que GET .../repositories affiche déjà pour ce même
-        // registry — les deux vues sont désormais TOUJOURS cohérentes entre elles.
-        return {
-          ...base,
-          status: "error",
-          trackedImages: localCount,
-          lastSyncAt: null,
-          statusDetail: diagnosticFromError("GHCR", err),
-        };
-      }
-    }
+  // "Images suivies" = TOUJOURS le catalogue distant, jamais ce qui traîne en local (demande
+  // explicite du 25/08/2026 : une carte de registry doit décrire le registry, pas l'hôte). Un
+  // catalogue inaccessible bascule la carte en erreur avec le même message que l'explorateur,
+  // plutôt que d'afficher un décompte local sans rapport.
+  const org = resolveRegistryOrg(persisted, localImages);
+  const catalog = await listRegistryRepositories(persisted.kind, org, persisted.url);
+  if (catalog.diagnostic) {
+    return { ...base, status: "error", trackedImages: 0, lastSyncAt: null, statusDetail: catalog.diagnostic };
   }
-  // Même raisonnement pour GitLab depuis que son catalogue est interrogeable (25/08/2026) : sans
-  // ça, la carte affichait le nombre d'images du même type déjà tirées EN LOCAL pendant que
-  // l'explorateur, lui, montrait le vrai contenu du registre — deux chiffres justes mais
-  // contradictoires à l'écran.
-  if (persisted.kind === "gitlab") {
-    const org = resolveRegistryOrg(persisted, localImages);
-    if (org) {
-      try {
-        trackedImages = (await listGroupRepositories(persisted.url, org)).length;
-      } catch (err) {
-        return {
-          ...base,
-          status: "error",
-          trackedImages: localCount,
-          lastSyncAt: null,
-          statusDetail: diagnosticFromError("GitLab", err),
-        };
-      }
-    }
-  }
+  const trackedImages = catalog.repositories.length;
 
   return {
     ...base,

@@ -8,7 +8,6 @@ import {
   IconPhone,
   IconServer,
   IconSettings,
-  IconStorageArray,
   IconVm,
 } from "@/components/icons";
 
@@ -66,13 +65,6 @@ export const SETTINGS_SECTIONS: SettingsSectionMeta[] = [
     label: "Sauvegardes HYCU",
     description: "Contrôleur de sauvegarde HYCU (lecture seule).",
     icon: IconBackup,
-    relatedView: "backups",
-  },
-  {
-    id: "exagrid",
-    label: "Stockage de sauvegarde ExaGrid",
-    description: "Appliance ExaGrid interrogée en SNMP.",
-    icon: IconStorageArray,
     relatedView: "backups",
   },
   {

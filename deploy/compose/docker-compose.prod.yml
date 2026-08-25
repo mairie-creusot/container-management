@@ -43,7 +43,7 @@ services:
       # true dès que QUAI est servi en HTTPS (cas normal en production).
       COOKIE_SECURE: ${COOKIE_SECURE:-true}
       CONFIG_PATH: /app/data/config.json
-      # Chiffre config.json (identifiants Nutanix/HYCU/GLPI/3CX/ExaGrid au repos). La PERDRE rend
+      # Chiffre config.json (identifiants Nutanix/HYCU/GLPI/3CX au repos). La PERDRE rend
       # ces configurations illisibles : à sauvegarder hors de la machine.
       CONFIG_ENCRYPTION_KEY: ${CONFIG_ENCRYPTION_KEY}
       # --- Active Directory RÉEL de la mairie (aucun annuaire de test en production) -------------
@@ -54,10 +54,6 @@ services:
       LDAP_SEARCH_FILTER: ${LDAP_SEARCH_FILTER}
       LDAP_GROUP_ROLE_MAP: ${LDAP_GROUP_ROLE_MAP}
       LDAP_DEFAULT_ROLE: ${LDAP_DEFAULT_ROLE:-viewer}
-    ports:
-      # Traps SNMP poussés par l'appliance ExaGrid vers <hôte>:162. Publié vers un port > 1024 dans
-      # le conteneur : l'API tourne sous l'utilisateur non root "node", incapable de se lier au 162.
-      - "${QUAI_SNMP_TRAP_PORT:-162}:1162/udp"
     volumes:
       # Données persistantes : config.json chiffré, secrets, journal d'audit, catalogue de
       # templates, workspaces Infra-as-code, positions du graphe. Le Dockerfile crée /app/data

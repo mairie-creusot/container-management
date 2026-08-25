@@ -383,7 +383,7 @@ export function IconBackup({ className }: IconProps) {
 }
 
 /** Baie de stockage (plateaux empilés + témoins) — page "Stockage de sauvegarde" (appliance
- * ExaGrid), distincte de IconBackup (le job de sauvegarde) et de IconServer (rack de calcul). */
+ * baie de stockage), distincte de IconBackup (le job de sauvegarde) et de IconServer (rack de calcul). */
 /** Sceau et ruban — page Certificats (AD CS). */
 export function IconCertificate({ className }: IconProps) {
   return base(

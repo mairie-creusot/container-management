@@ -1,5 +1,4 @@
-/* Page Sauvegardes (contrôleur HYCU + appliance ExaGrid réunis). Les relevés de l'appliance
-   réutilisent les jauges et tuiles de exagrid.css. */
+/* Page Sauvegardes — contrôleur HYCU. */
 
 /* --- Bandeau des deux intégrations ----------------------------------------------------------- */
 
@@ -121,39 +120,6 @@
   white-space: nowrap;
   color: var(--color-text);
   font-size: 13px;
-}
-
-/* --- Rapprochement HYCU <-> ExaGrid ---------------------------------------------------------- */
-
-.bkp-link {
-  padding: 11px 14px;
-  margin-bottom: 14px;
-  border: 1px solid var(--color-border);
-  border-left: 3px solid var(--color-text-faint);
-  border-radius: var(--radius-md);
-  background: var(--color-surface-1);
-  color: var(--color-text-muted);
-  font-size: 12.5px;
-  line-height: 1.6;
-}
-
-.bkp-link.is-confirmed {
-  border-left-color: var(--color-success);
-  background: var(--color-success-bg);
-}
-
-.bkp-link.is-probable {
-  border-left-color: var(--color-warning);
-  background: var(--color-warning-bg);
-}
-
-.bkp-link strong,
-.bkp-link code {
-  color: var(--color-text);
-}
-
-.bkp-link code {
-  font-size: 12px;
 }
 
 /* --- Onglets et sections --------------------------------------------------------------------- */

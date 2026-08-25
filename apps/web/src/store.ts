@@ -24,7 +24,6 @@ import cronJobsReducer from "@/features/cronJobs/cronJobsSlice";
 import automationReducer from "@/features/automation/automationSlice";
 import nutanixReducer from "@/features/nutanix/nutanixSlice";
 import hycuReducer from "@/features/hycu/hycuSlice";
-import exagridReducer from "@/features/exagrid/exagridSlice";
 import threecxReducer from "@/features/threecx/threecxSlice";
 import glpiReducer from "@/features/glpi/glpiSlice";
 import certificatesReducer from "@/features/certificates/certificatesSlice";
@@ -58,7 +57,6 @@ export const store = configureStore({
     automation: automationReducer,
     nutanix: nutanixReducer,
     hycu: hycuReducer,
-    exagrid: exagridReducer,
     threecx: threecxReducer,
     glpi: glpiReducer,
     certificates: certificatesReducer,

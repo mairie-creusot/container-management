@@ -11,33 +11,23 @@ import {
   fetchHycuVms,
   type HycuTab,
 } from "@/features/hycu/hycuSlice";
-import { fetchExagridConfig, fetchExagridStatus, fetchExagridTraps } from "@/features/exagrid/exagridSlice";
 import { canAdminister } from "@/features/auth/authSlice";
 import DataTable, { type DataTableColumn } from "@/components/DataTable";
 import StatusPill from "@/components/StatusPill";
 import IntegrationSettingsHint, { OpenSettingsButton } from "@/components/IntegrationSettingsHint";
-import { IconBackup, IconStorageArray } from "@/components/icons";
-import ExagridReadingsPanel from "@/features/exagrid/ExagridReadingsPanel";
+import { IconBackup } from "@/components/icons";
 import {
   MISSING,
-  ageSeverityClass,
-  formatAge,
-  formatBytes,
-  formatPercent,
-  usageSeverityClass,
-  versionLabel,
-} from "@/features/exagrid/exagridFormat";
-import {
   complianceProps,
   countCompliance,
   eventSeverityProps,
+  formatBytes,
   formatDateMs,
+  formatPercent,
   jobStatusProps,
   latestJob,
-  matchExagridTargets,
-  type ExagridMatchKind,
 } from "@/features/dataProtection/backupsModel";
-import type { ExagridTrap, HycuEvent, HycuJob, HycuPolicy, HycuTarget, HycuVm } from "@/types";
+import type { HycuEvent, HycuJob, HycuPolicy, HycuTarget, HycuVm } from "@/types";
 
 // Les identifiants d'onglet restent ceux de HycuTab : le menu contextuel du nœud HYCU du graphe
 // demande déjà "jobs" (voir TopologyGraph.tsx) et doit continuer d'ouvrir le bon onglet.
@@ -94,16 +84,6 @@ export default function BackupsPage() {
     configStatus: hycuConfigStatus,
     focus,
   } = useAppSelector((s) => s.hycu);
-  const {
-    status: exagridStatus,
-    statusLoad: exagridLoad,
-    statusError: exagridError,
-    backendUnavailable,
-    configured: exagridConfigured,
-    config: exagridConfig,
-    configLoad: exagridConfigLoad,
-    traps: exagridTraps,
-  } = useAppSelector((s) => s.exagrid);
   const session = useAppSelector((s) => s.auth.session);
   const admin = canAdminister(session);
 
@@ -113,13 +93,7 @@ export default function BackupsPage() {
   useEffect(() => {
     if (summaryStatus === "idle") dispatch(fetchHycuStatus());
     if (hycuConfigStatus === "idle") dispatch(fetchHycuConfig());
-    if (exagridLoad === "idle") {
-      dispatch(fetchExagridStatus());
-    dispatch(fetchExagridTraps());
-      dispatch(fetchExagridTraps());
-    }
-    if (exagridConfigLoad === "idle") dispatch(fetchExagridConfig());
-  }, [dispatch, summaryStatus, hycuConfigStatus, exagridLoad, exagridConfigLoad]);
+  }, [dispatch, summaryStatus, hycuConfigStatus]);
 
   // VM, jobs et cibles alimentent le résumé de tête (conformité, dernier job, rapprochement avec
   // l'appliance) : chargés dès que HYCU répond, pas seulement à l'ouverture de leur onglet.
@@ -143,7 +117,6 @@ export default function BackupsPage() {
 
   function handleRefresh() {
     dispatch(fetchHycuStatus());
-    dispatch(fetchExagridStatus());
     if (!hycuConfigured) return;
     dispatch(fetchHycuJobs());
     dispatch(fetchHycuVms());
@@ -154,24 +127,8 @@ export default function BackupsPage() {
 
   const hycuReachable = summary?.reachable === true;
   const hycuUnreachable = hycuConfigured && summary?.reachable === false;
-  const exagridUnreachable = exagridConfigured && exagridStatus?.reachable === false;
-  // `reachable` absent : on n'invente pas de verdict, mais on affiche les valeurs réellement lues.
-  const exagridShowData = exagridConfigured && !!exagridStatus && exagridStatus.reachable !== false;
-  const readings = exagridStatus?.readings;
-  const retentionPct = readings?.retention.usedPct;
-
   const compliance = useMemo(() => countCompliance(vms), [vms]);
   const lastJob = useMemo(() => latestJob(jobs), [jobs]);
-
-  const exagridHost = exagridStatus?.endpoint?.host ?? exagridConfig?.config?.host ?? null;
-  const matches = useMemo(() => matchExagridTargets(targets, exagridHost), [targets, exagridHost]);
-  const matchByTarget = useMemo(() => {
-    const map = new Map<HycuTarget, ExagridMatchKind>();
-    for (const match of matches) map.set(match.target, match.kind);
-    return map;
-  }, [matches]);
-  const confirmedMatches = matches.filter((match) => match.kind === "address");
-  const probableMatches = matches.filter((match) => match.kind === "hostname");
 
   const hycuPill = !hycuConfigured
     ? { status: "unconfigured" }
@@ -180,35 +137,6 @@ export default function BackupsPage() {
       : hycuReachable
         ? { status: "connected" }
         : { status: "checking", label: "Vérification…" };
-
-  const exagridPill = backendUnavailable
-    ? { status: "unavailable", label: "Indisponible" }
-    : exagridLoad === "loading" && !exagridStatus
-      ? { status: "checking", label: "Vérification…" }
-      : !exagridConfigured
-        ? { status: "unconfigured" }
-        : exagridUnreachable
-          ? { status: "crit", label: "Injoignable" }
-          : exagridStatus?.reachable === true
-            ? { status: "connected" }
-            : { status: "unknown", label: "État inconnu" };
-
-  /** Ancienneté de la file de réplication — le signal qui se dégrade avant tous les autres. */
-  function replicationTile(): SummaryTile {
-    const label = "Réplication en attente";
-    if (backendUnavailable) return { label, value: MISSING, hint: "intégration ExaGrid indisponible" };
-    if (!exagridConfigured) return { label, value: MISSING, hint: "ExaGrid non configuré" };
-    if (exagridUnreachable) return { label, value: MISSING, hint: "appliance injoignable" };
-    const age = readings?.pendingReplication.ageSeconds;
-    if (age === undefined) return { label, value: MISSING, hint: "ancienneté non communiquée par la MIB" };
-    const bytes = readings?.pendingReplication.bytes;
-    return {
-      label,
-      value: formatAge(age),
-      hint: bytes === undefined ? "volume non communiqué" : `${formatBytes(bytes)} en attente de copie hors site`,
-      hintClass: ageSeverityClass(age),
-    };
-  }
 
   function protectedTile(): SummaryTile {
     const label = "VM protégées";
@@ -235,22 +163,6 @@ export default function BackupsPage() {
       value: String(compliance.nonCompliant),
       hint: `sur ${compliance.withCompliance} VM avec un état de conformité`,
       ...(compliance.nonCompliant > 0 ? { hintClass: " is-warning" } : {}),
-    };
-  }
-
-  function occupancyTile(): SummaryTile {
-    const label = "Occupation de l'appliance";
-    if (backendUnavailable) return { label, value: MISSING, hint: "intégration ExaGrid indisponible" };
-    if (!exagridConfigured) return { label, value: MISSING, hint: "ExaGrid non configuré" };
-    if (exagridUnreachable) return { label, value: MISSING, hint: "appliance injoignable" };
-    const retention = readings?.retention.usedPct;
-    if (retention === undefined) return { label, value: MISSING, hint: "occupation non communiquée par la MIB" };
-    const landing = readings?.landing.usedPct;
-    return {
-      label,
-      value: formatPercent(retention),
-      hint: landing === undefined ? "zone de rétention" : `rétention · atterrissage à ${formatPercent(landing)}`,
-      hintClass: usageSeverityClass(retention),
     };
   }
 
@@ -315,24 +227,6 @@ export default function BackupsPage() {
         label: "Nom",
         accessor: (row) => row.item.name,
         className: "cell-primary",
-        render: (row) => {
-          const kind = matchByTarget.get(row.item);
-          return (
-            <span className="bkp-cell-inline">
-              {row.item.name}
-              {kind === "address" && (
-                <span className="bkp-badge is-confirmed" title="Cette cible désigne l'appliance ExaGrid configurée">
-                  ExaGrid
-                </span>
-              )}
-              {kind === "hostname" && (
-                <span className="bkp-badge" title="Nom d'hôte de l'appliance ExaGrid — rapprochement probable">
-                  ExaGrid ?
-                </span>
-              )}
-            </span>
-          );
-        },
       },
       { key: "type", label: "Type", accessor: (row) => row.item.type ?? "" },
       {
@@ -372,7 +266,7 @@ export default function BackupsPage() {
         render: (row) => formatPercent(row.item.utilizationPct),
       },
     ],
-    [matchByTarget],
+    [],
   );
 
   const jobColumns = useMemo<DataTableColumn<Keyed<HycuJob>>[]>(
@@ -403,28 +297,6 @@ export default function BackupsPage() {
         searchable: false,
         className: "cell-mono",
         render: (row) => formatDateMs(row.item.endTimeInMillis),
-      },
-    ],
-    [],
-  );
-
-  const trapColumns = useMemo<DataTableColumn<ExagridTrap>[]>(
-    () => [
-      {
-        key: "recu",
-        label: "Reçu le",
-        accessor: (row) => row.receivedAt,
-        render: (row) => new Date(row.receivedAt).toLocaleString("fr-FR"),
-        className: "cell-mono",
-      },
-      { key: "emetteur", label: "Émetteur", accessor: (row) => row.source, className: "cell-mono" },
-      { key: "notification", label: "Notification", accessor: (row) => row.trapOid ?? "", render: (row) => row.trapOid ?? "—" },
-      {
-        key: "detail",
-        label: "Détail",
-        accessor: (row) => row.varbinds.map((v) => `${v.oid} = ${v.value}`).join(" "),
-        render: (row) =>
-          row.varbinds.length === 0 ? "—" : row.varbinds.map((v) => `${v.oid} = ${v.value}`).join(" · "),
       },
     ],
     [],
@@ -483,8 +355,7 @@ export default function BackupsPage() {
           <div>
             <h2>Sauvegardes</h2>
             <p>
-              Protection des VM par le contrôleur HYCU et occupation réelle de l'appliance ExaGrid où atterrissent les
-              sauvegardes — en lecture seule, aucune valeur n'est modifiée par QUAI.
+              Protection des VM par le contrôleur HYCU — en lecture seule, aucune valeur n'est modifiée par QUAI.
             </p>
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -500,14 +371,6 @@ export default function BackupsPage() {
             <span className="bkp-integration__name">Contrôleur HYCU</span>
             <StatusPill {...hycuPill} />
           </span>
-          <span className="bkp-integration">
-            <IconStorageArray />
-            <span className="bkp-integration__name">Appliance ExaGrid</span>
-            <StatusPill {...exagridPill} />
-            {exagridConfigured && exagridConfig?.config && (
-              <span className="bkp-integration__hint">
-                {exagridConfig.config.host} · {versionLabel(exagridConfig.config.version)}
-              </span>
             )}
           </span>
           {admin && (
@@ -525,26 +388,9 @@ export default function BackupsPage() {
             listes ci-dessous peuvent rester vides tant que le contrôleur ne répond pas.
           </div>
         )}
-        {backendUnavailable && (
-          <div className="exagrid-note">
-            L'API QUAI ne répond pas sur les routes ExaGrid : l'intégration n'est pas encore déployée sur ce serveur.
-            Aucune valeur d'appliance n'est affichée tant qu'elle n'est pas réellement interrogée.
-          </div>
-        )}
-        {!backendUnavailable && exagridError && <div className="error-banner">ExaGrid : {exagridError}</div>}
-        {exagridUnreachable && (
-          <div className="error-banner">
-            L'appliance ExaGrid est configurée mais ne répond pas en SNMP
-            {exagridStatus?.lastPoll
-              ? ` (dernier essai : ${new Date(exagridStatus.lastPoll.at).toLocaleString("fr-FR")})`
-              : ""}
-            . Aucune valeur n'est affichée tant qu'elle reste injoignable.
-          </div>
-        )}
 
         <div className="bkp-summary">
-          <Tile tile={replicationTile()} hero />
-          <Tile tile={protectedTile()} />
+          <Tile tile={protectedTile()} hero />
           <Tile tile={complianceTile()} />
           <div className="bkp-tile">
             <span className="bkp-tile__label">Dernier job</span>
@@ -573,43 +419,7 @@ export default function BackupsPage() {
               </>
             )}
           </div>
-          <Tile tile={occupancyTile()} />
         </div>
-
-        {hycuConfigured && exagridConfigured && targetsStatus === "ready" && targets.length > 0 && (
-          <div
-            className={`bkp-link${confirmedMatches.length > 0 ? " is-confirmed" : probableMatches.length > 0 ? " is-probable" : ""}`}
-          >
-            {confirmedMatches.length > 0 ? (
-              <p>
-                <strong>Ces sauvegardes atterrissent sur cette appliance.</strong> La cible HYCU{" "}
-                {confirmedMatches.map((match, index) => (
-                  <span key={match.target.uuid ?? match.target.name}>
-                    {index > 0 && ", "}
-                    <code>{match.target.name}</code>
-                  </span>
-                ))}{" "}
-                désigne l'adresse <code>{confirmedMatches[0]?.token}</code> de l'appliance ExaGrid configurée
-                {retentionPct === undefined
-                  ? ", dont l'occupation n'est pas communiquée par la MIB."
-                  : `, occupée à ${formatPercent(retentionPct)} en zone de rétention.`}
-              </p>
-            ) : probableMatches.length > 0 ? (
-              <p>
-                <strong>Rapprochement probable, non confirmé.</strong> La cible HYCU{" "}
-                <code>{probableMatches[0]?.target.name}</code> contient le nom d'hôte{" "}
-                <code>{probableMatches[0]?.token}</code> de l'appliance ExaGrid configurée, sans citer son adresse
-                complète (<code>{exagridHost}</code>) — QUAI n'affirme pas que ces sauvegardes y atterrissent.
-              </p>
-            ) : (
-              <p>
-                Aucune cible HYCU ne désigne l'adresse de l'appliance ExaGrid configurée (<code>{exagridHost}</code>) —
-                QUAI n'affirme aucun lien entre ces sauvegardes et cette appliance. HYCU n'expose que le nom de ses
-                cibles, jamais leur adresse : le rapprochement ne peut se faire que sur ce nom.
-              </p>
-            )}
-          </div>
-        )}
 
         <div className="bkp-tabs">
           {TABS.map((tab) => (
@@ -715,45 +525,6 @@ export default function BackupsPage() {
               hycuMissing
             )}
 
-            <h3 className="bkp-section-title">Appliance de stockage ExaGrid</h3>
-            {!exagridConfigured && !backendUnavailable && exagridLoad !== "loading" && (
-              <IntegrationSettingsHint
-                title="ExaGrid non configuré"
-                description="Sans accès SNMP à l'appliance, ni l'occupation des zones, ni les files d'attente de déduplication et de réplication ne peuvent être relevées."
-                icon={<IconStorageArray />}
-                admin={admin}
-              />
-            )}
-            {exagridLoad === "loading" && !exagridStatus && (
-              <div className="empty-state">Chargement de l'état de l'appliance…</div>
-            )}
-            {exagridShowData && exagridStatus && <ExagridReadingsPanel status={exagridStatus} />}
-
-            {/* Alarmes poussées par l'appliance : indépendantes du poll, elles arrivent même quand
-                l'agent SNMP interrogeable est inactif — c'est alors la seule donnée réelle. */}
-            <section className="panel">
-              <header className="panel__header">
-                <h3>Alarmes reçues de l'appliance</h3>
-                <p className="panel__subtitle">
-                  Traps SNMP envoyés par l'ExaGrid (Configuration &gt; SNMP Traps sur l'appliance). Un trap signale un
-                  événement : il ne porte ni occupation, ni taux de déduplication, ni retard de réplication.
-                </p>
-              </header>
-              {exagridTraps.length === 0 ? (
-                <div className="empty-state">
-                  Aucun trap reçu depuis le dernier démarrage de QUAI. L'appliance doit pointer vers cet hôte sur le
-                  port 162.
-                </div>
-              ) : (
-                <DataTable
-                  rows={exagridTraps}
-                  columns={trapColumns}
-                  rowKey={(row) => `${row.receivedAt}-${row.source}-${row.trapOid ?? ""}`}
-                  searchable
-                  searchPlaceholder="Rechercher (emetteur:172.20.0.101, notification:…)"
-                />
-              )}
-            </section>
           </>
         )}
       </div>

@@ -26,9 +26,6 @@ import { config } from "../config.js";
 import { decryptSecret, encryptSecretIfNeeded, isEncrypted } from "./crypto.js";
 import { writeFileRestricted } from "../utils/secureFile.js";
 import type { RegistryKind, Role } from "../types.js";
-// Types purs (effacés à la compilation) : aucune dépendance runtime vers services/exagrid.ts,
-// qui lui importe RÉELLEMENT ce module.
-import type { ExagridAuthProtocol, ExagridPrivProtocol, ExagridSecurityLevel, ExagridSnmpVersion } from "./exagrid.js";
 
 export interface SetupLdapConfig {
   url: string;
@@ -119,25 +116,6 @@ export interface SetupThreecxConfig {
   tlsRejectUnauthorized?: boolean;
 }
 
-/**
- * ExaGrid (appliance de sauvegarde) — stocké ICI comme HYCU/Nutanix : même nature (une appliance
- * interne unique), même cycle de vie (/api/exagrid/config). Pas d'API REST côté ExaGrid : la
- * config décrit une session SNMP v2c OU v3 (voir services/exagrid.ts).
- */
-export interface SetupExagridConfig {
-  host: string;
-  port: number;
-  version: ExagridSnmpVersion;
-  // v2c — community : chiffrée au repos (voir encryptSecrets ci-dessous), jamais renvoyée.
-  community?: string;
-  // v3 — username/securityLevel/protocoles ne sont PAS secrets ; authKey/privKey le sont.
-  username?: string;
-  securityLevel?: ExagridSecurityLevel;
-  authProtocol?: ExagridAuthProtocol;
-  authKey?: string;
-  privProtocol?: ExagridPrivProtocol;
-  privKey?: string;
-}
 
 /**
  * DNS Active Directory (RFC 2136 + GSS-TSIG, voir services/adDns.ts et types.ts#AdDnsConfig) —
@@ -231,7 +209,6 @@ export interface SetupConfig {
   hycu?: SetupHycuConfig;
   glpi?: SetupGlpiConfig;
   threecx?: SetupThreecxConfig;
-  exagrid?: SetupExagridConfig;
   registries?: SetupRegistryConfig[];
   adDns?: SetupAdDnsConfig;
   certificates?: SetupCertificatesConfig;
@@ -267,16 +244,6 @@ function defaultCandidate(): SetupConfig {
   };
 }
 
-/** Applique `transform` aux SEULS champs secrets d'ExaGrid (community/authKey/privKey) — host,
- * port, version, username et noms de protocoles ne sont pas des secrets. */
-function mapExagridSecrets(cfg: SetupExagridConfig, transform: (value: string) => string): SetupExagridConfig {
-  return {
-    ...cfg,
-    ...(cfg.community !== undefined ? { community: transform(cfg.community) } : {}),
-    ...(cfg.authKey !== undefined ? { authKey: transform(cfg.authKey) } : {}),
-    ...(cfg.privKey !== undefined ? { privKey: transform(cfg.privKey) } : {}),
-  };
-}
 
 /** Applique `transform` aux SEULS champs secrets de GLPI (appToken/userToken/password) — apiUrl et
  * username (compte de service) ne sont pas des secrets. */
@@ -322,7 +289,6 @@ function encryptSecrets(cfg: SetupConfig): SetupConfig {
       : {}),
     ...(cfg.glpi ? { glpi: mapGlpiSecrets(cfg.glpi, encryptSecretIfNeeded) } : {}),
     ...(cfg.threecx ? { threecx: mapThreecxSecrets(cfg.threecx, encryptSecretIfNeeded) } : {}),
-    ...(cfg.exagrid ? { exagrid: mapExagridSecrets(cfg.exagrid, encryptSecretIfNeeded) } : {}),
     ...(cfg.adDns?.password
       ? { adDns: { ...cfg.adDns, password: encryptSecretIfNeeded(cfg.adDns.password) } }
       : {}),
@@ -349,7 +315,6 @@ function hasLegacyPlaintextSecret(cfg: SetupConfig): boolean {
   if (cfg.hycu?.password && !isEncrypted(cfg.hycu.password)) return true;
   if (cfg.glpi && [cfg.glpi.appToken, cfg.glpi.userToken, cfg.glpi.password].some((s) => s && !isEncrypted(s))) return true;
   if (cfg.threecx && [cfg.threecx.clientSecret, cfg.threecx.password].some((s) => s && !isEncrypted(s))) return true;
-  if (cfg.exagrid && [cfg.exagrid.community, cfg.exagrid.authKey, cfg.exagrid.privKey].some((s) => s && !isEncrypted(s))) return true;
   if (cfg.adDns?.password && !isEncrypted(cfg.adDns.password)) return true;
   if (cfg.certificates?.password && !isEncrypted(cfg.certificates.password)) return true;
   if (cfg.registries?.some((r) => (r.password && !isEncrypted(r.password)) || (r.token && !isEncrypted(r.token)))) {
@@ -719,35 +684,6 @@ export async function clearThreecxConfig(): Promise<SetupConfig> {
   return next;
 }
 
-/** Config ExaGrid effective (community/authKey/privKey déchiffrés), ou `null` si jamais
- * configurée — même principe que getEffectiveHycuConfig (aucun bootstrap par variable
- * d'environnement : hôte et identifiants SNMP sont toujours saisis explicitement). */
-export async function getEffectiveExagridConfig(): Promise<SetupExagridConfig | null> {
-  const current = await getCurrent();
-  if (!current.exagrid) return null;
-  return mapExagridSecrets(current.exagrid, decryptSecret);
-}
-
-/** PUT /api/exagrid/config — configure/remplace ExaGrid (secrets chiffrés avant écriture),
- * n'affecte aucune autre section — même principe que setHycuConfig ci-dessus. */
-export async function setExagridConfig(input: SetupExagridConfig): Promise<SetupConfig> {
-  const current = await getCurrent();
-  const next: SetupConfig = encryptSecrets({ ...current, exagrid: input });
-  await writeToDisk(next);
-  cache = next;
-  return next;
-}
-
-/** DELETE /api/exagrid/config — retire la configuration ExaGrid (retour à "jamais configuré",
- * GET /api/exagrid/status redevient { configured: false }). */
-export async function clearExagridConfig(): Promise<SetupConfig> {
-  const current = await getCurrent();
-  const { exagrid: _removed, ...rest } = current;
-  const next: SetupConfig = rest;
-  await writeToDisk(next);
-  cache = next;
-  return next;
-}
 
 /** Config DNS AD effective (mot de passe déchiffré), ou `null` si jamais configurée — même
  * principe que getEffectiveNutanixConfig (aucun mécanisme de bootstrap par variable

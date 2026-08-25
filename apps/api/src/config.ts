@@ -125,16 +125,6 @@ export const config = {
     // cache pour résoudre les noms des interlocuteurs sans réinterroger /Users à chaque poll.
     directoryCacheMs: readNumber("THREECX_DIRECTORY_CACHE_MS", 60_000),
   },
-  exagrid: {
-    // Appliance de sauvegarde ExaGrid : AUCUNE API REST n'existe, l'intégration est SNMP (UDP,
-    // EXAGRID-MIB) — d'où un timeout/retries plutôt qu'un timeout HTTP. UDP ne retransmet pas :
-    // `retries` est le nombre de RENVOIS de la requête après le premier essai (net-snmp).
-    requestTimeoutMs: readNumber("EXAGRID_SNMP_TIMEOUT_MS", 5000),
-    retries: readNumber("EXAGRID_SNMP_RETRIES", 1),
-    // Écoute des traps poussés par l'appliance. > 1024 : l'API tourne sous un utilisateur non
-    // root, qui ne peut pas se lier au 162 — c'est le compose qui publie 162/udp vers ce port.
-    trapListenPort: readNumber("EXAGRID_TRAP_PORT", 1162),
-  },
   registries: {
     requestTimeoutMs: readNumber("REGISTRY_REQUEST_TIMEOUT_MS", 5000),
     dockerhub: {

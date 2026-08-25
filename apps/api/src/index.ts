@@ -25,7 +25,6 @@ import containerLogsRoutes from "./routes/containerLogs.js";
 import containersRoutes from "./routes/containers.js";
 import cronJobsRoutes from "./routes/cronJobs.js";
 import environmentsRoutes from "./routes/environments.js";
-import exagridRoutes from "./routes/exagrid.js";
 import githubRoutes from "./routes/github.js";
 import githubWebhookRoutes from "./routes/githubWebhook.js";
 import gitopsRoutes from "./routes/gitops.js";
@@ -59,8 +58,6 @@ import { startCronJobsScheduler } from "./services/cronJobsScheduler.js";
 import { startGitopsReconciler } from "./services/gitopsReconciler.js";
 import { startMetricsCollector } from "./services/metricsCollector.js";
 import { startReverseProxyReconciler } from "./services/reverseProxyReconciler.js";
-import { startExagridTrapReceiver, stopExagridTrapReceiver } from "./services/exagridTraps.js";
-import { getEffectiveExagridConfig } from "./services/setupStore.js";
 import { startScanScheduler } from "./services/scanScheduler.js";
 import { startWatchdog } from "./services/watchdog.js";
 
@@ -110,7 +107,6 @@ export function buildServer() {
   void fastify.register(glpiRoutes);
   void fastify.register(glpiInventoryRoutes);
   void fastify.register(threecxRoutes);
-  void fastify.register(exagridRoutes);
   void fastify.register(remoteEnvironmentsRoutes);
   void fastify.register(lxcRoutes);
   void fastify.register(reverseProxyRoutes);
@@ -151,16 +147,6 @@ async function main(): Promise<void> {
   // tests qui construisent le serveur avec `app.inject` sans jamais appeler main().
   const stopWatchdog = startWatchdog();
 
-  // Écoute des traps SNMP de l'appliance ExaGrid (elle les pousse d'elle-même, voir
-  // services/exagridTraps.ts). Démarré seulement ici, jamais depuis buildServer() : aucun test
-  // n'ouvre de socket. La communauté configurée sert de filtre ; sans configuration, on écoute
-  // quand même — c'est le seul moyen de voir arriver un premier trap et de le diagnostiquer.
-  void (async () => {
-    const exagrid = await getEffectiveExagridConfig().catch(() => null);
-    const port = config.exagrid.trapListenPort;
-    const ok = await startExagridTrapReceiver(port, exagrid?.community);
-    if (ok) fastify.log.info(`Écoute des traps SNMP ExaGrid sur le port ${port}/udp`);
-  })();
 
   // Boucle de réconciliation GitOps (détection de dérive seulement, jamais d'application
   // automatique — voir services/gitopsReconciler.ts) : même câblage que le watchdog ci-dessus,
@@ -224,7 +210,6 @@ async function main(): Promise<void> {
     stopCronJobsScheduler();
     stopBackupScheduler();
     stopAutomationEngine();
-    stopExagridTrapReceiver();
     void fastify.close().then(() => process.exit(0));
   };
   process.on("SIGTERM", () => shutdown("SIGTERM"));

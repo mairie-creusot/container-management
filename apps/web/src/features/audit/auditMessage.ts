@@ -33,7 +33,6 @@ const RESOURCE_LABELS: Record<string, string> = {
   containers: "les conteneurs",
   "cron-jobs": "les tâches planifiées",
   environments: "les environnements",
-  exagrid: "le stockage de sauvegarde ExaGrid",
   github: "l'intégration GitHub",
   gitops: "GitOps",
   glpi: "l'assistance GLPI",
@@ -199,15 +198,13 @@ export function describeAction(event: AuditEvent): string {
     if (idOrAction === "issue") return "a demandé l'émission d'un certificat";
     if (method === "DELETE") return `a retiré le certificat de ${shortId(idOrAction)}`;
   }
-  if (resource === "hycu" || resource === "exagrid" || resource === "glpi" || resource === "3cx") {
+  if (resource === "hycu" || resource === "glpi" || resource === "3cx") {
     const what =
       resource === "hycu"
         ? "des sauvegardes HYCU"
-        : resource === "exagrid"
-          ? "du stockage de sauvegarde ExaGrid"
-          : resource === "glpi"
-            ? "de l'assistance GLPI"
-            : "de la téléphonie 3CX";
+        : resource === "glpi"
+          ? "de l'assistance GLPI"
+          : "de la téléphonie 3CX";
     if (idOrAction === "config" && subAction === "test") return `a testé la connexion ${what}`;
     if (idOrAction === "config" && method === "PUT") return `a configuré l'intégration ${what}`;
     if (idOrAction === "config" && method === "DELETE") return `a désactivé l'intégration ${what}`;

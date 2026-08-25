@@ -19,7 +19,7 @@ import type {
 } from "@/features/threecx/types";
 
 /** Corps de PUT/POST /api/3cx/config — `clientSecret`/`password` vides sont OMIS, jamais envoyés
- * vides : côté serveur, absent = conserver le secret existant (même convention que HYCU/ExaGrid).
+ * vides : côté serveur, absent = conserver le secret existant (même convention que HYCU).
  * `authMode` est TOUJOURS envoyé : c'est lui que le serveur teste. */
 export interface ThreecxConfigFormInput {
   baseUrl: string;
@@ -31,7 +31,7 @@ export interface ThreecxConfigFormInput {
   tlsRejectUnauthorized?: boolean;
 }
 
-/** Comme exagridSlice : une lecture ne REJETTE jamais. Une 404 signifie "route absente de cette
+/** Une lecture ne REJETTE jamais. Une 404 signifie "route absente de cette
  * API" et doit produire un état indisponible honnête, pas un écran vide qui ressemblerait à un PBX
  * sans appels. */
 export type ThreecxFetchResult<T> = { kind: "ok"; data: T } | { kind: "unavailable" } | { kind: "error"; message: string };

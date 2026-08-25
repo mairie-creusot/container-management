@@ -285,7 +285,7 @@ manque :
 | --- | --- | --- | --- |
 | `QUAI_PUBLIC_URL` | URL par laquelle les navigateurs joignent QUAI, ex. `https://quai.lecreusot.priv` (sert aussi d'origine CORS et de lien de retour dans les tickets GLPI) | oui | non (contient `://`) |
 | `JWT_SECRET` | secret de signature des sessions — `openssl rand -hex 32` | oui | oui |
-| `CONFIG_ENCRYPTION_KEY` | clé de chiffrement de `config.json` — `openssl rand -hex 32`. **À sauvegarder hors de la machine** : sans elle, les configurations Nutanix/HYCU/GLPI/3CX/ExaGrid sont irrécupérables | oui | oui |
+| `CONFIG_ENCRYPTION_KEY` | clé de chiffrement de `config.json` — `openssl rand -hex 32`. **À sauvegarder hors de la machine** : sans elle, les configurations Nutanix/HYCU/GLPI/3CX sont irrécupérables | oui | oui |
 | `LDAP_URL` | annuaire réel, ex. `ldaps://dc01.lecreusot.priv:636` | oui | non (contient `://`) |
 | `LDAP_BIND_DN` | compte de service **en lecture seule**, ex. `CN=svc-quai,OU=Services,OU=ville-du-Creusot,DC=lecreusot,DC=priv` | oui | non (contient `=` et `,`) |
 | `LDAP_BIND_PASSWORD` | mot de passe de ce compte | oui | oui |
