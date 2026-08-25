@@ -29,6 +29,8 @@ import type { PluginGraphContribution, PluginGraphEdge, PluginGraphNode } from "
 import { getHycuTopologySnapshot, hycuVmProtectionState, lastKnownHycuPoll } from "../../services/hycu.js";
 import type { HycuPollOutcome, HycuTopologySnapshot } from "../../services/hycu.js";
 import type { HycuVmProtectionState, TopologyEdge, TopologyNode } from "../../types.js";
+import { isPluginDisabled } from "../activation.js";
+import { HYCU_PLUGIN_ID } from "./config.js";
 
 /** Type de nœud contribué — la MÊME valeur que `permissions.graphNodeKinds` du manifeste. */
 export const HYCU_GRAPH_NODE_KIND = "hycu-appliance";
@@ -190,6 +192,10 @@ function toTopologyEdge(edge: PluginGraphEdge): TopologyEdge | null {
 export async function hycuTopologyParts(
   nutanixVmNodes: TopologyNode[],
 ): Promise<{ nodes: TopologyNode[]; edges: TopologyEdge[] }> {
+  // Greffon désactivé : le socle ne le consomme plus, ni nœud ni annotation de protection — sa
+  // configuration reste écrite et le réactiver le fait réapparaître tel quel.
+  if (await isPluginDisabled(HYCU_PLUGIN_ID)) return { nodes: [], edges: [] };
+
   const snapshot = await getHycuTopologySnapshot();
   if (!snapshot) return { nodes: [], edges: [] };
 
@@ -211,6 +217,7 @@ export async function hycuTopologyParts(
 
 /** Contribution du greffon SANS contexte de graphe (voir Plugin#graph) : le nœud seul. */
 export async function hycuGraphContribution(): Promise<PluginGraphContribution> {
+  if (await isPluginDisabled(HYCU_PLUGIN_ID)) return { nodes: [], edges: [], attachments: [] };
   const snapshot = await getHycuTopologySnapshot();
   if (!snapshot) return { nodes: [], edges: [], attachments: [] };
   return buildHycuGraph(snapshot, lastKnownHycuPoll(), []).contribution;

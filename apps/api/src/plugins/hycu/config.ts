@@ -8,6 +8,7 @@
  * plugins/threecx/config.ts.
  */
 
+import type { PluginConfigStore } from "@quai/plugin-contract";
 import {
   clearHycuConfig,
   clearIntegrationConfig,
@@ -98,3 +99,20 @@ export async function removeHycuPluginConfig(): Promise<void> {
   await clearIntegrationConfig(HYCU_PLUGIN_ID);
   await dropLegacyConfig();
 }
+
+/** Voie d'écriture du socle (Plugin#configStore) : passe par les fonctions ci-dessus, qui purgent
+ * le champ typé — écrire dans le stockage générique en direct laisserait le reliquat ressusciter. */
+export const hycuConfigStore: PluginConfigStore = {
+  async load(): Promise<Record<string, unknown> | null> {
+    const cfg = await loadHycuPluginConfig();
+    return cfg ? toStored(cfg) : null;
+  },
+  async save(config: Record<string, unknown>): Promise<void> {
+    const parsed = parseHycuConfig(config);
+    if (!parsed || !isHycuConfigComplete(parsed)) throw new Error("url, username et password sont requis");
+    await saveHycuPluginConfig(parsed);
+  },
+  async remove(): Promise<void> {
+    await removeHycuPluginConfig();
+  },
+};

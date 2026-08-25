@@ -164,8 +164,8 @@ describe("Greffon HYCU — GET /api/plugins", () => {
     const response = await app.inject({ method: "GET", url: "/api/plugins", cookies: viewerCookie() });
     expect(response.statusCode).toBe(200);
 
-    const body = response.json() as { plugins: Array<Record<string, unknown>> };
-    const exposed = body.plugins.find((plugin) => plugin.id === HYCU_PLUGIN_ID);
+    const body = response.json() as { plugins: Array<{ manifest: Record<string, unknown> }> };
+    const exposed = body.plugins.find((plugin) => plugin.manifest.id === HYCU_PLUGIN_ID)?.manifest;
     expect(exposed).toBeDefined();
     expect(exposed?.secretFields).toEqual(["password"]);
     expect(exposed?.permissions).toMatchObject({ mutates: false, graphNodeKinds: ["hycu-appliance"] });

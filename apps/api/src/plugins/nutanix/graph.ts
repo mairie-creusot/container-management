@@ -15,6 +15,8 @@
 import type { PluginGraphContribution, PluginGraphEdge, PluginGraphNode } from "@quai/plugin-contract";
 import { getNutanixClusters, getNutanixHosts, getNutanixVms, isNutanixConfigured } from "../../services/nutanix.js";
 import type { NutanixVm, TopologyEdge, TopologyNode } from "../../types.js";
+import { isPluginDisabled } from "../activation.js";
+import { NUTANIX_PLUGIN_ID } from "./config.js";
 
 export const NUTANIX_VM_NODE_PREFIX = "nutanix-vm:";
 
@@ -127,6 +129,9 @@ export async function getNutanixTopologyParts(): Promise<{
   hostNodes: TopologyNode[];
   hostEdges: TopologyEdge[];
 }> {
+  // Greffon désactivé : le socle ne le consomme plus, aucun appel réseau et aucun nœud — sa
+  // configuration reste écrite et le réactiver le fait réapparaître tel quel.
+  if (await isPluginDisabled(NUTANIX_PLUGIN_ID)) return { vmNodes: [], hostNodes: [], hostEdges: [] };
   if (!(await isNutanixConfigured())) return { vmNodes: [], hostNodes: [], hostEdges: [] };
 
   const [vms, clusters, hosts] = await Promise.all([getNutanixVms(), getNutanixClusters(), getNutanixHosts()]);

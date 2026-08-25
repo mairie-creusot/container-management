@@ -33,6 +33,7 @@ import { createGlpiComputerForResource, updateGlpiComputerForResource } from "..
 import type { InventoryField } from "../../services/glpiInventory.js";
 import {
   glpiAuthModeOf,
+  glpiConfigStore,
   GLPI_PLUGIN_ID,
   GLPI_SECRET_FIELDS,
   isGlpiConfigComplete,
@@ -205,6 +206,8 @@ export const glpiPlugin: Plugin = {
       "update-inventory-computer": "Alignement d'une fiche d'inventaire GLPI sur la ressource réelle",
     },
   },
+
+  configStore: glpiConfigStore,
 
   async test(config: unknown): Promise<PluginTestResult> {
     const parsed = parseGlpiConfig(config);

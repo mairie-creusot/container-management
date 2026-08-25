@@ -21,7 +21,7 @@ import type {
   ServiceModuleTone,
 } from "@quai/plugin-contract";
 import { getHycuStatus, testHycuConnection } from "../../services/hycu.js";
-import { HYCU_PLUGIN_ID, HYCU_SECRET_FIELDS, isHycuConfigComplete, parseHycuConfig } from "./config.js";
+import { hycuConfigStore, HYCU_PLUGIN_ID, HYCU_SECRET_FIELDS, isHycuConfigComplete, parseHycuConfig } from "./config.js";
 import { HYCU_GRAPH_NODE_KIND, hycuGraphContribution } from "./graph.js";
 
 /** Même vocabulaire que le formulaire des Réglages (features/hycu/HycuConnectionForm.tsx). */
@@ -80,6 +80,8 @@ export const hycuPlugin: Plugin = {
     // Aucune action exposée, donc aucun libellé d'audit : le greffon est en lecture seule.
     auditLabels: {},
   },
+
+  configStore: hycuConfigStore,
 
   async test(config: unknown): Promise<PluginTestResult> {
     const parsed = parseHycuConfig(config);

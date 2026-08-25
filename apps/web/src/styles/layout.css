@@ -61,6 +61,103 @@
   display: inline-flex;
 }
 
+/* Tiroir « Extensions » : les pages apportées par les greffons activés (Sidebar.tsx). */
+.sidebar__group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar__group-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebar__group-count {
+  flex: none;
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--color-surface-2);
+  color: var(--color-text-muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.sidebar__group-toggle:hover .sidebar__group-count,
+.sidebar__group-toggle.is-active .sidebar__group-count {
+  background: rgba(255, 255, 255, 0.14);
+  color: inherit;
+}
+
+.sidebar__group-chevron {
+  flex: none;
+  display: inline-flex;
+  color: var(--color-text-faint);
+  transition: transform 0.15s ease;
+}
+
+.sidebar__group-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+.sidebar__group-items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-left: 22px;
+  padding-left: 10px;
+  border-left: 1px solid var(--color-border);
+}
+
+.sidebar__item--nested {
+  padding: 9px 12px;
+  font-size: 14px;
+}
+
+.sidebar__item-label {
+  flex: 1;
+  min-width: 0;
+}
+
+/* Greffon activé mais pas encore configuré — l'entrée reste cliquable, c'est sa page qui l'explique. */
+.sidebar__dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-warning);
+}
+
+.sidebar__group-empty {
+  margin-left: 22px;
+  padding: 10px 12px;
+  border-left: 1px solid var(--color-border);
+  color: var(--color-text-faint);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.sidebar__group-empty p {
+  margin: 0 0 6px;
+}
+
+.sidebar__group-link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--color-text-muted);
+  font-size: 12.5px;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.sidebar__group-link:hover {
+  color: var(--color-text);
+}
+
 .sidebar__spacer {
   flex: 1;
 }
@@ -620,6 +717,28 @@
     gap: 0;
     padding: 12px 0;
     font-size: 0; /* masque le libellé texte sans changer les dimensions propres de l'icône */
+  }
+
+  /* Barre d'icônes : plus de place pour les libellés, le compteur, le chevron ni l'état vide du
+     tiroir — les extensions activées restent listées, à plat sous leur en-tête. Les libellés sont
+     masqués (et pas seulement vidés par font-size) pour que leur `flex: 1` ne décentre pas l'icône. */
+  .sidebar__group-label,
+  .sidebar__item-label,
+  .sidebar__group-count,
+  .sidebar__group-chevron,
+  .sidebar__group-empty,
+  .sidebar__dot {
+    display: none;
+  }
+
+  .sidebar__group-items {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: none;
+  }
+
+  .sidebar__item--nested {
+    padding: 12px 0;
   }
 
   .topbar {

@@ -17,8 +17,10 @@ import {
   CAPABILITY_DEFS,
   CAPABILITY_PORT_META,
   KIND_ICON,
-  NODE_CONTRACT,
   hycuProtectionBadge,
+  isNodeKindRegistered,
+  nodeContractFor,
+  nodeContractRefusal,
   nodeIcon,
   quickLifecycleActions,
   serviceModuleBadge,
@@ -54,14 +56,18 @@ export {
   MEMORY_ALERT_RATIO,
   MINIMAP_NODE_COLOR,
   NODE_CONTRACT,
+  isNodeKindRegistered,
+  nodeContractFor,
   nodeIcon,
   nodeMinimapColor,
   nutanixVmHostEdgeState,
   hycuProtectionEdgeState,
+  registerNodeContract,
   serviceModuleBadge,
   type CapabilityDef,
   type CapabilityId,
   type EdgeHealthState,
+  type NodeContract,
   type NodeServiceModuleBinding,
   type PortSpec,
 } from "@/components/topologyNodeContract";
@@ -213,7 +219,7 @@ export interface NodeResourceAlert {
  * (voir MEMORY_ALERT_RATIO, topologyNodeContract.tsx).
  */
 export function computeNodeResourceAlerts(node: TopologyNode): NodeResourceAlert[] {
-  const spec = NODE_CONTRACT[node.kind].resourceAlerts;
+  const spec = nodeContractFor(node.kind).resourceAlerts;
   if (!spec) return [];
   const hasCpuAlert =
     node.status === "running" && typeof node.cpuPercent === "number" && node.cpuPercent > spec.cpuThresholdPercent;
@@ -347,7 +353,7 @@ const EDGE_KIND_PORT_CAPABILITY: Record<TopologyEdge["kind"], { source: Capabili
 
 function portIdForCapability(node: TopologyNode | undefined, capability: CapabilityId): string | undefined {
   if (!node) return undefined;
-  return NODE_CONTRACT[node.kind].ports.find((p) => p.capability === capability)?.id;
+  return nodeContractFor(node.kind).ports.find((p) => p.capability === capability)?.id;
 }
 
 /**
@@ -398,7 +404,7 @@ export function buildTopologyEdges(
   // "aucun signal".
   const triggerStatusByNodeId = new Map<string, AutomationTriggerStatus>();
   for (const n of nodesById.values()) {
-    const seed = NODE_CONTRACT[n.kind].automationStatusSeed;
+    const seed = nodeContractFor(n.kind).automationStatusSeed;
     if (seed) triggerStatusByNodeId.set(n.id, seed(n));
   }
   for (const e of edges) {
@@ -427,7 +433,7 @@ export function buildTopologyEdges(
     ]) {
       const node = nodesById.get(endpoint.id);
       if (!node) continue;
-      const edgeHealth = NODE_CONTRACT[node.kind].edgeHealth;
+      const edgeHealth = nodeContractFor(node.kind).edgeHealth;
       if (!edgeHealth) continue;
       edgeHealthInfo = edgeHealth(node, {
         edgeKind: e.kind,
@@ -978,12 +984,17 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
     ...(node.attachments ?? []).filter((a) => a.kind === "volume"),
     ...(node.attachments ?? []).filter((a) => a.kind === "network"),
   ];
-  // TOUS les Handles du nœud viennent du contrat (NODE_CONTRACT[kind].ports,
+  // TOUS les Handles du nœud viennent du contrat (nodeContractFor(kind).ports,
   // topologyNodeContract.tsx) — y compris ceux des nœuds d'automatisation, autrefois posés par un
   // JSX conditionnel par-kind juste en dessous (comportement implicite rendu explicite par la
   // migration du 17/08/2026 : mêmes ids "automation-out"/"automation-in", mêmes côtés, même classe
   // .topology-handle--automation, désormais déclarés comme n'importe quel autre port).
-  const ports = NODE_CONTRACT[node.kind].ports;
+  const ports = nodeContractFor(node.kind).ports;
+  // Type de nœud qu'aucun contrat ne couvre (greffon absent de cette interface, contrat REFUSÉ à
+  // l'enregistrement, kind ajouté côté serveur en avance) : la carte reste affichée telle quelle
+  // avec le contrat de repli (icône neutre, aucun port, aucune action) et le dit franchement —
+  // jamais un nœud renvoyé par le serveur qui disparaît ou fait blanchir la page.
+  const unknownKind = !isNodeKindRegistered(node.kind);
   // Zoom sémantique : en dessous du seuil, on masque libellé/badges/métriques et on ne garde que
   // l'icône + le point de statut — évite un canevas illisible une fois dézoomé sur toute l'infra.
   const zoom = useStore(zoomSelector);
@@ -1020,6 +1031,19 @@ function GraphNodeImpl({ data, selected }: NodeProps) {
         </span>
         <span className="topology-node__label">{node.label}</span>
       </div>
+      {unknownKind && (
+        <div className="topology-node__badges">
+          <span
+            className="topology-badge topology-badge--warning"
+            title={
+              nodeContractRefusal(node.kind) ??
+              `Type de nœud "${node.kind}" inconnu de cette interface : aucun contrat enregistré. Le nœud reste affiché tel que le serveur l'a renvoyé, sans port ni action.`
+            }
+          >
+            Type inconnu
+          </span>
+        </div>
+      )}
       {node.orphan && (
         <div className="topology-node__badges">
           <span

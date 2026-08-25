@@ -47,7 +47,13 @@ import {
 } from "../../services/nutanix.js";
 import type { NutanixCreateVmInput, NutanixGuestCustomizationInput } from "../../services/nutanix.js";
 import type { NutanixVm } from "../../types.js";
-import { NUTANIX_PLUGIN_ID, NUTANIX_SECRET_FIELDS, parseNutanixConfig, readNutanixConfigCandidate } from "./config.js";
+import {
+  nutanixConfigStore,
+  NUTANIX_PLUGIN_ID,
+  NUTANIX_SECRET_FIELDS,
+  parseNutanixConfig,
+  readNutanixConfigCandidate,
+} from "./config.js";
 import { NUTANIX_GRAPH_NODE_KINDS, nutanixGraphContribution } from "./graph.js";
 
 const NOT_CONFIGURED_MESSAGE =
@@ -198,6 +204,8 @@ export const nutanixPlugin: Plugin = {
     },
     auditLabels: AUDIT_LABELS,
   },
+
+  configStore: nutanixConfigStore,
 
   async test(config: unknown): Promise<PluginTestResult> {
     const { prismCentralUrl, username, password } = readNutanixConfigCandidate(config);

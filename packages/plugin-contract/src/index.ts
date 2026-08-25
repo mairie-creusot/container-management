@@ -11,6 +11,7 @@ export { CORE_API_VERSION } from "./manifest.js";
 export type {
   Plugin,
   PluginAction,
+  PluginConfigStore,
   PluginGraphAttachment,
   PluginGraphContribution,
   PluginGraphEdge,

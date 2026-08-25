@@ -1,4 +1,5 @@
 import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
+import { PLUGIN_NAV_CATALOG } from "@/features/plugins/pluginsModel";
 
 export type ViewId =
   | "overview"
@@ -79,6 +80,8 @@ export const {
 } = uiSlice.actions;
 export default uiSlice.reducer;
 
+/** Pages du cœur, toujours présentes. Les pages de greffons vivent dans PLUGIN_NAV_CATALOG
+ * (features/plugins/pluginsModel.ts) et n'apparaissent que si leur greffon est activé. */
 export const NAV_ITEMS: { id: ViewId; label: string }[] = [
   { id: "overview", label: "Vue d'ensemble" },
   { id: "images", label: "Images" },
@@ -86,9 +89,6 @@ export const NAV_ITEMS: { id: ViewId; label: string }[] = [
   { id: "containers", label: "Conteneurs" },
   { id: "publication", label: "Publication" },
   { id: "clusters", label: "Environnements" },
-  { id: "backups", label: "Sauvegardes" },
-  { id: "threecx", label: "Téléphonie" },
-  { id: "glpi", label: "Assistance GLPI" },
 ];
 
 const PAGE_TITLES: Partial<Record<ViewId, string>> = {
@@ -101,5 +101,10 @@ const PAGE_TITLES: Partial<Record<ViewId, string>> = {
 };
 
 export function pageTitle(view: ViewId): string {
-  return NAV_ITEMS.find((item) => item.id === view)?.label ?? PAGE_TITLES[view] ?? "QUAI";
+  return (
+    NAV_ITEMS.find((item) => item.id === view)?.label ??
+    PLUGIN_NAV_CATALOG.find((entry) => entry.view === view)?.label ??
+    PAGE_TITLES[view] ??
+    "QUAI"
+  );
 }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { Position } from "@xyflow/react";
 import {
   CAPABILITY_DEFS,
@@ -8,13 +8,25 @@ import {
   IAC_ENGINE_CONTRACT,
   NODE_CONTRACT,
   NODE_KINDS,
+  UNKNOWN_NODE_CONTRACT,
   buildNodeMenuItems,
   capabilityPairKey,
   hycuProtectionBadge,
+  isNodeKindRegistered,
+  mapNodeContract,
+  nodeContractFor,
+  nodeContractRefusal,
+  nodeContractSource,
   nodeIcon,
   nodeMinimapColor,
   quickLifecycleActions,
+  registerNodeContract,
+  registeredNodeKinds,
+  unregisterNodeContract,
+  validateNodeContract,
   type CapabilityId,
+  type NodeContract,
+  type NodeMenuActionSpec,
 } from "./topologyNodeContract";
 import { buildTopologyEdges, computeNodeResourceAlerts } from "./topologyGraphShared";
 import type { IacEngine, TopologyEdge, TopologyHostKind, TopologyNode, TopologyNodeKind } from "@/types";
@@ -27,6 +39,11 @@ import type { IacEngine, TopologyEdge, TopologyHostKind, TopologyNode, TopologyN
  * bug réel du 17/08/2026) — et les moteurs génériques (buildTopologyEdges/
  * computeNodeResourceAlerts/buildNodeMenuItems) rendent EXACTEMENT ce que rendait le code par-kind
  * dispersé qu'ils remplacent (zéro changement visuel/fonctionnel, mission Phase 1).
+ *
+ * Phase 3 (25/08/2026) : le registre est OUVERT à l'exécution (topologyNodeRegistry.tsx). Les blocs
+ * de fin de fichier verrouillent ce qui remplace la totalité perdue côté compilateur —
+ * enregistrement d'un type par un greffon, REFUS d'un contrat incomplet, repli "type inconnu" — et
+ * la PARITÉ des types du cœur (mêmes ports, mêmes menus, mêmes couleurs, mêmes colonnes qu'avant).
  */
 
 /** Totalité vérifiée PAR LE COMPILATEUR : ajouter un kind à TopologyNodeKind (types.ts) sans
@@ -561,5 +578,323 @@ describe("buildNodeMenuItems — la liste vit dans le contrat, les callbacks che
       expect(items.map((i) => i.label), kind).toEqual(["Supprimer"]);
       expect(items[0]?.danger, kind).toBe(true);
     }
+  });
+});
+
+// --- Registre ouvert à l'exécution (Phase 3, 25/08/2026) ----------------------------------------
+
+/** Contrat VALIDE minimal tel qu'un greffon l'enregistrerait — base des cas de refus ci-dessous,
+ * dont chacun n'invalide qu'un seul aspect à la fois. */
+function pluginContract(): NodeContract {
+  return {
+    icon: NODE_CONTRACT.container.icon,
+    minimapColor: "#7c3aed",
+    defaultColumnX: 5440,
+    ports: [
+      { id: "hosted-by", capability: "hosted-by", handleType: "target", position: Position.Left, label: "Hébergé par", colorToken: "host" },
+    ],
+    edgeHealth: null,
+    automationStatusSeed: null,
+    resourceAlerts: null,
+    menuItems: [],
+    quickActions: [],
+  };
+}
+
+const PLUGIN_KIND = "proxmox-vm" as TopologyNodeKind;
+
+describe("registre de contrats — un greffon enregistre son propre type de nœud", () => {
+  afterEach(() => {
+    unregisterNodeContract(PLUGIN_KIND);
+  });
+
+  it("type enregistré : ports, menu et boutons rapides fonctionnent exactement comme pour un type du cœur", () => {
+    const contract: NodeContract = {
+      ...pluginContract(),
+      menuItems: [
+        { id: "proxmox-vm-start", label: "Démarrer", when: { field: "status", equals: ["stopped"] } },
+        { id: "proxmox-vm-remove", label: "Supprimer", severity: "destructive" },
+      ],
+      quickActions: [{ action: "start", when: { field: "status", equals: ["stopped"] } }],
+    };
+    expect(registerNodeContract(PLUGIN_KIND, contract, "greffon proxmox")).toEqual({ ok: true });
+    expect(isNodeKindRegistered(PLUGIN_KIND)).toBe(true);
+    expect(nodeContractSource(PLUGIN_KIND)).toBe("greffon proxmox");
+    expect(registeredNodeKinds()).toContain(PLUGIN_KIND);
+    expect(nodeContractFor(PLUGIN_KIND)).toBe(contract);
+
+    const handlers = { "proxmox-vm-start": () => {}, "proxmox-vm-remove": () => {} };
+    const stopped = node(PLUGIN_KIND, { status: "stopped" });
+    expect(nodeContractFor(stopped.kind).ports.map((p) => p.id)).toEqual(["hosted-by"]);
+    const items = buildNodeMenuItems(stopped, handlers);
+    expect(items.map((i) => i.label)).toEqual(["Démarrer", "Supprimer"]);
+    expect(items[1]?.danger).toBe(true);
+    expect(quickLifecycleActions(stopped)).toEqual(["start"]);
+
+    const running = node(PLUGIN_KIND, { status: "running" });
+    expect(buildNodeMenuItems(running, handlers).map((i) => i.label)).toEqual(["Supprimer"]);
+    expect(quickLifecycleActions(running)).toEqual([]);
+  });
+
+  it("le retrait d'un greffon fait retomber son type sur le repli, jamais sur un contrat fantôme", () => {
+    registerNodeContract(PLUGIN_KIND, pluginContract(), "greffon proxmox");
+    expect(unregisterNodeContract(PLUGIN_KIND)).toBe(true);
+    expect(isNodeKindRegistered(PLUGIN_KIND)).toBe(false);
+    expect(nodeContractFor(PLUGIN_KIND)).toBe(UNKNOWN_NODE_CONTRACT);
+  });
+
+  it("contrat incomplet REFUSÉ avec un message explicite : icône, couleur de MiniMap et libellé de port obligatoires", () => {
+    const invalid = {
+      ...pluginContract(),
+      icon: undefined,
+      minimapColor: "   ",
+      ports: [{ id: "hosted-by", capability: "hosted-by", handleType: "target", position: Position.Left, label: "", colorToken: "host" }],
+    } as unknown as NodeContract;
+    const result = registerNodeContract(PLUGIN_KIND, invalid, "greffon bancal");
+    if (result.ok) throw new Error("un contrat incomplet ne doit jamais être accepté");
+    expect(result.issues.map((issue) => issue.field)).toEqual(["icon", "minimapColor", "ports[0].label"]);
+    expect(result.message).toContain("REFUSÉ");
+    expect(result.message).toContain("greffon bancal");
+    // Refusé = non enregistré : le nœud correspondant retombe sur le repli, jamais sur un contrat
+    // à moitié rempli qui casserait le rendu plus tard.
+    expect(isNodeKindRegistered(PLUGIN_KIND)).toBe(false);
+    expect(nodeContractFor(PLUGIN_KIND)).toBe(UNKNOWN_NODE_CONTRACT);
+    expect(nodeContractRefusal(PLUGIN_KIND)).toContain("icon manquante");
+  });
+
+  it("champs structurels manquants : ports/edgeHealth/menuItems/quickActions doivent être déclarés EXPLICITEMENT", () => {
+    const issues = validateNodeContract("proxmox-host", { icon: NODE_CONTRACT.host.icon, minimapColor: "#7c3aed", defaultColumnX: 5440 });
+    expect(issues.map((issue) => issue.field)).toEqual(["ports", "edgeHealth", "automationStatusSeed", "resourceAlerts", "menuItems", "quickActions"]);
+  });
+
+  it("ports hors convention : position Top, capacité inconnue, couleur inconnue et id dupliqué sont REFUSÉS (le bug du 17/08/2026 ne peut plus revenir par un greffon)", () => {
+    const issues = validateNodeContract("proxmox-host", {
+      ...pluginContract(),
+      ports: [
+        { id: "p1", capability: "hosted-by", handleType: "target", position: Position.Top, label: "Entrée", colorToken: "host" },
+        { id: "p1", capability: "teleport", handleType: "source", position: Position.Right, label: "Sortie", colorToken: "rose" },
+      ],
+    });
+    expect(issues.map((issue) => issue.field)).toEqual(["ports[0].position", "ports[1].id", "ports[1].capability", "ports[1].colorToken"]);
+  });
+
+  it("action sans libellé ou au niveau de danger inventé : REFUSÉE", () => {
+    const issues = validateNodeContract("proxmox-host", {
+      ...pluginContract(),
+      menuItems: [{ id: "proxmox-host-nuke", severity: "apocalyptique" }],
+    });
+    expect(issues.map((issue) => issue.field)).toEqual(["menuItems[0].label", "menuItems[0].severity"]);
+  });
+
+  it("un greffon ne peut ni remplacer ni casser un type du cœur", () => {
+    const result = registerNodeContract("container", pluginContract(), "greffon pirate");
+    if (result.ok) throw new Error("un type du cœur ne doit jamais être remplaçable");
+    expect(result.message).toContain("déjà enregistré par cœur");
+    expect(nodeContractFor("container")).toBe(NODE_CONTRACT.container);
+    // Le contrat en place reste sain : aucun refus mémorisé pour lui.
+    expect(nodeContractRefusal("container")).toBeUndefined();
+    expect(unregisterNodeContract("container")).toBe(false);
+    expect(isNodeKindRegistered("container")).toBe(true);
+  });
+
+  it("kind mal formé : REFUSÉ (même convention que permissions.graphNodeKinds d'un manifeste de greffon)", () => {
+    expect(validateNodeContract("Proxmox VM", pluginContract()).map((issue) => issue.field)).toEqual(["kind"]);
+    expect(validateNodeContract("proxmox-vm", pluginContract())).toEqual([]);
+  });
+});
+
+describe("type de nœud inconnu — repli honnête, jamais une disparition silencieuse", () => {
+  const GHOST = "kind-jamais-declare" as TopologyNodeKind;
+
+  it("nodeContractFor rend le contrat de repli, jamais undefined", () => {
+    expect(isNodeKindRegistered(GHOST)).toBe(false);
+    expect(nodeContractFor(GHOST)).toBe(UNKNOWN_NODE_CONTRACT);
+    expect(UNKNOWN_NODE_CONTRACT.ports).toEqual([]);
+    expect(UNKNOWN_NODE_CONTRACT.minimapColor).toBeTruthy();
+  });
+
+  it("aucun port, aucune action, aucune alerte — mais le nœud reste affichable", () => {
+    const ghost = node(GHOST, { cpuPercent: 99, memBytes: 999, memoryLimitBytes: 1000 });
+    expect(buildNodeMenuItems(ghost, { "container-stop": () => {} })).toEqual([]);
+    expect(quickLifecycleActions(ghost)).toEqual([]);
+    expect(computeNodeResourceAlerts(ghost)).toEqual([]);
+    expect(nodeIcon(ghost)).toBe(UNKNOWN_NODE_CONTRACT.icon);
+    expect(nodeMinimapColor(ghost)).toBe(UNKNOWN_NODE_CONTRACT.minimapColor);
+  });
+
+  it("les tables historiques indexées par kind rendent le repli au lieu de undefined (position NaN, <Icon /> sur undefined)", () => {
+    expect(NODE_CONTRACT[GHOST]).toBe(UNKNOWN_NODE_CONTRACT);
+    const columns = mapNodeContract((contract) => contract.defaultColumnX);
+    expect(columns[GHOST]).toBe(UNKNOWN_NODE_CONTRACT.defaultColumnX);
+    expect(Number.isFinite(columns[GHOST])).toBe(true);
+    // Compteur de ligne par kind (TopologyGraph.tsx#columnCounters) : incrémentable même pour un
+    // kind hors table, sans jamais produire NaN.
+    const counters = mapNodeContract(() => 0);
+    expect(counters[GHOST]++).toBe(0);
+    expect(counters[GHOST]).toBe(1);
+  });
+
+  it("une arête touchant un nœud de type inconnu reste dessinée, ancrée sur le port de l'extrémité connue", () => {
+    const ghost = node(GHOST, { id: "kind-jamais-declare:1" });
+    const container = node("container", { id: "container:c1" });
+    const nodesById = new Map([
+      [ghost.id, ghost],
+      [container.id, container],
+    ]);
+    const [edge] = buildTopologyEdges([{ id: "hosts:ghost:c1", source: ghost.id, target: container.id, kind: "hosts" }], nodesById);
+    expect(edge?.sourceHandle).toBeUndefined();
+    expect(edge?.targetHandle).toBe("hosted-by");
+    // La santé vient de l'extrémité connue (le conteneur), le type inconnu n'en invente aucune.
+    expect(edge?.data?.state).toBe("none");
+  });
+});
+
+describe("parité des types du cœur après ouverture du registre", () => {
+  it("les types du cœur sont tous enregistrés PAR le cœur et résolus vers exactement le même contrat qu'avant", () => {
+    for (const kind of NODE_KINDS) {
+      expect(isNodeKindRegistered(kind), kind).toBe(true);
+      expect(nodeContractSource(kind), kind).toBe("cœur");
+      expect(nodeContractFor(kind), kind).toBe(NODE_CONTRACT[kind]);
+    }
+  });
+
+  it("couleurs de MiniMap inchangées (valeurs verrouillées, cohérentes avec topology.css)", () => {
+    expect({ ...mapNodeContract((contract) => contract.minimapColor) }).toEqual({
+      container: "#3b6fef",
+      volume: "#f5a524",
+      "nutanix-vm": "#22c55e",
+      host: "#14b8a6",
+      "cron-job": "#facc15",
+      backup: "#0ea5e9",
+      "iac-workspace": "#f97316",
+      "gitops-source": "#f43f5e",
+      "automation-trigger": "#dc2626",
+      "automation-condition": "#64748b",
+      "automation-action": "#84cc16",
+      "image-template": "#22d3ee",
+      "hycu-appliance": "#ec4899",
+    });
+  });
+
+  it("colonnes par défaut inchangées", () => {
+    expect({ ...mapNodeContract((contract) => contract.defaultColumnX) }).toEqual({
+      volume: 0,
+      container: 340,
+      "nutanix-vm": 1020,
+      host: 1700,
+      "iac-workspace": 2040,
+      "cron-job": 2380,
+      backup: 2720,
+      "gitops-source": 3060,
+      "automation-trigger": 3400,
+      "automation-condition": 3740,
+      "automation-action": 4080,
+      "image-template": 4420,
+      "hycu-appliance": 4760,
+    });
+  });
+
+  it("niveau de danger : les SEULES entrées destructives du cœur restent les \"Supprimer\" (aucune promotion/rétrogradation par la migration)", () => {
+    const destructive: string[] = [];
+    for (const kind of NODE_KINDS) {
+      const specs = NODE_CONTRACT[kind].menuItems;
+      const resolved = typeof specs === "function" ? specs(node(kind)) : specs;
+      for (const spec of resolved) if (spec.severity === "destructive") destructive.push(`${kind}:${spec.label}`);
+    }
+    expect(destructive.sort()).toEqual([
+      "automation-action:Supprimer",
+      "automation-condition:Supprimer",
+      "automation-trigger:Supprimer",
+      "container:Supprimer",
+      "image-template:Supprimer",
+      "volume:Supprimer",
+    ]);
+  });
+
+  it("conditions déclaratives : elles rendent EXACTEMENT les mêmes menus que les prédicats d'avant, pour chaque état réel", () => {
+    const handlers: Record<string, () => void> = {};
+    for (const spec of NODE_CONTRACT.container.menuItems as NodeMenuActionSpec[]) handlers[spec.id] = () => {};
+    for (const spec of NODE_CONTRACT["nutanix-vm"].menuItems as NodeMenuActionSpec[]) handlers[spec.id] = () => {};
+    expect(buildNodeMenuItems(node("container"), handlers).map((i) => i.label)).toEqual([
+      "Arrêter",
+      "Redémarrer",
+      "Renommer",
+      "Connecter à un réseau…",
+      "Attacher (stockage, réseau, variable)…",
+      "Supprimer",
+    ]);
+    expect(buildNodeMenuItems(node("container", { status: "restarting" }), handlers).map((i) => i.label)[0]).toBe("Démarrer");
+    expect(buildNodeMenuItems(node("container", { status: "neutral" }), handlers).map((i) => i.label)[0]).toBe("Démarrer");
+    expect(buildNodeMenuItems(node("nutanix-vm", { status: "neutral" }), handlers).map((i) => i.label)).toEqual([
+      "Ajouter un disque…",
+      "Ajouter une carte réseau…",
+      "vCPU / Mémoire…",
+    ]);
+  });
+
+  it("menu du kind \"host\" : la liste déclarative rend les mêmes entrées que la cascade sur hostKind qu'elle remplace", () => {
+    const handlers = { "host-add-environment": () => {} };
+    expect(buildNodeMenuItems(node("host", { hostKind: "quai-master" }), handlers).map((i) => i.label)).toEqual(["Ajouter un environnement…"]);
+    expect(buildNodeMenuItems(node("host", { hostKind: "nutanix-cluster" }), handlers).map((i) => i.label)).toEqual([
+      "Ajouter un environnement…",
+      "Créer une VM ici — bientôt",
+    ]);
+    expect(buildNodeMenuItems(node("host", { hostKind: "nutanix-host" }), handlers).map((i) => i.label)).toEqual(["Créer une VM ici — bientôt"]);
+    expect(buildNodeMenuItems(node("host", { hostKind: "remote-docker" }), handlers)).toEqual([]);
+    expect(buildNodeMenuItems(node("host"), handlers)).toEqual([]);
+    // Entrée désactivée : présente mais sans action, comme avant.
+    const cluster = buildNodeMenuItems(node("host", { hostKind: "nutanix-cluster" }), handlers);
+    expect(cluster.find((i) => i.label === "Créer une VM ici — bientôt")?.disabled).toBe(true);
+  });
+});
+
+describe("actions Nutanix dans la forme déclarative", () => {
+  const NUTANIX_KIND = "nutanix-vm-declared" as TopologyNodeKind;
+  /** Les six actions citées par la mission, déclarées SANS aucune closure : telle quelle, cette
+   * liste pourrait venir d'un manifeste de greffon (JSON). */
+  const NUTANIX_ACTIONS: NodeMenuActionSpec[] = [
+    { id: "nutanix-vm-start", label: "Démarrer", when: { field: "status", equals: ["stopped"] } },
+    { id: "nutanix-vm-stop", label: "Arrêter", severity: "caution", when: { field: "status", equals: ["running"] } },
+    { id: "nutanix-vm-restart", label: "Redémarrer", severity: "caution", when: { field: "status", equals: ["running"] } },
+    { id: "nutanix-vm-add-disk", label: "Ajouter un disque…" },
+    { id: "nutanix-vm-add-nic", label: "Ajouter une carte réseau…" },
+    { id: "nutanix-vm-remove", label: "Supprimer", severity: "destructive" },
+  ];
+
+  afterEach(() => {
+    unregisterNodeContract(NUTANIX_KIND);
+  });
+
+  it("les six actions s'expriment intégralement en données et rendent le bon menu pour chaque power_state réel", () => {
+    const registration = registerNodeContract(
+      NUTANIX_KIND,
+      { ...pluginContract(), menuItems: NUTANIX_ACTIONS, quickActions: NODE_CONTRACT["nutanix-vm"].quickActions },
+      "greffon nutanix",
+    );
+    expect(registration).toEqual({ ok: true });
+    const handlers: Record<string, () => void> = {};
+    for (const spec of NUTANIX_ACTIONS) handlers[spec.id] = () => {};
+    const hardware = ["Ajouter un disque…", "Ajouter une carte réseau…", "Supprimer"];
+    expect(buildNodeMenuItems(node(NUTANIX_KIND, { status: "running" }), handlers).map((i) => i.label)).toEqual([
+      "Arrêter",
+      "Redémarrer",
+      ...hardware,
+    ]);
+    expect(buildNodeMenuItems(node(NUTANIX_KIND, { status: "stopped" }), handlers).map((i) => i.label)).toEqual(["Démarrer", ...hardware]);
+    // power_state inconnu : aucune action de cycle de vie, la configuration matérielle reste là.
+    expect(buildNodeMenuItems(node(NUTANIX_KIND, { status: "neutral" }), handlers).map((i) => i.label)).toEqual(hardware);
+    // Boutons rapides repris tels quels du contrat du cœur : même grille d'état.
+    expect(quickLifecycleActions(node(NUTANIX_KIND, { status: "running" }))).toEqual(["stop", "restart"]);
+    expect(quickLifecycleActions(node(NUTANIX_KIND, { status: "neutral" }))).toEqual([]);
+  });
+
+  it("niveau de danger : seule la suppression se présente en rouge — \"caution\" reste rendu comme une action neutre (aucun changement visuel)", () => {
+    registerNodeContract(NUTANIX_KIND, { ...pluginContract(), menuItems: NUTANIX_ACTIONS }, "greffon nutanix");
+    const handlers: Record<string, () => void> = {};
+    for (const spec of NUTANIX_ACTIONS) handlers[spec.id] = () => {};
+    const items = buildNodeMenuItems(node(NUTANIX_KIND, { status: "running" }), handlers);
+    expect(items.find((i) => i.label === "Supprimer")?.danger).toBe(true);
+    expect(items.find((i) => i.label === "Arrêter")?.danger).toBeUndefined();
+    expect(items.find((i) => i.label === "Ajouter un disque…")?.danger).toBeUndefined();
   });
 });

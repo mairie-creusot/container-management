@@ -7,6 +7,7 @@
  * de secours qui ressusciterait le GLPI que l'admin vient de retirer.
  */
 
+import type { PluginConfigStore } from "@quai/plugin-contract";
 import {
   clearGlpiConfig,
   clearIntegrationConfig,
@@ -131,3 +132,23 @@ export async function removeGlpiPluginConfig(): Promise<void> {
   await clearIntegrationConfig(GLPI_PLUGIN_ID);
   await dropLegacyConfig();
 }
+
+/** Voie d'écriture du socle (Plugin#configStore) : passe par les fonctions ci-dessus, qui purgent
+ * le champ typé — écrire dans le stockage générique en direct laisserait le reliquat ressusciter. */
+export const glpiConfigStore: PluginConfigStore = {
+  async load(): Promise<Record<string, unknown> | null> {
+    const cfg = await loadGlpiPluginConfig();
+    return cfg ? toStored(cfg) : null;
+  },
+  async save(config: Record<string, unknown>): Promise<void> {
+    const parsed = parseGlpiConfig(config);
+    if (!parsed) throw new Error("L'URL de l'API GLPI est requise");
+    if (!isGlpiConfigComplete(parsed)) {
+      throw new Error("app_token et jeton utilisateur (ou compte de service) sont requis");
+    }
+    await saveGlpiPluginConfig(parsed);
+  },
+  async remove(): Promise<void> {
+    await removeGlpiPluginConfig();
+  },
+};

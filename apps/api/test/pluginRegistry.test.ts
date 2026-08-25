@@ -462,7 +462,11 @@ describe("GET /api/plugins", () => {
     app = buildServer();
     const response = await app.inject({ method: "GET", url: "/api/plugins", cookies: cookieFor(["viewer"]) });
     expect(response.statusCode).toBe(200);
-    expect((response.json() as { plugins: Array<{ id: string }> }).plugins.map((plugin) => plugin.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
+    const body = response.json() as { plugins: Array<{ manifest: { id: string }; enabled: boolean; configured: boolean }> };
+    expect(body.plugins.map((plugin) => plugin.manifest.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
+    // Rien n'est configuré dans ce CONFIG_PATH isolé — mais rien n'a été mis en pause non plus :
+    // `enabled` reste vrai, seule une désactivation explicite le fait tomber.
+    expect(body.plugins.every((plugin) => plugin.configured === false && plugin.enabled === true)).toBe(true);
   });
 
   it("expose le manifeste public, sans le moindre secret ni valeur de configuration", async () => {
@@ -478,8 +482,11 @@ describe("GET /api/plugins", () => {
     expect(response.statusCode).toBe(200);
 
     const body = response.json() as { plugins: Array<Record<string, unknown>> };
-    const manifest = body.plugins.find((plugin) => plugin.id === "example")!;
-    expect(manifest, "le greffon d'exemple enregistré à la main doit être exposé").toBeDefined();
+    const entry = body.plugins.find((plugin) => (plugin.manifest as { id?: unknown } | undefined)?.id === "example")!;
+    expect(entry, "le greffon d'exemple enregistré à la main doit être exposé").toBeDefined();
+    // L'enveloppe porte l'état, le manifeste ne porte QUE la forme de la configuration.
+    expect(Object.keys(entry).sort()).toEqual(["configured", "enabled", "manifest"]);
+    const manifest = entry.manifest as Record<string, unknown>;
     expect(Object.keys(manifest).sort()).toEqual(
       ["auditLabels", "configSchema", "coreApi", "id", "name", "permissions", "secretFields", "version"],
     );

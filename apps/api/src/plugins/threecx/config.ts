@@ -7,6 +7,7 @@
  * de secours qui ressusciterait le PBX que l'admin vient de retirer.
  */
 
+import type { PluginConfigStore } from "@quai/plugin-contract";
 import {
   clearIntegrationConfig,
   clearThreecxConfig,
@@ -129,3 +130,23 @@ export async function removeThreecxPluginConfig(): Promise<void> {
   await clearIntegrationConfig(THREECX_PLUGIN_ID);
   await dropLegacyConfig();
 }
+
+/** Voie d'écriture du socle (Plugin#configStore) : passe par les fonctions ci-dessus, qui purgent
+ * le champ typé — écrire dans le stockage générique en direct laisserait le reliquat ressusciter. */
+export const threecxConfigStore: PluginConfigStore = {
+  async load(): Promise<Record<string, unknown> | null> {
+    const cfg = await loadThreecxPluginConfig();
+    return cfg ? toStored(cfg) : null;
+  },
+  async save(config: Record<string, unknown>): Promise<void> {
+    const parsed = parseThreecxConfig(config);
+    if (!parsed) throw new Error("L'URL du PBX est requise");
+    if (!isThreecxConfigComplete(parsed)) {
+      throw new Error("Les identifiants du mode d'authentification choisi sont requis");
+    }
+    await saveThreecxPluginConfig(parsed);
+  },
+  async remove(): Promise<void> {
+    await removeThreecxPluginConfig();
+  },
+};

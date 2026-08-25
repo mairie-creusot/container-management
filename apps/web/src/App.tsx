@@ -3,6 +3,10 @@ import { useAppDispatch, useAppSelector } from "@/hooks";
 import { fetchSession } from "@/features/auth/authSlice";
 import { fetchSetupStatus } from "@/features/setup/setupSlice";
 import { fetchSystemNotifications } from "@/features/notifications/notificationsSlice";
+import { fetchPlugins } from "@/features/plugins/pluginsSlice";
+import { isPluginView } from "@/features/plugins/pluginsModel";
+import { usePluginNavItems } from "@/features/plugins/usePluginNav";
+import { setCurrentView } from "@/features/ui/uiSlice";
 import LoginScreen from "@/features/auth/LoginScreen";
 import SetupWizard from "@/features/setup/SetupWizard";
 import Sidebar from "@/components/Sidebar";
@@ -92,6 +96,7 @@ export default function App() {
   const { session, status: authStatus } = useAppSelector((state) => state.auth);
   const setupCompleted = useAppSelector((state) => state.setup.completed);
   const currentView = useAppSelector((state) => state.ui.currentView);
+  const pluginNavItems = usePluginNavItems();
 
   // ARCHITECTURE.md § "Assistant de configuration au premier lancement" :
   // GET /api/setup/status est vérifié avant toute autre décision d'affichage.
@@ -116,6 +121,20 @@ export default function App() {
     }, NOTIFICATIONS_REFRESH_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [dispatch, session]);
+
+  // Greffons réellement enregistrés côté serveur : c'est ce qui décide des entrées « Extensions »
+  // du menu latéral (Sidebar.tsx). À redemander après toute activation/désactivation.
+  useEffect(() => {
+    if (!session) return;
+    dispatch(fetchPlugins());
+  }, [dispatch, session]);
+
+  // Greffon désactivé alors qu'on était sur sa page : on la quitte au lieu de la laisser ouverte.
+  useEffect(() => {
+    if (!isPluginView(currentView)) return;
+    if (pluginNavItems.some((item) => item.view === currentView)) return;
+    dispatch(setCurrentView("overview"));
+  }, [dispatch, currentView, pluginNavItems]);
 
   if (setupCompleted === null) {
     return (

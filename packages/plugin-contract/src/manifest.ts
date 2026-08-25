@@ -82,6 +82,22 @@ export interface PluginGraphContribution {
 
 export type PluginAction = (input: unknown) => Promise<unknown>;
 
+/**
+ * Voie d'écriture PROPRE au greffon, quand le stockage générique ne suffit pas. Un greffon issu
+ * d'une intégration historique doit purger son ancien champ typé à chaque écriture : sans cela, une
+ * configuration retirée par l'admin ressusciterait au prochain démarrage. Le socle passe TOUJOURS
+ * par là quand elle existe, et retombe sinon sur le stockage générique des intégrations.
+ */
+export interface PluginConfigStore {
+  /** Configuration effective (secrets EN CLAIR), ou `null` si le greffon n'est pas configuré.
+   * Réservée au socle : ne jamais la renvoyer par une route, seule la vue sûre sort. */
+  load(): Promise<Record<string, unknown> | null>;
+  /** Remplace la configuration. Refuse (exception) une configuration inutilisable. */
+  save(config: Record<string, unknown>): Promise<void>;
+  /** Retour à « jamais configuré », reliquats compris. Idempotent. */
+  remove(): Promise<void>;
+}
+
 export interface Plugin {
   manifest: PluginManifest;
   /** Vérifie la configuration fournie et rapporte le résultat RÉEL, sans rien inventer. */
@@ -90,4 +106,6 @@ export interface Plugin {
   graph?(config: unknown): Promise<PluginGraphContribution>;
   /** Chaque clé exige `permissions.mutates` et une entrée dans `auditLabels`. */
   actions?: Record<string, PluginAction> | undefined;
+  /** Absent = le socle lit et écrit dans le stockage générique, sous `manifest.id`. */
+  configStore?: PluginConfigStore | undefined;
 }

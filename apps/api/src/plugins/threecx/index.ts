@@ -16,6 +16,7 @@ import {
   isThreecxConfigComplete,
   normalizeThreecxAuthMode,
   parseThreecxConfig,
+  threecxConfigStore,
   THREECX_PLUGIN_ID,
   THREECX_SECRET_FIELDS,
 } from "./config.js";
@@ -107,6 +108,8 @@ export const threecxPlugin: Plugin = {
     // Aucune action exposée, donc aucun libellé d'audit : le greffon est en lecture seule.
     auditLabels: {},
   },
+
+  configStore: threecxConfigStore,
 
   async test(config: unknown): Promise<PluginTestResult> {
     const parsed = parseThreecxConfig(config);

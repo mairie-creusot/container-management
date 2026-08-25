@@ -14,7 +14,61 @@ import {
   IconVm,
   IconVolumes,
 } from "@/components/icons";
+import {
+  CAPABILITY_DEFS,
+  CORE_CONTRACT_SOURCE,
+  matchesNodeState,
+  nodeContractFor,
+  registerNodeContract,
+  tableWithRuntimeFallback,
+  type AutomationTriggerStatus,
+  type CapabilityId,
+  type EdgeHealthContext,
+  type EdgeHealthInfo,
+  type EdgeHealthState,
+  type NodeContract,
+  type NodeMenuActionSpec,
+  type QuickLifecycleAction,
+} from "@/components/topologyNodeRegistry";
 import type { IacEngine, TopologyHostKind, TopologyNode, TopologyNodeKind } from "@/types";
+
+/**
+ * Vocabulaire du contrat (capacités/ports, santé d'arête, actions déclarées) et REGISTRE :
+ * topologyNodeRegistry.tsx. Ré-exports ci-dessous — mêmes noms publics qu'avant l'ouverture du
+ * registre, aucun import à modifier chez les consommateurs.
+ */
+export {
+  CAPABILITY_DEFS,
+  CAPABILITY_PORT_META,
+  PORT_COLOR_TOKENS,
+  UNKNOWN_NODE_CONTRACT,
+  isNodeKindRegistered,
+  matchesNodeState,
+  nodeContractFor,
+  nodeContractRefusal,
+  nodeContractSource,
+  registerNodeContract,
+  registeredNodeKinds,
+  unregisterNodeContract,
+  validateNodeContract,
+  type AutomationTriggerStatus,
+  type CapabilityDef,
+  type CapabilityId,
+  type EdgeHealthContext,
+  type EdgeHealthInfo,
+  type EdgeHealthState,
+  type NodeActionSeverity,
+  type NodeContract,
+  type NodeContractIssue,
+  type NodeContractRegistration,
+  type NodeMenuActionSpec,
+  type NodeStateCondition,
+  type NodeStateValue,
+  type PortSpec,
+  type QuickLifecycleAction,
+  type QuickLifecycleActionSpec,
+  type ResourceAlertsSpec,
+} from "@/components/topologyNodeRegistry";
 
 /**
  * CONTRAT GÉNÉRIQUE DES NŒUDS DU GRAPHE DE TOPOLOGIE — registre déclaratif UNIQUE (17/08/2026).
@@ -29,10 +83,10 @@ import type { IacEngine, TopologyHostKind, TopologyNode, TopologyNodeKind } from
  * COLUMN_X...) — chaque nouvelle plateforme (bientôt Proxmox/VMware/SSH) aurait refait les mêmes
  * erreurs.
  *
- * Désormais : TOUT ce qui est spécifique à un `kind` est déclaré ICI comme DONNÉES
- * (NODE_CONTRACT, un `Record<TopologyNodeKind, NodeContract>` — le compilateur refuse tout kind
- * oublié), consommées par des moteurs de rendu génériques qui ne contiennent plus AUCUN
- * `if (kind === ...)` de plateforme :
+ * Désormais : TOUT ce qui est spécifique à un `kind` est déclaré comme DONNÉES (NODE_CONTRACT
+ * ci-dessous pour les types du CŒUR, le registre de topologyNodeRegistry.tsx pour ceux qu'un
+ * greffon ajoute à l'exécution), consommées par des moteurs de rendu génériques qui ne contiennent
+ * plus AUCUN `if (kind === ...)` de plateforme :
  *  - GraphNode (topologyGraphShared.tsx) pose les Handles depuis `ports` — y compris les Handles
  *    d'automatisation, autrefois posés par un JSX conditionnel hors table (comportement implicite
  *    rendu explicite par ce chantier).
@@ -47,136 +101,13 @@ import type { IacEngine, TopologyHostKind, TopologyNode, TopologyNodeKind } from
  *
  * Pour ajouter une future plateforme (Proxmox/VMware/SSH) : ajouter son kind à TopologyNodeKind
  * (types.ts) puis UNE entrée ici — le compilateur signale chaque champ à décider explicitement,
- * aucun moteur de rendu à modifier.
+ * aucun moteur de rendu à modifier. Un GREFFON, lui, n'a pas ce luxe (son kind n'existe pas dans
+ * l'union figée) : il enregistre son contrat à l'exécution via registerNodeContract
+ * (topologyNodeRegistry.tsx), qui le REFUSE s'il est incomplet.
  *
- * ZÉRO changement visuel/fonctionnel dans cette passe : chaque valeur ci-dessous est la copie
- * exacte du comportement dispersé qu'elle remplace (les commentaires historiques "pourquoi" sont
- * conservés avec elle).
+ * ZÉRO changement visuel/fonctionnel : chaque valeur ci-dessous est la copie exacte du comportement
+ * dispersé qu'elle remplace (les commentaires historiques "pourquoi" sont conservés avec elle).
  */
-
-// --- Ports typés (façon Railway) -----------------------------------------------------------------
-
-/**
- * Connexions par capacité — chaque port a une capacité (ce qu'il peut relier) et un type de Handle
- * React Flow (source/target) qui fixe son côté du nœud. "automation-out"/"automation-in"
- * (17/08/2026, migration vers ce contrat) : les Handles des nœuds d'automatisation, autrefois posés
- * par un JSX conditionnel dans GraphNode HORS de toute table (comportement implicite), sont
- * désormais déclarés ici comme n'importe quel autre port — classifyConnection/handleConnect
- * (TopologyGraph.tsx) ne les lisent toujours PAS (la validation/le POST d'une connexion entre deux
- * nœuds d'automatisation passe par un chemin dédié qui ne se fie qu'au kind des deux nœuds visés,
- * voir routes/automation.ts#isValidConnection côté serveur), mais leur EXISTENCE/côté/couleur est
- * enfin une donnée du contrat, pas un cas spécial de rendu.
- */
-export type CapabilityId =
-  | "volume-mount"
-  | "provide"
-  | "hosted-by"
-  | "hosts"
-  | "automation-out"
-  | "automation-in"
-  | "artifact-out"
-  | "artifact-in"
-  // Sauvegarde HYCU : la donnée REMONTE de la VM vers l'appliance — "protection-out" est donc posé
-  // sur la VM (sortie à droite) et "protected-by" sur HYCU (entrée à gauche), qui ne fait que
-  // recevoir. Non interactives : c'est une vérité rapportée par HYCU à chaque poll, en lecture seule.
-  | "protection-out"
-  | "protected-by";
-
-export interface PortSpec {
-  /** Id du Handle React Flow — unique au sein d'un même type de nœud. */
-  id: string;
-  capability: CapabilityId;
-  handleType: "source" | "target";
-  position: Position;
-  /** Tooltip du Handle. */
-  label: string;
-  /** Suffixe de classe .topology-handle--<token> — couleur reprise de celle de l'icône du même
-   * type de nœud (variables.css), pas de couleur arbitraire ajoutée. */
-  colorToken: "volume" | "host" | "automation" | "template" | "backup";
-}
-
-export interface CapabilityDef {
-  /** Capacité compatible attendue à l'autre bout de la connexion. */
-  linksTo: CapabilityId;
-  /** true = action réelle déclenchée au drop (voir CONNECTION_ACTIONS) ; false = message d'info. */
-  interactive: boolean;
-  infoMessage?: string;
-}
-
-export const CAPABILITY_DEFS: Record<CapabilityId, CapabilityDef> = {
-  // Vague 3 (câblage au fil) : le fil ouvre MountVolumePopover pré-rempli — la recréation du
-  // conteneur reste confirmée par l'utilisateur, jamais déclenchée par le seul geste.
-  "volume-mount": { linksTo: "provide", interactive: true },
-  provide: { linksTo: "volume-mount", interactive: true },
-  // Posé À LA FOIS sur les ports synthétiques d'un groupe replié (deriveGroupPorts,
-  // topologyGraphShared.tsx) ET, depuis le correctif du 14/08/2026, sur tout vrai nœud
-  // "nutanix-vm"/"host" — toujours le bout TARGET d'une arête "hosts" (jamais l'origine d'une
-  // connexion glissée par l'utilisateur, React Flow ne démarre un geste de connexion que depuis un
-  // Handle `type="source"`). Jamais interactif : ce placement est une vérité serveur recalculée à
-  // chaque poll, pas une intention à modifier à la main depuis ce port.
-  "hosted-by": { linksTo: "hosts", interactive: false, infoMessage: "Relation d'hébergement posée par le serveur, non modifiable ici." },
-  // Pendant SOURCE de "hosted-by" ci-dessus — posé UNIQUEMENT sur un vrai nœud "host", jamais sur
-  // un port synthétique de groupe (un groupe n'est jamais lui-même la source d'une arête "hosts",
-  // voir deriveGroupPorts). Même garde non-interactive que "hosted-by" : un clic-glissé depuis ce
-  // port affiche le même message plutôt que de ne rien faire silencieusement.
-  hosts: { linksTo: "hosted-by", interactive: false, infoMessage: "Relation d'hébergement posée par le serveur, non modifiable ici." },
-  // Connexions entre nœuds d'automatisation (trigger -> condition/action, condition -> action) :
-  // interactives (React Flow démarre bien un geste de connexion depuis "automation-out"), mais
-  // JAMAIS validées par classifyConnection/CAPABILITY_DEFS — handleConnect (TopologyGraph.tsx)
-  // intercepte toute connexion dont un bout est un nœud d'automatisation AVANT d'en arriver là et
-  // POST /api/automation/edges avec sa propre règle d'ordre (même règle que le serveur,
-  // routes/automation.ts#isValidConnection). `linksTo` déclaré par cohérence documentaire.
-  "automation-out": { linksTo: "automation-in", interactive: true },
-  "automation-in": { linksTo: "automation-out", interactive: true },
-  // Dépendance d'artefact template->template : vérité issue de la RECETTE (étape "artifact"),
-  // recalculée à chaque poll — se modifie dans le studio, pas au fil (phase sous-graphe à venir).
-  "artifact-out": { linksTo: "artifact-in", interactive: false, infoMessage: "Dépendance d'artefact définie par la recette du template — modifiable dans le studio." },
-  "artifact-in": { linksTo: "artifact-out", interactive: false, infoMessage: "Dépendance d'artefact définie par la recette du template — modifiable dans le studio." },
-  // Protection HYCU : QUAI lit l'appliance, il ne la pilote JAMAIS (aucune route de mutation) —
-  // un fil tiré depuis ce port doit le dire honnêtement plutôt que de laisser espérer une action.
-  "protection-out": {
-    linksTo: "protected-by",
-    interactive: false,
-    infoMessage: "Protection rapportée par HYCU (lecture seule) — elle s'assigne dans HYCU, pas depuis QUAI.",
-  },
-  "protected-by": {
-    linksTo: "protection-out",
-    interactive: false,
-    infoMessage: "Protection rapportée par HYCU (lecture seule) — elle s'assigne dans HYCU, pas depuis QUAI.",
-  },
-};
-
-/**
- * Métadonnées de rendu d'un port PAR CAPACITÉ (indépendantes du type de nœud qui le porte) —
- * reprises telles quelles des entrées de ports existantes (même position/couleur/libellé pour une
- * capacité donnée, quel que soit le nœud) : un groupe (voir deriveGroupPorts,
- * topologyGraphShared.tsx) n'est PAS un type de nœud avec ses propres ports fixes, ses ports
- * dépendent de ce qu'il contient réellement — cette table permet de construire un Handle
- * synthétique cohérent avec le reste du graphe pour n'importe quelle capacité, sans dupliquer
- * position/couleur/libellé à chaque usage.
- */
-export const CAPABILITY_PORT_META: Record<CapabilityId, Pick<PortSpec, "handleType" | "position" | "colorToken" | "label">> = {
-  "volume-mount": { handleType: "target", position: Position.Left, colorToken: "volume", label: "Volume (lecture seule)" },
-  provide: { handleType: "source", position: Position.Right, colorToken: "volume", label: "Fournit un volume" },
-  // Position.Left (bug corrigé le 17/08/2026, même correctif que les ports "nutanix-vm"/"host"
-  // ci-dessous — convention TARGET = Left partout) : un groupe hébergé par un nœud "host" externe
-  // utilise la même convention que le reste du graphe, jamais un côté à part.
-  "hosted-by": { handleType: "target", position: Position.Left, colorToken: "host", label: "Hébergé par" },
-  // Jamais réellement lue par deriveGroupPorts (un groupe n'est jamais SOURCE d'une arête "hosts")
-  // — entrée requise uniquement pour que ce Record reste total. Valeurs alignées sur le port réel
-  // du nœud "host" pour rester cohérentes si jamais réutilisées un jour.
-  hosts: { handleType: "source", position: Position.Right, colorToken: "host", label: "Héberge" },
-  // Jamais lues par deriveGroupPorts non plus (aucun kind de TopologyEdge ne s'y projette — les
-  // arêtes "automation-flow" d'un groupe replié ne produisent aucun port synthétique dans ce
-  // premier lot, voir deriveGroupPorts) : entrées requises uniquement par la totalité du Record,
-  // valeurs alignées sur les vrais ports des nœuds d'automatisation ci-dessous.
-  "automation-out": { handleType: "source", position: Position.Right, colorToken: "automation", label: "Relier vers une condition/action" },
-  "automation-in": { handleType: "target", position: Position.Left, colorToken: "automation", label: "Relié depuis un déclencheur/une condition" },
-  "artifact-out": { handleType: "source", position: Position.Right, colorToken: "template", label: "Artefact fourni" },
-  "artifact-in": { handleType: "target", position: Position.Left, colorToken: "template", label: "Artefact consommé" },
-  "protection-out": { handleType: "source", position: Position.Right, colorToken: "backup", label: "Sauvegardée vers HYCU" },
-  "protected-by": { handleType: "target", position: Position.Left, colorToken: "backup", label: "Sauvegarde cette VM" },
-};
 
 // --- Câblage manuel au fil (React Flow onConnect) ------------------------------------------------
 
@@ -207,42 +138,11 @@ export const CONNECTION_ACTIONS: Partial<Record<CapabilityPairKey, ConnectionAct
 
 // --- Santé des arêtes (couleur/pointillé) --------------------------------------------------------
 
-// Une arête ne porte aucune donnée de santé propre (voir services/topology.ts côté API) : c'est le
-// nœud "pertinent" à l'une de ses extrémités qui fournit l'état — chaque kind déclare ci-dessous
-// (NodeContract#edgeHealth) s'il porte un signal et comment il se projette sur la MÊME palette,
-// jamais un système de couleurs parallèle par plateforme (retour utilisateur du 17/08/2026 : "j'ai
-// impression que le systeme n'est pas coherent entre nutanyx et le systeme de container c'est
+// Types (EdgeHealthState/EdgeHealthInfo/EdgeHealthContext) : topologyNodeRegistry.tsx, ré-exportés
+// en tête de ce fichier. Restent ici les implémentations RÉELLES de chaque plateforme, projetées
+// sur la MÊME palette, jamais un système de couleurs parallèle (retour utilisateur du 17/08/2026 :
+// "j'ai impression que le systeme n'est pas coherent entre nutanyx et le systeme de container c'est
 // comme si la logique etait seprarer en deux").
-export type EdgeHealthState = "healthy" | "unhealthy" | "starting" | "none" | "stopped";
-
-/** Dernier état RÉEL observé par le moteur d'automatisation pour un déclencheur — voir
- * TopologyNode#automationLastStatus (types.ts) et services/automationEngine.ts côté API. */
-export type AutomationTriggerStatus = "ok" | "failing" | "unknown";
-
-/** Ce qu'une extrémité "porteuse de signal" rend à buildTopologyEdges pour SON arête. */
-export interface EdgeHealthInfo {
-  state: EdgeHealthState;
-  strokeDasharray: string | undefined;
-  /** Données supplémentaires à fusionner dans `edge.data` (ex: nutanixPlacementConfirmed, consommé
-   * par le badge flottant d'arête — voir edgeBadgeItems, topologyGraphShared.tsx) — le moteur les
-   * recopie telles quelles, sans en connaître le sens : aucune clé de plateforme codée en dur dans
-   * buildTopologyEdges. */
-  extraEdgeData?: Record<string, unknown>;
-}
-
-/** Contexte fourni par buildTopologyEdges au `edgeHealth` d'un contrat — tout ce qu'un kind peut
- * légitimement vouloir consulter SANS que le moteur ait à connaître sa plateforme. */
-export interface EdgeHealthContext {
-  /** Kind de l'arête interrogée — même union que TopologyEdge["kind"]. */
-  edgeKind: "mount" | "hosts" | "automation-flow" | "uses-artifact" | "protects";
-  /** Rôle de CE nœud sur l'arête — permet à un contrat de ne répondre que pour le bout où son
-   * signal a un sens (ex : une VM Nutanix n'est porteuse que comme CIBLE d'une arête "hosts"). */
-  role: "source" | "target";
-  /** Statut de déclencheur propagé jusqu'à la SOURCE de l'arête le long des arêtes
-   * "automation-flow" (pré-passe générique de buildTopologyEdges, alimentée par
-   * NodeContract#automationStatusSeed) — "unknown" si aucun signal n'atteint cette arête. */
-  automationUpstreamStatus: AutomationTriggerStatus;
-}
 
 /**
  * État réel d'un déclencheur d'automatisation projeté sur la même palette que EDGE_STATE_COLOR —
@@ -383,23 +283,17 @@ export const CPU_ALERT_THRESHOLD_PERCENT = 90;
  * seuil absolu inventé en son absence (voir computeNodeResourceAlerts, topologyGraphShared.tsx). */
 export const MEMORY_ALERT_RATIO = 0.9;
 
-/** Seuils d'alerte de ressources d'un kind — `null` dans NodeContract#resourceAlerts pour tout
- * kind sans métriques d'utilisation live (explicite, jamais une absence implicite : seul
- * "container" expose aujourd'hui cpuPercent/memBytes réels, voir services/topology.ts). */
-export interface ResourceAlertsSpec {
-  cpuThresholdPercent: number;
-  memoryRatio: number;
-}
-
 // --- Actions du menu contextuel ------------------------------------------------------------------
 
 /**
- * Ids d'actions par kind — le contrat déclare QUELLES actions existent pour un kind (liste
- * ordonnée, libellé, danger, condition de visibilité sur l'état réel du nœud) ; l'IMPLÉMENTATION
- * (dispatch/confirm/popovers) reste injectée par l'appelant via buildNodeMenuItems ci-dessous,
- * seul à avoir accès aux hooks Redux/au state du composant. Préfixés par kind : deux kinds
- * différents n'exécutent jamais le même code pour un même verbe (ex : "Supprimer" un conteneur
- * passe par runContainerAction, une VM par TopologyNodeDetailPanel uniquement — jamais fusionnés).
+ * Ids d'actions du CŒUR — le contrat déclare QUELLES actions existent pour un kind (liste
+ * ordonnée, libellé, niveau de danger, condition de visibilité sur l'état réel du nœud) ;
+ * l'IMPLÉMENTATION (dispatch/confirm/popovers) reste injectée par l'appelant via buildNodeMenuItems
+ * ci-dessous, seul à avoir accès aux hooks Redux/au state du composant. Préfixés par kind : deux
+ * kinds différents n'exécutent jamais le même code pour un même verbe (ex : "Supprimer" un
+ * conteneur passe par runContainerAction, une VM par TopologyNodeDetailPanel uniquement — jamais
+ * fusionnés). Un greffon déclare ses propres ids (NodeMenuActionSpec#id est une chaîne libre) : le
+ * compilateur ne peut plus les connaître, seul le préfixe par kind évite les collisions.
  */
 export type NodeMenuActionId =
   | "container-stop"
@@ -431,17 +325,14 @@ export type NodeMenuActionId =
   | "hycu-view-jobs"
   | "hycu-configure";
 
-export interface NodeMenuActionSpec {
-  id: NodeMenuActionId;
-  label: string;
-  /** Style rouge pour les actions destructrices — même sémantique que ContextMenuItem#danger. */
-  danger?: boolean;
-  /** Rendue seulement si vrai pour CE nœud (état réel) — absente = toujours proposée. */
-  visible?: (node: TopologyNode) => boolean;
-  /** Entrée visible mais non cliquable, au libellé honnête ("bientôt") — même sémantique que
-   * ContextMenuItem#disabled ; incluse SANS handler (une entrée désactivée n'a pas d'action). */
-  disabled?: boolean;
-}
+/** Entrée de menu d'un kind du CŒUR — même forme déclarative que celle d'un greffon
+ * (NodeMenuActionSpec, topologyNodeRegistry.tsx), avec l'id restreint à l'union ci-dessus : une
+ * faute de frappe dans NODE_CONTRACT reste une erreur de compilation. */
+export type CoreMenuActionSpec = Omit<NodeMenuActionSpec, "id"> & { id: NodeMenuActionId };
+
+/** Table id d'action -> callback réel. Les ids du cœur restent proposés en autocomplétion ; la
+ * seconde moitié (index libre) accepte l'id d'une action déclarée par un greffon. */
+export type NodeActionHandlers = Partial<Record<NodeMenuActionId, () => void>> & Partial<Record<string, () => void>>;
 
 /**
  * Rend les actions déclarées par le contrat de `node.kind` en items de menu concrets — l'appelant
@@ -450,16 +341,18 @@ export interface NodeMenuActionSpec {
  * volontairement qu'un sous-ensemble — pas de "Renommer"/"Connecter à un network…" dans le
  * sous-graphe, comportement historique inchangé par cette migration), jamais un item mort qui ne
  * ferait rien au clic. Le résultat est structurellement assignable à ContextMenuItem[]
- * (ContextMenu.tsx) sans dépendre de ce composant ici.
+ * (ContextMenu.tsx) sans dépendre de ce composant ici. Un kind non enregistré n'a aucune action :
+ * menu vide, jamais une exception.
  */
 export function buildNodeMenuItems(
   node: TopologyNode,
-  handlers: Partial<Record<NodeMenuActionId, () => void>>,
+  handlers: NodeActionHandlers,
 ): { label: string; danger?: boolean; disabled?: boolean; onClick: () => void }[] {
-  const specs = NODE_CONTRACT[node.kind].menuItems;
+  const specs = nodeContractFor(node.kind).menuItems;
   const resolved = typeof specs === "function" ? specs(node) : specs;
   const items: { label: string; danger?: boolean; disabled?: boolean; onClick: () => void }[] = [];
   for (const spec of resolved) {
+    if (!matchesNodeState(node, spec.when)) continue;
     if (spec.visible && !spec.visible(node)) continue;
     // Une entrée désactivée est incluse sans handler (aucune action par définition).
     if (spec.disabled) {
@@ -468,7 +361,8 @@ export function buildNodeMenuItems(
     }
     const handler = handlers[spec.id];
     if (!handler) continue;
-    items.push({ label: spec.label, ...(spec.danger ? { danger: true } : {}), onClick: handler });
+    // Seul "destructive" passe en rouge — voir NodeActionSeverity (topologyNodeRegistry.tsx).
+    items.push({ label: spec.label, ...(spec.severity === "destructive" ? { danger: true } : {}), onClick: handler });
   }
   return items;
 }
@@ -491,7 +385,7 @@ export function buildNodeMenuItems(
 export interface IacEngineContract {
   /** Actions de menu SPÉCIFIQUES à ce moteur, ajoutées à la suite de celles du kind — [] pour les
    * trois moteurs dans cette passe (zéro changement visible). */
-  menuItems: NodeMenuActionSpec[];
+  menuItems: CoreMenuActionSpec[];
 }
 
 export const IAC_ENGINE_CONTRACT: Record<IacEngine, IacEngineContract> = {
@@ -502,46 +396,11 @@ export const IAC_ENGINE_CONTRACT: Record<IacEngine, IacEngineContract> = {
 
 // --- Le contrat lui-même -------------------------------------------------------------------------
 
-export interface NodeContract {
-  /** Icône de la carte du nœud (et de ses reprises : palette de création, panneau de détail...). */
-  icon: (props: { className?: string }) => JSX.Element;
-  /** Couleur de la MiniMap — même valeur que celle de l'icône du nœud dans topology.css. */
-  minimapColor: string;
-  /**
-   * Abscisse de la colonne PAR DÉFAUT du kind sur le canevas principal (TopologyGraph.tsx) — ne
-   * sert qu'en l'absence de position sauvegardée par l'utilisateur, et plus du tout pour
-   * "host"/"nutanix-vm" une fois l'arbre auto-disposé calculé (hostHierarchyPositions,
-   * topologyGraphShared.tsx — la colonne fixe n'y reste qu'en repli défensif improbable).
-   */
-  defaultColumnX: number;
-  /** Handles React Flow du nœud — `[]` EXPLICITE pour un kind jamais connectable (jamais une
-   * absence implicite : c'est précisément l'oubli qui a rendu les arêtes Nutanix invisibles le
-   * 14/08/2026, voir l'entrée "nutanix-vm" ci-dessous). */
-  ports: PortSpec[];
-  /**
-   * Comment une arête dont ce nœud est l'extrémité PERTINENTE calcule son état de santé/pointillé
-   * — `null` si ce kind ne porte jamais de signal (l'arête retombe alors sur le rendu neutre
-   * générique de buildTopologyEdges). Un contrat se garde LUI-MÊME (edgeKind/role du contexte) :
-   * le moteur interroge source puis cible sans aucune connaissance de plateforme.
-   */
-  edgeHealth: ((node: TopologyNode, ctx: EdgeHealthContext) => EdgeHealthInfo | null) | null;
-  /**
-   * Statut que ce kind INJECTE dans la propagation le long des arêtes "automation-flow"
-   * (pré-passe générique de buildTopologyEdges : le statut d'un déclencheur se propage aux
-   * conditions/actions qu'il alimente, pour qu'une arête condition -> action hérite d'un état réel
-   * plutôt que de retomber sur "aucun signal") — `null` pour tout kind qui n'émet rien.
-   */
-  automationStatusSeed: ((node: TopologyNode) => AutomationTriggerStatus) | null;
-  /** Seuils d'alertes CPU/mémoire — `null` EXPLICITE pour un kind sans métriques live. */
-  resourceAlerts: ResourceAlertsSpec | null;
-  /**
-   * Actions du menu contextuel PROPRES à ce kind (les entrées génériques — "Voir le détail",
-   * "Visualiser les dépendances", "Grouper la sélection" — restent posées par l'appelant, valables
-   * pour tous les kinds). Fonction de `node` quand la liste dépend d'une donnée du nœud (cas
-   * "iac-workspace" : déclinaison par moteur via IAC_ENGINE_CONTRACT ci-dessus).
-   */
-  menuItems: NodeMenuActionSpec[] | ((node: TopologyNode) => NodeMenuActionSpec[]);
-}
+/** L'interface NodeContract vit dans topologyNodeRegistry.tsx (partagée avec les greffons) — les
+ * entrées du CŒUR se déclarent avec des ids d'action restreints à NodeMenuActionId. */
+export type CoreNodeContract = Omit<NodeContract, "menuItems"> & {
+  menuItems: CoreMenuActionSpec[] | ((node: TopologyNode) => CoreMenuActionSpec[]);
+};
 
 /** Santé "conteneur" — extrémité conteneur d'une arête "mount" (volume partagé <-> conteneur) ou
  * "hosts" (Docker local -> conteneur). "stopped" prime sur healthStatus : un conteneur arrêté n'a
@@ -568,7 +427,9 @@ function automationSourceEdgeHealth(_node: TopologyNode, ctx: EdgeHealthContext)
   return { state: automationTriggerEdgeState(ctx.automationUpstreamStatus), strokeDasharray: "2 4" };
 }
 
-export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
+/** Contrats des types de nœud du CŒUR — totalité toujours vérifiée par le compilateur pour EUX
+ * (`Record<TopologyNodeKind, …>`) ; les types d'un greffon vivent dans le registre. */
+const NODE_CONTRACT_CORE: Record<TopologyNodeKind, CoreNodeContract> = {
   container: {
     icon: IconContainers,
     minimapColor: "#3b6fef",
@@ -598,8 +459,8 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
       // Démarrer/Arrêter mutuellement exclusifs selon l'état RÉEL — même règle qu'avant migration
       // (TopologyGraph.tsx#nodeMenuItems historique) : "running" propose Arrêter, tout le reste
       // (stopped/restarting/neutral) propose Démarrer.
-      { id: "container-stop", label: "Arrêter", visible: (n) => n.status === "running" },
-      { id: "container-start", label: "Démarrer", visible: (n) => n.status !== "running" },
+      { id: "container-stop", label: "Arrêter", when: { field: "status", equals: ["running"] } },
+      { id: "container-start", label: "Démarrer", when: { field: "status", notEquals: ["running"] } },
       { id: "container-restart", label: "Redémarrer" },
       { id: "container-rename", label: "Renommer" },
       // Un réseau n'étant plus un nœud du graphe (24/08/2026), c'est le SEUL chemin de connexion
@@ -607,7 +468,15 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
       { id: "container-connect-network", label: "Connecter à un réseau…" },
       // Même picker que le bouton ＋ au survol de la carte (TopologyGraph.tsx#attachPickerItems).
       { id: "container-attach", label: "Attacher (stockage, réseau, variable)…" },
-      { id: "container-remove", label: "Supprimer", danger: true },
+      { id: "container-remove", label: "Supprimer", severity: "destructive" },
+    ],
+    // Boutons directs au survol — MÊME grille d'état que les entrées de menu ci-dessus (jamais une
+    // seconde règle qui pourrait diverger) ; "Supprimer" volontairement absent, voir
+    // quickLifecycleActions plus bas.
+    quickActions: [
+      { action: "stop", when: { field: "status", equals: ["running"] } },
+      { action: "restart", when: { field: "status", equals: ["running"] } },
+      { action: "start", when: { field: "status", notEquals: ["running"] } },
     ],
   },
   volume: {
@@ -629,8 +498,9 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
       // présenté comme anodin. Volontairement absent du sous-graphe (TopologySubGraphPanel ne
       // fournit pas ce handler — buildNodeMenuItems omet alors l'entrée, jamais un item mort).
       { id: "volume-mount-on-container", label: "Monter sur un conteneur…" },
-      { id: "volume-remove", label: "Supprimer", danger: true },
+      { id: "volume-remove", label: "Supprimer", severity: "destructive" },
     ],
+    quickActions: [],
   },
   // Le kind "network" a été retiré le 24/08/2026 : un réseau est un tiroir sous la carte du nœud
   // qui y est rattaché (TopologyNodeAttachment), jamais un nœud du graphe.
@@ -693,9 +563,9 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
       // une seule source de vérité pour l'action la plus destructrice. Démarrer/Arrêter/Redémarrer
       // mutuellement exclusifs selon l'état RÉEL — noter la nuance avec "container" : un statut
       // "neutral" (power_state unknown) ne propose RIEN, jamais un "Démarrer" par défaut.
-      { id: "nutanix-vm-stop", label: "Arrêter", visible: (n) => n.status === "running" },
-      { id: "nutanix-vm-restart", label: "Redémarrer", visible: (n) => n.status === "running" },
-      { id: "nutanix-vm-start", label: "Démarrer", visible: (n) => n.status === "stopped" },
+      { id: "nutanix-vm-stop", label: "Arrêter", when: { field: "status", equals: ["running"] } },
+      { id: "nutanix-vm-restart", label: "Redémarrer", when: { field: "status", equals: ["running"] } },
+      { id: "nutanix-vm-start", label: "Démarrer", when: { field: "status", equals: ["stopped"] } },
       // Configuration matérielle (18/08/2026, mêmes entrées que le menu "Update VM" de Prism —
       // backend réel : POST /api/nutanix/vms/:uuid/{disks,nics}, PATCH .../compute). Toujours
       // visibles quel que soit le power_state : le hot-add disque/NIC est supporté par AHV, et un
@@ -703,6 +573,13 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
       { id: "nutanix-vm-add-disk", label: "Ajouter un disque…" },
       { id: "nutanix-vm-add-nic", label: "Ajouter une carte réseau…" },
       { id: "nutanix-vm-edit-compute", label: "vCPU / Mémoire…" },
+    ],
+    // Nuance conservée par rapport à "container" : un power_state inconnu ("neutral") ne propose
+    // RIEN, jamais un "Démarrer" par défaut.
+    quickActions: [
+      { action: "stop", when: { field: "status", equals: ["running"] } },
+      { action: "restart", when: { field: "status", equals: ["running"] } },
+      { action: "start", when: { field: "status", equals: ["stopped"] } },
     ],
   },
   // Le kind "ad-server" a été retiré le 24/08/2026 : les contrôleurs de domaine sont des VMs
@@ -740,15 +617,18 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     // "Créer une VM ici" : aucun backend de création de VM Nutanix n'existe — entrée désactivée
     // honnête plutôt qu'une fausse action. "Ajouter un environnement…" ouvre la vraie modale
     // RemoteEnvironmentCreateModal (handler injecté par TopologyGraph.tsx, admin uniquement).
-    menuItems: (node) => {
-      const createVmSoon: NodeMenuActionSpec = { id: "host-create-vm", label: "Créer une VM ici — bientôt", disabled: true };
-      if (node.hostKind === "quai-master") return [{ id: "host-add-environment", label: "Ajouter un environnement…" }];
-      if (node.hostKind === "nutanix-cluster") {
-        return [{ id: "host-add-environment", label: "Ajouter un environnement…" }, createVmSoon];
-      }
-      if (node.hostKind === "nutanix-host") return [createVmSoon];
-      return [];
-    },
+    // Liste déclarative depuis le 25/08/2026 (auparavant une fonction en cascade sur hostKind) —
+    // mêmes entrées, même ordre, mêmes hostKind concernés.
+    menuItems: [
+      { id: "host-add-environment", label: "Ajouter un environnement…", when: { field: "hostKind", equals: ["quai-master", "nutanix-cluster"] } },
+      {
+        id: "host-create-vm",
+        label: "Créer une VM ici — bientôt",
+        disabled: true,
+        when: { field: "hostKind", equals: ["nutanix-cluster", "nutanix-host"] },
+      },
+    ],
+    quickActions: [],
   },
   // Cron job (services/cronJobsStore.ts) — horloge, façon Railway "Cron Jobs". Jamais relié par
   // une arête à son conteneur cible (QUAI n'a aucune garantie que cette relation reste vraie dans
@@ -765,6 +645,7 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     automationStatusSeed: null,
     resourceAlerts: null,
     menuItems: [],
+    quickActions: [],
   },
   // Sauvegarde (services/backupsStore.ts) — même icône que l'ancienne page BackupsPage.tsx.
   backup: {
@@ -777,6 +658,7 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     automationStatusSeed: null,
     resourceAlerts: null,
     menuItems: [],
+    quickActions: [],
   },
   // Workspace Infra-as-code (services/iac/workspaces.ts) — UN SEUL kind de nœud pour les 3 moteurs
   // (tofu/ansible/packer), le moteur réel étant porté par TopologyNode#iacEngine (champ dédié,
@@ -819,6 +701,7 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     // workspace sans moteur connu (jamais censé arriver, le champ est toujours renvoyé par l'API)
     // retombe honnêtement sur "aucune action" plutôt qu'une liste inventée.
     menuItems: (node) => (node.iacEngine ? IAC_ENGINE_CONTRACT[node.iacEngine].menuItems : []),
+    quickActions: [],
   },
   // Dépôt Git source GitOps (services/topology.ts#getGitOpsSourceNode) — config globale
   // indépendante de Docker, jamais reliée par une arête à un nœud précis du graphe (le
@@ -833,6 +716,7 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     automationStatusSeed: null,
     resourceAlerts: null,
     menuItems: [],
+    quickActions: [],
   },
   // Déclencheur d'automatisation (services/automationStore.ts) — cloche d'alerte (IconBell, déjà
   // utilisée par Topbar.tsx pour les notifications) : un trigger surveille un état et "sonne
@@ -858,7 +742,8 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     // observé par le moteur ("unknown" tant que jamais évalué depuis le démarrage du process).
     automationStatusSeed: (node) => node.automationLastStatus ?? "unknown",
     resourceAlerts: null,
-    menuItems: [{ id: "automation-node-remove", label: "Supprimer", danger: true }],
+    menuItems: [{ id: "automation-node-remove", label: "Supprimer", severity: "destructive" }],
+    quickActions: [],
   },
   // Condition — point de décision qui divise la chaîne (voir icons.tsx#IconBranch). Les deux ports
   // (cible ET source) : reliée depuis un déclencheur, relie vers une action.
@@ -891,7 +776,8 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     edgeHealth: automationSourceEdgeHealth,
     automationStatusSeed: null,
     resourceAlerts: null,
-    menuItems: [{ id: "automation-node-remove", label: "Supprimer", danger: true }],
+    menuItems: [{ id: "automation-node-remove", label: "Supprimer", severity: "destructive" }],
+    quickActions: [],
   },
   // Action — déclenchement/exécution réelle (voir icons.tsx#IconPlay). Toujours une FEUILLE :
   // port d'entrée uniquement, jamais source d'une arête (routes/automation.ts#isValidConnection
@@ -916,7 +802,8 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     edgeHealth: null,
     automationStatusSeed: null,
     resourceAlerts: null,
-    menuItems: [{ id: "automation-node-remove", label: "Supprimer", danger: true }],
+    menuItems: [{ id: "automation-node-remove", label: "Supprimer", severity: "destructive" }],
+    quickActions: [],
   },
   // Template d'image (fabrique de templates, contrat types.ts#ImageTemplate) — le nœud topologie
   // sera posé par le backend À VENIR : d'ici là ce kind compile et reste simplement invisible.
@@ -938,12 +825,13 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
     // — "Déployer en VM"/"Créer un conteneur" n'apparaissent qu'avec un artifact du bon type,
     // jamais une action qui échouerait faute d'image construite.
     menuItems: [
-      { id: "image-template-build", label: "Construire", visible: (n) => n.templateStatus !== "building" },
+      { id: "image-template-build", label: "Construire", when: { field: "templateStatus", notEquals: ["building"] } },
       { id: "image-template-view-builds", label: "Voir les builds" },
-      { id: "image-template-deploy-vm", label: "Déployer en VM…", visible: (n) => n.templateArtifactType === "nutanix-image" },
-      { id: "image-template-create-container", label: "Créer un conteneur…", visible: (n) => n.templateArtifactType === "docker-image" },
-      { id: "image-template-remove", label: "Supprimer", danger: true },
+      { id: "image-template-deploy-vm", label: "Déployer en VM…", when: { field: "templateArtifactType", equals: ["nutanix-image"] } },
+      { id: "image-template-create-container", label: "Créer un conteneur…", when: { field: "templateArtifactType", equals: ["docker-image"] } },
+      { id: "image-template-remove", label: "Supprimer", severity: "destructive" },
     ],
+    quickActions: [],
   },
   // Appliance HYCU (services/hycu.ts — contrôleur de sauvegarde RÉEL de la mairie, LECTURE SEULE
   // stricte côté API). Icône IconBackup, comme le kind "backup" et la page Sauvegardes : c'est la
@@ -977,8 +865,26 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
       { id: "hycu-view-jobs", label: "Voir les jobs" },
       { id: "hycu-configure", label: "Configurer…" },
     ],
+    quickActions: [],
   },
 };
+
+// Enregistrement des types du CŒUR — effet de bord à l'import de ce module, avant tout rendu : un
+// greffon qui enregistre le sien plus tard ne peut ni remplacer ni masquer l'un d'eux.
+for (const [kind, contract] of Object.entries(NODE_CONTRACT_CORE) as [TopologyNodeKind, CoreNodeContract][]) {
+  registerNodeContract(kind, contract, CORE_CONTRACT_SOURCE);
+}
+
+/**
+ * Vue "table" des contrats du cœur — conservée pour les consommateurs qui indexent encore par kind.
+ * Une clé hors cœur (type d'un greffon, type inconnu) est résolue à l'exécution par
+ * nodeContractFor plutôt que de rendre `undefined` : aucun accès historique ne peut plus faire
+ * planter le graphe. Tout nouveau code passe par nodeContractFor.
+ */
+export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = tableWithRuntimeFallback<TopologyNodeKind, NodeContract>(
+  NODE_CONTRACT_CORE,
+  nodeContractFor,
+);
 
 // --- Actions rapides au survol de la carte (18/08/2026) ------------------------------------------
 
@@ -990,16 +896,14 @@ export const NODE_CONTRACT: Record<TopologyNodeKind, NodeContract> = {
  * suppression garde ses protections existantes (conteneur : menu contextuel + confirmation ; VM :
  * confirmation lourde "taper le nom" du SEUL panneau de détail) — jamais une poubelle en un survol.
  * Fonction PURE consommée par GraphNode (topologyGraphShared.tsx), callbacks injectés par
- * TopologyGraph.tsx (mêmes handlers réels que le menu contextuel, jamais dupliqués). */
-export type QuickLifecycleAction = "start" | "stop" | "restart";
+ * TopologyGraph.tsx (mêmes handlers réels que le menu contextuel, jamais dupliqués). Depuis
+ * l'ouverture du registre (25/08/2026), la LISTE et ses conditions sont déclarées par chaque
+ * contrat (NodeContract#quickActions) — cette fonction n'est plus que le moteur générique qui les
+ * filtre, sans plus aucun `if (kind === ...)`. */
 export function quickLifecycleActions(node: TopologyNode): QuickLifecycleAction[] {
-  if (node.kind === "container") return node.status === "running" ? ["stop", "restart"] : ["start"];
-  if (node.kind === "nutanix-vm") {
-    if (node.status === "running") return ["stop", "restart"];
-    if (node.status === "stopped") return ["start"];
-    return [];
-  }
-  return [];
+  return nodeContractFor(node.kind)
+    .quickActions.filter((spec) => matchesNodeState(node, spec.when) && (!spec.visible || spec.visible(node)))
+    .map((spec) => spec.action);
 }
 
 // --- Déclinaison PAR hostKind du kind "host" (même principe que IAC_ENGINE_CONTRACT) ------------
@@ -1021,27 +925,30 @@ export const HOST_KIND_CONTRACT: Record<TopologyHostKind, HostKindContract> = {
 };
 
 export function nodeIcon(node: TopologyNode): (props: { className?: string }) => JSX.Element {
-  if (node.kind === "host" && node.hostKind) return HOST_KIND_CONTRACT[node.hostKind].icon ?? NODE_CONTRACT.host.icon;
-  return NODE_CONTRACT[node.kind].icon;
+  const contract = nodeContractFor(node.kind);
+  if (node.kind === "host" && node.hostKind) return HOST_KIND_CONTRACT[node.hostKind].icon ?? contract.icon;
+  return contract.icon;
 }
 
 export function nodeMinimapColor(node: TopologyNode): string {
-  if (node.kind === "host" && node.hostKind) return HOST_KIND_CONTRACT[node.hostKind].minimapColor ?? NODE_CONTRACT.host.minimapColor;
-  return NODE_CONTRACT[node.kind].minimapColor;
+  const contract = nodeContractFor(node.kind);
+  if (node.kind === "host" && node.hostKind) return HOST_KIND_CONTRACT[node.hostKind].minimapColor ?? contract.minimapColor;
+  return contract.minimapColor;
 }
 
 // --- Vues dérivées du registre (compatibilité + consommation générique) -------------------------
 
-/** Tous les kinds du registre — dérivé de NODE_CONTRACT (le compilateur garantit déjà la totalité
- * du Record, cette liste ne peut donc jamais oublier un kind). */
-export const NODE_KINDS = Object.keys(NODE_CONTRACT) as TopologyNodeKind[];
+/** Kinds du CŒUR uniquement (totalité vérifiée par le compilateur) — pour la liste VIVANTE, cœur
+ * et greffons compris, voir registeredNodeKinds() (topologyNodeRegistry.tsx). */
+export const NODE_KINDS = Object.keys(NODE_CONTRACT_CORE) as TopologyNodeKind[];
 
 /** Projette un champ du contrat en Record par kind — pour les consommateurs qui préfèrent une
- * table plate (MiniMap, palette de création...) à un accès NODE_CONTRACT[kind].champ. */
+ * table plate (MiniMap, palette de création...) à un accès nodeContractFor(kind).champ. Même
+ * garde que NODE_CONTRACT : une clé hors cœur est projetée à l'exécution, jamais `undefined`. */
 export function mapNodeContract<T>(pick: (contract: NodeContract) => T): Record<TopologyNodeKind, T> {
   const result = {} as Record<TopologyNodeKind, T>;
-  for (const kind of NODE_KINDS) result[kind] = pick(NODE_CONTRACT[kind]);
-  return result;
+  for (const kind of NODE_KINDS) result[kind] = pick(nodeContractFor(kind));
+  return tableWithRuntimeFallback<TopologyNodeKind, T>(result, (kind) => pick(nodeContractFor(kind)));
 }
 
 /** Icône par kind — vue dérivée du registre, mêmes consommateurs qu'avant la migration

@@ -557,6 +557,29 @@ export function validatePlugin(input: unknown, options: ValidationOptions = {}):
     issues.push({ code: "plugin.graph", field: "graph", message: `graph, s'il est fourni, doit être une fonction, reçu ${describe(input.graph)}.` });
   }
 
+  // Un configStore à moitié fourni est pire que pas de configStore du tout : le socle écrirait par
+  // la voie du greffon et lirait par la voie générique, ou l'inverse.
+  const rawStore = input.configStore;
+  if (rawStore !== undefined) {
+    if (!isPlainObject(rawStore)) {
+      issues.push({
+        code: "plugin.configStore",
+        field: "configStore",
+        message: `configStore, s'il est fourni, doit être un objet { load, save, remove }, reçu ${describe(rawStore)}.`,
+      });
+    } else {
+      for (const name of ["load", "save", "remove"]) {
+        if (typeof rawStore[name] !== "function") {
+          issues.push({
+            code: "plugin.configStore",
+            field: `configStore.${name}`,
+            message: `configStore.${name} doit être une fonction, reçu ${describe(rawStore[name])}.`,
+          });
+        }
+      }
+    }
+  }
+
   const rawActions = input.actions;
   let actionNames: string[] = [];
   if (rawActions !== undefined) {
