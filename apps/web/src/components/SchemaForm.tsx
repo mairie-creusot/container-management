@@ -70,7 +70,9 @@ export type FormState = Record<string, FieldState>;
 export const SECRET_MASK = "•••";
 const KEEP_SUFFIX = " (laisser vide pour conserver l'existant)";
 
-export function isSecretField(field: SchemaField): field is SchemaStringField {
+// Prédicat porté sur le FORMAT et pas seulement sur le type : sinon, dans une branche où le champ
+// est déjà connu comme une chaîne, l'écarter ne laisserait plus aucun type possible.
+export function isSecretField(field: SchemaField): field is SchemaStringField & { format: "password" } {
   return field.type === "string" && field.format === "password";
 }
 
