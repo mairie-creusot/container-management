@@ -80,7 +80,9 @@ const THREECX: ManifestFixture = {
   secretFields: ["clientSecret", "password"],
 };
 
-/** Manifeste du formulaire RÉEL de features/glpi/GlpiConfigSection.tsx. */
+/** Manifeste RÉEL du greffon GLPI — copie de apps/api/src/plugins/glpi/index.ts. Il décrit le
+ * formulaire de features/glpi/GlpiConfigSection.tsx : app_token toujours visible, bascule de mode
+ * libellée en clair, identifiants de chaque mode conditionnels. */
 const GLPI: ManifestFixture = {
   configSchema: {
     type: "object",
@@ -95,6 +97,7 @@ const GLPI: ManifestFixture = {
         type: "string",
         title: "Mode d'authentification",
         enum: ["user-token", "credentials"],
+        enumLabels: ["Jeton utilisateur (user_token)", "Compte de service (login et mot de passe)"],
         default: "user-token",
       },
       userToken: {
@@ -159,6 +162,39 @@ const CERTIFICATES: ManifestFixture = {
       },
     },
     required: ["caUrl", "template", "username", "password"],
+  },
+  secretFields: ["password"],
+};
+
+/**
+ * Manifeste RÉEL du greffon Nutanix — copie de apps/api/src/plugins/nutanix/index.ts. Il décrit le
+ * formulaire de features/clusters/NutanixConfigSection.tsx : trois champs, aucun mode, le mot de
+ * passe déduit de secretFields.
+ */
+const NUTANIX: ManifestFixture = {
+  configSchema: {
+    type: "object",
+    title: "Nutanix Prism Central",
+    properties: {
+      prismCentralUrl: {
+        type: "string",
+        title: "URL Prism Central",
+        description: "Adresse de Prism Central, port compris — QUAI ajoute lui-même les chemins d'API (v3 et Prism Element v2.0).",
+        examples: ["https://prism.lecreusot.fr:9440"],
+      },
+      username: {
+        type: "string",
+        title: "Utilisateur",
+        description: "Compte Prism Central utilisé pour toutes les requêtes, lectures comme actions sur les VMs.",
+      },
+      password: {
+        type: "string",
+        title: "Mot de passe",
+        description: "Laisser vide lors d'une modification conserve le mot de passe déjà enregistré.",
+      },
+    },
+    required: ["prismCentralUrl", "username", "password"],
+    additionalProperties: false,
   },
   secretFields: ["password"],
 };
@@ -285,10 +321,30 @@ describe("adaptateur — GLPI", () => {
     expect(input("app_token")).toBeTruthy();
   });
 
-  it("faute de libellé d'option dans le sous-ensemble, la valeur d'énumération sert de libellé", () => {
+  it("affiche les modes d'authentification en clair, jamais la valeur brute", () => {
     render(<SchemaForm schema={adapt(GLPI)} onSubmit={() => undefined} />);
     const options = [...(screen.getByLabelText("Mode d'authentification") as HTMLSelectElement).options];
     expect(options.map((option) => option.value)).toEqual(["user-token", "credentials"]);
+    expect(options.map((option) => option.textContent)).toEqual([
+      "Jeton utilisateur (user_token)",
+      "Compte de service (login et mot de passe)",
+    ]);
+  });
+
+  it("faute de libellé d'option dans le manifeste, la valeur d'énumération sert de libellé", () => {
+    const properties = GLPI.configSchema.properties as Record<string, unknown>;
+    const sansLibelles: ManifestFixture = {
+      ...GLPI,
+      configSchema: {
+        ...GLPI.configSchema,
+        properties: {
+          ...properties,
+          authMode: { type: "string", title: "Mode d'authentification", enum: ["user-token", "credentials"], default: "user-token" },
+        },
+      },
+    };
+    render(<SchemaForm schema={adapt(sansLibelles)} onSubmit={() => undefined} />);
+    const options = [...(screen.getByLabelText("Mode d'authentification") as HTMLSelectElement).options];
     expect(options.map((option) => option.textContent)).toEqual(["user-token", "credentials"]);
   });
 });
@@ -324,6 +380,38 @@ describe("adaptateur — AD CS", () => {
     expect(dedicated.required).toBe(true);
     expect(dedicated.getAttribute("placeholder")).toBe("LECREUSOT\\svc-quai-pki");
     expect(input("Mot de passe").getAttribute("type")).toBe("password");
+  });
+});
+
+describe("adaptateur — Nutanix", () => {
+  it("produit les trois champs du formulaire réel, mot de passe masqué et requis", () => {
+    const schema = adapt(NUTANIX);
+    expect(schema.fields.map((field) => field.name)).toEqual(["prismCentralUrl", "username", "password"]);
+    expect(schema.fields.map((field) => field.type)).toEqual(["string", "string", "string"]);
+
+    const [prismCentralUrl, , password] = schema.fields;
+    expect(prismCentralUrl).toMatchObject({
+      label: "URL Prism Central",
+      required: true,
+      placeholder: "https://prism.lecreusot.fr:9440",
+    });
+    expect(password).toEqual({
+      name: "password",
+      label: "Mot de passe",
+      help: "Laisser vide lors d'une modification conserve le mot de passe déjà enregistré.",
+      type: "string",
+      format: "password",
+      required: true,
+    });
+  });
+
+  it("rend le formulaire d'origine : aucun champ conditionnel, aucune valeur pré-remplie", () => {
+    render(<SchemaForm schema={adapt(NUTANIX)} onSubmit={() => undefined} />);
+
+    expect(input("URL Prism Central").required).toBe(true);
+    expect(input("Utilisateur").required).toBe(true);
+    expect(input("Mot de passe").getAttribute("type")).toBe("password");
+    expect(input("Mot de passe").value).toBe("");
   });
 });
 

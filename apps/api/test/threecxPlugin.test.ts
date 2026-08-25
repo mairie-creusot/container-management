@@ -53,9 +53,10 @@ describe("Greffon 3CX — manifeste", () => {
   });
 
   it("est réellement branché dans les greffons du socle", () => {
-    expect(BUILTIN_PLUGINS.map((plugin) => plugin.manifest.id)).toEqual(["3cx"]);
+    // D'autres intégrations ont été migrées depuis : la liste reste EXACTE, jamais un « contient 3cx ».
+    expect(BUILTIN_PLUGINS.map((plugin) => plugin.manifest.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
     app = buildServer();
-    expect(listPlugins().map((plugin) => plugin.manifest.id)).toEqual(["3cx"]);
+    expect(listPlugins().map((plugin) => plugin.manifest.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
   });
 
   it("décrit le formulaire réel : mêmes champs, même bascule de mode, mêmes valeurs par défaut", () => {

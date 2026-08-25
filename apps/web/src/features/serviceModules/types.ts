@@ -12,7 +12,12 @@
 export type ServiceModuleTone = "ok" | "warning" | "critical" | "neutral";
 export type ServiceModuleEntityStatus = "ok" | "warning" | "critical" | "unknown";
 export type ServiceModuleRelationState = "active" | "idle" | "failed" | "unknown";
-export type ServiceModuleStatus = "ready" | "not-configured" | "unreachable";
+/**
+ * Vocabulaire d'état d'une intégration. « denied » et « failed » ont été ajoutés le 25/08/2026 :
+ * 3CX distinguait un accès refusé (licence, droits) d'une erreur renvoyée par le service, et les
+ * écraser tous deux en « injoignable » avait déjà coûté un diagnostic erroné.
+ */
+export type ServiceModuleStatus = "ready" | "not-configured" | "unreachable" | "denied" | "failed";
 
 export interface ServiceModuleSummaryItem {
   label: string;

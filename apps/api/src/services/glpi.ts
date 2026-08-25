@@ -1,8 +1,8 @@
 /**
  * Intégration GLPI (outil de tickets de la Mairie du Creusot) — API REST `apirest.php`, même
- * patron exact que services/hycu.ts : config chiffrée au repos (setupStore.ts#SetupGlpiConfig),
- * test de connexion RÉEL avant persistance, `lastKnownGlpiPoll()` pour distinguer "vide" de
- * "injoignable", et aucun jeu de démonstration.
+ * patron exact que services/hycu.ts : config chiffrée au repos (celle du GREFFON "glpi",
+ * plugins/glpi/config.ts, de forme SetupGlpiConfig), test de connexion RÉEL avant persistance,
+ * `lastKnownGlpiPoll()` pour distinguer "vide" de "injoignable", et aucun jeu de démonstration.
  *
  * PÉRIMÈTRE D'ÉCRITURE STRICT (autorisé par l'utilisateur, borné ici) : créer un ticket, ajouter
  * un suivi (ITILFollowup), passer un ticket en résolu. Aucune suppression, et la seule mutation
@@ -43,7 +43,7 @@
 
 import { createHash } from "node:crypto";
 import { config } from "../config.js";
-import { getEffectiveGlpiConfig } from "./setupStore.js";
+import { loadGlpiPluginConfig } from "../plugins/glpi/config.js";
 import type { SetupGlpiConfig } from "./setupStore.js";
 
 // --- Types publics de l'intégration (déclarés ICI, pas dans types.ts) ---
@@ -243,9 +243,10 @@ function loadConfigOrNull(cfg: SetupGlpiConfig | null): SetupGlpiConfig | null {
 }
 
 /** Config GLPI effective si complète, sinon `null` — garde "jamais configuré", même rôle exact
- * que hycu.ts#loadHycuConfig. */
+ * que hycu.ts#loadHycuConfig. La config vient du stockage générique des greffons
+ * (plugins/glpi/config.ts), qui reprend au passage celle de l'ancien champ typé. */
 async function loadGlpiConfig(): Promise<SetupGlpiConfig | null> {
-  return loadConfigOrNull(await getEffectiveGlpiConfig());
+  return loadConfigOrNull(await loadGlpiPluginConfig());
 }
 
 function normalizedApiUrl(url: string): string {
@@ -421,7 +422,7 @@ export async function releaseGlpiSession(): Promise<void> {
   cachedSession = null;
   inFlightInit = null;
   if (!session) return;
-  const cfg = await getEffectiveGlpiConfig();
+  const cfg = await loadGlpiPluginConfig();
   if (cfg?.apiUrl && cfg.appToken) await killSession(cfg, session.token);
 }
 

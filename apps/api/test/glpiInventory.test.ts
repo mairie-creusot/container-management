@@ -85,7 +85,7 @@ vi.stubGlobal("fetch", fetchMock);
 const { buildServer } = await import("../src/index.js");
 const { config } = await import("../src/config.js");
 const { signSessionToken } = await import("../src/services/session.js");
-const { clearGlpiConfig, setGlpiConfig } = await import("../src/services/setupStore.js");
+const { removeGlpiPluginConfig, saveGlpiPluginConfig } = await import("../src/plugins/glpi/config.js");
 const { QUAI_PROVENANCE_PREFIX, reconcileInventory } = await import("../src/services/glpiInventory.js");
 type RealResource = import("../src/services/glpiInventory.js").RealResource;
 type GlpiComputerRecord = import("../src/services/glpiInventory.js").GlpiComputerRecord;
@@ -112,7 +112,7 @@ afterEach(async () => {
   recorded.length = 0;
   fetchMock.mockClear();
   vi.clearAllMocks();
-  await clearGlpiConfig();
+  await removeGlpiPluginConfig();
 });
 
 function adminCookie() {
@@ -123,7 +123,7 @@ function viewerCookie() {
 }
 
 async function seedGlpiConfig(): Promise<void> {
-  await setGlpiConfig({ apiUrl: API_URL, appToken: "app-token-de-test", userToken: "user-token-de-test" });
+  await saveGlpiPluginConfig({ apiUrl: API_URL, appToken: "app-token-de-test", userToken: "user-token-de-test" });
 }
 
 const VM_APPLI = "0005c1f0-1111-4a2b-8c3d-000000000001";

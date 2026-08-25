@@ -7,10 +7,13 @@
  */
 
 import type { Plugin } from "@quai/plugin-contract";
+import { glpiPlugin } from "./glpi/index.js";
+import { hycuPlugin } from "./hycu/index.js";
+import { nutanixPlugin } from "./nutanix/index.js";
 import { hasPlugin, registerPlugin } from "./registry.js";
 import { threecxPlugin } from "./threecx/index.js";
 
-export const BUILTIN_PLUGINS: readonly Plugin[] = [threecxPlugin];
+export const BUILTIN_PLUGINS: readonly Plugin[] = [threecxPlugin, glpiPlugin, hycuPlugin, nutanixPlugin];
 
 /** Idempotent : buildServer() est appelé plusieurs fois dans une même exécution de tests. */
 export function registerBuiltinPlugins(): void {

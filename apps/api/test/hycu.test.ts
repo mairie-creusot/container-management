@@ -83,7 +83,12 @@ vi.mock("node:https", () => ({
 const { buildServer } = await import("../src/index.js");
 const { config } = await import("../src/config.js");
 const { signSessionToken } = await import("../src/services/session.js");
-const { setHycuConfig, clearHycuConfig } = await import("../src/services/setupStore.js");
+const { setHycuConfig, getCurrent, getEffectiveHycuConfig, getSafeIntegrationConfig } = await import(
+  "../src/services/setupStore.js"
+);
+const { HYCU_PLUGIN_ID, loadHycuPluginConfig, removeHycuPluginConfig, saveHycuPluginConfig } = await import(
+  "../src/plugins/hycu/config.js"
+);
 const { getHycuTopologySnapshot, hycuVmProtectionState, lastKnownHycuPoll } = await import("../src/services/hycu.js");
 
 afterAll(async () => {
@@ -98,7 +103,8 @@ afterEach(async () => {
   queuesByKey.clear();
   lastByKey.clear();
   seenSearchParamsByKey.clear();
-  await clearHycuConfig();
+  // Retire l'entrée du greffon ET tout reliquat du champ typé : aucun test n'hérite d'une appliance.
+  await removeHycuPluginConfig();
 });
 
 function adminCookie() {
@@ -113,7 +119,13 @@ function viewerCookie() {
 const POLICY_GOLD = "11111111-aaaa-4bbb-8ccc-000000000001";
 const POLICY_BRONZE = "11111111-aaaa-4bbb-8ccc-000000000002";
 
+/** Config du GREFFON "hycu" — la voie normale depuis la migration (stockage générique). */
 async function seedHycuConfig(): Promise<void> {
+  await saveHycuPluginConfig({ url: "https://172.20.0.100:8443", username: "quai-ro", password: "hycu-secret" });
+}
+
+/** Config telle qu'une version ANTÉRIEURE au greffon l'écrivait : champ typé `hycu`. */
+async function seedLegacyHycuConfig(): Promise<void> {
   await setHycuConfig({ url: "https://172.20.0.100:8443", username: "quai-ro", password: "hycu-secret" });
 }
 
@@ -255,6 +267,37 @@ describe("Service HYCU — parsing des formes tusc/hycu", () => {
     ]);
   });
 
+  it("GET /api/hycu/vms : `compliancyStatus` (champ réel du contrôleur) l'emporte sur l'ancien nom supposé", async () => {
+    await seedHycuConfig();
+    queueResponse("GET /rest/v1.0/vms", {
+      entities: [
+        // Forme RÉELLE : externalId (uuid hyperviseur) + compliancyStatus.
+        {
+          uuid: "objet-hycu-1",
+          externalId: "aaaaaaaa-1111-4222-8333-444444444444",
+          vmName: "HDVAPPLI",
+          protectionGroupUuid: POLICY_GOLD,
+          compliancyStatus: "COMPLIANT",
+          complianceStatus: "GREEN",
+        },
+      ],
+      metadata: { totalEntityCount: 1 },
+    });
+    seedPolicies();
+    app = buildServer();
+    const response = await app.inject({ method: "GET", url: "/api/hycu/vms", cookies: viewerCookie() });
+    expect(response.json()).toEqual([
+      {
+        uuid: "objet-hycu-1",
+        externalId: "aaaaaaaa-1111-4222-8333-444444444444",
+        vmName: "HDVAPPLI",
+        protectionGroupUuid: POLICY_GOLD,
+        policyName: "Gold",
+        complianceStatus: "COMPLIANT",
+      },
+    ]);
+  });
+
   it("GET /api/hycu/policies : vmCount calculé (mécanisme list_vm_backups_by_policy.sh), jamais lu d'un champ supposé", async () => {
     await seedHycuConfig();
     seedVms();
@@ -384,11 +427,18 @@ describe("Config HYCU — test réel avant persistance, chiffrement au repos, ja
     expect(JSON.stringify(response.json())).not.toContain("hycu-secret");
 
     // Chiffré AU REPOS : le fichier config.json ne contient jamais le mot de passe en clair.
+    // Depuis la migration, la config vit sous l'identifiant du greffon (integrations.hycu).
     const raw = await fs.readFile(tmpConfigPath, "utf-8");
     expect(raw).not.toContain("hycu-secret");
-    const onDisk = JSON.parse(raw) as { hycu?: { password?: string; url?: string } };
-    expect(onDisk.hycu?.url).toBe("https://172.20.0.100:8443");
-    expect(onDisk.hycu?.password).toMatch(/^enc:v1:/);
+    const onDisk = JSON.parse(raw) as {
+      hycu?: unknown;
+      integrations?: Record<string, { config?: { url?: string; password?: string }; secretFields?: string[] }>;
+    };
+    expect(onDisk.hycu).toBeUndefined();
+    const entry = onDisk.integrations?.[HYCU_PLUGIN_ID];
+    expect(entry?.config?.url).toBe("https://172.20.0.100:8443");
+    expect(entry?.config?.password).toMatch(/^enc:v1:/);
+    expect(entry?.secretFields).toEqual(["password"]);
 
     const cfg = await app.inject({ method: "GET", url: "/api/hycu/config", cookies: adminCookie() });
     expect(cfg.json()).toEqual({ configured: true, config: { url: "https://172.20.0.100:8443", username: "quai-ro" } });
@@ -408,7 +458,11 @@ describe("Config HYCU — test réel avant persistance, chiffrement au repos, ja
     expect(response.json().config.url).toBe("https://hycu.lecreusot.fr:8443");
     const raw = await fs.readFile(tmpConfigPath, "utf-8");
     expect(raw).not.toContain("hycu-secret");
-    expect((JSON.parse(raw) as { hycu?: { password?: string } }).hycu?.password).toMatch(/^enc:v1:/);
+    const stored = (JSON.parse(raw) as { integrations?: Record<string, { config?: { password?: string } }> })
+      .integrations?.[HYCU_PLUGIN_ID];
+    expect(stored?.config?.password).toMatch(/^enc:v1:/);
+    // Le mot de passe conservé est bien l'ancien, réellement déchiffrable.
+    expect(await loadHycuPluginConfig()).toMatchObject({ url: "https://hycu.lecreusot.fr:8443", password: "hycu-secret" });
   });
 
   it("POST /api/hycu/config/test : teste sans persister (config candidate ou existante)", async () => {
@@ -435,6 +489,70 @@ describe("Config HYCU — test réel avant persistance, chiffrement au repos, ja
     expect(cfg.json()).toEqual({ configured: false });
     const vms = await app.inject({ method: "GET", url: "/api/hycu/vms", cookies: viewerCookie() });
     expect(vms.json()).toEqual([]);
+  });
+});
+
+/**
+ * Reprise de la configuration écrite AVANT la migration en greffon (champ typé `hycu`) — même
+ * discipline exacte que 3CX : recopie sous l'identifiant du greffon, puis RETRAIT du champ typé.
+ */
+describe("Config HYCU — reprise du champ typé par le greffon", () => {
+  it("une appliance configurée avant la migration reste jointe sans ressaisie", async () => {
+    await seedLegacyHycuConfig();
+    seedVms();
+    seedPolicies();
+    app = buildServer();
+
+    const response = await app.inject({ method: "GET", url: "/api/hycu/vms", cookies: viewerCookie() });
+    expect(response.statusCode).toBe(200);
+    expect((response.json() as unknown[]).length).toBe(3);
+  });
+
+  it("le champ typé est RETIRÉ une fois repris — plus aucune config de secours sur disque", async () => {
+    await seedLegacyHycuConfig();
+    await loadHycuPluginConfig();
+
+    expect((await getCurrent()).hycu).toBeUndefined();
+    expect(await getEffectiveHycuConfig()).toBeNull();
+    expect(await loadHycuPluginConfig()).toMatchObject({
+      url: "https://172.20.0.100:8443",
+      username: "quai-ro",
+      password: "hycu-secret",
+    });
+  });
+
+  it("le secret repris est chiffré au repos et ne ressort jamais de la vue sûre", async () => {
+    await seedLegacyHycuConfig();
+    await loadHycuPluginConfig();
+
+    const entry = (await getCurrent()).integrations?.[HYCU_PLUGIN_ID];
+    expect(entry?.secretFields).toEqual(["password"]);
+    expect(String(entry?.config.password).startsWith("enc:v1:")).toBe(true);
+
+    const safe = await getSafeIntegrationConfig(HYCU_PLUGIN_ID);
+    expect(safe?.config).toMatchObject({ url: "https://172.20.0.100:8443", username: "quai-ro", hasPassword: true });
+    expect(JSON.stringify(safe)).not.toContain("hycu-secret");
+  });
+
+  it("une config de greffon déjà écrite l'emporte sur le champ typé, qui est retiré sans être lu", async () => {
+    await seedHycuConfig();
+    await setHycuConfig({ url: "https://ancienne-appliance:8443", username: "ancien", password: "ancien-secret" });
+
+    expect(await loadHycuPluginConfig()).toMatchObject({ url: "https://172.20.0.100:8443", username: "quai-ro" });
+    expect((await getCurrent()).hycu).toBeUndefined();
+  });
+
+  it("retirer la configuration ne fait pas ressusciter le champ typé", async () => {
+    await seedLegacyHycuConfig();
+    app = buildServer();
+
+    const del = await app.inject({ method: "DELETE", url: "/api/hycu/config", cookies: adminCookie() });
+    expect(del.json()).toEqual({ ok: true });
+
+    const cfg = await app.inject({ method: "GET", url: "/api/hycu/config", cookies: adminCookie() });
+    expect(cfg.json()).toEqual({ configured: false });
+    expect((await getCurrent()).hycu).toBeUndefined();
+    expect(await loadHycuPluginConfig()).toBeNull();
   });
 });
 

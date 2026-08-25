@@ -52,7 +52,10 @@ vi.mock("node:https", () => ({
 const { buildServer } = await import("../src/index.js");
 const { config } = await import("../src/config.js");
 const { signSessionToken } = await import("../src/services/session.js");
-const { setNutanixConfig, clearNutanixConfig } = await import("../src/services/setupStore.js");
+const { setNutanixConfig } = await import("../src/services/setupStore.js");
+// Retour à "jamais configuré" APRÈS migration en greffon : le champ typé seedé ci-dessus est repris
+// puis retiré par plugins/nutanix/config.ts — seul removeNutanixPluginConfig() efface les deux.
+const { removeNutanixPluginConfig } = await import("../src/plugins/nutanix/config.js");
 
 afterAll(async () => {
   await fs.rm(tmpConfigPath, { force: true });
@@ -278,14 +281,14 @@ describe("GET /api/nutanix/cluster-stats", () => {
 
   it("accessible en lecture à un rôle viewer (aucune mutation possible)", async () => {
     app = buildServer();
-    await clearNutanixConfig();
+    await removeNutanixPluginConfig();
     const response = await app.inject({ method: "GET", url: "/api/nutanix/cluster-stats", cookies: viewerCookie() });
     expect(response.statusCode).toBe(200);
   });
 
   it("configured:false si Nutanix n'a jamais été configuré (jamais un 500, jamais de fausse stat)", async () => {
     app = buildServer();
-    await clearNutanixConfig();
+    await removeNutanixPluginConfig();
     const response = await app.inject({ method: "GET", url: "/api/nutanix/cluster-stats", cookies: adminCookie() });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ configured: false, reachable: false, clusters: [] });
@@ -464,7 +467,7 @@ describe("GET /api/nutanix/alerts", () => {
 
   it("configured:false si Nutanix n'a jamais été configuré", async () => {
     app = buildServer();
-    await clearNutanixConfig();
+    await removeNutanixPluginConfig();
     const response = await app.inject({ method: "GET", url: "/api/nutanix/alerts", cookies: adminCookie() });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ configured: false, reachable: false, alerts: [] });

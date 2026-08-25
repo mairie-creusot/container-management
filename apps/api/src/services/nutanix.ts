@@ -16,7 +16,7 @@ import { request as httpsRequest } from "node:https";
 import type { Readable } from "node:stream";
 import { URL } from "node:url";
 import { config } from "../config.js";
-import { getEffectiveNutanixConfig } from "./setupStore.js";
+import { loadNutanixPluginConfig } from "../plugins/nutanix/config.js";
 import type { SetupNutanixConfig } from "./setupStore.js";
 import type {
   ClusterNode,
@@ -36,7 +36,9 @@ import type {
  * pour éviter un second appel + une assertion de type dans les fonctions ci-dessous.
  */
 async function loadNutanixConfig(): Promise<SetupNutanixConfig | null> {
-  const effective = await getEffectiveNutanixConfig();
+  // Depuis la migration en greffon : stockage générique des intégrations, avec reprise (et retrait)
+  // du champ typé `nutanix` d'une configuration antérieure — voir plugins/nutanix/config.ts.
+  const effective = await loadNutanixPluginConfig();
   if (!effective?.prismCentralUrl || !effective.username || !effective.password) return null;
   return effective;
 }

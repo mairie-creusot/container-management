@@ -73,7 +73,10 @@ vi.mock("node:https", () => ({
 const { buildServer } = await import("../src/index.js");
 const { config } = await import("../src/config.js");
 const { signSessionToken } = await import("../src/services/session.js");
-const { setNutanixConfig, clearNutanixConfig } = await import("../src/services/setupStore.js");
+const { setNutanixConfig } = await import("../src/services/setupStore.js");
+// Retour à "jamais configuré" APRÈS migration en greffon : le champ typé seedé ci-dessus est repris
+// puis retiré par plugins/nutanix/config.ts — seul removeNutanixPluginConfig() efface les deux.
+const { removeNutanixPluginConfig } = await import("../src/plugins/nutanix/config.js");
 const { listAuditEvents } = await import("../src/services/auditLog.js");
 
 afterAll(async () => {
@@ -211,7 +214,7 @@ describe("Configuration matérielle d'une VM Nutanix — autorisation", () => {
 
   it("400 si Nutanix n'a jamais été configuré", async () => {
     app = buildServer();
-    await clearNutanixConfig();
+    await removeNutanixPluginConfig();
     const response = await app.inject({
       method: "POST",
       url: `/api/nutanix/vms/${VM_UUID}/disks`,
@@ -237,7 +240,7 @@ describe("GET /api/nutanix/subnets", () => {
 
   it("[] si Nutanix n'a jamais été configuré (jamais une erreur pour un simple listing)", async () => {
     app = buildServer();
-    await clearNutanixConfig();
+    await removeNutanixPluginConfig();
     const response = await app.inject({ method: "GET", url: "/api/nutanix/subnets", cookies: viewerCookie() });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual([]);

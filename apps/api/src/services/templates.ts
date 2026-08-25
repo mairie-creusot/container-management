@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { getEffectiveNutanixConfig } from "./setupStore.js";
+import { loadNutanixPluginConfig } from "../plugins/nutanix/config.js";
 import { createWorkspace, deleteWorkspace, workspaceFilesPath, writeFile, WorkspaceNotFoundError } from "./iac/workspaces.js";
 import { lintShellScript } from "./iac/lint.js";
 import { sha512Crypt } from "./iac/sha512crypt.js";
@@ -1654,7 +1654,7 @@ export async function buildTemplate(id: string, startedBy: string): Promise<Imag
           'une base ISO en installation manuelle ne se construit pas — la VM s\'installe via la console VNC (passez install: "unattended" pour un build réel)',
         );
       }
-      const nutanix = await getEffectiveNutanixConfig();
+      const nutanix = await loadNutanixPluginConfig();
       if (!nutanix) {
         throw new NutanixNotConfiguredError(
           "Nutanix n'est pas configuré : impossible de lancer un build ISO automatisé (voir /api/nutanix/config)",
@@ -1691,7 +1691,7 @@ export async function buildTemplate(id: string, startedBy: string): Promise<Imag
     }
     case "cloud-image": {
       // Identifiants Prism lus AU MOMENT du spawn, jamais persistés ni loggés (StartRunOptions#extraEnv).
-      const nutanix = await getEffectiveNutanixConfig();
+      const nutanix = await loadNutanixPluginConfig();
       if (!nutanix) {
         throw new NutanixNotConfiguredError(
           "Nutanix n'est pas configuré : impossible de lancer un build cloud-image (voir /api/nutanix/config)",

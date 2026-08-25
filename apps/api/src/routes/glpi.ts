@@ -25,6 +25,7 @@
  *   LECTURE SEULE, et toute lecture de tickets d'autrui est écrite au journal d'audit.
  * GET    /api/glpi/search-options          — options de recherche RÉELLES de Ticket (admin) : sert à
  *                                              confirmer les numéros supposés de services/glpi.ts.
+ * La configuration est celle du GREFFON "glpi" (plugins/glpi/config.ts), stockée par le socle.
  * GET    /api/glpi/config                  — config REDACTÉE (admin) : jamais appToken/userToken/
  *                                              password, même partiellement.
  * PUT    /api/glpi/config                  — configure/remplace (admin) — teste RÉELLEMENT la
@@ -52,7 +53,7 @@ import {
   testGlpiConnection,
 } from "../services/glpi.js";
 import { recordAuditEvent } from "../services/auditLog.js";
-import { clearGlpiConfig, getEffectiveGlpiConfig, setGlpiConfig } from "../services/setupStore.js";
+import { loadGlpiPluginConfig, removeGlpiPluginConfig, saveGlpiPluginConfig } from "../plugins/glpi/config.js";
 import type { SetupGlpiConfig } from "../services/setupStore.js";
 
 /** Même garde locale admin que routes/hycu.ts#rejectIfNotAdmin. */
@@ -356,14 +357,14 @@ export default async function glpiRoutes(fastify: FastifyInstance): Promise<void
 
   fastify.get("/api/glpi/config", async (request, reply) => {
     if (rejectIfNotAdmin(request, reply)) return;
-    const current = await getEffectiveGlpiConfig();
+    const current = await loadGlpiPluginConfig();
     return reply.send(current ? { configured: true, config: toPublicConfig(current) } : { configured: false });
   });
 
   fastify.put<{ Body: GlpiConfigBody }>("/api/glpi/config", async (request, reply) => {
     if (rejectIfNotAdmin(request, reply)) return;
 
-    const existing = await getEffectiveGlpiConfig();
+    const existing = await loadGlpiPluginConfig();
     const candidate = mergeCandidate(request.body ?? {}, existing);
     if (!candidate.apiUrl || !candidate.appToken) {
       return reply.code(400).send({ error: "apiUrl and appToken are required" });
@@ -376,7 +377,7 @@ export default async function glpiRoutes(fastify: FastifyInstance): Promise<void
     const test = await testGlpiConnection(candidate);
     if (!test.ok) return reply.code(400).send({ error: test.message });
 
-    await setGlpiConfig(candidate);
+    await saveGlpiPluginConfig(candidate);
     // La session en cache appartenait à l'ancienne config : on la libère proprement.
     await releaseGlpiSession();
     return reply.send({ configured: true, config: toPublicConfig(candidate) });
@@ -384,7 +385,7 @@ export default async function glpiRoutes(fastify: FastifyInstance): Promise<void
 
   fastify.post<{ Body: GlpiConfigBody }>("/api/glpi/config/test", async (request, reply) => {
     if (rejectIfNotAdmin(request, reply)) return;
-    const existing = await getEffectiveGlpiConfig();
+    const existing = await loadGlpiPluginConfig();
     const result = await testGlpiConnection(mergeCandidate(request.body ?? {}, existing));
     return reply.send(result);
   });
@@ -392,7 +393,7 @@ export default async function glpiRoutes(fastify: FastifyInstance): Promise<void
   fastify.delete("/api/glpi/config", async (request, reply) => {
     if (rejectIfNotAdmin(request, reply)) return;
     await releaseGlpiSession();
-    await clearGlpiConfig();
+    await removeGlpiPluginConfig();
     return reply.send({ ok: true });
   });
 }

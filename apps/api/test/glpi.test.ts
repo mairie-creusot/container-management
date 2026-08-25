@@ -81,7 +81,7 @@ vi.stubGlobal("fetch", fetchMock);
 const { buildServer } = await import("../src/index.js");
 const { config } = await import("../src/config.js");
 const { signSessionToken } = await import("../src/services/session.js");
-const { setGlpiConfig, clearGlpiConfig } = await import("../src/services/setupStore.js");
+const { removeGlpiPluginConfig, saveGlpiPluginConfig } = await import("../src/plugins/glpi/config.js");
 const { listAuditEvents } = await import("../src/services/auditLog.js");
 const glpi = await import("../src/services/glpi.js");
 
@@ -103,7 +103,9 @@ afterEach(async () => {
   await app?.close();
   app = undefined;
   await glpi.releaseGlpiSession();
-  await clearGlpiConfig();
+  // Retire l'entrée du greffon ET tout reliquat de l'ancien champ typé : sans quoi une config
+  // survivrait d'un test à l'autre.
+  await removeGlpiPluginConfig();
 });
 
 function adminCookie() {
@@ -120,10 +122,10 @@ function viewerCookie() {
 }
 
 async function seedUserTokenConfig(): Promise<void> {
-  await setGlpiConfig({ apiUrl: "http://glpi.test/apirest.php", appToken: APP_TOKEN, userToken: USER_TOKEN });
+  await saveGlpiPluginConfig({ apiUrl: "http://glpi.test/apirest.php", appToken: APP_TOKEN, userToken: USER_TOKEN });
 }
 async function seedCredentialsConfig(): Promise<void> {
-  await setGlpiConfig({
+  await saveGlpiPluginConfig({
     apiUrl: "http://glpi.test/apirest.php",
     appToken: APP_TOKEN,
     username: "svc-quai",

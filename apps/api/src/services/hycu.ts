@@ -16,9 +16,12 @@
  *    SANS identifiants — GET non authentifiés uniquement) : /rest/v1.0/{vms,policies,targets,
  *    jobs,events,users} répondent 401 (chemins réels), /rest/v1.0/{dashboard,version} 404
  *    (n'existent PAS — d'où un résumé CALCULÉ côté QUAI plutôt qu'un endpoint dashboard supposé).
- *  - SUPPOSÉ (typé optionnel, mappé seulement si présent, jamais inventé) : statuts de
- *    protection/conformité/dernier backup par VM, métadonnées de jobs/events au-delà de
- *    status/severity — à confirmer lors de la première connexion authentifiée réelle.
+ *  - CONFIRMÉ depuis contre le vrai contrôleur : `externalId` (uuid de la VM côté hyperviseur) est
+ *    la clé de rapprochement avec Nutanix, et le champ de conformité s'appelle `compliancyStatus`
+ *    (et non `complianceStatus`, nom supposé de la première implémentation, gardé en repli).
+ *  - SUPPOSÉ (typé optionnel, mappé seulement si présent, jamais inventé) : statut de protection
+ *    et dernier backup par VM, métadonnées de jobs/events au-delà de status/severity — à confirmer
+ *    lors de la première connexion authentifiée réelle.
  *
  * Gardes identiques à nutanix.ts : jamais configuré → null/[] (aucun jeu de démonstration HYCU) ;
  * configuré mais injoignable → [] + lastKnownHycuPoll() pour que l'UI distingue "vide" de "panne".
@@ -27,14 +30,16 @@
 import { request as httpsRequest } from "node:https";
 import { URL } from "node:url";
 import { config } from "../config.js";
-import { getEffectiveHycuConfig } from "./setupStore.js";
+import { loadHycuPluginConfig } from "../plugins/hycu/config.js";
 import type { SetupHycuConfig } from "./setupStore.js";
 import type { HycuEvent, HycuJob, HycuPolicy, HycuStatusSummary, HycuTarget, HycuVm, HycuVmProtectionState } from "../types.js";
 
 /** Config HYCU effective si complète, sinon `null` — garde "jamais configuré" + valeur déjà
- * déchiffrée, même rôle exact que nutanix.ts#loadNutanixConfig. */
+ * déchiffrée, même rôle exact que nutanix.ts#loadNutanixConfig. Depuis la migration en greffon,
+ * la source est le stockage générique des intégrations (plugins/hycu/config.ts, qui reprend au
+ * passage une configuration écrite avant la migration dans le champ typé `hycu`). */
 async function loadHycuConfig(): Promise<SetupHycuConfig | null> {
-  const effective = await getEffectiveHycuConfig();
+  const effective = await loadHycuPluginConfig();
   if (!effective?.url || !effective.username || !effective.password) return null;
   return effective;
 }
@@ -92,12 +97,21 @@ interface HycuListResponse<E> {
   metadata?: { totalEntityCount?: number };
 }
 
-/** uuid/vmName/protectionGroupUuid confirmés (tusc/hycu) ; le reste supposé (voir en-tête). */
+/**
+ * uuid/vmName/protectionGroupUuid confirmés (tusc/hycu) ; le reste supposé (voir en-tête), à deux
+ * exceptions près CONFIRMÉES depuis contre le vrai contrôleur :
+ *  - `externalId` : uuid de la VM côté hyperviseur — la clé de rapprochement avec Nutanix (`uuid`
+ *    reste l'identifiant interne de l'objet HYCU, conservé tel quel) ;
+ *  - `compliancyStatus` : le champ de conformité réel. `complianceStatus` (nom supposé de la
+ *    première implémentation) est gardé en repli, jamais prioritaire.
+ */
 interface HycuVmEntity {
   uuid?: string;
+  externalId?: string;
   vmName?: string;
   protectionGroupUuid?: string | null;
   protectionStatus?: string;
+  compliancyStatus?: string;
   complianceStatus?: string;
   lastBackupInMillis?: number;
   status?: string;
@@ -227,16 +241,25 @@ function recordPoll(reachable: boolean): void {
   lastPollOutcome = { reachable, at: new Date().toISOString() };
 }
 
-function mapVmEntity(entity: HycuVmEntity, policyNameByUuid: Map<string, string>): HycuVm {
+/** VM HYCU enrichie de `externalId` (uuid hyperviseur) : la clé de rapprochement Nutanix, portée
+ * ici plutôt que dans le type public `HycuVm` — la page Sauvegardes n'en a aucun usage. */
+export interface HycuVmWithExternalId extends HycuVm {
+  externalId?: string;
+}
+
+function mapVmEntity(entity: HycuVmEntity, policyNameByUuid: Map<string, string>): HycuVmWithExternalId {
   const protectionGroupUuid = entity.protectionGroupUuid ?? undefined;
   const policyName = protectionGroupUuid ? policyNameByUuid.get(protectionGroupUuid) : undefined;
+  // Champ réel d'abord, ancien nom supposé en repli — jamais l'inverse.
+  const compliancy = entity.compliancyStatus ?? entity.complianceStatus;
   return {
     uuid: entity.uuid ?? "unknown-vm",
+    ...(entity.externalId ? { externalId: entity.externalId } : {}),
     vmName: entity.vmName ?? "VM sans nom",
     ...(protectionGroupUuid ? { protectionGroupUuid } : {}),
     ...(policyName ? { policyName } : {}),
     ...(entity.protectionStatus ? { protectionStatus: entity.protectionStatus } : {}),
-    ...(entity.complianceStatus ? { complianceStatus: entity.complianceStatus } : {}),
+    ...(compliancy ? { complianceStatus: compliancy } : {}),
     ...(typeof entity.lastBackupInMillis === "number" ? { lastBackupInMillis: entity.lastBackupInMillis } : {}),
     ...(entity.status ? { status: entity.status } : {}),
   };
@@ -434,8 +457,9 @@ export function hycuVmProtectionState(vm: HycuVm, lastBackupFieldPresent: boolea
 export interface HycuTopologySnapshot {
   url: string;
   reachable: boolean;
-  /** VMs vues par HYCU, policy résolue — [] si injoignable. */
-  vms: HycuVm[];
+  /** VMs vues par HYCU, policy résolue — [] si injoignable. `externalId` (uuid hyperviseur) est
+   * porté quand l'appliance le renseigne : c'est la clé de rapprochement avec Nutanix. */
+  vms: HycuVmWithExternalId[];
   /** Voir hycuVmProtectionState ci-dessus — false si injoignable/aucune VM n'expose la date. */
   lastBackupFieldPresent: boolean;
   /** Compteurs réels du poll — absents si injoignable, jamais des zéros de remplissage. */

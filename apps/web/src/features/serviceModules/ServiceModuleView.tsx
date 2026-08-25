@@ -30,6 +30,15 @@ export interface ServiceModuleViewProps {
  * serviceModuleGraph.tsx). Un module non configuré / injoignable affiche l'état explicite renvoyé
  * par le serveur, jamais un canevas vide muet ni des données de démonstration.
  */
+/** Repli quand l'intégration n'a pas fourni son propre message — jamais un état inventé. */
+const DEFAULT_STATUS_NOTE: Record<ServiceModuleSnapshot["status"], string> = {
+  ready: "",
+  "not-configured": "Intégration non configurée — aucune donnée réelle à afficher.",
+  unreachable: "Intégration configurée mais injoignable — aucune donnée réelle à afficher.",
+  denied: "Accès refusé par le service — les identifiants sont acceptés mais les droits manquent.",
+  failed: "Le service a répondu par une erreur — aucune donnée réelle à afficher.",
+};
+
 export default function ServiceModuleView({
   moduleId,
   moduleLabel,
@@ -95,10 +104,7 @@ export default function ServiceModuleView({
 
       {snapshot && snapshot.status !== "ready" && (
         <div className="topology-subgraph-panel__note">
-          {snapshot.message ??
-            (snapshot.status === "not-configured"
-              ? "Intégration non configurée — aucune donnée réelle à afficher."
-              : "Intégration configurée mais injoignable — aucune donnée réelle à afficher.")}
+          {snapshot.message ?? DEFAULT_STATUS_NOTE[snapshot.status]}
         </div>
       )}
       {snapshot && snapshot.status === "ready" && snapshot.message && (

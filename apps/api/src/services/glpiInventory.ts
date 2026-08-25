@@ -12,7 +12,7 @@
  */
 
 import { redactSecrets } from "./glpi.js";
-import { getEffectiveGlpiConfig } from "./setupStore.js";
+import { loadGlpiPluginConfig } from "../plugins/glpi/config.js";
 import type { SetupGlpiConfig } from "./setupStore.js";
 import { getNutanixClusters, getNutanixHosts, getNutanixVms, isNutanixConfigured, lastKnownNutanixPoll } from "./nutanix.js";
 import type { NutanixHost, NutanixVm } from "../types.js";
@@ -156,8 +156,8 @@ export class GlpiInventoryError extends Error {
 
 // --- Configuration ---------------------------------------------------------------------------
 
-/** Config déjà déchiffrée par setupStore.getEffectiveGlpiConfig() — même objet exact que le
- * client GLPI de base, aucune duplication de stockage. */
+/** Config déjà déchiffrée du greffon "glpi" — même objet exact que le client GLPI de base, aucune
+ * duplication de stockage. */
 export type GlpiRuntimeConfig = SetupGlpiConfig;
 
 function asString(value: unknown): string | undefined {
@@ -183,7 +183,7 @@ function isTruthyFlag(value: unknown): boolean {
  * configuré OU si aucun moyen d'authentification n'est utilisable : aucune requête n'est alors
  * émise vers GLPI. */
 export async function resolveGlpiConfig(): Promise<GlpiRuntimeConfig | null> {
-  const cfg = await getEffectiveGlpiConfig();
+  const cfg = await loadGlpiPluginConfig();
   if (!cfg?.apiUrl || !cfg.appToken) return null;
   if (!cfg.userToken && !(cfg.username && cfg.password)) return null;
   return cfg;

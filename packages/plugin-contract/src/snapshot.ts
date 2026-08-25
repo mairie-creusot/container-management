@@ -48,7 +48,12 @@ export interface ServiceModuleRelation {
 
 /** "ready" = données réelles ; "not-configured" = intégration jamais configurée ; "unreachable" =
  * configurée mais la source n'a pas répondu — jamais un repli silencieux sur des données vides. */
-export type ServiceModuleStatus = "ready" | "not-configured" | "unreachable";
+/**
+ * Vocabulaire d'état d'une intégration. « denied » et « failed » ont été ajoutés le 25/08/2026 :
+ * 3CX distinguait un accès refusé (licence, droits) d'une erreur renvoyée par le service, et les
+ * écraser tous deux en « injoignable » avait déjà coûté un diagnostic erroné.
+ */
+export type ServiceModuleStatus = "ready" | "not-configured" | "unreachable" | "denied" | "failed";
 
 export interface ServiceModuleSnapshot {
   moduleId: string;

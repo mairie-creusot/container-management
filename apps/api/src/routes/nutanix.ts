@@ -25,6 +25,10 @@
  *                               lancement, invisible/inaccessible une fois celui-ci terminé sans
  *                               tout rouvrir (POST /api/setup/reset, LDAP compris).
  * DELETE /api/nutanix/config — retire la configuration (admin uniquement).
+ *                               Ces trois routes lisent/écrivent désormais la configuration du
+ *                               GREFFON (plugins/nutanix/config.ts : stockage générique des
+ *                               intégrations, reprise puis retrait du champ typé `nutanix`) — même
+ *                               réponse, même convention « mot de passe vide = conserver ».
  *
  * POST   /api/nutanix/vms/:uuid/start   — démarre une VM éteinte (services/nutanix.ts#startNutanixVm).
  * POST   /api/nutanix/vms/:uuid/stop    — arrête GRACIEUSEMENT une VM allumée (ACPI, pas un
@@ -132,7 +136,7 @@ import {
   uploadNutanixImage,
 } from "../services/nutanix.js";
 import type { NutanixGuestCustomizationInput, NutanixUploadImageType } from "../services/nutanix.js";
-import { clearNutanixConfig, getEffectiveNutanixConfig, setNutanixConfig } from "../services/setupStore.js";
+import { loadNutanixPluginConfig, removeNutanixPluginConfig, saveNutanixPluginConfig } from "../plugins/nutanix/config.js";
 import type { SetupNutanixConfig } from "../services/setupStore.js";
 import type { NutanixConfig, NutanixStatus } from "../types.js";
 
@@ -217,7 +221,7 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
   });
 
   fastify.get("/api/nutanix/config", async (_request, reply) => {
-    const current = await getEffectiveNutanixConfig();
+    const current = await loadNutanixPluginConfig();
     const status: NutanixStatus = current ? { configured: true, config: toPublicConfig(current) } : { configured: false };
     return reply.send(status);
   });
@@ -226,7 +230,7 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
     if (rejectIfNotAdmin(request, reply)) return;
 
     const body = request.body ?? {};
-    const existing = await getEffectiveNutanixConfig();
+    const existing = await loadNutanixPluginConfig();
     const prismCentralUrl = body.prismCentralUrl?.trim();
     const username = body.username?.trim();
     // password vide/absent = conserver l'existant (même convention que PATCH /api/registries/:id
@@ -245,14 +249,15 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
       return reply.code(400).send({ error: test.message });
     }
 
-    const saved = await setNutanixConfig({ prismCentralUrl, username, password });
-    return reply.send({ configured: true, config: toPublicConfig(saved.nutanix!) } satisfies NutanixStatus);
+    const saved: SetupNutanixConfig = { prismCentralUrl, username, password };
+    await saveNutanixPluginConfig(saved);
+    return reply.send({ configured: true, config: toPublicConfig(saved) } satisfies NutanixStatus);
   });
 
   fastify.delete("/api/nutanix/config", async (request, reply) => {
     if (rejectIfNotAdmin(request, reply)) return;
 
-    await clearNutanixConfig();
+    await removeNutanixPluginConfig();
     return reply.send({ ok: true });
   });
 

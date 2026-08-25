@@ -407,7 +407,7 @@ describe("registre de greffons", () => {
   it("n'enregistre au démarrage que les greffons réels (le greffon d'exemple n'en est pas un)", () => {
     app = buildServer();
     // Seules les intégrations RÉELLEMENT migrées (plugins/builtins.ts) sont enregistrées.
-    expect(listPlugins().map((plugin) => plugin.manifest.id)).toEqual(["3cx"]);
+    expect(listPlugins().map((plugin) => plugin.manifest.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
     expect(getPlugin("example")).toBeUndefined();
   });
 
@@ -462,7 +462,7 @@ describe("GET /api/plugins", () => {
     app = buildServer();
     const response = await app.inject({ method: "GET", url: "/api/plugins", cookies: cookieFor(["viewer"]) });
     expect(response.statusCode).toBe(200);
-    expect((response.json() as { plugins: Array<{ id: string }> }).plugins.map((plugin) => plugin.id)).toEqual(["3cx"]);
+    expect((response.json() as { plugins: Array<{ id: string }> }).plugins.map((plugin) => plugin.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
   });
 
   it("expose le manifeste public, sans le moindre secret ni valeur de configuration", async () => {

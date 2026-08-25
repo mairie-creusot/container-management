@@ -20,6 +20,10 @@
  *                                 (même discipline que PUT /api/nutanix/config).
  * POST   /api/hycu/config/test — teste une config candidate SANS persister (admin uniquement).
  * DELETE /api/hycu/config      — retire la configuration (admin uniquement).
+ *
+ * La configuration est lue/écrite via le greffon (plugins/hycu/config.ts, stockage générique des
+ * intégrations) : une config écrite avant la migration dans le champ typé `hycu` est reprise puis
+ * retirée, sans ressaisie.
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -33,7 +37,7 @@ import {
   lastKnownHycuPoll,
   testHycuConnection,
 } from "../services/hycu.js";
-import { clearHycuConfig, getEffectiveHycuConfig, setHycuConfig } from "../services/setupStore.js";
+import { loadHycuPluginConfig, removeHycuPluginConfig, saveHycuPluginConfig } from "../plugins/hycu/config.js";
 import type { SetupHycuConfig } from "../services/setupStore.js";
 import type { HycuConfig, HycuConfigStatus } from "../types.js";
 
@@ -85,7 +89,7 @@ export default async function hycuRoutes(fastify: FastifyInstance): Promise<void
   });
 
   fastify.get("/api/hycu/config", async (_request, reply) => {
-    const current = await getEffectiveHycuConfig();
+    const current = await loadHycuPluginConfig();
     const status: HycuConfigStatus = current ? { configured: true, config: toPublicConfig(current) } : { configured: false };
     return reply.send(status);
   });
@@ -94,7 +98,7 @@ export default async function hycuRoutes(fastify: FastifyInstance): Promise<void
     if (rejectIfNotAdmin(request, reply)) return;
 
     const body = request.body ?? {};
-    const existing = await getEffectiveHycuConfig();
+    const existing = await loadHycuPluginConfig();
     const url = body.url?.trim();
     const username = body.username?.trim();
     // password vide/absent = conserver l'existant (même convention que PUT /api/nutanix/config).
@@ -110,15 +114,16 @@ export default async function hycuRoutes(fastify: FastifyInstance): Promise<void
       return reply.code(400).send({ error: test.message });
     }
 
-    const saved = await setHycuConfig({ url, username, password });
-    return reply.send({ configured: true, config: toPublicConfig(saved.hycu!) } satisfies HycuConfigStatus);
+    const saved: SetupHycuConfig = { url, username, password };
+    await saveHycuPluginConfig(saved);
+    return reply.send({ configured: true, config: toPublicConfig(saved) } satisfies HycuConfigStatus);
   });
 
   fastify.post<{ Body: HycuConfigBody }>("/api/hycu/config/test", async (request, reply) => {
     if (rejectIfNotAdmin(request, reply)) return;
 
     const body = request.body ?? {};
-    const existing = await getEffectiveHycuConfig();
+    const existing = await loadHycuPluginConfig();
     const url = body.url?.trim() ?? existing?.url ?? "";
     const username = body.username?.trim() ?? existing?.username ?? "";
     // Même convention que PUT ci-dessus : tester la config déjà enregistrée sans ressaisir le
@@ -132,7 +137,7 @@ export default async function hycuRoutes(fastify: FastifyInstance): Promise<void
   fastify.delete("/api/hycu/config", async (request, reply) => {
     if (rejectIfNotAdmin(request, reply)) return;
 
-    await clearHycuConfig();
+    await removeHycuPluginConfig();
     return reply.send({ ok: true });
   });
 }

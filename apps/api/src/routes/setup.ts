@@ -20,7 +20,7 @@ import type { FastifyInstance } from "fastify";
 import { testDockerConnection } from "../services/docker.js";
 import { testKubernetesConnection } from "../services/kubernetes.js";
 import { testLdapConnection } from "../services/ldap.js";
-import { testNutanixConnection } from "../services/nutanix.js";
+import { isNutanixConfigured, testNutanixConnection } from "../services/nutanix.js";
 import { testRegistryConnection } from "../services/registries/index.js";
 import { completeSetup, getCurrent, getEffectiveLdapConfig, resetSetup, setLdapConfig } from "../services/setupStore.js";
 import type { SetupLdapConfig } from "../services/setupStore.js";
@@ -74,7 +74,10 @@ export default async function setupRoutes(fastify: FastifyInstance): Promise<voi
       ldapConfigured: current.ldap !== undefined,
       dockerConfigured: current.docker?.host !== undefined,
       kubernetesConfigured: current.kubernetes?.kubeconfigYaml !== undefined,
-      nutanixConfigured: current.nutanix !== undefined,
+      // Depuis la migration de Nutanix en greffon, la configuration vit dans le stockage générique
+      // des intégrations (le champ typé `nutanix` n'est plus qu'un reliquat repris puis retiré) :
+      // isNutanixConfigured() est la seule source de vérité, voir plugins/nutanix/config.ts.
+      nutanixConfigured: await isNutanixConfigured(),
       registriesConfigured: (current.registries?.length ?? 0) > 0,
     });
   });
