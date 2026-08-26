@@ -328,6 +328,8 @@ export async function restoreOriginPlugin(id: string, by: string): Promise<Origi
       // Un paquet d'origine est signé par la clé de l'image, pas par un certificat : aucun signataire.
       signer: null,
       certificateFingerprint: null,
+      revocation: null,
+      revocationReason: null,
       origin: true,
       installedAt: mark.installedAt,
       installedBy: mark.installedBy,

@@ -161,6 +161,42 @@ function readRevokedCertificates(): string[] {
   return out;
 }
 
+/**
+ * Ce qu'on fait d'un certificat de signature qu'aucune liste de révocation à jour ne couvre.
+ *  - "off"    : les listes ne sont pas consultées du tout.
+ *  - "soft"   : un certificat listé comme révoqué est refusé ; une liste absente ou périmée ne
+ *               bloque rien (l'écran le dit). C'est le défaut : sans liste déposée, rien ne change.
+ *  - "strict" : un certificat qu'aucune liste à jour ne couvre est refusé lui aussi. À choisir quand
+ *               la PKI publie réellement ses listes — la publication devient alors indispensable.
+ */
+function readCrlPolicy(): "off" | "soft" | "strict" {
+  const raw = readOptionalString("PLUGIN_CRL_POLICY")?.toLowerCase();
+  if (raw === "off" || raw === "soft" || raw === "strict") return raw;
+  if (raw !== undefined) {
+    // eslint-disable-next-line no-console
+    console.warn(`[config] PLUGIN_CRL_POLICY inconnue (${raw}) — "soft" appliquée`);
+  }
+  return "soft";
+}
+
+/** URLs des listes de révocation à rapatrier périodiquement. Vide = QUAI ne va rien chercher : les
+ * fichiers déposés à la main dans PLUGIN_CRL_PATH restent la seule source. */
+function readCrlUrls(): string[] {
+  const raw = readOptionalString("PLUGIN_CRL_URLS");
+  if (raw === undefined) return [];
+  const out: string[] = [];
+  for (const token of raw.split(/[\s,;]+/)) {
+    const url = token.trim();
+    if (url.length === 0) continue;
+    if (/^https?:\/\//i.test(url)) out.push(url);
+    else {
+      // eslint-disable-next-line no-console
+      console.warn(`[config] PLUGIN_CRL_URLS : "${url}" n'est pas une URL http(s) — ignorée`);
+    }
+  }
+  return out;
+}
+
 /** Identifiant réservé de la clé d'ORIGINE : celle qu'un build grave dans l'image pour signer les
  * intégrations livrées avec QUAI. PLUGIN_TRUSTED_KEYS ne peut pas la remplacer. */
 export const PLUGIN_ORIGIN_KEY_ID = "quai-origin";
@@ -322,6 +358,12 @@ export const config = {
     // certificat apporte en plus une identité de signataire et un retrait sans reconstruction.
     trustedCertificates: readTrustedCertificateAnchors(),
     revokedCertificates: readRevokedCertificates(),
+    // Listes de révocation lues sur DISQUE (jamais par le réseau au moment de charger du code, voir
+    // plugins/crl.ts). Non défini = sous-dossier `crl/` du répertoire de CONFIG_PATH.
+    crlPath: readOptionalString("PLUGIN_CRL_PATH"),
+    crlPolicy: readCrlPolicy(),
+    crlUrls: readCrlUrls(),
+    crlRefreshIntervalMs: readNumber("PLUGIN_CRL_REFRESH_MS", 6 * 60 * 60 * 1000),
     // Taille maximale d'un paquet accepté à l'installation, décodé (somme de ses fichiers).
     maxPackageBytes: readNumber("PLUGIN_MAX_PACKAGE_BYTES", 2 * 1024 * 1024),
     // Délais d'expiration des appels AUX GREFFONS (plugins/guard.ts). Sans isolation hors processus,

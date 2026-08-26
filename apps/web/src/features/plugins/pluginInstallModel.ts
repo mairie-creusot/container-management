@@ -24,6 +24,12 @@ export interface ModuleInventoryEntry {
   /** Empreinte du certificat de signature : c'est elle qu'on pose côté serveur pour retirer ce
    * signataire, donc elle doit être lisible et copiable ici. */
   certificateFingerprint: string | null;
+  /** Ce que les listes de révocation en disent : "clear" (une liste à jour le couvre et ne le
+   * révoque pas) ou "unknown" (aucune ne le couvre). `null` = sans objet. Un module RÉVOQUÉ n'arrive
+   * jamais ici : il est refusé et apparaît comme tel. */
+  revocation: string | null;
+  /** Pourquoi la révocation n'a pas pu être établie — jamais masqué derrière un état rassurant. */
+  revocationReason: string | null;
   /** Motif RÉEL du refus, tel que rendu par le serveur. */
   reason: string | null;
   /** Date ISO d'installation et auteur, quand le serveur les a conservés. */
@@ -164,6 +170,8 @@ function readEntry(value: unknown, defaultOrigin: ModuleOrigin): ModuleInventory
     signer: firstString(block, ["signer"]) ?? firstString(value, ["signer"]),
     certificateFingerprint:
       firstString(block, ["certificateFingerprint"]) ?? firstString(value, ["certificateFingerprint"]),
+    revocation: firstString(block, ["revocation"]) ?? firstString(value, ["revocation"]),
+    revocationReason: firstString(block, ["revocationReason"]) ?? firstString(value, ["revocationReason"]),
     reason:
       firstString(block, ["reason", "message", "error", "detail"]) ??
       firstString(value, ["trustReason", "reason", "error"]),
@@ -308,6 +316,8 @@ function rowFromSummary(summary: PluginSummary, origin: ModuleOrigin, trust: Mod
     signedBy: null,
     signer: null,
     certificateFingerprint: null,
+    revocation: null,
+    revocationReason: null,
     reason: null,
     installedAt: null,
     installedBy: null,
@@ -332,6 +342,8 @@ function rowFromRemovedOrigin(entry: OriginModuleEntry): ModuleRow {
     signedBy: null,
     signer: null,
     certificateFingerprint: null,
+    revocation: null,
+    revocationReason: null,
     reason: null,
     installedAt: null,
     installedBy: null,

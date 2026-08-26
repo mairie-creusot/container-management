@@ -22,6 +22,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { config } from "../config.js";
 import { isBuiltinPluginId } from "./builtins.js";
+import { loadCrls } from "./crl.js";
 import type { PluginModuleEntry } from "./builtins.js";
 import {
   CERTIFICATE_KEY_PREFIX,
@@ -51,6 +52,11 @@ export interface InstalledPluginRecord {
   version: string | null;
   trusted: boolean;
   keyId: string | null;
+  /** Ce que les listes de révocation disent de ce certificat : "clear", "unknown" ou (jamais listé
+   * ici, puisqu'il serait refusé) "revoked". `null` pour une signature par clé nue. */
+  revocation: string | null;
+  /** Motif quand la révocation n'a pas pu être établie — jamais masqué derrière un état vert. */
+  revocationReason: string | null;
   /** QUI a signé, quand une AUTORITÉ le dit (nom usuel du certificat) — `null` pour une signature
    * par clé nue, qui ne porte aucune identité. */
   signer: string | null;
@@ -83,9 +89,25 @@ export function installedPluginsRoot(): string {
   return path.join(path.dirname(path.resolve(config.setup.configPath)), "plugins");
 }
 
-/** Confiance apportée par une AUTORITÉ (AD CS interne), telle que la configuration la décrit. */
+/** Répertoire des listes de révocation, dans les DONNÉES : elles sont rafraîchies en cours de vie du
+ * serveur (services/crlRefresher.ts) et ne peuvent donc pas vivre dans l'image. */
+export function crlDirectory(): string {
+  const configured = config.plugins.crlPath;
+  if (configured !== undefined) return path.resolve(configured);
+  return path.join(path.dirname(path.resolve(config.setup.configPath)), "crl");
+}
+
+/** Confiance apportée par une AUTORITÉ (AD CS interne), telle que la configuration la décrit. Les
+ * listes de révocation sont lues sur le disque à ce moment-là — aucun appel réseau n'est fait. */
 export function certificateTrust(): CertificateTrust {
-  return { anchors: config.plugins.trustedCertificates, revoked: config.plugins.revokedCertificates };
+  const policy = config.plugins.crlPolicy;
+  const { crls } = loadCrls(policy === "off" ? undefined : crlDirectory());
+  return {
+    anchors: config.plugins.trustedCertificates,
+    revoked: config.plugins.revokedCertificates,
+    crls,
+    crlPolicy: policy,
+  };
 }
 
 /** Nom usuel d'une autorité configurée, pour l'afficher sans jamais sortir son certificat. */
@@ -209,6 +231,8 @@ export async function listInstalledPlugins(): Promise<InstalledPluginRecord[]> {
     keyId: entry.verified?.keyId ?? null,
     signer: entry.verified?.signer ?? null,
     certificateFingerprint: entry.verified?.certificateFingerprint ?? null,
+    revocation: entry.verified?.revocation?.state ?? null,
+    revocationReason: entry.verified?.revocation?.state === "unknown" ? entry.verified.revocation.reason : null,
     origin: entry.verified !== null && isOriginKeyId(entry.verified.keyId),
     installedAt: entry.mark.installedAt,
     installedBy: entry.mark.installedBy,
@@ -318,7 +342,7 @@ export async function installPluginPackage(body: unknown, installedBy: string): 
   const verification = verifyPluginPackage(envelope.files, config.plugins.trustedKeys, certificateTrust());
   if (!verification.ok) return { ok: false, status: 400, error: verification.reason };
 
-  const { manifest, keyId, signer, certificateFingerprint } = verification.verified;
+  const { manifest, keyId, signer, certificateFingerprint, revocation } = verification.verified;
   if (isBuiltinPluginId(manifest.id)) {
     return {
       ok: false,
@@ -349,6 +373,8 @@ export async function installPluginPackage(body: unknown, installedBy: string): 
       keyId,
       signer: signer ?? null,
       certificateFingerprint: certificateFingerprint ?? null,
+      revocation: revocation?.state ?? null,
+      revocationReason: revocation?.state === "unknown" ? revocation.reason : null,
       origin: isOriginKeyId(keyId),
       installedAt: mark.installedAt,
       installedBy: mark.installedBy,

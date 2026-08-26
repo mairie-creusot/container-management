@@ -325,6 +325,7 @@ export default function ModulesSection() {
             row.signer !== null ||
             row.signedBy !== null ||
             row.certificateFingerprint !== null ||
+            row.revocation !== null ||
             row.installedAt !== null ||
             row.installedBy !== null;
 
@@ -409,6 +410,18 @@ export default function ModulesSection() {
                         <div>
                           <dt>Empreinte</dt>
                           <dd>{row.certificateFingerprint}</dd>
+                        </div>
+                      )}
+                      {/* « Non vérifiée » n'est PAS « saine » : le motif accompagne toujours l'état,
+                          sinon une liste absente se lirait comme un feu vert. */}
+                      {row.revocation !== null && (
+                        <div>
+                          <dt>Révocation</dt>
+                          <dd>
+                            {row.revocation === "clear"
+                              ? "vérifiée auprès de l'autorité"
+                              : `non vérifiée — ${row.revocationReason ?? "motif non communiqué"}`}
+                          </dd>
                         </div>
                       )}
                       {row.installedAt !== null && (

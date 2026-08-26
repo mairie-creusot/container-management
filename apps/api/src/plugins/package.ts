@@ -35,6 +35,8 @@ import type { KeyObject } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { isSemver } from "@quai/plugin-contract";
+import { checkRevocation } from "./crl.js";
+import type { CrlPolicy, ParsedCrl, RevocationVerdict } from "./crl.js";
 
 export const PACKAGE_FORMAT = "quai-plugin/1";
 export const PACKAGE_MANIFEST_NAME = "quai-plugin.json";
@@ -83,6 +85,9 @@ export interface VerifiedPluginPackage {
   /** Empreinte SHA-256 du certificat de signature — celle à poser dans PLUGIN_REVOKED_CERTS pour
    * retirer ce signataire. */
   certificateFingerprint?: string;
+  /** Ce que les listes de révocation disponibles disent de ce certificat. « unknown » est un état à
+   * part entière : aucune liste ne le couvre, et ce n'est PAS « sain ». */
+  revocation?: RevocationVerdict;
 }
 
 /**
@@ -95,6 +100,10 @@ export interface CertificateTrust {
   anchors: readonly string[];
   /** Empreintes SHA-256 (hex minuscule, sans séparateur) de certificats retirés à la main. */
   revoked: readonly string[];
+  /** Listes de révocation déjà lues sur le disque — jamais récupérées par le réseau ici. */
+  crls?: readonly ParsedCrl[];
+  /** Ce qu'on fait d'un certificat qu'aucune CRL ne couvre. Défaut : "soft". */
+  crlPolicy?: CrlPolicy;
 }
 
 const NO_CERTIFICATE_TRUST: CertificateTrust = { anchors: [], revoked: [] };
@@ -175,6 +184,7 @@ interface CertificateVerdict {
   keyId: string;
   signer: string;
   fingerprint: string;
+  revocation: RevocationVerdict;
 }
 
 /**
@@ -269,6 +279,8 @@ function verifyCertificateSignature(
   }
 
   // Remontée de proche en proche : chaque certificat doit avoir été RÉELLEMENT émis par le suivant.
+  // `issuers` garde qui a émis quoi : c'est ce que la révocation confrontera aux CRL disponibles.
+  const issuers: X509Certificate[] = [];
   let current = leaf;
   for (const issuer of chain.slice(1)) {
     if (!issuer.ca) {
@@ -277,6 +289,7 @@ function verifyCertificateSignature(
     if (!current.checkIssued(issuer) || !current.verify(issuer.publicKey)) {
       return { ok: false, reason: `Chaîne de certificats rompue : « ${commonName(current.subject) ?? "un certificat"} » n'a pas été émis par « ${commonName(issuer.subject) ?? "le certificat suivant"} ».` };
     }
+    issuers.push(issuer);
     current = issuer;
   }
 
@@ -290,12 +303,32 @@ function verifyCertificateSignature(
     if (!isCurrentlyValid(anchor, now)) {
       return { ok: false, reason: `L'autorité « ${commonName(anchor.subject) ?? "configurée"} » n'est plus valide (${anchor.validFrom} → ${anchor.validTo}).` };
     }
+
+    // La chaîne tient. Reste ce que l'autorité en dit AUJOURD'HUI : le dernier émetteur est l'ancre
+    // elle-même quand elle n'était pas fournie dans le paquet.
+    const policy: CrlPolicy = trust.crlPolicy ?? "soft";
+    const revocation =
+      policy === "off"
+        ? ({ state: "unknown", reason: "vérification de révocation désactivée sur ce serveur" } as const)
+        : checkRevocation(chain, [...issuers, anchor], trust.crls ?? [], now);
+
+    if (revocation.state === "revoked") {
+      return { ok: false, reason: `Le certificat « ${leafName} » a été ${revocation.reason} : ce module n'est plus accepté.` };
+    }
+    // « strict » : un certificat qu'aucune liste à jour ne couvre n'est pas réputé valide. C'est le
+    // réglage à choisir quand la PKI publie réellement ses listes ; il fait tomber les modules dès
+    // que la publication s'arrête, ce qui est le but, et ce qui doit rester un choix explicite.
+    if (policy === "strict" && revocation.state === "unknown") {
+      return { ok: false, reason: `Révocation invérifiable pour « ${leafName} » : ${revocation.reason}. Le serveur est en mode strict.` };
+    }
+
     return {
       ok: true,
       verdict: {
         keyId: `${CERTIFICATE_KEY_PREFIX}${commonName(anchor.subject) ?? "autorité"}`,
         signer: leafName,
         fingerprint: fingerprintOf(leaf),
+        revocation,
       },
     };
   }
@@ -407,6 +440,7 @@ export function verifyPluginPackage(
   let keyId: string;
   let signer: string | undefined;
   let certificateFingerprint: string | undefined;
+  let revocation: RevocationVerdict | undefined;
 
   if (algorithm === "x509-sha256") {
     const outcome = verifyCertificateSignature(
@@ -422,6 +456,7 @@ export function verifyPluginPackage(
     keyId = outcome.verdict.keyId;
     signer = outcome.verdict.signer;
     certificateFingerprint = outcome.verdict.fingerprint;
+    revocation = outcome.verdict.revocation;
   } else {
     const declared = signatureDoc.keyId;
     if (typeof declared !== "string" || declared.trim().length === 0) {
@@ -476,6 +511,7 @@ export function verifyPluginPackage(
       digest: sha256(manifestBytes),
       ...(signer !== undefined ? { signer } : {}),
       ...(certificateFingerprint !== undefined ? { certificateFingerprint } : {}),
+      ...(revocation !== undefined ? { revocation } : {}),
     },
   };
 }

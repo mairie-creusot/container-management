@@ -56,6 +56,7 @@ import volumesRoutes from "./routes/volumes.js";
 import { startAutomationEngine } from "./services/automationEngine.js";
 import { startBackupScheduler } from "./services/backupScheduler.js";
 import { startCertificatesReconciler } from "./services/certificatesReconciler.js";
+import { startCrlRefresher, stopCrlRefresher } from "./services/crlRefresher.js";
 import { startCronJobsScheduler } from "./services/cronJobsScheduler.js";
 import { startGitopsReconciler } from "./services/gitopsReconciler.js";
 import { startMetricsCollector } from "./services/metricsCollector.js";
@@ -180,6 +181,11 @@ async function main(): Promise<void> {
   // démarré seulement ici pour ne jamais contacter l'autorité de certification pendant les tests.
   const stopCertificatesReconciler = startCertificatesReconciler();
 
+  // Rapatriement des listes de révocation de l'autorité, pour les certificats qui habilitent les
+  // modules (voir services/crlRefresher.ts). SEUL endroit du dispositif qui touche au réseau : la
+  // vérification, elle, ne lit que des fichiers déjà posés. Ne démarre pas sans PLUGIN_CRL_URLS.
+  startCrlRefresher();
+
   // Scan automatique en tâche de fond des images RÉELLEMENT déployées (conteneurs running) qui
   // n'ont jamais été scannées ou dont le dernier scan réussi est trop ancien (voir
   // services/scanScheduler.ts — cron de rafraîchissement périodique, PAS un edge-triggered comme
@@ -222,6 +228,7 @@ async function main(): Promise<void> {
     stopGitopsReconciler();
     stopReverseProxyReconciler();
     stopCertificatesReconciler();
+    stopCrlRefresher();
     stopScanScheduler();
     stopMetricsCollector();
     stopCronJobsScheduler();
