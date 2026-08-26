@@ -132,6 +132,8 @@ const MUTATING_ROUTES: [string, string][] = [
   ["DELETE", "/api/topology/groups/g1"],
   ["PUT", "/api/topology/groups/g1/positions"],
   ["PUT", "/api/topology/positions"],
+  ["POST", "/api/plugins/installed"],
+  ["DELETE", "/api/plugins/installed/mon-module"],
 ];
 
 describe("journal de traçabilité : phrases lisibles", () => {
@@ -171,17 +173,17 @@ describe("journal de traçabilité : phrases lisibles", () => {
       "a exécuté « Supprimer définitivement une VM Nutanix »",
     );
     expect(describeAction(event("PUT", "/api/plugins/nutanix/enabled"), labels)).toBe(
-      "a activé ou désactivé le greffon « Virtualisation Nutanix »",
+      "a activé ou désactivé le module « Virtualisation Nutanix »",
     );
   });
 
   it("reste lisible sans libellé connu : l'identifiant réel, jamais un libellé inventé", () => {
     const message = describeAction(event("POST", "/api/plugins/nutanix/actions/vm.start"));
-    expect(message).toBe("a exécuté l'action « vm.start » du greffon « nutanix »");
+    expect(message).toBe("a exécuté l'action « vm.start » du module « nutanix »");
 
     const labels = pluginAuditLabels([{ manifest: { id: "nutanix", name: "Virtualisation Nutanix", auditLabels: {} } }]);
     expect(describeAction(event("POST", "/api/plugins/nutanix/actions/vm.inconnue"), labels)).toBe(
-      "a exécuté l'action « vm.inconnue » du greffon « Virtualisation Nutanix »",
+      "a exécuté l'action « vm.inconnue » du module « Virtualisation Nutanix »",
     );
   });
 

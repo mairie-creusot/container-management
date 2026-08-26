@@ -17,6 +17,11 @@ coverage/
 apps/api/data/
 data/
 
+# clés privées de signature des modules (scripts/sign-plugin.mjs) — une clé privée ne doit jamais
+# être versionnée, ni se retrouver sur un serveur : seule la clé PUBLIQUE (*.pub) se partage
+*.key
+*.pem
+
 # rust / wasm-pack
 target/
 packages/wasm-core/pkg/

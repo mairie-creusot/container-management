@@ -3,6 +3,9 @@
  * désactive n'importe quelle intégration, sans qu'une ligne de code soit écrite par intégration.
  *
  * GET    /api/plugins                       — greffons enregistrés : manifeste PUBLIC + état réel.
+ * GET    /api/plugins/installed             — modules INSTALLÉS (admin) : confiance, version, provenance.
+ * POST   /api/plugins/installed             — installe un paquet signé (admin), à chaud.
+ * DELETE /api/plugins/installed/:id         — désinstalle un module (admin), à chaud.
  * GET    /api/plugins/:id/config            — vue SÛRE de la configuration (jamais un secret).
  * PUT    /api/plugins/:id/config            — configure/remplace (admin) — teste AVANT d'enregistrer.
  * POST   /api/plugins/:id/config/test       — teste une configuration candidate (admin), ne persiste rien.
@@ -30,10 +33,18 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { publicManifest, validateActionInput } from "@quai/plugin-contract";
 import type { JSONSchema, Plugin, PluginActionSpec, PublicPluginManifest } from "@quai/plugin-contract";
 import { isPluginDisabled } from "../plugins/activation.js";
-import { BUILTIN_PLUGINS, isBuiltinPluginId } from "../plugins/builtins.js";
+import { isCatalogPluginId, readPluginCatalog } from "../plugins/catalog.js";
 import { configStoreOf, mergeKeepingSecrets } from "../plugins/configStore.js";
-import { getPlugin, listPlugins } from "../plugins/registry.js";
-import { loadPluginForAdmin } from "../plugins/loader.js";
+import {
+  installPluginPackage,
+  isPluginInstallAvailable,
+  listInstalledPlugins,
+  trustedKeyIds,
+  uninstallPlugin,
+} from "../plugins/installed.js";
+import { getPlugin, listPlugins, unregisterPlugin } from "../plugins/registry.js";
+import { loadPluginForAdmin, refreshPluginActivation } from "../plugins/loader.js";
+import { config } from "../config.js";
 import { getSafeIntegrationConfig, setIntegrationEnabled } from "../services/setupStore.js";
 
 /** Clés de pilotage du corps de requête : elles ne font pas partie de la configuration. */
@@ -63,13 +74,17 @@ interface ActionBody {
 
 /**
  * Statut HTTP porté par l'erreur d'un greffon quand elle en porte un (NutanixActionError#httpStatus
- * : 400 non configuré, 404 introuvable, 409 garde-fou métier, 502 Prism, 504 timeout). Lu par
- * canard-typage : la route générique ne connaît aucune intégration. 502 sinon — jamais un succès
- * silencieux sur une action mutante.
+ * : 400 non configuré, 404 introuvable, 409 garde-fou métier, 502 Prism, 504 timeout ; et
+ * PluginTimeoutError#httpStatus : 504 pour un greffon qui n'a pas rendu la main dans son délai). Lu
+ * par canard-typage : la route générique ne connaît aucune intégration.
  */
-function actionErrorStatus(err: unknown): number {
+function pluginErrorStatus(err: unknown, fallback: number): number {
   const status = (err as { httpStatus?: unknown } | null | undefined)?.httpStatus;
-  return typeof status === "number" && status >= 400 && status <= 599 ? status : 502;
+  return typeof status === "number" && status >= 400 && status <= 599 ? status : fallback;
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 interface PluginState {
@@ -169,7 +184,7 @@ function submittedInput(body: unknown): Record<string, unknown> | null {
 async function resolvePlugin(id: string) {
   const known = getPlugin(id);
   if (known) return known;
-  if (!isBuiltinPluginId(id)) return undefined;
+  if (!(await isCatalogPluginId(id))) return undefined;
   return (await loadPluginForAdmin(id)) ? getPlugin(id) : undefined;
 }
 
@@ -179,16 +194,83 @@ export default async function pluginsRoutes(fastify: FastifyInstance): Promise<v
     // reprises menées en parallèle se marcheraient dessus (lecture/écriture du même config.json).
     const plugins: Array<{ manifest: PublicPluginManifest; enabled: boolean; configured: boolean }> = [];
     // Les greffons en pause ne sont pas chargés : sans ce rattrapage ils disparaîtraient de la
-    // liste, donc de l'écran des Réglages, et plus rien ne permettrait de les réactiver.
+    // liste, donc de l'écran des Réglages, et plus rien ne permettrait de les réactiver. Le
+    // catalogue inclut les modules installés dont la signature est vérifiée — eux seuls.
     const registered = new Set(listPlugins().map((p) => p.manifest.id));
-    for (const entry of BUILTIN_PLUGINS) {
-      if (!registered.has(entry.id)) await loadPluginForAdmin(entry.id);
+    const catalog = await readPluginCatalog();
+    for (const entry of catalog.entries) {
+      if (!registered.has(entry.id)) await loadPluginForAdmin(entry.id, catalog.entries);
     }
     for (const plugin of listPlugins()) {
       const { configured, enabled } = await stateOf(plugin);
       plugins.push({ manifest: publicManifest(plugin.manifest), enabled, configured });
     }
     return reply.send({ plugins });
+  });
+
+  /**
+   * MODULES INSTALLÉS — ceux qui ne sont pas livrés avec l'image. `trusted` dit si la signature du
+   * paquet posé sur le disque se vérifie MAINTENANT, pas seulement le jour de l'installation :
+   * un fichier modifié depuis se voit ici, avec son motif, et le module n'est plus chargé.
+   */
+  fastify.get("/api/plugins/installed", async (request, reply) => {
+    if (rejectIfNotAdmin(request, reply)) return;
+    return reply.send({
+      modules: await listInstalledPlugins(),
+      // Aucune valeur de clé ne sort : seulement de quoi dire quelles signatures sont acceptées.
+      installAvailable: isPluginInstallAvailable(),
+      trustedKeyIds: trustedKeyIds(),
+    });
+  });
+
+  /**
+   * INSTALLE un paquet signé, à chaud. La signature est vérifiée AVANT toute écriture et bien avant
+   * tout `import()` : un paquet non signé, mal signé, signé par une clé inconnue ou modifié après
+   * signature n'atteint jamais le disque. Un module qui ne se charge pas ensuite (manifeste refusé
+   * par le contrat) est retiré aussitôt : on n'installe pas un module inexploitable.
+   */
+  fastify.post<{ Body: unknown }>(
+    "/api/plugins/installed",
+    { bodyLimit: Math.max(config.plugins.maxPackageBytes * 2, 4 * 1024 * 1024) },
+    async (request, reply) => {
+      if (rejectIfNotAdmin(request, reply)) return;
+
+      const installed = await installPluginPackage(request.body, request.authSession!.username);
+      if (!installed.ok) return reply.code(installed.status).send({ error: installed.error });
+
+      const id = installed.record.id;
+      unregisterPlugin(id);
+      const outcome = await refreshPluginActivation(id);
+      const failure = outcome.failed.find((entry) => entry.id === id);
+      if (failure) {
+        await uninstallPlugin(id);
+        return reply.code(400).send({ error: `Module refusé par le socle, rien n'a été installé : ${failure.reason}` });
+      }
+
+      return reply.code(201).send({
+        module: installed.record,
+        replaced: installed.replaced,
+        // Un module installé alors qu'une mise en pause explicite existe déjà sous cet identifiant
+        // reste en pause : on le dit, plutôt que de prétendre qu'il tourne.
+        loaded: outcome.loaded.includes(id),
+      });
+    },
+  );
+
+  /**
+   * DÉSINSTALLE : le répertoire est effacé du disque, puis le greffon retiré du socle — plus rien ne
+   * l'appelle et il ne reviendra pas au prochain démarrage. Ne touche QUE les modules installés :
+   * un identifiant inconnu du répertoire d'installation (un greffon livré, par exemple) répond 404
+   * sans jamais désenregistrer quoi que ce soit.
+   */
+  fastify.delete<{ Params: { id: string } }>("/api/plugins/installed/:id", async (request, reply) => {
+    if (rejectIfNotAdmin(request, reply)) return;
+
+    const { id } = request.params;
+    const removed = await uninstallPlugin(id);
+    if (!removed.ok) return reply.code(removed.status).send({ error: removed.error });
+    unregisterPlugin(id);
+    return reply.send({ ok: true });
   });
 
   fastify.get<{ Params: { id: string } }>("/api/plugins/:id/config", async (request, reply) => {
@@ -215,8 +297,14 @@ export default async function pluginsRoutes(fastify: FastifyInstance): Promise<v
     const merged = mergeKeepingSecrets(submitted, await store.load(), plugin.manifest.secretFields);
 
     if (request.body?.skipTest !== true) {
-      const result = await plugin.test(merged);
-      if (!result.ok) return reply.code(400).send({ error: result.message });
+      try {
+        const result = await plugin.test(merged);
+        if (!result.ok) return reply.code(400).send({ error: result.message });
+      } catch (err) {
+        // Un greffon qui lève au lieu de rapporter (ou qui dépasse son délai : 504) ne doit pas
+        // se transformer en 500 anonyme — le motif réel remonte tel quel.
+        return reply.code(pluginErrorStatus(err, 400)).send({ error: messageOf(err) });
+      }
     }
 
     try {
@@ -241,8 +329,13 @@ export default async function pluginsRoutes(fastify: FastifyInstance): Promise<v
     const existing = await configStoreOf(plugin).load();
     const candidate = mergeKeepingSecrets({ ...(existing ?? {}), ...submitted }, existing, plugin.manifest.secretFields);
 
-    const result = await plugin.test(candidate);
-    return reply.send({ ok: result.ok, message: result.message });
+    try {
+      const result = await plugin.test(candidate);
+      return reply.send({ ok: result.ok, message: result.message });
+    } catch (err) {
+      // Même forme de réponse qu'un test raté : l'écran affiche le motif, y compris « n'a pas répondu ».
+      return reply.send({ ok: false, message: messageOf(err) });
+    }
   });
 
   /** Idempotent : retirer une configuration absente n'est pas une erreur. */
@@ -291,6 +384,8 @@ export default async function pluginsRoutes(fastify: FastifyInstance): Promise<v
    *  404 action inconnue        — ce greffon n'implémente pas cette action.
    *  400 entrée refusée         — l'entrée ne satisfait pas le schéma déclaré par le manifeste, ou
    *                               la cible manque alors que l'action en exige une.
+   *  504 greffon muet           — l'action a dépassé son délai (plugins/guard.ts) : abandonnée et
+   *                               tracée, jamais une attente infinie.
    *
    * L'audit est celui du socle (plugins/audit.ts, hook onResponse) : méthode, chemin, statut, acteur
    * — JAMAIS le corps, qui peut porter un mot de passe cloud-init (voir nutanix "vm.create"). C'est
@@ -307,7 +402,7 @@ export default async function pluginsRoutes(fastify: FastifyInstance): Promise<v
       // Un greffon mis en pause n'est PLUS dans le registre (son module n'est même pas chargé, voir
       // plugins/loader.ts) : sans cette distinction, une intégration simplement désactivée se dirait
       // « inconnue » et l'admin chercherait un greffon disparu au lieu de le réactiver.
-      if ((await isPluginDisabled(id)) && (plugin !== undefined || isBuiltinPluginId(id))) {
+      if ((await isPluginDisabled(id)) && (plugin !== undefined || (await isCatalogPluginId(id)))) {
         return reply.code(409).send({
           error: `Le greffon "${plugin?.manifest.name ?? id}" est désactivé : réactivez-le avant d'exécuter une de ses actions.`,
         });
@@ -356,7 +451,8 @@ export default async function pluginsRoutes(fastify: FastifyInstance): Promise<v
         const result = await action(input);
         return reply.send({ ok: true, result: result ?? null });
       } catch (err) {
-        return reply.code(actionErrorStatus(err)).send({ error: err instanceof Error ? err.message : String(err) });
+        // 502 par défaut — jamais un succès silencieux sur une action mutante.
+        return reply.code(pluginErrorStatus(err, 502)).send({ error: messageOf(err) });
       }
     },
   );

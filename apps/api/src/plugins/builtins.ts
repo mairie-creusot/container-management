@@ -9,6 +9,11 @@
  * Le greffon d'exemple (plugins/example) n'est délibérément PAS ici — il sert de modèle et de test
  * de bout en bout, jamais d'intégration réelle visible dans l'interface. Migrer une intégration
  * consiste à ajouter son entrée à cette liste.
+ *
+ * Cette liste est le catalogue INTERNE, celui du code livré. Les modules installés à chaud, eux,
+ * viennent du répertoire de données après vérification de leur signature (plugins/installed.ts) ;
+ * plugins/catalog.ts réunit les deux, et un module installé ne peut jamais usurper un identifiant
+ * qui figure ici.
  */
 
 export interface PluginModuleEntry {

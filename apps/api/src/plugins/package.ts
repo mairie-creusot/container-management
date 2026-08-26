@@ -1,0 +1,302 @@
+/**
+ * FORMAT DE PAQUET d'un module distribuable, et VÉRIFICATION DE SA SIGNATURE.
+ *
+ * Un paquet est un RÉPERTOIRE contenant :
+ *   quai-plugin.json — manifeste de paquet : identifiant, version, point d'entrée, nom d'export, et
+ *                      l'empreinte SHA-256 de CHAQUE fichier de code du paquet ;
+ *   signature.json   — { algorithm: "ed25519", keyId, signature } : signature Ed25519 des OCTETS
+ *                      EXACTS de quai-plugin.json (aucune re-sérialisation, donc aucune ambiguïté
+ *                      de canonicalisation) ;
+ *   le code lui-même — JavaScript ESM autonome (aucun import autre que les modules `node:`).
+ *
+ * Chaîne de confiance : la signature couvre le manifeste, le manifeste couvre les empreintes des
+ * fichiers. Changer un octet de code casse une empreinte ; changer une empreinte casse la signature.
+ *
+ * Ce module ne fait QUE lire et vérifier : il n'importe jamais de code. C'est la règle
+ * non contournable — un paquet non signé, mal signé, signé par une clé inconnue ou modifié après
+ * signature est refusé AVANT tout `import()`, jamais chargé « avec un avertissement ».
+ *
+ * Pour le transport HTTP, le même paquet voyage dans une enveloppe JSON `{ files: { "<chemin>":
+ * "<base64>" } }` produite par l'outil de signature HORS LIGNE (scripts/sign-plugin.mjs) : c'est le
+ * répertoire sérialisé, octet pour octet, signature comprise.
+ */
+
+import { createHash, createPublicKey, verify as verifyEd25519 } from "node:crypto";
+import type { KeyObject } from "node:crypto";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { isSemver } from "@quai/plugin-contract";
+
+export const PACKAGE_FORMAT = "quai-plugin/1";
+export const PACKAGE_MANIFEST_NAME = "quai-plugin.json";
+export const PACKAGE_SIGNATURE_NAME = "signature.json";
+/** Trace d'installation posée par le socle — hors paquet, donc hors périmètre de la signature. */
+export const INSTALL_MARK_NAME = ".quai-install.json";
+
+const RESERVED_NAMES = new Set([PACKAGE_SIGNATURE_NAME, INSTALL_MARK_NAME]);
+const SAFE_PATH_PATTERN = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*$/;
+const PLUGIN_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+const BASE64_PATTERN = /^[A-Za-z0-9+/\s]*={0,2}$/;
+const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+const MAX_FILES = 64;
+
+export type PackageFiles = ReadonlyMap<string, Buffer>;
+
+export interface PluginPackageManifest {
+  format: string;
+  id: string;
+  name: string;
+  version: string;
+  /** Fichier importé par le socle, relatif à la racine du paquet ("index.js"). */
+  entry: string;
+  /** Nom sous lequel ce fichier exporte le greffon. */
+  exportName: string;
+  /** Chemin relatif -> empreinte SHA-256 hexadécimale. */
+  files: Record<string, string>;
+}
+
+export interface VerifiedPluginPackage {
+  manifest: PluginPackageManifest;
+  /** Clé de confiance qui a réellement signé — celle configurée, jamais celle annoncée. */
+  keyId: string;
+  /** SHA-256 des octets du manifeste signé : identifie le contenu exact du paquet. */
+  digest: string;
+}
+
+export type PackageVerification = { ok: true; verified: VerifiedPluginPackage } | { ok: false; reason: string };
+
+function refuse(reason: string): PackageVerification {
+  return { ok: false, reason };
+}
+
+function sha256(data: Buffer): string {
+  return createHash("sha256").update(data).digest("hex");
+}
+
+/** Chemin relatif sans échappatoire : ni absolu, ni `..`, ni antislash, ni segment vide. */
+export function isSafePackagePath(name: string): boolean {
+  if (name.length === 0 || name.length > 200 || !SAFE_PATH_PATTERN.test(name)) return false;
+  return !name.split("/").some((segment) => segment === "." || segment === "..");
+}
+
+export function isValidPluginId(id: unknown): id is string {
+  return typeof id === "string" && id.length >= 2 && id.length <= 32 && PLUGIN_ID_PATTERN.test(id) && !id.includes("--");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Clé publique Ed25519, en PEM, en DER SPKI base64, ou en 32 octets bruts base64. */
+function trustedPublicKey(material: string): KeyObject | undefined {
+  const trimmed = material.trim();
+  try {
+    const key = trimmed.startsWith("-----BEGIN")
+      ? createPublicKey(trimmed)
+      : (() => {
+          const raw = Buffer.from(trimmed, "base64");
+          const der = raw.length === 32 ? Buffer.concat([ED25519_SPKI_PREFIX, raw]) : raw;
+          return createPublicKey({ key: der, format: "der", type: "spki" });
+        })();
+    return key.asymmetricKeyType === "ed25519" ? key : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function parseJson(bytes: Buffer): unknown {
+  try {
+    return JSON.parse(bytes.toString("utf-8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Manifeste de paquet exploitable, ou le motif exact du refus. */
+function readPackageManifest(bytes: Buffer): { ok: true; manifest: PluginPackageManifest } | { ok: false; reason: string } {
+  const parsed = parseJson(bytes);
+  if (!isRecord(parsed)) return { ok: false, reason: `${PACKAGE_MANIFEST_NAME} n'est pas un objet JSON exploitable.` };
+  if (parsed.format !== PACKAGE_FORMAT) {
+    return { ok: false, reason: `Format de paquet inconnu : attendu "${PACKAGE_FORMAT}", trouvé ${JSON.stringify(parsed.format)}.` };
+  }
+  const id: unknown = parsed.id;
+  if (!isValidPluginId(id)) {
+    return {
+      ok: false,
+      reason: `Identifiant de module invalide : ${JSON.stringify(id)} — 2 à 32 caractères en minuscules (lettres, chiffres, tirets).`,
+    };
+  }
+  const name: unknown = parsed.name;
+  if (typeof name !== "string" || name.trim().length === 0) {
+    return { ok: false, reason: "Le manifeste de paquet doit porter un nom lisible (name)." };
+  }
+  const version: unknown = parsed.version;
+  if (typeof version !== "string" || !isSemver(version)) {
+    return { ok: false, reason: `Version de module invalide : ${JSON.stringify(version)} — semver attendu (ex. "1.0.0").` };
+  }
+  const entry: unknown = parsed.entry;
+  // .mjs imposé : un module vit dans le répertoire de DONNÉES, où aucun package.json du dépôt ne
+  // dit à Node qu'il s'agit d'ESM (voir plugins/installed.ts, qui pose tout de même un marqueur).
+  if (typeof entry !== "string" || !isSafePackagePath(entry) || !entry.endsWith(".mjs")) {
+    return { ok: false, reason: `Point d'entrée invalide : ${JSON.stringify(entry)} — un fichier .mjs du paquet est attendu.` };
+  }
+  const exportName: unknown = parsed.exportName;
+  if (typeof exportName !== "string" || exportName.trim().length === 0) {
+    return { ok: false, reason: "Le manifeste de paquet doit indiquer exportName : le nom sous lequel le module exporte son greffon." };
+  }
+  const declared: unknown = parsed.files;
+  if (!isRecord(declared) || Object.keys(declared).length === 0) {
+    return { ok: false, reason: "Le manifeste de paquet ne liste aucun fichier : rien ne serait couvert par la signature." };
+  }
+  const files: Record<string, string> = {};
+  for (const [file, digest] of Object.entries(declared)) {
+    if (!isSafePackagePath(file)) return { ok: false, reason: `Chemin de fichier refusé dans le manifeste : ${JSON.stringify(file)}.` };
+    if (file === PACKAGE_MANIFEST_NAME || RESERVED_NAMES.has(file)) {
+      return { ok: false, reason: `"${file}" est réservé au socle : il ne peut pas figurer parmi les fichiers signés.` };
+    }
+    if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) {
+      return { ok: false, reason: `Empreinte invalide pour "${file}" : SHA-256 hexadécimal attendu.` };
+    }
+    files[file] = digest;
+  }
+  if (files[entry] === undefined) {
+    return { ok: false, reason: `Le point d'entrée "${entry}" ne figure pas parmi les fichiers signés.` };
+  }
+  return { ok: true, manifest: { format: PACKAGE_FORMAT, id, name: name.trim(), version, entry, exportName, files } };
+}
+
+/**
+ * SEULE porte d'entrée de la confiance. Rien d'autre dans le socle ne décide qu'un module est
+ * fiable, et rien n'est importé tant que cette fonction n'a pas répondu `ok`.
+ */
+export function verifyPluginPackage(files: PackageFiles, trustedKeys: Readonly<Record<string, string>>): PackageVerification {
+  const trustedIds = Object.keys(trustedKeys);
+  if (trustedIds.length === 0) {
+    return refuse(
+      "Aucune clé de confiance n'est configurée (PLUGIN_TRUSTED_KEYS) : l'installation et le chargement de modules externes sont indisponibles.",
+    );
+  }
+
+  const manifestBytes = files.get(PACKAGE_MANIFEST_NAME);
+  if (!manifestBytes) return refuse(`Le paquet ne contient pas son manifeste (${PACKAGE_MANIFEST_NAME}).`);
+
+  const signatureBytes = files.get(PACKAGE_SIGNATURE_NAME);
+  if (!signatureBytes) {
+    return refuse(`Le paquet n'est pas signé (${PACKAGE_SIGNATURE_NAME} absent) : un module non signé n'est jamais chargé.`);
+  }
+
+  const signatureDoc = parseJson(signatureBytes);
+  if (!isRecord(signatureDoc)) return refuse(`${PACKAGE_SIGNATURE_NAME} n'est pas un objet JSON exploitable.`);
+  if (signatureDoc.algorithm !== "ed25519") {
+    return refuse(`Algorithme de signature non supporté : ${JSON.stringify(signatureDoc.algorithm)} — seul "ed25519" est accepté.`);
+  }
+  const keyId = signatureDoc.keyId;
+  if (typeof keyId !== "string" || keyId.trim().length === 0) {
+    return refuse(`${PACKAGE_SIGNATURE_NAME} n'indique pas quelle clé a signé (keyId).`);
+  }
+  const rawSignature = signatureDoc.signature;
+  if (typeof rawSignature !== "string" || !BASE64_PATTERN.test(rawSignature)) {
+    return refuse(`${PACKAGE_SIGNATURE_NAME} ne porte pas de signature base64 exploitable.`);
+  }
+
+  const material = trustedKeys[keyId];
+  if (material === undefined) {
+    return refuse(
+      `Signature émise par la clé "${keyId}", inconnue du serveur : seules les clés de confiance configurées (${trustedIds.join(", ")}) sont acceptées.`,
+    );
+  }
+  const publicKey = trustedPublicKey(material);
+  if (!publicKey) {
+    return refuse(`La clé de confiance "${keyId}" n'est pas une clé publique Ed25519 exploitable : corrigez PLUGIN_TRUSTED_KEYS.`);
+  }
+
+  let valid = false;
+  try {
+    valid = verifyEd25519(null, manifestBytes, publicKey, Buffer.from(rawSignature, "base64"));
+  } catch {
+    valid = false;
+  }
+  if (!valid) {
+    return refuse(`Signature invalide : le manifeste du paquet ne correspond pas à ce que la clé "${keyId}" a signé.`);
+  }
+
+  const manifest = readPackageManifest(manifestBytes);
+  if (!manifest.ok) return refuse(manifest.reason);
+
+  for (const [name, expected] of Object.entries(manifest.manifest.files)) {
+    const content = files.get(name);
+    if (!content) return refuse(`Le fichier signé "${name}" manque dans le paquet.`);
+    if (sha256(content) !== expected) {
+      return refuse(`Le fichier "${name}" ne correspond pas à son empreinte signée : le paquet a été modifié après signature.`);
+    }
+  }
+  for (const name of files.keys()) {
+    if (name === PACKAGE_MANIFEST_NAME || RESERVED_NAMES.has(name)) continue;
+    if (manifest.manifest.files[name] === undefined) {
+      return refuse(`Le paquet contient un fichier non signé : "${name}" — un ajout après signature est refusé.`);
+    }
+  }
+
+  return { ok: true, verified: { manifest: manifest.manifest, keyId, digest: sha256(manifestBytes) } };
+}
+
+/** Fichiers d'un paquet posé sur disque, chemins relatifs à `dir`. Lève si le paquet déborde. */
+export async function readPackageFiles(dir: string, maxBytes: number): Promise<PackageFiles> {
+  const files = new Map<string, Buffer>();
+  let total = 0;
+
+  const walk = async (current: string, prefix: string): Promise<void> => {
+    const entries = await fs.readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const relative = prefix.length === 0 ? entry.name : `${prefix}/${entry.name}`;
+      if (entry.isDirectory()) {
+        await walk(path.join(current, entry.name), relative);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (files.size >= MAX_FILES) throw new Error(`Le paquet dépasse ${MAX_FILES} fichiers.`);
+      const content = await fs.readFile(path.join(current, entry.name));
+      total += content.byteLength;
+      if (total > maxBytes) throw new Error(`Le paquet dépasse la taille maximale de ${maxBytes} octets.`);
+      files.set(relative, content);
+    }
+  };
+
+  await walk(dir, "");
+  return files;
+}
+
+export type EnvelopeResult = { ok: true; files: PackageFiles } | { ok: false; reason: string };
+
+/**
+ * Enveloppe de transport `{ files: { "<chemin>": "<base64>" } }` — le répertoire du paquet
+ * sérialisé tel quel. Aucun chemin n'est deviné ni normalisé : un chemin refusé est refusé.
+ */
+export function decodePackageEnvelope(body: unknown, maxBytes: number): EnvelopeResult {
+  const outer = isRecord(body) ? body : undefined;
+  const nested: unknown = outer?.package;
+  const root: unknown = isRecord(nested) ? nested : body;
+  const declared: unknown = isRecord(root) ? root.files : undefined;
+  if (!isRecord(declared)) {
+    return { ok: false, reason: 'Paquet illisible : un objet { "files": { "<chemin>": "<contenu base64>" } } est attendu.' };
+  }
+
+  const entries = Object.entries(declared);
+  if (entries.length === 0) return { ok: false, reason: "Le paquet ne contient aucun fichier." };
+  if (entries.length > MAX_FILES) return { ok: false, reason: `Le paquet dépasse ${MAX_FILES} fichiers.` };
+
+  const files = new Map<string, Buffer>();
+  let total = 0;
+  for (const [name, encoded] of entries) {
+    if (!isSafePackagePath(name)) return { ok: false, reason: `Chemin de fichier refusé : ${JSON.stringify(name)}.` };
+    if (name === INSTALL_MARK_NAME) return { ok: false, reason: `"${INSTALL_MARK_NAME}" est réservé au socle : il ne peut pas être fourni.` };
+    if (typeof encoded !== "string" || !BASE64_PATTERN.test(encoded)) {
+      return { ok: false, reason: `Le contenu de "${name}" n'est pas du base64 exploitable.` };
+    }
+    const content = Buffer.from(encoded, "base64");
+    total += content.byteLength;
+    if (total > maxBytes) return { ok: false, reason: `Le paquet dépasse la taille maximale de ${maxBytes} octets.` };
+    files.set(name, content);
+  }
+  return { ok: true, files };
+}

@@ -12,6 +12,7 @@ import {
 } from "@/features/settings/settingsSections";
 import PluginEnableCard from "@/features/settings/PluginEnableCard";
 import PluginSettingsSection from "@/features/settings/PluginSettingsSection";
+import ModulesSection from "@/features/settings/ModulesSection";
 import AdDnsConfigSection, { LdapAccountDiagnosticSection } from "@/features/adDns/AdDnsConfigSection";
 import ThreecxConfigSection from "@/features/threecx/ThreecxConfigSection";
 import GlpiConfigSection from "@/features/glpi/GlpiConfigSection";
@@ -127,6 +128,8 @@ function SectionBody({ meta }: { meta: SettingsSectionMeta }) {
   switch (meta.id) {
     case "setup":
       return <SetupWizardSection />;
+    case "modules":
+      return <ModulesSection />;
     case "ad-dns":
       return (
         <>

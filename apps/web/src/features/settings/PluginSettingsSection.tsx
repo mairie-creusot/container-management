@@ -100,15 +100,15 @@ export default function PluginSettingsSection({ pluginId }: { pluginId: string }
       <>
         <div className="page-header" style={{ marginTop: 0 }}>
           <div>
-            <h3 style={{ marginBottom: 4 }}>Greffon « {pluginId} »</h3>
-            <p>Section apportée par un greffon : son formulaire est déduit du manifeste renvoyé par le serveur.</p>
+            <h3 style={{ marginBottom: 4 }}>Module « {pluginId} »</h3>
+            <p>Section apportée par un module : son formulaire est déduit du manifeste renvoyé par le serveur.</p>
           </div>
         </div>
         <div className="empty-state">
           <IconInfo />
           <strong>Manifeste indisponible</strong>
           <span>
-            GET /api/plugins n'a pas renvoyé ce greffon : aucun formulaire ne peut en être déduit, et rien n'est
+            GET /api/plugins n'a pas renvoyé ce module : aucun formulaire ne peut en être déduit, et rien n'est
             deviné à sa place.
           </span>
         </div>
@@ -175,7 +175,7 @@ export default function PluginSettingsSection({ pluginId }: { pluginId: string }
         <div>
           <h3 style={{ marginBottom: 4 }}>{name}</h3>
           <p>
-            Formulaire déduit du manifeste du greffon « {manifest.id} ». La connexion est réellement testée par le
+            Formulaire déduit du manifeste du module « {manifest.id} ». La connexion est réellement testée par le
             serveur avant tout enregistrement — une configuration qui ne fonctionne pas n'est jamais persistée.
           </p>
         </div>
@@ -208,7 +208,7 @@ export default function PluginSettingsSection({ pluginId }: { pluginId: string }
 
       {conversion !== null && !conversion.ok && (
         <div className="error-banner schema-form__rejected" role="alert" style={{ marginBottom: 16 }}>
-          <p>Ce formulaire ne peut pas être affiché : le manifeste de ce greffon n'est pas convertible.</p>
+          <p>Ce formulaire ne peut pas être affiché : le manifeste de ce module n'est pas convertible.</p>
           <ul>
             {conversion.problems.map((problem, index) => (
               <li key={`${index}-${problem}`}>{problem}</li>

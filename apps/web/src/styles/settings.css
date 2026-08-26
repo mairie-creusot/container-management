@@ -81,6 +81,69 @@
   color: var(--color-text-faint);
 }
 
+/* Section « Modules » (features/settings/ModulesSection.tsx) : une carte par module, celles dont la
+   signature n'est pas établie portant une bordure d'alerte pour ne jamais se confondre avec les
+   autres. */
+.modules-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.module-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.module-card--untrusted {
+  border-color: var(--color-critical);
+  background: var(--color-critical-bg);
+}
+
+.module-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.module-card__name {
+  margin: 0;
+  font-size: 15px;
+}
+
+.module-notice {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.module-notice--caution {
+  border-color: var(--color-warning);
+  background: var(--color-warning-bg);
+}
+
+.module-key {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.module-install {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 /* Sous 1000px, le rail passe en bandeau horizontal défilable au-dessus du formulaire — même
    principe que la sidebar réduite (layout.css). */
 @media (max-width: 1000px) {

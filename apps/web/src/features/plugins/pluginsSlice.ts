@@ -65,7 +65,7 @@ export type PluginTestResult =
 
 /** Réponse du serveur à une activation sans configuration (409) — traduite, jamais servie brute. */
 export const NOT_CONFIGURED_MESSAGE =
-  "Ce greffon n'a aucune configuration enregistrée : renseignez la connexion et enregistrez-la avant de l'activer.";
+  "Ce module n'a aucune configuration enregistrée : renseignez la connexion et enregistrez-la avant de l'activer.";
 
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : fallback;
@@ -79,7 +79,7 @@ export const fetchPlugins = createAsyncThunk<FetchPluginsResult>("plugins/fetchA
     if (!plugins) return { ok: false, reason: "GET /api/plugins n'a pas renvoyé de liste exploitable." };
     return { ok: true, plugins };
   } catch (error) {
-    return { ok: false, reason: errorMessage(error, "Liste des greffons injoignable.") };
+    return { ok: false, reason: errorMessage(error, "Liste des modules injoignable.") };
   }
 });
 
@@ -94,7 +94,7 @@ export const fetchPluginConfig = createAsyncThunk<PluginConfigResult, string>(
       if (!view) return { ok: false, pluginId, reason: "La configuration renvoyée n'est pas exploitable." };
       return { ok: true, pluginId, view };
     } catch (error) {
-      return { ok: false, pluginId, reason: errorMessage(error, "Configuration du greffon injoignable.") };
+      return { ok: false, pluginId, reason: errorMessage(error, "Configuration du module injoignable.") };
     }
   },
 );
@@ -218,7 +218,7 @@ const pluginsSlice = createSlice({
       .addCase(fetchPlugins.rejected, (state, action) => {
         state.status = "unavailable";
         state.items = [];
-        state.error = action.error.message ?? "Liste des greffons injoignable.";
+        state.error = action.error.message ?? "Liste des modules injoignable.";
       })
 
       .addCase(fetchPluginConfig.pending, (state, action) => {

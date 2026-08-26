@@ -14,7 +14,8 @@ import {
 } from "@/components/icons";
 
 /** Une entrée du menu Réglages = une intégration. Partagée par le Topbar (menu déroulant) et par
- * la page Réglages (rail de gauche) — jamais deux listes à garder synchronisées. */
+ * la page Réglages (rail de gauche) — jamais deux listes à garder synchronisées, et toutes deux
+ * dérivées par buildSettingsSections pour qu'un module installé y apparaisse sans redémarrage. */
 export interface SettingsSectionMeta {
   id: string;
   label: string;
@@ -31,9 +32,8 @@ export interface SettingsSectionMeta {
 
 /**
  * Ordre de référence des sections. Les entrées portant un `pluginId` sont des emplacements de
- * greffon : leur libellé définitif vient du manifeste (voir buildSettingsSections), celui déclaré
- * ici ne sert que tant que GET /api/plugins n'a pas répondu — notamment au menu du Topbar, qui lit
- * cette liste statique.
+ * module : leur libellé définitif vient du manifeste (voir buildSettingsSections), celui déclaré
+ * ici ne sert que tant que GET /api/plugins n'a pas répondu.
  */
 export const SETTINGS_SECTIONS: SettingsSectionMeta[] = [
   {
@@ -41,6 +41,12 @@ export const SETTINGS_SECTIONS: SettingsSectionMeta[] = [
     label: "Assistant de configuration",
     description: "LDAP, orchestrateurs Docker/Kubernetes et registries — rouvre l'assistant de premier lancement.",
     icon: IconSettings,
+  },
+  {
+    id: "modules",
+    label: "Modules",
+    description: "Modules livrés avec l'application ou installés : version, signature vérifiée et activation.",
+    icon: IconStack,
   },
   {
     id: "nutanix",
@@ -135,7 +141,7 @@ export function buildSettingsSections(
     sections.push({
       id,
       label: manifestLabel(summary, id),
-      description: "Greffon enregistré par le serveur — formulaire déduit de son manifeste.",
+      description: "Module enregistré par le serveur — formulaire déduit de son manifeste.",
       icon: IconStack,
       pluginId: id,
     });

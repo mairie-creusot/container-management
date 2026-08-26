@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import {
   openSettingsSection,
@@ -10,7 +10,7 @@ import {
 import { fetchEnvironments } from "@/features/clusters/clustersSlice";
 import { canAdminister, logout } from "@/features/auth/authSlice";
 import { markAllRead, markServerNotificationsRead } from "@/features/notifications/notificationsSlice";
-import { SETTINGS_SECTIONS } from "@/features/settings/settingsSections";
+import { buildSettingsSections } from "@/features/settings/settingsSections";
 import { useConfirm } from "@/components/ConfirmProvider";
 import { IconBell, IconSearch, IconSettings } from "@/components/icons";
 
@@ -35,7 +35,12 @@ export default function Topbar() {
   const environmentsStatus = useAppSelector((state) => state.clusters.status);
   const session = useAppSelector((state) => state.auth.session);
   const unreadCount = useAppSelector((state) => state.notifications.items.filter((n) => !n.read).length);
+  const plugins = useAppSelector((state) => state.plugins);
   const confirm = useConfirm();
+
+  // Même dérivation que la page Réglages : un module installé à chaud entre dans ce menu sans
+  // qu'une liste statique ait à être retouchée.
+  const settingsSections = useMemo(() => buildSettingsSections(plugins), [plugins]);
 
   const [menuOpen, setMenuOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -139,7 +144,7 @@ export default function Topbar() {
 
       {/* Menu Réglages — toutes les configurations d'intégration, réservé aux admins (la vue
           "settings" refuse elle aussi les autres rôles). Ouvre la page dédiée sur la section
-          choisie ; la liste vient de SETTINGS_SECTIONS, jamais recopiée ici. */}
+          choisie ; la liste est dérivée des modules réellement chargés, jamais recopiée ici. */}
       {canAdminister(session) && (
         <div className="topbar__settings" ref={settingsRef}>
           <button
@@ -157,7 +162,7 @@ export default function Topbar() {
           {settingsOpen && (
             <div className="profile-menu settings-menu" role="menu">
               <div className="settings-menu__title">Réglages</div>
-              {SETTINGS_SECTIONS.map((section) => {
+              {settingsSections.map((section) => {
                 const Icon = section.icon;
                 return (
                   <button

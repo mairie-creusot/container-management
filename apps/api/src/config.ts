@@ -58,6 +58,41 @@ function readDefaultRole(name: string, fallback: Role): Role {
   return fallback;
 }
 
+/**
+ * Clés PUBLIQUES de confiance pour la signature des modules distribuables — JSON
+ * `{ "<identifiant de clé>": "<clé publique>" }`. Une clé PRIVÉE n'a rien à faire ici : le serveur
+ * ne signe jamais, il ne fait que vérifier (voir plugins/package.ts et scripts/sign-plugin.mjs).
+ * Aucune valeur n'est journalisée, seulement l'identifiant de l'entrée fautive.
+ */
+function readTrustedPluginKeys(name: string): Record<string, string> {
+  const raw = process.env[name];
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    // eslint-disable-next-line no-console
+    console.warn(`[config] ${name} n'est pas du JSON valide : aucune clé de confiance retenue`);
+    return {};
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    // eslint-disable-next-line no-console
+    console.warn(`[config] ${name} doit être un objet { "identifiant": "clé publique" } : aucune clé de confiance retenue`);
+    return {};
+  }
+  const keys: Record<string, string> = {};
+  for (const [keyId, value] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof value !== "string" || value.trim().length === 0) continue;
+    if (value.includes("PRIVATE KEY")) {
+      // eslint-disable-next-line no-console
+      console.warn(`[config] ${name} : l'entrée "${keyId}" ressemble à une clé privée — ignorée, seule la clé publique se configure ici`);
+      continue;
+    }
+    keys[keyId] = value.trim();
+  }
+  return keys;
+}
+
 export const config = {
   server: {
     port: readNumber("PORT", 3000),
@@ -156,6 +191,34 @@ export const config = {
     // chapitre "Assistant de configuration au premier lancement"). Défaut dev : fichier local
     // ; en conteneur, pointer vers un volume monté (ex: /data/quai/config.json).
     configPath: readString("CONFIG_PATH", "./data/config.json"),
+  },
+  plugins: {
+    // Répertoire d'installation des modules DISTRIBUABLES (cf. ARCHITECTURE.md, chapitre "Modules
+    // distribuables"). Non défini = sous-dossier `plugins/` du répertoire de CONFIG_PATH, comme
+    // audit-log.jsonl : les modules installés vivent avec les DONNÉES, jamais dans le code livré,
+    // pour survivre à une reconstruction d'image et disparaître réellement à la désinstallation.
+    installPath: readOptionalString("PLUGINS_PATH"),
+    // Clés publiques autorisées à signer un module. AUCUNE clé configurée = l'installation de
+    // modules externes est indisponible ; les greffons livrés avec l'image continuent de tourner.
+    // La signature est la SEULE frontière de sécurité : un module installé s'exécute dans ce
+    // process, qui a accès au socket Docker, à l'annuaire et à la clé de chiffrement.
+    trustedKeys: readTrustedPluginKeys("PLUGIN_TRUSTED_KEYS"),
+    // Taille maximale d'un paquet accepté à l'installation, décodé (somme de ses fichiers).
+    maxPackageBytes: readNumber("PLUGIN_MAX_PACKAGE_BYTES", 2 * 1024 * 1024),
+    // Délais d'expiration des appels AUX GREFFONS (plugins/guard.ts). Sans isolation hors processus,
+    // un greffon qui ne répond pas fige l'appelant : un appel dépassé est abandonné et tracé, le
+    // greffon traité comme non contributif — jamais une attente infinie.
+    // `test` est déclenché par un admin qui attend devant son écran, mais peut enchaîner une
+    // authentification puis un appel (deux fois les 8 s de timeout réseau des intégrations).
+    testTimeoutMs: readNumber("PLUGIN_TEST_TIMEOUT_MS", 15_000),
+    // `graph`/`snapshot` sont rejoués à CHAQUE construction du graphe, greffon après greffon : à
+    // peine plus que le timeout réseau unitaire (8 s) des intégrations, sinon un seul greffon muet
+    // rallongerait tout l'affichage.
+    graphTimeoutMs: readNumber("PLUGIN_GRAPH_TIMEOUT_MS", 10_000),
+    snapshotTimeoutMs: readNumber("PLUGIN_SNAPSHOT_TIMEOUT_MS", 10_000),
+    // Une action est une MUTATION réelle (créer une VM, ouvrir un ticket) : plus généreux que la
+    // lecture, sans jamais devenir une attente infinie.
+    actionTimeoutMs: readNumber("PLUGIN_ACTION_TIMEOUT_MS", 30_000),
   },
   secrets: {
     // Persistance du gestionnaire de secrets nommés (cf. ARCHITECTURE.md, chapitre "Gestionnaire

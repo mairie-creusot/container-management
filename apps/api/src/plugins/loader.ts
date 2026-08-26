@@ -11,14 +11,20 @@
  * les trois autres intégrations, elles, doivent continuer de fonctionner.
  *
  * Ré-évaluation sans redémarrage : `refreshPluginActivation(id)` rejoue la décision pour un seul
- * greffon (à appeler juste après PUT /api/plugins/:id/enabled). Activer importe et enregistre ;
- * mettre en pause retire du registre. Le module déjà importé reste dans le cache de modules de Node
- * — impossible de l'en sortir — mais plus rien ne l'appelle.
+ * greffon (à appeler juste après PUT /api/plugins/:id/enabled, une installation ou une
+ * désinstallation). Activer importe et enregistre ; mettre en pause retire du registre. Le module
+ * déjà importé reste dans le cache de modules de Node — impossible de l'en sortir — mais plus rien
+ * ne l'appelle.
+ *
+ * Catalogue : les greffons livrés ET les modules installés dont la signature est vérifiée
+ * (plugins/catalog.ts). Un module dont le paquet est refusé n'a AUCUNE entrée de catalogue, donc
+ * aucun `import()` possible ; s'il était chargé lors d'une passe précédente (fichier modifié sur le
+ * disque depuis), il est retiré du socle ici même.
  */
 
 import { isPluginDisabled } from "./activation.js";
-import { BUILTIN_PLUGINS } from "./builtins.js";
 import type { PluginModuleEntry } from "./builtins.js";
+import { readPluginCatalog } from "./catalog.js";
 import { hasPlugin, registerPlugin, unregisterPlugin } from "./registry.js";
 
 export interface PluginLoadFailure {
@@ -99,9 +105,35 @@ async function loadEntry(entry: PluginModuleEntry, outcome: PluginLoadOutcome): 
   }
 }
 
-async function syncEntries(entries: readonly PluginModuleEntry[], only?: string): Promise<PluginLoadOutcome> {
+/**
+ * Le catalogue à jouer. Sans liste explicite (tout le socle sauf les tests), il est RELU du disque à
+ * chaque passe : un module installé depuis y apparaît, un module dont le paquet ne se vérifie plus
+ * en disparaît — et s'il était chargé, il est retiré du registre séance tenante.
+ */
+async function resolveEntries(
+  entries: readonly PluginModuleEntry[] | undefined,
+  only: string | undefined,
+  outcome: PluginLoadOutcome,
+): Promise<readonly PluginModuleEntry[]> {
+  if (entries) return entries;
+
+  const catalog = await readPluginCatalog();
+  const chargeables = new Set(catalog.entries.map((entry) => entry.id));
+  for (const refusal of catalog.rejected) {
+    if (only !== undefined && refusal.id !== only) continue;
+    // Un identifiant qui reste au catalogue (greffon LIVRÉ, qu'un module posé à la main tente
+    // d'usurper) ne doit surtout pas quitter le socle : c'est l'intrus qu'on écarte, jamais
+    // l'intégration légitime.
+    const removed = !chargeables.has(refusal.id) && unregisterPlugin(refusal.id);
+    outcome.failed.push({ id: refusal.id, reason: refusal.reason });
+    console.warn(`[greffons] module installé "${refusal.id}" refusé : ${refusal.reason}${removed ? " — retiré du socle" : ""}`);
+  }
+  return catalog.entries;
+}
+
+async function syncEntries(entries: readonly PluginModuleEntry[] | undefined, only?: string): Promise<PluginLoadOutcome> {
   const outcome: PluginLoadOutcome = { loaded: [], paused: [], failed: [] };
-  for (const entry of entries) {
+  for (const entry of await resolveEntries(entries, only, outcome)) {
     if (only !== undefined && entry.id !== only) continue;
     await loadEntry(entry, outcome);
   }
@@ -114,18 +146,19 @@ async function syncEntries(entries: readonly PluginModuleEntry[], only?: string)
  * appelé plusieurs fois dans une même exécution de tests) et sans exception : les échecs sont
  * rapportés dans `failed`.
  */
-export async function loadActivePlugins(entries: readonly PluginModuleEntry[] = BUILTIN_PLUGINS): Promise<PluginLoadOutcome> {
+export async function loadActivePlugins(entries?: readonly PluginModuleEntry[]): Promise<PluginLoadOutcome> {
   return await serialize(async () => await syncEntries(entries));
 }
 
 /**
  * Rejoue la décision pour UN greffon (ou pour tous si aucun identifiant n'est donné) — à appeler
- * après une bascule d'activation, pour qu'elle prenne effet sans redémarrage. Un identifiant hors
- * catalogue ne fait rien : il n'y a pas de module à charger pour lui.
+ * après une bascule d'activation, une installation ou une désinstallation, pour qu'elle prenne effet
+ * sans redémarrage. Un identifiant hors catalogue ne fait rien : il n'y a pas de module à charger
+ * pour lui.
  */
 export async function refreshPluginActivation(
   pluginId?: string,
-  entries: readonly PluginModuleEntry[] = BUILTIN_PLUGINS,
+  entries?: readonly PluginModuleEntry[],
 ): Promise<PluginLoadOutcome> {
   return await serialize(async () => await syncEntries(entries, pluginId));
 }
@@ -150,10 +183,11 @@ export async function ensurePluginsLoaded(): Promise<void> {
  * commence par `ensurePluginsLoaded()`, qui retire de nouveau tout greffon en pause avant de
  * collecter quoi que ce soit (voir services/topology.ts#collectPluginGraphParts).
  */
-export async function loadPluginForAdmin(pluginId: string): Promise<boolean> {
+export async function loadPluginForAdmin(pluginId: string, entries?: readonly PluginModuleEntry[]): Promise<boolean> {
   return await serialize(async () => {
     if (hasPlugin(pluginId)) return true;
-    const entry = BUILTIN_PLUGINS.find((candidate) => candidate.id === pluginId);
+    const catalog = entries ?? (await readPluginCatalog()).entries;
+    const entry = catalog.find((candidate) => candidate.id === pluginId);
     if (!entry) return false;
     try {
       registerPlugin(pluginFromModule(await entry.load(), entry));

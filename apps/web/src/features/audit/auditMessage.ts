@@ -45,7 +45,7 @@ const RESOURCE_LABELS: Record<string, string> = {
   notifications: "les notifications",
   nutanix: "Nutanix",
   packages: "les paquets",
-  plugins: "les greffons",
+  plugins: "les modules",
   registries: "les registries",
   "remote-environments": "les environnements Docker distants",
   "reverse-proxy": "la publication",
@@ -203,6 +203,10 @@ export function describeAction(event: AuditEvent, plugins?: ReadonlyMap<string, 
     }
   }
   if (resource === "plugins" && idOrAction) {
+    if (idOrAction === "installed") {
+      if (method === "POST") return "a installé un module";
+      if (method === "DELETE") return `a désinstallé le module « ${shortId(subAction)} »`;
+    }
     const plugin = plugins?.get(idOrAction);
     const pluginName = plugin?.name ?? idOrAction;
     if (subAction === "actions" && subId) {
@@ -210,12 +214,12 @@ export function describeAction(event: AuditEvent, plugins?: ReadonlyMap<string, 
       const label = plugin?.auditLabels[actionId];
       // Le libellé du manifeste se suffit à lui-même ("Démarrer une VM Nutanix") — le greffon n'est
       // rappelé que lorsqu'aucun libellé n'est connu, pour que la ligne reste identifiable.
-      return label ? `a exécuté « ${label} »` : `a exécuté l'action « ${actionId} » du greffon « ${pluginName} »`;
+      return label ? `a exécuté « ${label} »` : `a exécuté l'action « ${actionId} » du module « ${pluginName} »`;
     }
-    if (subAction === "config" && subId === "test") return `a testé la connexion du greffon « ${pluginName} »`;
-    if (subAction === "config" && method === "PUT") return `a configuré le greffon « ${pluginName} »`;
-    if (subAction === "config" && method === "DELETE") return `a retiré la configuration du greffon « ${pluginName} »`;
-    if (subAction === "enabled") return `a activé ou désactivé le greffon « ${pluginName} »`;
+    if (subAction === "config" && subId === "test") return `a testé la connexion du module « ${pluginName} »`;
+    if (subAction === "config" && method === "PUT") return `a configuré le module « ${pluginName} »`;
+    if (subAction === "config" && method === "DELETE") return `a retiré la configuration du module « ${pluginName} »`;
+    if (subAction === "enabled") return `a activé ou désactivé le module « ${pluginName} »`;
   }
   if (resource === "lxc") {
     if (idOrAction === "config" && method === "PUT") return "a configuré l'hôte LXD";

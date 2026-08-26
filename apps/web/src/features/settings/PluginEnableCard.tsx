@@ -9,8 +9,8 @@ import {
 } from "@/features/plugins/pluginsSlice";
 
 /**
- * Interrupteur Activer/Désactiver d'un greffon — la seule bascule, commune à la section générée et
- * aux sections encore écrites à la main. Elle reste manœuvrable même quand l'écran croit le greffon
+ * Interrupteur Activer/Désactiver d'un module — la seule bascule, commune à la section générée et
+ * aux sections encore écrites à la main. Elle reste manœuvrable même quand l'écran croit le module
  * non configuré : c'est le 409 du serveur qui tranche, traduit en une phrase au lieu d'une erreur brute.
  */
 export default function PluginEnableCard({ pluginId }: { pluginId: string }) {
@@ -51,17 +51,17 @@ export default function PluginEnableCard({ pluginId }: { pluginId: string }) {
           disabled={entry.toggling}
           onChange={(event) => void toggle(event.target.checked)}
         />
-        <span>{entry.toggling ? "Bascule en cours…" : "Greffon activé"}</span>
+        <span>{entry.toggling ? "Bascule en cours…" : "Module activé"}</span>
       </label>
 
       <p className="create-container-hint" style={{ margin: 0 }}>
-        Désactiver met le greffon en pause sans toucher à sa configuration : il n'interroge plus rien et ses pages
+        Désactiver met le module en pause sans toucher à sa configuration : il n'interroge plus rien et ses pages
         quittent le menu.
       </p>
 
       {!configured && (
         <p className="create-container-hint" style={{ margin: 0 }}>
-          Ce greffon n'a aucune configuration enregistrée : il ne peut pas être activé tant que la connexion n'a pas
+          Ce module n'a aucune configuration enregistrée : il ne peut pas être activé tant que la connexion n'a pas
           été renseignée et enregistrée.
         </p>
       )}

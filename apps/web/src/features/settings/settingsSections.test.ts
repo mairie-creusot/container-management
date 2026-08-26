@@ -23,7 +23,7 @@ function summary(id: string, name: string, enabled: boolean, configured: boolean
   return { manifest: manifest(id, name), enabled, configured };
 }
 
-/** Les quatre greffons réellement enregistrés par le serveur, avec le nom exact de leur manifeste. */
+/** Les quatre modules réellement enregistrés par le serveur, avec le nom exact de leur manifeste. */
 const FOUR = [
   summary("nutanix", "Virtualisation Nutanix", true, true),
   summary("3cx", "Téléphonie 3CX", true, true),
@@ -35,10 +35,11 @@ function ids(sections: { id: string }[]): string[] {
   return sections.map((section) => section.id);
 }
 
-describe("buildSettingsSections — une section par greffon réellement enregistré", () => {
-  it("les quatre greffons donnent leurs quatre sections, dans l'ordre de référence", () => {
+describe("buildSettingsSections — une section par module réellement enregistré", () => {
+  it("les quatre modules donnent leurs quatre sections, dans l'ordre de référence", () => {
     expect(ids(buildSettingsSections({ status: "ready", items: FOUR }))).toEqual([
       "setup",
+      "modules",
       "nutanix",
       "ad-dns",
       "threecx",
@@ -57,31 +58,38 @@ describe("buildSettingsSections — une section par greffon réellement enregist
     expect(sections.find((section) => section.id === "hycu")?.label).toBe("Sauvegarde HYCU renommée");
   });
 
-  it("greffon désactivé : sa section reste — c'est là qu'on le réactive", () => {
+  it("module désactivé : sa section reste — c'est là qu'on le réactive", () => {
     const sections = buildSettingsSections({ status: "ready", items: [summary("hycu", "Sauvegarde HYCU", false, true)] });
     expect(ids(sections)).toContain("hycu");
   });
 
-  it("greffon jamais configuré : sa section reste — c'est là qu'on le configure", () => {
+  it("module jamais configuré : sa section reste — c'est là qu'on le configure", () => {
     const sections = buildSettingsSections({ status: "ready", items: [summary("glpi", "Assistance GLPI", true, false)] });
     expect(ids(sections)).toContain("glpi");
   });
 
-  it("greffon absent de la réponse : sa section disparaît, aucun formulaire n'est deviné", () => {
+  it("module absent de la réponse : sa section disparaît, aucun formulaire n'est deviné", () => {
     const sections = buildSettingsSections({ status: "ready", items: [summary("hycu", "Sauvegarde HYCU", true, true)] });
-    expect(ids(sections)).toEqual(["setup", "ad-dns", "hycu", "certificates", "notification-channels"]);
+    expect(ids(sections)).toEqual(["setup", "modules", "ad-dns", "hycu", "certificates", "notification-channels"]);
   });
 
-  it("aucun greffon : seules les sections du cœur subsistent", () => {
+  it("aucun module : seules les sections du cœur subsistent", () => {
     expect(ids(buildSettingsSections({ status: "ready", items: [] }))).toEqual([
       "setup",
+      "modules",
       "ad-dns",
       "certificates",
       "notification-channels",
     ]);
   });
 
-  it("greffon inconnu du catalogue : ajouté à la fin, nommé par son manifeste", () => {
+  it("la section Modules est du cœur : elle n'est portée par aucun module et ne disparaît jamais", () => {
+    const section = buildSettingsSections({ status: "ready", items: [] }).find((entry) => entry.id === "modules");
+    expect(section?.pluginId).toBeUndefined();
+    expect(section?.label).toBe("Modules");
+  });
+
+  it("module inconnu du catalogue : ajouté à la fin, nommé par son manifeste", () => {
     const sections = buildSettingsSections({
       status: "ready",
       items: [...FOUR, summary("zabbix", "Supervision Zabbix", true, false)],
@@ -92,13 +100,13 @@ describe("buildSettingsSections — une section par greffon réellement enregist
     expect(last?.pluginId).toBe("zabbix");
   });
 
-  it("manifeste sans nom exploitable : l'identifiant du greffon sert de libellé, rien n'est inventé", () => {
+  it("manifeste sans nom exploitable : l'identifiant du module sert de libellé, rien n'est inventé", () => {
     const nameless = summary("zabbix", "   ", true, true);
     const sections = buildSettingsSections({ status: "ready", items: [nameless] });
     expect(sections[sections.length - 1]?.label).toBe("zabbix");
   });
 
-  it("un greffon apparu deux fois n'ouvre pas deux sections", () => {
+  it("un module apparu deux fois n'ouvre pas deux sections", () => {
     const sections = buildSettingsSections({
       status: "ready",
       items: [summary("hycu", "Sauvegarde HYCU", true, true), summary("hycu", "Doublon", true, true)],

@@ -5,10 +5,14 @@
  * Le registre ne contient QUE les greffons réellement chargés : c'est plugins/loader.ts qui décide
  * lesquels importer (les actifs) et qui les retire d'ici dès qu'ils sont mis en pause. Un greffon
  * absent de ce registre n'a donc pas seulement disparu de l'écran — son module n'est pas chargé.
+ *
+ * Ce qui entre ici a ses appels BORNÉS dans le temps (plugins/guard.ts) : aucun appelant du socle
+ * n'a à se souvenir de poser un délai sur test/snapshot/graph/actions.
  */
 
 import { CORE_API_VERSION, publicManifest, validatePlugin } from "@quai/plugin-contract";
 import type { Plugin, PluginValidationIssue, PublicPluginManifest } from "@quai/plugin-contract";
+import { guardPluginCalls } from "./guard.js";
 
 export class PluginRegistrationError extends Error {
   readonly issues: PluginValidationIssue[];
@@ -44,8 +48,11 @@ export function registerPlugin(candidate: unknown): Plugin {
     ]);
   }
 
-  registry.set(id, plugin);
-  return plugin;
+  // Ce qui entre au registre, c'est le greffon dont les appels sont BORNÉS dans le temps : plus
+  // aucun appelant n'a à se souvenir de poser un délai (voir plugins/guard.ts).
+  const bounded = guardPluginCalls(plugin);
+  registry.set(id, bounded);
+  return bounded;
 }
 
 /** Retire un greffon mis en pause. `false` s'il n'était pas enregistré — jamais une exception :
