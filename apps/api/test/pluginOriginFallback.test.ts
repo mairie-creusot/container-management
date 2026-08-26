@@ -58,6 +58,6 @@ describe("Hors image, le catalogue interne reprend son rôle", () => {
 
     await loadActivePlugins();
 
-    expect(listPlugins().map((plugin) => plugin.manifest.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
+    expect(listPlugins().map((plugin) => plugin.manifest.id)).toEqual(["3cx", "demo", "glpi", "hycu", "nutanix"]);
   });
 });

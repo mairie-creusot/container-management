@@ -26,8 +26,22 @@ export interface ModuleInventoryEntry {
   removable: boolean;
 }
 
+/** Module livré par l'image, tel que le serveur le décrit — y compris désinstallé, auquel cas son
+ * paquet est resté dans l'image et il est réinstallable. */
+export interface OriginModuleEntry {
+  id: string;
+  name: string;
+  version: string | null;
+  installed: boolean;
+  removed: boolean;
+  removedAt: string | null;
+  removedBy: string | null;
+}
+
 export interface ModuleInventory {
   entries: ModuleInventoryEntry[];
+  /** Modules d'origine de l'image — vide si le serveur n'en publie pas. */
+  originModules: OriginModuleEntry[];
   /** Libellés des clés de confiance — vide si le serveur ne les nomme pas. */
   trustKeys: string[];
   /** Nombre de clés de confiance configurées ; `null` = le serveur ne le dit pas. */
@@ -153,6 +167,37 @@ function readEntry(value: unknown, defaultOrigin: ModuleOrigin): ModuleInventory
 const ENTRY_KEYS = ["modules", "plugins", "items", "installed"] as const;
 const TRUST_KEY_KEYS = ["trustedKeyIds", "trustKeys", "trustedKeys", "keys"] as const;
 
+/** Un module d'origine n'est retenu que s'il dit son identifiant : le reste peut manquer sans que
+ * rien ne soit supposé à sa place. */
+function readOriginEntry(value: unknown): OriginModuleEntry | null {
+  if (!isRecord(value)) return null;
+  const id = firstString(value, ["id"]);
+  if (id === null) return null;
+  return {
+    id,
+    name: firstString(value, ["name"]) ?? id,
+    version: firstString(value, ["version"]),
+    installed: firstBoolean(value, ["installed"]) ?? false,
+    removed: firstBoolean(value, ["removed"]) ?? false,
+    removedAt: firstString(value, ["removedAt"]),
+    removedBy: firstString(value, ["removedBy"]),
+  };
+}
+
+function readOriginModules(raw: Record<string, unknown>): OriginModuleEntry[] {
+  const candidate = raw["origin"];
+  if (!Array.isArray(candidate)) return [];
+  const out: OriginModuleEntry[] = [];
+  const seen = new Set<string>();
+  for (const item of candidate as unknown[]) {
+    const entry = readOriginEntry(item);
+    if (!entry || seen.has(entry.id)) continue;
+    seen.add(entry.id);
+    out.push(entry);
+  }
+  return out;
+}
+
 function readTrustKeys(raw: Record<string, unknown>): string[] {
   for (const key of TRUST_KEY_KEYS) {
     const candidate = raw[key];
@@ -211,6 +256,7 @@ export function normalizeModuleInventory(
 
   return {
     entries,
+    originModules: readOriginModules(raw),
     trustKeys: readTrustKeys(raw),
     trustKeyCount: readTrustKeyCount(raw),
     installSupported: firstBoolean(raw, ["installSupported", "canInstall", "installAvailable"]),
@@ -227,6 +273,11 @@ export interface ModuleRow extends ModuleInventoryEntry {
   /** `null` = le serveur ne l'a pas dit — jamais supposé activé ni désactivé. */
   enabled: boolean | null;
   configured: boolean | null;
+  /** « removed » = module d'origine désinstallé volontairement : rien n'est chargé, mais son paquet
+   * est resté dans l'image et il est réinstallable. Sans cette ligne il deviendrait introuvable. */
+  state: "present" | "removed";
+  removedAt: string | null;
+  removedBy: string | null;
 }
 
 function activationOf(plugins: PluginsNavSource, id: string): { enabled: boolean | null; configured: boolean | null } {
@@ -252,6 +303,31 @@ function rowFromSummary(summary: PluginSummary, origin: ModuleOrigin, trust: Mod
     removable: false,
     enabled: summary.enabled,
     configured: summary.configured,
+    state: "present",
+    removedAt: null,
+    removedBy: null,
+  };
+}
+
+/** Module d'origine DÉSINSTALLÉ : rien n'est chargé, donc ni confiance ni activation à afficher —
+ * seulement de quoi le reconnaître et le réinstaller. */
+function rowFromRemovedOrigin(entry: OriginModuleEntry): ModuleRow {
+  return {
+    id: entry.id,
+    name: entry.name,
+    version: entry.version,
+    origin: "builtin",
+    trust: "builtin",
+    signedBy: null,
+    reason: null,
+    installedAt: null,
+    installedBy: null,
+    removable: false,
+    enabled: null,
+    configured: null,
+    state: "removed",
+    removedAt: entry.removedAt,
+    removedBy: entry.removedBy,
   };
 }
 
@@ -281,9 +357,26 @@ export function deriveModuleRows(source: ModuleInventorySource, plugins: Plugins
   }
 
   for (const entry of installed) {
-    rows.push({ ...entry, ...activationOf(plugins, entry.id) });
+    rows.push({ ...entry, ...activationOf(plugins, entry.id), state: "present", removedAt: null, removedBy: null });
+  }
+
+  // Modules d'origine que l'admin a retirés : leur paquet n'a pas quitté l'image. Sans cette ligne,
+  // désinstaller une intégration livrée la ferait disparaître de l'écran qui sert à la remettre.
+  if (source.status === "ready") {
+    for (const entry of source.inventory.originModules) {
+      if (!entry.removed || seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      rows.push(rowFromRemovedOrigin(entry));
+    }
   }
   return rows;
+}
+
+/** Le serveur sait-il réinstaller ce module depuis l'image ? Vrai seulement pour un module d'origine
+ * réellement annoncé comme retiré — jamais pour un module tiers, dont le paquet n'existe plus. */
+export function moduleRestorable(row: ModuleRow, source: ModuleInventorySource): boolean {
+  if (row.state !== "removed" || source.status !== "ready") return false;
+  return source.inventory.originModules.some((entry) => entry.id === row.id && entry.removed);
 }
 
 export type ModuleInstallAvailability = "ready" | "no-inventory" | "unsupported" | "no-trust-key";

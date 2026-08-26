@@ -181,6 +181,13 @@ export default function SettingsPage() {
         <nav className="settings-rail" aria-label="Réglages par intégration">
           {sections.map((section) => {
             const Icon = section.icon;
+            // Un module mis en pause garde sa section — c'est par elle qu'on le réactive — mais il ne
+            // doit pas se lire comme un module en service : le dire ici évite de chercher longtemps
+            // pourquoi ses données ont disparu du reste de l'application.
+            const paused =
+              section.pluginId !== undefined &&
+              plugins.status === "ready" &&
+              plugins.items.some((entry) => entry.manifest.id === section.pluginId && !entry.enabled);
             return (
               <button
                 key={section.id}
@@ -193,6 +200,7 @@ export default function SettingsPage() {
                   <Icon />
                 </span>
                 <span className="settings-rail__label">{section.label}</span>
+                {paused && <span className="settings-rail__paused">En pause</span>}
               </button>
             );
           })}

@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Plugin, PluginGraphContribution, PluginGraphLinks } from "@quai/plugin-contract";
 
 /**
@@ -182,8 +183,20 @@ describe("Chargement à la demande des greffons", () => {
     expect(loads).toHaveLength(2);
   });
 
+  it("chaque greffon livré déclare le répertoire RÉEL de son module", async () => {
+    // L'empaquetage d'origine écrit dans chaque paquet un chemin en dur vers ce répertoire
+    // (scripts/build-origin-plugins.mjs). Déduire ce chemin de l'identifiant avait produit un paquet
+    // 3CX visant "plugins/3cx" — inexistant, le module vivant dans "threecx" : signature valide,
+    // import impossible, intégration absente de l'interface sans qu'aucun build n'échoue.
+    const pluginsRoot = fileURLToPath(new URL("../src/plugins/", import.meta.url));
+    for (const entry of BUILTIN_PLUGINS) {
+      const dir = entry.hostDir ?? entry.id;
+      await expect(fs.stat(path.join(pluginsRoot, dir, "index.ts")), `greffon "${entry.id}"`).resolves.toBeDefined();
+    }
+  });
+
   it("le catalogue connaît un greffon même en pause, et sait le charger pour l'administration", async () => {
-    expect(BUILTIN_PLUGINS.map((entry) => entry.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
+    expect(BUILTIN_PLUGINS.map((entry) => entry.id)).toEqual(["3cx", "demo", "glpi", "hycu", "nutanix"]);
     expect(isBuiltinPluginId("hycu")).toBe(true);
     expect(isBuiltinPluginId("inexistant")).toBe(false);
 

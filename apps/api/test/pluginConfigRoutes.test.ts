@@ -177,7 +177,7 @@ describe("GET /api/plugins — manifeste public + état réel", () => {
     expect(response.statusCode).toBe(200);
     const body = response.json() as PluginListBody;
 
-    expect(body.plugins.map((plugin) => plugin.manifest.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
+    expect(body.plugins.map((plugin) => plugin.manifest.id)).toEqual(["3cx", "demo", "glpi", "hycu", "nutanix"]);
     const hycu = body.plugins.find((plugin) => plugin.manifest.id === "hycu");
     expect(hycu).toMatchObject({ configured: true, enabled: true });
     expect(hycu?.manifest.secretFields).toEqual(["password"]);
@@ -666,18 +666,31 @@ describe("PUT /api/plugins/:id/enabled — activer/désactiver sans rien perdre"
     expect(response.json()).toMatchObject({ configured: true, enabled: false });
   });
 
-  it("409 tant que rien n'est configuré : on ne crée jamais une entrée vide pour porter un booléen", async () => {
+  it("un greffon jamais configuré se met quand même en pause, sans se dire configuré pour autant", async () => {
+    // La pause est ce qui empêche le module d'être IMPORTÉ : la refuser à un module fraîchement
+    // installé rendrait l'interrupteur inopérant là où il compte le plus.
     app = buildServer();
-    const response = await app.inject({
+    const off = await app.inject({
+      method: "PUT",
+      url: "/api/plugins/glpi/enabled",
+      cookies: adminCookie(),
+      payload: { enabled: false },
+    });
+
+    expect(off.statusCode).toBe(200);
+    expect(off.json()).toEqual({ configured: false, enabled: false, config: {} });
+    expect(await isPluginDisabled("glpi")).toBe(true);
+    // L'entrée écrite ne porte AUCUNE configuration : rien n'a été inventé pour loger le booléen.
+    expect((await getCurrent()).integrations?.glpi).toEqual({ enabled: false, config: {} });
+
+    const on = await app.inject({
       method: "PUT",
       url: "/api/plugins/glpi/enabled",
       cookies: adminCookie(),
       payload: { enabled: true },
     });
-
-    expect(response.statusCode).toBe(409);
-    expect((response.json() as { error: string }).error).toContain("glpi");
-    expect((await getCurrent()).integrations?.glpi).toBeUndefined();
+    expect(on.json()).toEqual({ configured: false, enabled: true, config: {} });
+    expect(await isPluginDisabled("glpi")).toBe(false);
   });
 
   it("400 si `enabled` n'est pas un booléen", async () => {

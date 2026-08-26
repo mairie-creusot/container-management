@@ -629,7 +629,7 @@ describe("registre de greffons", () => {
     // module de greffon n'est importé avant que le serveur ne soit prêt.
     await app.ready();
     // Seules les intégrations RÉELLEMENT migrées (plugins/builtins.ts) sont enregistrées.
-    expect(listPlugins().map((plugin) => plugin.manifest.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
+    expect(listPlugins().map((plugin) => plugin.manifest.id)).toEqual(["3cx", "demo", "glpi", "hycu", "nutanix"]);
     expect(getPlugin("example")).toBeUndefined();
   });
 
@@ -685,7 +685,7 @@ describe("GET /api/plugins", () => {
     const response = await app.inject({ method: "GET", url: "/api/plugins", cookies: cookieFor(["viewer"]) });
     expect(response.statusCode).toBe(200);
     const body = response.json() as { plugins: Array<{ manifest: { id: string }; enabled: boolean; configured: boolean }> };
-    expect(body.plugins.map((plugin) => plugin.manifest.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
+    expect(body.plugins.map((plugin) => plugin.manifest.id)).toEqual(["3cx", "demo", "glpi", "hycu", "nutanix"]);
     // Rien n'est configuré dans ce CONFIG_PATH isolé — mais rien n'a été mis en pause non plus :
     // `enabled` reste vrai, seule une désactivation explicite le fait tomber.
     expect(body.plugins.every((plugin) => plugin.configured === false && plugin.enabled === true)).toBe(true);

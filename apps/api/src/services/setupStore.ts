@@ -1217,14 +1217,20 @@ export async function listSafeIntegrationConfigs(): Promise<Record<string, SafeI
   return out;
 }
 
-/** Active/désactive un greffon SANS toucher à sa configuration (secrets compris). `null` si le
- * greffon n'a aucune configuration écrite : on ne crée jamais une entrée vide à la volée. */
-export async function setIntegrationEnabled(pluginId: string, enabled: boolean): Promise<SafeIntegrationConfig | null> {
+/**
+ * Active/désactive un greffon SANS toucher à sa configuration (secrets compris).
+ *
+ * Un greffon JAMAIS configuré est activé implicitement (voir plugins/activation.ts) : le mettre en
+ * pause exige donc d'écrire une entrée, sinon l'interrupteur n'aurait aucune prise sur un module
+ * fraîchement installé et l'admin ne pourrait pas empêcher son code d'être importé. L'entrée créée
+ * ne porte AUCUNE configuration — elle ne rend donc pas le greffon « configuré ».
+ */
+export async function setIntegrationEnabled(pluginId: string, enabled: boolean): Promise<SafeIntegrationConfig> {
   const id = requireIntegrationId(pluginId);
   const current = await getCurrent();
   const existing = findIntegrationEntry(current, id);
-  if (!existing) return null;
-  const next = await writeIntegrations(current, { ...(current.integrations ?? {}), [id]: { ...existing, enabled } });
+  const entry: SetupIntegrationEntry = existing ? { ...existing, enabled } : { enabled, config: {} };
+  const next = await writeIntegrations(current, { ...(current.integrations ?? {}), [id]: entry });
   return toSafeIntegrationConfig(next.integrations?.[id]);
 }
 

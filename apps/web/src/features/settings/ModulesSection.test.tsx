@@ -126,7 +126,7 @@ describe("inventaire — livré / installé, confiance, activation", () => {
     expect(await screen.findByText("Sauvegarde HYCU")).toBeTruthy();
     expect(screen.getAllByText("Livré avec l'application")).toHaveLength(1);
     expect(screen.getAllByText("Installé")).toHaveLength(2);
-    expect(screen.getByText("2.1.0")).toBeTruthy();
+    expect(screen.getByText(/zabbix · v2\.1\.0/)).toBeTruthy();
     // La clé nommée par le serveur : dans la liste des clés de confiance ET sur le module signé.
     expect(screen.getAllByText("ops-2026")).toHaveLength(2);
     expect(screen.getAllByText("Signature vérifiée")).toHaveLength(1);
@@ -143,6 +143,8 @@ describe("inventaire — livré / installé, confiance, activation", () => {
     expect(screen.getByText("Signature refusée")).toBeTruthy();
     // Jamais présenté comme prêt à l'emploi : pas de renvoi vers sa configuration.
     expect(card?.querySelector("button")?.textContent).toBe("Désinstaller");
+    // Ni d'interrupteur : rien de ce module n'est chargé, il n'y a rien à mettre en pause.
+    expect(card?.querySelector("input[role='switch']")).toBeNull();
   });
 
   it("un module livré avec l'application ne propose pas de désinstallation", async () => {
@@ -152,6 +154,90 @@ describe("inventaire — livré / installé, confiance, activation", () => {
     const card = name.closest(".module-card");
     const labels = Array.from(card?.querySelectorAll("button") ?? []).map((button) => button.textContent);
     expect(labels).not.toContain("Désinstaller");
+  });
+});
+
+describe("interrupteur d'activation — la carte commande vraiment le module", () => {
+  function switchOf(name: string): HTMLInputElement {
+    const card = screen.getByText(name).closest(".module-card");
+    return card!.querySelector("input[role='switch']") as HTMLInputElement;
+  }
+
+  it("mettre en pause appelle la route et l'écran suit sans rechargement", async () => {
+    routes["PUT /api/plugins/zabbix/enabled"] = {
+      status: 200,
+      payload: { configured: true, enabled: false, config: {} },
+    };
+    renderSection([HYCU, ZABBIX]);
+
+    await screen.findByText("Supervision Zabbix");
+    expect(switchOf("Supervision Zabbix").checked).toBe(true);
+    fireEvent.click(switchOf("Supervision Zabbix"));
+
+    await waitFor(() => expect(callsTo("PUT", "/api/plugins/zabbix/enabled")).toHaveLength(1));
+    await waitFor(() => expect(switchOf("Supervision Zabbix").checked).toBe(false));
+    expect(screen.getByText(/mis en pause/)).toBeTruthy();
+  });
+
+  it("refus du serveur : son motif est affiché et l'interrupteur ne bouge pas", async () => {
+    routes["PUT /api/plugins/zabbix/enabled"] = {
+      status: 403,
+      payload: { error: "Insufficient role: admin required" },
+    };
+    renderSection([HYCU, ZABBIX]);
+
+    await screen.findByText("Supervision Zabbix");
+    fireEvent.click(switchOf("Supervision Zabbix"));
+
+    expect(await screen.findByText("Insufficient role: admin required")).toBeTruthy();
+    expect(switchOf("Supervision Zabbix").checked).toBe(true);
+  });
+
+  it("module installé que le serveur n'a pas chargé : l'écran le dit au lieu d'un interrupteur trompeur", async () => {
+    // « zabbix » est dans l'inventaire mais absent de GET /api/plugins : exactement le cas de 3CX
+    // dont le paquet visait un module inexistant.
+    renderSection([HYCU]);
+
+    await screen.findByText("Supervision Zabbix");
+    expect(switchOf("Supervision Zabbix").disabled).toBe(true);
+    expect(screen.getByText(/le serveur ne l'a pas chargé/)).toBeTruthy();
+  });
+});
+
+describe("module d'origine désinstallé — la carte d'où on le réinstalle", () => {
+  const REMOVED_INVENTORY = {
+    modules: [],
+    installAvailable: true,
+    trustedKeyIds: ["ops-2026"],
+    origin: [
+      {
+        id: "nutanix",
+        name: "Virtualisation Nutanix",
+        version: "1.0.0",
+        installed: false,
+        removed: true,
+        removedAt: "2026-08-26T07:15:00.000Z",
+        removedBy: "ybanas",
+      },
+    ],
+  };
+
+  it("il reste listé, dit qui l'a retiré, et se réinstalle depuis l'image", async () => {
+    routes["GET /api/plugins/installed"] = { status: 200, payload: REMOVED_INVENTORY };
+    routes["POST /api/plugins/installed/nutanix/restore"] = { status: 201, payload: {} };
+    renderSection([]);
+
+    const name = await screen.findByText("Virtualisation Nutanix");
+    const card = name.closest(".module-card");
+    expect(card?.className).toContain("module-card--removed");
+    expect(screen.getByText("Désinstallé")).toBeTruthy();
+    expect(screen.getByText("ybanas")).toBeTruthy();
+    // Rien n'est chargé : aucun interrupteur à manœuvrer.
+    expect(card?.querySelector("input[role='switch']")).toBeNull();
+
+    fireEvent.click(within(card as HTMLElement).getByRole("button", { name: "Réinstaller" }));
+    await waitFor(() => expect(callsTo("POST", "/api/plugins/installed/nutanix/restore")).toHaveLength(1));
+    expect(await screen.findByText(/réinstallé depuis l'image/)).toBeTruthy();
   });
 });
 

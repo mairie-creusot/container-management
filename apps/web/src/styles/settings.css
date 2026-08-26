@@ -66,6 +66,19 @@
   white-space: nowrap;
 }
 
+/* Module mis en pause : sa section reste (c'est par elle qu'on le réactive) mais elle ne doit pas se
+   lire comme un module en service. */
+.settings-rail__paused {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--color-warning);
+  color: var(--color-warning);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
 .settings-panel {
   flex: 1;
   min-width: 0;
@@ -81,20 +94,23 @@
   color: var(--color-text-faint);
 }
 
-/* Section « Modules » (features/settings/ModulesSection.tsx) : une carte par module, celles dont la
-   signature n'est pas établie portant une bordure d'alerte pour ne jamais se confondre avec les
-   autres. */
-.modules-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+/* Section « Modules » (features/settings/ModulesSection.tsx) : une grille de cartes, une par module,
+   chacune portant son interrupteur. Celles dont la signature n'est pas établie ont une bordure
+   d'alerte pour ne jamais se confondre avec les autres ; un module d'origine désinstallé reste
+   visible, en retrait, parce que c'est de cette carte qu'on le réinstalle. */
+.modules-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 14px;
   margin-bottom: 20px;
+  align-items: start;
 }
 
 .module-card {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  height: 100%;
 }
 
 .module-card--untrusted {
@@ -102,17 +118,166 @@
   background: var(--color-critical-bg);
 }
 
+.module-card--removed {
+  border-style: dashed;
+  opacity: 0.85;
+}
+
 .module-card__head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  flex-wrap: wrap;
+}
+
+.module-card__identity {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .module-card__name {
   margin: 0;
   font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.module-card__id {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--color-text-faint);
+}
+
+/* Ce que le module apporte réellement (page, nœuds du graphe, actions, réglages) : sans cette ligne,
+   un module qui n'ajoute aucune page se lit comme un module en panne. */
+.module-card__contributions {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+}
+
+.module-card__contributions span {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10.5px;
+  color: var(--color-text-faint);
+  margin-right: 6px;
+}
+
+.module-card__meta {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12.5px;
+}
+
+.module-card__meta > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.module-card__meta dt {
+  color: var(--color-text-faint);
+}
+
+.module-card__meta dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--color-text-muted);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+/* Les actions restent en bas de carte quelle que soit la hauteur du contenu au-dessus. */
+.module-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+/* Interrupteur d'activation — bascule réelle, pas une case à cocher : c'est l'action principale de
+   la carte. Inerte (et dit pourquoi) quand le serveur n'a pas communiqué l'état du module. */
+.module-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  cursor: pointer;
+  user-select: none;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.module-switch input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.module-switch__track {
+  position: relative;
+  display: inline-block;
+  width: 34px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.module-switch__track::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--color-text-faint);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.module-switch input:checked + .module-switch__track {
+  background: var(--color-success-bg);
+  border-color: var(--color-success);
+}
+
+.module-switch input:checked + .module-switch__track::after {
+  transform: translateX(16px);
+  background: var(--color-success);
+}
+
+.module-switch input:focus-visible + .module-switch__track {
+  outline: 2px solid var(--accent-start);
+  outline-offset: 2px;
+}
+
+.module-switch input:disabled + .module-switch__track {
+  opacity: 0.5;
+}
+
+.module-switch:has(input:disabled) {
+  cursor: default;
+}
+
+.module-switch--unknown .module-switch__label {
+  color: var(--color-warning);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .module-switch__track,
+  .module-switch__track::after {
+    transition: none;
+  }
 }
 
 .module-notice {

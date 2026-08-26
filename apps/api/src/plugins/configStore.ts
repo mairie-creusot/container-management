@@ -24,7 +24,11 @@ export function configStoreOf(plugin: Plugin): PluginConfigStore {
   return {
     async load(): Promise<Record<string, unknown> | null> {
       const entry = await getEffectiveIntegrationConfig(id);
-      return entry ? entry.config : null;
+      // Une entrée SANS aucun champ n'est pas une configuration : elle n'existe que pour porter une
+      // mise en pause explicite d'un greffon jamais configuré (setupStore#setIntegrationEnabled).
+      // La rendre ici ferait dire « Configuration : enregistrée » là où rien n'a jamais été saisi.
+      if (!entry || Object.keys(entry.config).length === 0) return null;
+      return entry.config;
     },
     async save(config: Record<string, unknown>): Promise<void> {
       await setIntegrationConfig(id, config, secretFields);

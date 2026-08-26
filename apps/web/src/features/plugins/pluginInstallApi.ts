@@ -59,3 +59,15 @@ export async function uninstallModule(id: string): Promise<ModuleMutationOutcome
     return { ok: false, reason: reasonOf(error, "Désinstallation impossible.") };
   }
 }
+
+/** Réinstalle un module d'ORIGINE depuis l'image — sa configuration, retirée à la désinstallation,
+ * reste à ressaisir : rien n'est restauré à sa place. */
+export async function restoreModule(id: string): Promise<ModuleMutationOutcome> {
+  try {
+    await apiPost<unknown>(`${modulePath(id)}/restore`, {});
+    return { ok: true };
+  } catch (error) {
+    if (isMissingRoute(error)) return { ok: false, reason: "Ce serveur n'expose pas la réinstallation de modules." };
+    return { ok: false, reason: reasonOf(error, "Réinstallation impossible.") };
+  }
+}

@@ -63,10 +63,6 @@ export type PluginTestResult =
   | { ok: true; pluginId: string; test: PluginTestOutcome }
   | { ok: false; pluginId: string; reason: string };
 
-/** Réponse du serveur à une activation sans configuration (409) — traduite, jamais servie brute. */
-export const NOT_CONFIGURED_MESSAGE =
-  "Ce module n'a aucune configuration enregistrée : renseignez la connexion et enregistrez-la avant de l'activer.";
-
 function errorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : fallback;
 }
@@ -147,7 +143,8 @@ export const removePluginConfig = createAsyncThunk<PluginConfigResult, string>(
   },
 );
 
-/** Bascule seule : la configuration n'est ni relue ni réécrite. 409 = greffon jamais configuré. */
+/** Bascule seule : la configuration n'est ni relue ni réécrite, et un module jamais configuré se met
+ * en pause comme les autres — c'est cet état qui empêche son code d'être chargé. */
 export const setPluginEnabled = createAsyncThunk<PluginConfigResult, { pluginId: string; enabled: boolean }>(
   "plugins/setEnabled",
   async ({ pluginId, enabled }) => {
@@ -158,9 +155,8 @@ export const setPluginEnabled = createAsyncThunk<PluginConfigResult, { pluginId:
       if (!view) return { ok: false, pluginId, reason: "Le serveur n'a pas confirmé la bascule." };
       return { ok: true, pluginId, view };
     } catch (error) {
-      if (error instanceof ApiError && error.status === 409) {
-        return { ok: false, pluginId, reason: NOT_CONFIGURED_MESSAGE };
-      }
+      // Le motif du serveur est rendu tel quel : lui substituer une phrase générique masquerait la
+      // cause réelle d'un refus (droits, module retiré entre-temps…).
       return { ok: false, pluginId, reason: errorMessage(error, "Activation impossible.") };
     }
   },
@@ -177,8 +173,14 @@ function entryOf(state: PluginsState, pluginId: string): PluginConfigEntry {
   return state.configs[pluginId]!;
 }
 
-/** Applique la vue renvoyée par une route de configuration : c'est elle qui fait foi ensuite. */
-function applyView(entry: PluginConfigEntry, view: PluginConfigView): void {
+/**
+ * Applique la vue renvoyée par une route de configuration : c'est elle qui fait foi ensuite. La
+ * LISTE est alignée au passage — c'est elle qui alimente le tiroir « Extensions », la page Modules
+ * et les sections de Réglages. Sans cet alignement, une bascule restait invisible partout ailleurs
+ * que dans la section qui l'avait déclenchée, jusqu'à un rechargement de la liste.
+ */
+function applyView(state: PluginsState, pluginId: string, view: PluginConfigView): void {
+  const entry = entryOf(state, pluginId);
   entry.status = "ready";
   entry.configured = view.configured;
   entry.enabled = view.enabled;
@@ -186,6 +188,12 @@ function applyView(entry: PluginConfigEntry, view: PluginConfigView): void {
   entry.revision += 1;
   entry.error = null;
   entry.enabledError = null;
+
+  const summary = state.items.find((item) => item.manifest.id === pluginId);
+  if (summary) {
+    summary.enabled = view.enabled;
+    summary.configured = view.configured;
+  }
 }
 
 const pluginsSlice = createSlice({
@@ -232,7 +240,7 @@ const pluginsSlice = createSlice({
           entry.error = action.payload.reason;
           return;
         }
-        applyView(entry, action.payload.view);
+        applyView(state, action.payload.pluginId, action.payload.view);
       })
 
       .addCase(savePluginConfig.pending, (state, action) => {
@@ -248,7 +256,7 @@ const pluginsSlice = createSlice({
           entry.error = action.payload.reason;
           return;
         }
-        applyView(entry, action.payload.view);
+        applyView(state, action.payload.pluginId, action.payload.view);
       })
 
       .addCase(testPluginConfig.pending, (state, action) => {
@@ -279,7 +287,7 @@ const pluginsSlice = createSlice({
           entry.error = action.payload.reason;
           return;
         }
-        applyView(entry, action.payload.view);
+        applyView(state, action.payload.pluginId, action.payload.view);
       })
 
       .addCase(setPluginEnabled.pending, (state, action) => {
@@ -294,7 +302,7 @@ const pluginsSlice = createSlice({
           entry.enabledError = action.payload.reason;
           return;
         }
-        applyView(entry, action.payload.view);
+        applyView(state, action.payload.pluginId, action.payload.view);
       });
   },
 });

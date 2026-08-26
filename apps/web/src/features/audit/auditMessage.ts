@@ -204,6 +204,7 @@ export function describeAction(event: AuditEvent, plugins?: ReadonlyMap<string, 
   }
   if (resource === "plugins" && idOrAction) {
     if (idOrAction === "installed") {
+      if (subId === "restore") return `a réinstallé le module « ${shortId(subAction)} » depuis l'image`;
       if (method === "POST") return "a installé un module";
       if (method === "DELETE") return `a désinstallé le module « ${shortId(subAction)} »`;
     }
@@ -219,7 +220,9 @@ export function describeAction(event: AuditEvent, plugins?: ReadonlyMap<string, 
     if (subAction === "config" && subId === "test") return `a testé la connexion du module « ${pluginName} »`;
     if (subAction === "config" && method === "PUT") return `a configuré le module « ${pluginName} »`;
     if (subAction === "config" && method === "DELETE") return `a retiré la configuration du module « ${pluginName} »`;
-    if (subAction === "enabled") return `a activé ou désactivé le module « ${pluginName} »`;
+    // Le corps de la requête n'est jamais journalisé (il peut porter un secret) : le sens de la
+    // bascule n'est donc pas connu ici, et on ne l'invente pas.
+    if (subAction === "enabled") return `a changé l'activation du module « ${pluginName} »`;
   }
   if (resource === "lxc") {
     if (idOrAction === "config" && method === "PUT") return "a configuré l'hôte LXD";

@@ -144,3 +144,31 @@ export function derivePluginNavItems(
 export function isPluginView(view: ViewId, catalog: readonly PluginNavDefinition[] = PLUGIN_NAV_CATALOG): boolean {
   return catalog.some((definition) => definition.view === view);
 }
+
+/**
+ * Ce que ce module APPORTE réellement à l'application, déduit de son manifeste et du catalogue de
+ * pages — jamais une description écrite à la main.
+ *
+ * Cette liste existe parce que « installé mais absent du menu » se lisait comme une panne : Nutanix
+ * n'apporte pas de page à lui, il alimente le graphe et sa section de réglages. Le dire sur la carte
+ * du module évite de chercher une entrée de menu qui n'a jamais eu lieu d'être.
+ */
+export function pluginContributions(
+  manifest: PluginManifest,
+  catalog: readonly PluginNavDefinition[] = PLUGIN_NAV_CATALOG,
+): string[] {
+  const out: string[] = [];
+
+  const page = catalog.find((definition) => definition.pluginId === manifest.id);
+  if (page) out.push(`Page « ${page.label} »`);
+
+  const kinds = manifest.permissions?.graphNodeKinds ?? [];
+  if (kinds.length > 0) out.push(kinds.length === 1 ? "Nœuds du graphe (1 type)" : `Nœuds du graphe (${kinds.length} types)`);
+
+  const actions = Object.keys(manifest.actions ?? {}).length;
+  if (actions > 0) out.push(actions === 1 ? "1 action" : `${actions} actions`);
+
+  // Toujours vrai pour un module chargé : son formulaire est déduit de `configSchema`.
+  out.push("Section de réglages");
+  return out;
+}

@@ -28,6 +28,12 @@ export interface PluginModuleEntry {
   id: string;
   /** Nom sous lequel le module exporte son greffon. */
   exportName: string;
+  /** Répertoire du module SOUS `plugins/`, quand il ne porte pas le nom de l'identifiant — le
+   * greffon « 3cx » vit dans `threecx/`, un identifiant ne pouvant pas commencer par un chiffre en
+   * JavaScript. Lu par l'empaquetage d'origine (scripts/build-origin-plugins.mjs), qui doit viser le
+   * module RÉEL : déduire ce chemin de l'identifiant produisait un paquet 3CX pointant vers un
+   * fichier inexistant, donc une intégration silencieusement absente (constaté le 26/08/2026). */
+  hostDir?: string;
   /** Paquet d'ORIGINE de cette image — prouvé par la clé qui a signé le paquet, jamais déclaré. */
   origin?: boolean;
   /** Import DYNAMIQUE — appelé uniquement si le greffon est actif. */
@@ -35,10 +41,11 @@ export interface PluginModuleEntry {
 }
 
 export const BUILTIN_PLUGINS: readonly PluginModuleEntry[] = [
-  { id: "3cx", exportName: "threecxPlugin", load: () => import("./threecx/index.js") },
-  { id: "glpi", exportName: "glpiPlugin", load: () => import("./glpi/index.js") },
-  { id: "hycu", exportName: "hycuPlugin", load: () => import("./hycu/index.js") },
-  { id: "nutanix", exportName: "nutanixPlugin", load: () => import("./nutanix/index.js") },
+  { id: "3cx", exportName: "threecxPlugin", hostDir: "threecx", load: () => import("./threecx/index.js") },
+  { id: "demo", exportName: "demoPlugin", hostDir: "demo", load: () => import("./demo/index.js") },
+  { id: "glpi", exportName: "glpiPlugin", hostDir: "glpi", load: () => import("./glpi/index.js") },
+  { id: "hycu", exportName: "hycuPlugin", hostDir: "hycu", load: () => import("./hycu/index.js") },
+  { id: "nutanix", exportName: "nutanixPlugin", hostDir: "nutanix", load: () => import("./nutanix/index.js") },
 ];
 
 /** Le greffon fait-il partie du catalogue livré ? Vrai même s'il est en pause (donc absent du

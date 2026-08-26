@@ -3,6 +3,7 @@ import {
   deriveModuleRows,
   moduleInstallAvailability,
   moduleIsTrusted,
+  moduleRestorable,
   moduleUninstallable,
   normalizeModuleInventory,
   type ModuleInventory,
@@ -232,6 +233,59 @@ describe("moduleInstallAvailability — jamais un bouton dont l'échec est certa
 
   it("au moins une clé et aucun refus : installation proposée", () => {
     expect(moduleInstallAvailability(readySource(INVENTORY_PAYLOAD))).toBe("ready");
+  });
+});
+
+describe("modules d'origine désinstallés — la carte d'où on les réinstalle", () => {
+  const plugins = { status: "ready" as const, items: [summary("hycu", "Sauvegarde HYCU", true, true)] };
+  const payload = {
+    modules: [],
+    installAvailable: true,
+    trustedKeyIds: ["ops-2026"],
+    origin: [
+      { id: "hycu", name: "Sauvegarde HYCU", version: "1.0.0", installed: true, removed: false },
+      {
+        id: "nutanix",
+        name: "Virtualisation Nutanix",
+        version: "1.0.0",
+        installed: false,
+        removed: true,
+        removedAt: "2026-08-26T07:15:00.000Z",
+        removedBy: "ybanas",
+      },
+    ],
+  };
+
+  it("un module d'origine retiré reste listé, avec qui l'a retiré et quand", () => {
+    const rows = deriveModuleRows(readySource(payload), plugins);
+    const nutanix = rows.find((row) => row.id === "nutanix");
+    expect(nutanix).toMatchObject({
+      state: "removed",
+      name: "Virtualisation Nutanix",
+      removedBy: "ybanas",
+      removedAt: "2026-08-26T07:15:00.000Z",
+      // Rien n'est chargé : ni activation ni configuration ne sont supposées.
+      enabled: null,
+      configured: null,
+    });
+  });
+
+  it("un module d'origine encore installé n'est pas dupliqué par sa ligne d'origine", () => {
+    const rows = deriveModuleRows(readySource(payload), plugins);
+    expect(rows.filter((row) => row.id === "hycu")).toHaveLength(1);
+    expect(rows.find((row) => row.id === "hycu")?.state).toBe("present");
+  });
+
+  it("seul un module d'origine réellement retiré est réinstallable", () => {
+    const source = readySource(payload);
+    const rows = deriveModuleRows(source, plugins);
+    expect(moduleRestorable(rows.find((row) => row.id === "nutanix")!, source)).toBe(true);
+    expect(moduleRestorable(rows.find((row) => row.id === "hycu")!, source)).toBe(false);
+  });
+
+  it("serveur qui ne publie aucun module d'origine : aucune ligne inventée", () => {
+    const rows = deriveModuleRows(readySource(INVENTORY_PAYLOAD), plugins);
+    expect(rows.every((row) => row.state === "present")).toBe(true);
   });
 });
 

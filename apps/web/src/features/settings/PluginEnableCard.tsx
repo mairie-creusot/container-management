@@ -10,8 +10,9 @@ import {
 
 /**
  * Interrupteur Activer/Désactiver d'un module — la seule bascule, commune à la section générée et
- * aux sections encore écrites à la main. Elle reste manœuvrable même quand l'écran croit le module
- * non configuré : c'est le 409 du serveur qui tranche, traduit en une phrase au lieu d'une erreur brute.
+ * aux sections encore écrites à la main. Elle vaut aussi pour un module jamais configuré : c'est cet
+ * état qui empêche son code d'être chargé, le refuser rendrait l'interrupteur inopérant là où il
+ * compte le plus, sur un module fraîchement installé.
  */
 export default function PluginEnableCard({ pluginId }: { pluginId: string }) {
   const dispatch = useAppDispatch();
@@ -61,8 +62,8 @@ export default function PluginEnableCard({ pluginId }: { pluginId: string }) {
 
       {!configured && (
         <p className="create-container-hint" style={{ margin: 0 }}>
-          Ce module n'a aucune configuration enregistrée : il ne peut pas être activé tant que la connexion n'a pas
-          été renseignée et enregistrée.
+          Ce module n'a aucune configuration enregistrée : activé, il reste chargé mais n'a rien à interroger tant
+          que la connexion n'a pas été renseignée ici.
         </p>
       )}
 

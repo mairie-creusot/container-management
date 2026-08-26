@@ -67,8 +67,8 @@ describe("Aucune clé de confiance configurée", () => {
     app = buildServer();
     await app.ready();
 
-    for (const id of ["3cx", "glpi", "hycu", "nutanix"]) expect(hasPlugin(id)).toBe(true);
-    expect((await readPluginCatalog()).entries.map((entry) => entry.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
+    for (const id of ["3cx", "demo", "glpi", "hycu", "nutanix"]) expect(hasPlugin(id)).toBe(true);
+    expect((await readPluginCatalog()).entries.map((entry) => entry.id)).toEqual(["3cx", "demo", "glpi", "hycu", "nutanix"]);
   });
 
   it("l'installation d'un module externe est indisponible, avec un message explicite", async () => {

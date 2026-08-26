@@ -6,11 +6,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { Provider } from "react-redux";
 import { configureStore } from "@reduxjs/toolkit";
 import { ConfirmProvider } from "@/components/ConfirmProvider";
-import pluginsReducer, {
-  initialPluginsState,
-  NOT_CONFIGURED_MESSAGE,
-  type PluginsState,
-} from "@/features/plugins/pluginsSlice";
+import pluginsReducer, { initialPluginsState, type PluginsState } from "@/features/plugins/pluginsSlice";
 import type { PluginManifest, PluginSummary } from "@/features/plugins/pluginsModel";
 import PluginSettingsSection from "@/features/settings/PluginSettingsSection";
 
@@ -209,18 +205,27 @@ describe("interrupteur Activer/Désactiver", () => {
     await waitFor(() => expect((screen.getByRole("switch") as HTMLInputElement).checked).toBe(false));
   });
 
-  it("greffon non configuré : le 409 devient une phrase, jamais l'erreur brute du serveur", async () => {
-    routes["GET /api/plugins/hycu/config"] = { status: 200, payload: { configured: false, enabled: false, config: {} } };
-    routes["PUT /api/plugins/hycu/enabled"] = {
-      status: 409,
-      payload: { error: 'Le greffon "hycu" n\'a aucune configuration : configurez-le avant de l\'activer.' },
-    };
-    renderSection(summaryOf(false, false));
+  it("greffon jamais configuré : la mise en pause passe quand même, c'est elle qui décharge le module", async () => {
+    routes["GET /api/plugins/hycu/config"] = { status: 200, payload: { configured: false, enabled: true, config: {} } };
+    routes["PUT /api/plugins/hycu/enabled"] = { status: 200, payload: { configured: false, enabled: false, config: {} } };
+    renderSection(summaryOf(false, true));
+
+    const toggle = await screen.findByRole("switch");
+    await waitFor(() => expect((screen.getByRole("switch") as HTMLInputElement).checked).toBe(true));
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(callsTo("PUT", "/api/plugins/hycu/enabled")).toHaveLength(1));
+    expect(callsTo("PUT", "/api/plugins/hycu/enabled")[0]?.body).toEqual({ enabled: false });
+    await waitFor(() => expect((screen.getByRole("switch") as HTMLInputElement).checked).toBe(false));
+  });
+
+  it("un refus du serveur est rendu tel quel près de l'interrupteur", async () => {
+    routes["PUT /api/plugins/hycu/enabled"] = { status: 403, payload: { error: "Insufficient role: admin required" } };
+    renderSection(summaryOf(true, true));
 
     fireEvent.click(await screen.findByRole("switch"));
 
-    expect(await screen.findByText(NOT_CONFIGURED_MESSAGE)).toBeTruthy();
-    expect(screen.queryByText(/configurez-le avant de l'activer/)).toBeNull();
-    expect((screen.getByRole("switch") as HTMLInputElement).checked).toBe(false);
+    expect(await screen.findByText(/Insufficient role/)).toBeTruthy();
+    expect((screen.getByRole("switch") as HTMLInputElement).checked).toBe(true);
   });
 });

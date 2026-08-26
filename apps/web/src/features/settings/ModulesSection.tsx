@@ -1,17 +1,23 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useId, useMemo, useState, type FormEvent } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import { useConfirm } from "@/components/ConfirmProvider";
-import KeyValueList, { type KeyValueRow } from "@/components/KeyValueList";
 import StatusPill from "@/components/StatusPill";
 import { IconCheck, IconInfo } from "@/components/icons";
 import { openSettingsSection } from "@/features/ui/uiSlice";
-import { fetchPlugins } from "@/features/plugins/pluginsSlice";
-import { fetchModuleInventory, installModule, uninstallModule } from "@/features/plugins/pluginInstallApi";
+import { fetchPlugins, setPluginEnabled } from "@/features/plugins/pluginsSlice";
+import { pluginContributions } from "@/features/plugins/pluginsModel";
+import {
+  fetchModuleInventory,
+  installModule,
+  restoreModule,
+  uninstallModule,
+} from "@/features/plugins/pluginInstallApi";
 import {
   deriveModuleRows,
   moduleInstallAvailability,
   moduleIsTrusted,
   moduleOriginLabel,
+  moduleRestorable,
   moduleTrustLabel,
   moduleUninstallable,
   type ModuleInventorySource,
@@ -29,16 +35,6 @@ function trustPillStatus(trust: ModuleTrust): string {
   return "neutral";
 }
 
-function activationLabel(enabled: boolean | null): string {
-  if (enabled === null) return "Activation non communiquée";
-  return enabled ? "Activé" : "Désactivé";
-}
-
-function configurationLabel(configured: boolean | null): string {
-  if (configured === null) return "Non communiquée";
-  return configured ? "Enregistrée" : "Aucune";
-}
-
 /** Même format de date que le reste de l'application ; une date illisible reste affichée telle
  * quelle plutôt que remplacée. */
 function formatDate(iso: string): string {
@@ -53,16 +49,40 @@ function formatDate(iso: string): string {
   });
 }
 
-function detailRows(row: ModuleRow): KeyValueRow[] {
-  const rows: KeyValueRow[] = [
-    { key: "Identifiant", value: row.id },
-    { key: "Version", value: row.version ?? MISSING },
-    { key: "Configuration", value: configurationLabel(row.configured) },
-  ];
-  if (row.signedBy !== null) rows.push({ key: "Clé de signature", value: row.signedBy });
-  if (row.installedAt !== null) rows.push({ key: "Installé le", value: formatDate(row.installedAt) });
-  if (row.installedBy !== null) rows.push({ key: "Installé par", value: row.installedBy });
-  return rows;
+/**
+ * Interrupteur d'un module. Il ne prétend jamais commander ce qu'il ne commande pas : tant que la
+ * liste des modules chargés n'a pas répondu, il n'affirme aucun état ; et un module que le serveur
+ * n'a pas chargé le rend inerte, avec le motif juste en dessous.
+ */
+function ModuleSwitch({
+  row,
+  ready,
+  busy,
+  onToggle,
+}: {
+  row: ModuleRow;
+  ready: boolean;
+  busy: boolean;
+  onToggle: (enabled: boolean) => void;
+}) {
+  const id = useId();
+  const known = ready && row.enabled !== null;
+  return (
+    <label className={`module-switch${ready && !known ? " module-switch--unknown" : ""}`} htmlFor={id}>
+      <input
+        id={id}
+        type="checkbox"
+        role="switch"
+        checked={row.enabled === true}
+        disabled={busy || !known}
+        onChange={(event) => onToggle(event.target.checked)}
+      />
+      <span className="module-switch__track" aria-hidden="true" />
+      <span className="module-switch__label">
+        {busy ? "Bascule…" : !ready ? "Lecture…" : known ? (row.enabled ? "Activé" : "En pause") : "Non chargé"}
+      </span>
+    </label>
+  );
 }
 
 /**
@@ -80,6 +100,7 @@ export default function ModulesSection() {
   const [packageFile, setPackageFile] = useState<File | null>(null);
   const [installing, setInstalling] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [togglingId, setTogglingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -104,6 +125,29 @@ export default function ModulesSection() {
     return sections.find((section) => section.pluginId === pluginId)?.id ?? null;
   }
 
+  /** Ce que le module apporte — déduit de son manifeste, donc absent tant qu'il n'est pas chargé. */
+  function contributionsFor(pluginId: string): string[] {
+    const summary = plugins.items.find((entry) => entry.manifest.id === pluginId);
+    return summary ? pluginContributions(summary.manifest) : [];
+  }
+
+  async function handleToggle(row: ModuleRow, enabled: boolean) {
+    setTogglingId(row.id);
+    setActionError(null);
+    setNotice(null);
+    const action = await dispatch(setPluginEnabled({ pluginId: row.id, enabled }));
+    setTogglingId(null);
+    if (setPluginEnabled.fulfilled.match(action) && !action.payload.ok) {
+      setActionError(action.payload.reason);
+      return;
+    }
+    setNotice(
+      enabled
+        ? `Module « ${row.name} » activé : son code est chargé et ses données reviennent.`
+        : `Module « ${row.name} » mis en pause : son code n'est plus chargé, ses pages et ses données quittent QUAI.`,
+    );
+  }
+
   async function handleUninstall(row: ModuleRow) {
     const ok = await confirm({
       title: `Désinstaller ${row.name} ?`,
@@ -126,6 +170,21 @@ export default function ModulesSection() {
       return;
     }
     setNotice(`Module « ${row.name} » désinstallé.`);
+    await reload();
+    void dispatch(fetchPlugins());
+  }
+
+  async function handleRestore(row: ModuleRow) {
+    setBusyId(row.id);
+    setActionError(null);
+    setNotice(null);
+    const outcome = await restoreModule(row.id);
+    setBusyId(null);
+    if (!outcome.ok) {
+      setActionError(outcome.reason);
+      return;
+    }
+    setNotice(`Module « ${row.name} » réinstallé depuis l'image — sa configuration est à ressaisir.`);
     await reload();
     void dispatch(fetchPlugins());
   }
@@ -244,29 +303,108 @@ export default function ModulesSection() {
         </div>
       )}
 
-      <div className="modules-list">
+      <div className="modules-grid">
         {rows.map((row) => {
           const trusted = moduleIsTrusted(row);
           const refused = row.trust === "untrusted";
+          const removed = row.state === "removed";
           const sectionId = sectionIdFor(row.id);
           const removable = moduleUninstallable(row, source);
+          const restorable = moduleRestorable(row, source);
           // Renvoi vers la configuration : seulement si le serveur a réellement chargé ce module.
-          const configurable = sectionId !== null && !refused;
+          const configurable = sectionId !== null && !refused && !removed;
+          const contributions = contributionsFor(row.id);
+          // Installé, signature vérifiée, et pourtant inconnu de GET /api/plugins : le serveur ne l'a
+          // pas chargé. C'est le seul cas où « installé » et « présent dans l'interface » divergent —
+          // et il n'est affirmé qu'une fois la liste des modules chargés réellement obtenue.
+          const notLoaded = plugins.status === "ready" && !removed && !refused && row.enabled === null;
+          // Un module livré et jamais retiré n'a ni clé ni trace d'installation à montrer : sa liste
+          // de détails serait vide et n'ajouterait qu'un blanc dans la carte.
+          const hasMeta = removed || row.signedBy !== null || row.installedAt !== null || row.installedBy !== null;
+
           return (
-            <article key={row.id} className={`card module-card${refused ? " module-card--untrusted" : ""}`}>
+            <article
+              key={row.id}
+              className={`card module-card${refused ? " module-card--untrusted" : ""}${removed ? " module-card--removed" : ""}`}
+            >
               <div className="module-card__head">
-                <h4 className="module-card__name">{row.name}</h4>
-                <div className="chip-row">
-                  <StatusPill status="neutral" label={moduleOriginLabel(row.origin)} />
-                  <StatusPill status={trustPillStatus(row.trust)} label={moduleTrustLabel(row.trust)} />
-                  <StatusPill
-                    status={row.enabled === null ? "neutral" : row.enabled ? "ok" : "paused"}
-                    label={activationLabel(row.enabled)}
-                  />
+                <div className="module-card__identity">
+                  <h4 className="module-card__name">{row.name}</h4>
+                  <span className="module-card__id">
+                    {row.id}
+                    {row.version !== null && ` · v${row.version}`}
+                  </span>
                 </div>
+                {/* Ni pour un module retiré, ni pour un paquet refusé : rien n'est chargé dans les
+                    deux cas, un interrupteur y serait un mensonge. */}
+                {!removed && !refused && (
+                  <ModuleSwitch
+                    row={row}
+                    ready={plugins.status === "ready"}
+                    busy={togglingId === row.id}
+                    onToggle={(enabled) => void handleToggle(row, enabled)}
+                  />
+                )}
               </div>
 
-              <KeyValueList rows={detailRows(row)} />
+              <div className="chip-row">
+                {removed ? (
+                  <StatusPill status="paused" label="Désinstallé" />
+                ) : (
+                  <>
+                    <StatusPill status="neutral" label={moduleOriginLabel(row.origin)} />
+                    <StatusPill status={trustPillStatus(row.trust)} label={moduleTrustLabel(row.trust)} />
+                    <StatusPill
+                      status={row.configured === null ? "neutral" : row.configured ? "ok" : "unconfigured"}
+                      label={row.configured === null ? "Configuration inconnue" : row.configured ? "Configuré" : "Non configuré"}
+                    />
+                  </>
+                )}
+              </div>
+
+              {contributions.length > 0 && (
+                <p className="module-card__contributions">
+                  <span>Apporte</span> {contributions.join(" · ")}
+                </p>
+              )}
+
+              {hasMeta && (
+                <dl className="module-card__meta">
+                  {removed ? (
+                    <>
+                      <div>
+                        <dt>Désinstallé le</dt>
+                        <dd>{row.removedAt !== null ? formatDate(row.removedAt) : MISSING}</dd>
+                      </div>
+                      <div>
+                        <dt>Par</dt>
+                        <dd>{row.removedBy ?? MISSING}</dd>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      {row.signedBy !== null && (
+                        <div>
+                          <dt>Clé de signature</dt>
+                          <dd>{row.signedBy}</dd>
+                        </div>
+                      )}
+                      {row.installedAt !== null && (
+                        <div>
+                          <dt>Installé le</dt>
+                          <dd>{formatDate(row.installedAt)}</dd>
+                        </div>
+                      )}
+                      {row.installedBy !== null && (
+                        <div>
+                          <dt>Installé par</dt>
+                          <dd>{row.installedBy}</dd>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </dl>
+              )}
 
               {refused && (
                 <div className="error-banner" role="alert">
@@ -274,7 +412,20 @@ export default function ModulesSection() {
                 </div>
               )}
 
-              {!trusted && (
+              {notLoaded && (
+                <div className="error-banner" role="alert">
+                  Ce module est installé mais le serveur ne l'a pas chargé : il n'apporte ni page, ni section de
+                  réglages, ni données. Le motif est dans le journal du serveur (« greffons »).
+                </div>
+              )}
+
+              {removed && (
+                <p className="create-container-hint" style={{ margin: 0 }}>
+                  Son paquet est resté dans l'image : le réinstaller le remet en place, sans sa configuration.
+                </p>
+              )}
+
+              {!trusted && !removed && (
                 <p className="create-container-hint" style={{ margin: 0 }}>
                   {refused
                     ? "Confiance non établie : ce module n'est proposé ni à l'installation ni à l'activation depuis cet écran."
@@ -282,8 +433,8 @@ export default function ModulesSection() {
                 </p>
               )}
 
-              {(configurable || removable) && (
-                <div style={{ display: "flex", gap: 8 }}>
+              {(configurable || removable || restorable) && (
+                <div className="module-card__actions">
                   {configurable && sectionId !== null && (
                     <button
                       type="button"
@@ -291,6 +442,16 @@ export default function ModulesSection() {
                       onClick={() => dispatch(openSettingsSection(sectionId))}
                     >
                       Configurer
+                    </button>
+                  )}
+                  {restorable && (
+                    <button
+                      type="button"
+                      className="btn btn-primary btn-sm"
+                      onClick={() => void handleRestore(row)}
+                      disabled={busyId === row.id}
+                    >
+                      {busyId === row.id ? "Réinstallation…" : "Réinstaller"}
                     </button>
                   )}
                   {removable && (

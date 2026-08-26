@@ -67,10 +67,37 @@ function sha256(buffer) {
  * build. `pathToFileURL` résoudrait un chemin POSIX contre le lecteur courant sous Windows : la
  * forme est donc construite explicitement.
  */
-function hostModuleUrl(hostRoot, id) {
+function hostModuleUrl(hostRoot, dir) {
   const normalized = hostRoot.replace(/\\/g, "/").replace(/\/+$/, "");
   const prefix = /^[A-Za-z]:\//.test(normalized) ? "file:///" : "file://";
-  return `${prefix}${normalized}/plugins/${id}/index.js`.replace(/ /g, "%20");
+  return `${prefix}${normalized}/plugins/${dir}/index.js`.replace(/ /g, "%20");
+}
+
+/**
+ * Le shim est un chemin écrit en dur : sans cette vérification, un répertoire mal deviné produit un
+ * paquet parfaitement signé qui échoue à l'`import()` à l'exécution — l'intégration disparaît alors
+ * de l'interface sans que rien n'ait échoué au build (cas réel de 3CX, dont le module vit dans
+ * `threecx/`). On importe donc ICI le module exact que le shim visera, par le même chemin relatif,
+ * et on exige qu'il exporte bien ce greffon.
+ */
+async function loadThroughShimPath(dist, dir, exportName, id) {
+  const target = path.join(dist, "plugins", dir, "index.js");
+  try {
+    await fs.access(target);
+  } catch {
+    fail(`Le paquet d'origine "${id}" viserait ${target}, qui n'existe pas : corrigez "hostDir" dans plugins/builtins.ts.`);
+  }
+  let module;
+  try {
+    module = await import(pathToFileURL(target).href);
+  } catch (err) {
+    fail(`Le module visé par le paquet d'origine "${id}" (${target}) ne se charge pas : ${err.message}`);
+  }
+  const exported = module[exportName];
+  if (exported?.manifest?.id !== id) {
+    fail(`${target} n'exporte pas "${exportName}" avec l'identifiant "${id}" : le paquet d'origine viserait le mauvais module.`);
+  }
+  return exported;
 }
 
 const options = parseArgs(process.argv.slice(2));
@@ -98,22 +125,17 @@ for (const entry of builtins) {
   if (typeof entry?.id !== "string" || typeof entry?.exportName !== "string") fail("Entrée de catalogue interne inexploitable.");
   if (!IDENTIFIER.test(entry.exportName)) fail(`"${entry.exportName}" n'est pas un nom d'export JavaScript utilisable.`);
 
-  // Le manifeste RÉEL du greffon : aucune métadonnée n'est recopiée à la main ni devinée. Un module
-  // qui refuserait de se charger ici ne se chargerait pas davantage à l'exécution — le build échoue.
-  let plugin;
-  try {
-    const module = await entry.load();
-    plugin = module[entry.exportName];
-  } catch (err) {
-    fail(`Le greffon "${entry.id}" ne se charge pas : ${err.message}`);
-  }
-  const manifest = plugin?.manifest;
-  if (manifest?.id !== entry.id) fail(`Le greffon "${entry.id}" annonce l'identifiant ${JSON.stringify(manifest?.id)}.`);
+  // Le manifeste RÉEL du greffon, lu PAR LE CHEMIN QUE LE SHIM VISERA : aucune métadonnée n'est
+  // recopiée à la main, et un paquet qui pointerait à côté fait échouer le build.
+  // Répertoire du module DANS l'application — celui du greffon "3cx" s'appelle "threecx".
+  const hostDir = typeof entry.hostDir === "string" && entry.hostDir.length > 0 ? entry.hostDir : entry.id;
+  const plugin = await loadThroughShimPath(dist, hostDir, entry.exportName, entry.id);
+  const manifest = plugin.manifest;
   if (typeof manifest.name !== "string" || typeof manifest.version !== "string") {
     fail(`Le manifeste du greffon "${entry.id}" n'a ni nom ni version exploitables.`);
   }
 
-  const shim = Buffer.from(`export { ${entry.exportName} } from ${JSON.stringify(hostModuleUrl(hostRoot, entry.id))};\n`, "utf-8");
+  const shim = Buffer.from(`export { ${entry.exportName} } from ${JSON.stringify(hostModuleUrl(hostRoot, hostDir))};\n`, "utf-8");
   const packageManifest = {
     format: PACKAGE_FORMAT,
     id: manifest.id,

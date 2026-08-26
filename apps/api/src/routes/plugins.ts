@@ -382,18 +382,30 @@ export default async function pluginsRoutes(fastify: FastifyInstance): Promise<v
     }
   });
 
-  /** Idempotent : retirer une configuration absente n'est pas une erreur. */
+  /**
+   * Idempotent : retirer une configuration absente n'est pas une erreur. Une MISE EN PAUSE explicite
+   * survit au retrait — l'entrée qui la porte disparaît avec la configuration, elle est donc
+   * réécrite aussitôt : sans cela, vider la configuration d'un module en pause le remettrait en
+   * service à l'insu de l'admin.
+   */
   fastify.delete<{ Params: { id: string } }>("/api/plugins/:id/config", async (request, reply) => {
     if (rejectIfNotAdmin(request, reply)) return;
 
     const plugin = await resolvePlugin(request.params.id);
     if (!plugin) return notFound(reply, request.params.id);
 
+    const paused = await isPluginDisabled(plugin.manifest.id);
     await configStoreOf(plugin).remove();
+    if (paused) await setIntegrationEnabled(plugin.manifest.id, false);
     return reply.send({ ok: true });
   });
 
-  /** Bascule SEULE : la configuration, secrets compris, n'est ni relue ni réécrite. */
+  /**
+   * Bascule SEULE : la configuration, secrets compris, n'est ni relue ni réécrite. La décision est
+   * REJOUÉE dans la foulée (plugins/loader.ts) pour que l'effet soit immédiat — une mise en pause
+   * retire le greffon du socle sans attendre le prochain cycle de graphe, une réactivation
+   * réimporte son module. Sans cela, l'interrupteur mettrait plusieurs secondes à devenir vrai.
+   */
   fastify.put<{ Params: { id: string }; Body: EnabledBody }>("/api/plugins/:id/enabled", async (request, reply) => {
     if (rejectIfNotAdmin(request, reply)) return;
 
@@ -408,13 +420,10 @@ export default async function pluginsRoutes(fastify: FastifyInstance): Promise<v
     // avant la migration échouerait faute d'entrée générique à basculer.
     await configStoreOf(plugin).load();
 
-    const updated = await setIntegrationEnabled(plugin.manifest.id, enabled);
-    if (!updated) {
-      return reply.code(409).send({
-        error: `Le greffon "${plugin.manifest.id}" n'a aucune configuration : configurez-le avant de l'activer.`,
-      });
-    }
-    return reply.send(await stateOf(plugin));
+    await setIntegrationEnabled(plugin.manifest.id, enabled);
+    const state = await stateOf(plugin);
+    await refreshPluginActivation(plugin.manifest.id);
+    return reply.send(state);
   });
 
   /**

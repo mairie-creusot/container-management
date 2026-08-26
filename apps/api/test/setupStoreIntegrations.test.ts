@@ -189,10 +189,13 @@ describe("setupStore — intégrations génériques (greffons)", () => {
     expect((await store.getEffectiveIntegrationConfig("zabbix"))?.config.apiToken).toBe(SECRET_ZABBIX);
   });
 
-  it("ne crée jamais d'entrée à la volée pour un greffon jamais configuré", async () => {
-    expect(await store.setIntegrationEnabled("jamais-configure", true)).toBeNull();
-    expect(await store.getSafeIntegrationConfig("jamais-configure")).toBeNull();
-    expect(await store.getEffectiveIntegrationConfig("jamais-configure")).toBeNull();
+  it("met en pause un greffon jamais configuré sans lui inventer de configuration", async () => {
+    // L'activation d'un greffon jamais configuré est IMPLICITE : sans entrée écrite, aucune pause ne
+    // pourrait être exprimée et l'interrupteur resterait sans effet sur un module fraîchement installé.
+    const paused = await store.setIntegrationEnabled("jamais-configure", false);
+    expect(paused).toEqual({ enabled: false, config: {} });
+    expect(await store.getEffectiveIntegrationConfig("jamais-configure")).toEqual({ enabled: false, config: {} });
+    expect(await readDisk()).toContain("jamais-configure");
   });
 
   it("un champ secret déclaré mais ABSENT ne fait pas échouer l'écriture", async () => {

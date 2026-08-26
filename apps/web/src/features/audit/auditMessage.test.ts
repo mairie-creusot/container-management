@@ -134,6 +134,7 @@ const MUTATING_ROUTES: [string, string][] = [
   ["PUT", "/api/topology/positions"],
   ["POST", "/api/plugins/installed"],
   ["DELETE", "/api/plugins/installed/mon-module"],
+  ["POST", "/api/plugins/installed/nutanix/restore"],
 ];
 
 describe("journal de traçabilité : phrases lisibles", () => {
@@ -173,8 +174,13 @@ describe("journal de traçabilité : phrases lisibles", () => {
       "a exécuté « Supprimer définitivement une VM Nutanix »",
     );
     expect(describeAction(event("PUT", "/api/plugins/nutanix/enabled"), labels)).toBe(
-      "a activé ou désactivé le module « Virtualisation Nutanix »",
+      "a changé l'activation du module « Virtualisation Nutanix »",
     );
+    // Réinstaller un module d'origine et en installer un nouveau ne se disent pas de la même façon.
+    expect(describeAction(event("POST", "/api/plugins/installed/nutanix/restore"))).toBe(
+      "a réinstallé le module « nutanix » depuis l'image",
+    );
+    expect(describeAction(event("POST", "/api/plugins/installed"))).toBe("a installé un module");
   });
 
   it("reste lisible sans libellé connu : l'identifiant réel, jamais un libellé inventé", () => {

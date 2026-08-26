@@ -4,6 +4,7 @@ import {
   isPluginView,
   normalizePluginsPayload,
   PLUGIN_NAV_CATALOG,
+  pluginContributions,
   type PluginManifest,
   type PluginSummary,
 } from "@/features/plugins/pluginsModel";
@@ -145,5 +146,28 @@ describe("isPluginView — le cœur n'est jamais rangé sous Extensions", () => 
     expect(isPluginView("clusters")).toBe(false);
     expect(isPluginView("overview")).toBe(false);
     expect(isPluginView("publication")).toBe(false);
+  });
+});
+
+describe("pluginContributions — pourquoi un module chargé peut n'avoir aucune entrée de menu", () => {
+  it("un greffon qui apporte une page la nomme", () => {
+    expect(pluginContributions(manifest("hycu"))).toEqual(["Page « Sauvegardes »", "Section de réglages"]);
+  });
+
+  it("nutanix n'apporte pas de page : ses nœuds de graphe et ses actions le disent à sa place", () => {
+    const nutanix: PluginManifest = {
+      ...manifest("nutanix"),
+      permissions: { network: [], mutates: true, graphNodeKinds: ["nutanix-cluster", "nutanix-host", "nutanix-vm"] },
+      actions: { "vm.start": {}, "vm.stop": {} },
+    };
+    expect(pluginContributions(nutanix)).toEqual([
+      "Nœuds du graphe (3 types)",
+      "2 actions",
+      "Section de réglages",
+    ]);
+  });
+
+  it("un module sans page, sans nœud et sans action reste honnête : sa seule contribution est sa section", () => {
+    expect(pluginContributions(manifest("demo"))).toEqual(["Section de réglages"]);
   });
 });

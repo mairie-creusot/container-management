@@ -56,10 +56,10 @@ describe("Greffon 3CX — manifeste", () => {
     // D'autres intégrations ont été migrées depuis : la liste reste EXACTE, jamais un « contient 3cx ».
     // Le catalogue ne porte que des identifiants : le module d'un greffon n'est importé que s'il est
     // actif (voir plugins/builtins.ts et plugins/loader.ts).
-    expect(BUILTIN_PLUGINS.map((entry) => entry.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
+    expect(BUILTIN_PLUGINS.map((entry) => entry.id)).toEqual(["3cx", "demo", "glpi", "hycu", "nutanix"]);
     app = buildServer();
     await app.ready();
-    expect(listPlugins().map((plugin) => plugin.manifest.id)).toEqual(["3cx", "glpi", "hycu", "nutanix"]);
+    expect(listPlugins().map((plugin) => plugin.manifest.id)).toEqual(["3cx", "demo", "glpi", "hycu", "nutanix"]);
   });
 
   it("décrit le formulaire réel : mêmes champs, même bascule de mode, mêmes valeurs par défaut", () => {
