@@ -27,6 +27,7 @@ import {
   IconLifebuoy,
   IconPhone,
   IconStack,
+  IconPuzzle,
 } from "@/components/icons";
 
 type IconComponent = (props: { className?: string }) => JSX.Element;
@@ -191,6 +192,22 @@ export default function Sidebar() {
               </div>
             ))}
         </div>
+
+        {/* « Extensions » liste ce que les modules APPORTENT ; « Modules » est l'endroit où on les
+            installe, active et retire — d'où sa place juste sous le tiroir. */}
+        {canAdminister(session) && (
+          <button
+            type="button"
+            className={`sidebar__item${currentView === "modules" ? " is-active" : ""}`}
+            onClick={() => handleNavigate("modules")}
+            title={pageTitle("modules")}
+          >
+            <span className="sidebar__icon">
+              <IconPuzzle />
+            </span>
+            {pageTitle("modules")}
+          </button>
+        )}
 
         {canAdminister(session) && (
           <button

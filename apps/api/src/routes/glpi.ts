@@ -36,6 +36,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { rejectIfPluginDisabled } from "../plugins/activation.js";
 import {
   addGlpiFollowupForUser,
   getGlpiStatus,
@@ -166,6 +167,11 @@ function auditTargetOf(request: FastifyRequest): string {
   return `${pathname}?requesterId=${String(requesterId).slice(0, 32)}`;
 }
 
+/** Un module en pause ne sert plus ses données ; sa configuration reste lisible pour le réactiver. */
+async function rejectIfDisabled(reply: FastifyReply): Promise<boolean> {
+  return await rejectIfPluginDisabled(reply, "glpi", "Assistance GLPI");
+}
+
 export default async function glpiRoutes(fastify: FastifyInstance): Promise<void> {
   // Garde de PRÉFIXE : toute route /api/glpi/browse/*, y compris une future, exige operator/admin.
   fastify.addHook("preHandler", async (request, reply) => {
@@ -251,6 +257,7 @@ export default async function glpiRoutes(fastify: FastifyInstance): Promise<void
   );
 
   fastify.get<{ Params: { id: string } }>("/api/glpi/browse/tickets/:id", async (request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     const ticketId = parseTicketId(request.params.id);
     if (ticketId === null) return reply.code(400).send({ error: "Ticket id must be a positive integer" });
     if (!(await isGlpiConfigured())) return reply.code(503).send({ error: "GLPI n'est pas configuré" });
@@ -264,12 +271,14 @@ export default async function glpiRoutes(fastify: FastifyInstance): Promise<void
   });
 
   fastify.get("/api/glpi/status", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     const status = await getGlpiStatus();
     const lastPoll = lastKnownGlpiPoll();
     return reply.send({ ...status, ...(lastPoll ? { lastPoll } : {}) });
   });
 
   fastify.get("/api/glpi/my-tickets", async (request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     if (!(await isGlpiConfigured())) {
       return reply.send({ configured: false, tickets: [] });
     }
@@ -305,6 +314,7 @@ export default async function glpiRoutes(fastify: FastifyInstance): Promise<void
   });
 
   fastify.get<{ Params: { id: string } }>("/api/glpi/tickets/:id", async (request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     const ticketId = parseTicketId(request.params.id);
     if (ticketId === null) return reply.code(400).send({ error: "Ticket id must be a positive integer" });
     if (!(await isGlpiConfigured())) return reply.code(503).send({ error: "GLPI n'est pas configuré" });
@@ -346,6 +356,7 @@ export default async function glpiRoutes(fastify: FastifyInstance): Promise<void
   );
 
   fastify.get("/api/glpi/search-options", async (request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     if (rejectIfNotAdmin(request, reply)) return;
     if (!(await isGlpiConfigured())) return reply.code(503).send({ error: "GLPI n'est pas configuré" });
     try {

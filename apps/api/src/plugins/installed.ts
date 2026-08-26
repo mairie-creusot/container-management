@@ -6,6 +6,10 @@
  * Disposition : `<racine>/<identifiant>/` = le paquet tel quel (quai-plugin.json, signature.json,
  * code), plus `.quai-install.json` — la trace d'installation, hors paquet donc hors signature.
  *
+ * Les intégrations livrées avec QUAI passent par le MÊME chemin : elles sont empaquetées et signées
+ * au build puis installées ici au premier démarrage (plugins/origin.ts). Rien ne les distingue à la
+ * lecture, sinon la clé qui a signé leur paquet.
+ *
  * Chaque passe du chargeur REVÉRIFIE la signature de chaque module présent : un fichier modifié sur
  * le disque après l'installation ne produit pas seulement un refus au prochain démarrage, il retire
  * le module du socle au cycle suivant (voir plugins/loader.ts). Aucune entrée n'est produite pour un
@@ -45,6 +49,8 @@ export interface InstalledPluginRecord {
   version: string | null;
   trusted: boolean;
   keyId: string | null;
+  /** Paquet d'ORIGINE de cette image : prouvé par la clé qui l'a signé, jamais par sa trace d'installation. */
+  origin: boolean;
   installedAt: string | null;
   installedBy: string | null;
   /** Motif RÉEL du refus quand `trusted` est faux. */
@@ -69,16 +75,24 @@ export function installedPluginsRoot(): string {
   return path.join(path.dirname(path.resolve(config.setup.configPath)), "plugins");
 }
 
-/** Identifiants des clés de confiance configurées — jamais leur valeur. */
+/** Identifiants des clés de confiance configurées — jamais leur valeur. La clé d'ORIGINE en est
+ * exclue : sa clé privée n'existe plus après le build, personne ne peut signer avec elle. */
 export function trustedKeyIds(): string[] {
-  return Object.keys(config.plugins.trustedKeys).sort();
+  return Object.keys(config.plugins.trustedKeys)
+    .filter((keyId) => keyId !== config.plugins.originKeyId)
+    .sort();
+}
+
+/** Le paquet a-t-il été signé par la clé d'origine de CETTE image ? */
+export function isOriginKeyId(keyId: string): boolean {
+  return config.plugins.originKeyId !== undefined && keyId === config.plugins.originKeyId;
 }
 
 export function isPluginInstallAvailable(): boolean {
   return trustedKeyIds().length > 0;
 }
 
-interface InstallMark {
+export interface InstallMark {
   installedAt: string | null;
   installedBy: string | null;
 }
@@ -159,6 +173,7 @@ export async function listInstalledPlugins(): Promise<InstalledPluginRecord[]> {
     version: entry.verified?.manifest.version ?? null,
     trusted: entry.verified !== null,
     keyId: entry.verified?.keyId ?? null,
+    origin: entry.verified !== null && isOriginKeyId(entry.verified.keyId),
     installedAt: entry.mark.installedAt,
     installedBy: entry.mark.installedBy,
     reason: entry.reason,
@@ -190,6 +205,7 @@ export async function installedCatalog(): Promise<InstalledCatalog> {
     entries.push({
       id: manifest.id,
       exportName: manifest.exportName,
+      origin: isOriginKeyId(scanned.verified.keyId),
       load: async () => await nativeImport(`${href}?quai=${encodeURIComponent(cacheKey)}`),
     });
   }
@@ -214,6 +230,35 @@ async function writePackageTo(dir: string, files: PackageFiles, mark: InstallMar
     encoding: "utf-8",
     mode: 0o600,
   });
+}
+
+/**
+ * Pose sur le disque un paquet DÉJÀ VÉRIFIÉ, de façon atomique (répertoire temporaire puis
+ * renommage). Rend `true` si un module portait déjà cet identifiant. Lève en cas d'échec d'écriture
+ * — l'appelant décide du message. C'est le SEUL chemin d'écriture d'un module installé, celui de la
+ * route d'installation comme celui de l'amorçage des paquets d'origine (plugins/origin.ts).
+ */
+export async function writeInstalledPackage(id: string, files: PackageFiles, mark: InstallMark): Promise<boolean> {
+  const root = installedPluginsRoot();
+  const target = path.join(root, id);
+  const replaced = await fs
+    .stat(target)
+    .then(() => true)
+    .catch(() => false);
+
+  const staging = path.join(root, `.staging-${id}-${Date.now()}`);
+  try {
+    await ensureInstallRoot(root);
+    await fs.rm(staging, { recursive: true, force: true });
+    await writePackageTo(staging, files, mark);
+    // rm PUIS rename : sur Windows, renommer par-dessus un répertoire existant échoue.
+    await fs.rm(target, { recursive: true, force: true });
+    await fs.rename(staging, target);
+  } catch (err) {
+    await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
+    throw err;
+  }
+  return replaced;
 }
 
 /**
@@ -249,24 +294,11 @@ export async function installPluginPackage(body: unknown, installedBy: string): 
     return { ok: false, status: 409, error: `L'identifiant "${manifest.id}" est réservé par le socle : choisissez-en un autre.` };
   }
 
-  const root = installedPluginsRoot();
-  const target = path.join(root, manifest.id);
-  const replaced = await fs
-    .stat(target)
-    .then(() => true)
-    .catch(() => false);
-
-  const staging = path.join(root, `.staging-${manifest.id}-${Date.now()}`);
   const mark: InstallMark = { installedAt: new Date().toISOString(), installedBy };
+  let replaced: boolean;
   try {
-    await ensureInstallRoot(root);
-    await fs.rm(staging, { recursive: true, force: true });
-    await writePackageTo(staging, envelope.files, mark);
-    // rm PUIS rename : sur Windows, renommer par-dessus un répertoire existant échoue.
-    await fs.rm(target, { recursive: true, force: true });
-    await fs.rename(staging, target);
+    replaced = await writeInstalledPackage(manifest.id, envelope.files, mark);
   } catch (err) {
-    await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
     return { ok: false, status: 500, error: `Écriture du module impossible : ${err instanceof Error ? err.message : String(err)}` };
   }
 
@@ -279,6 +311,7 @@ export async function installPluginPackage(body: unknown, installedBy: string): 
       version: manifest.version,
       trusted: true,
       keyId,
+      origin: isOriginKeyId(keyId),
       installedAt: mark.installedAt,
       installedBy: mark.installedBy,
       reason: null,

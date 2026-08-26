@@ -24,6 +24,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { rejectIfPluginDisabled } from "../plugins/activation.js";
 import {
   getThreecxActiveCalls,
   getThreecxExtensions,
@@ -99,24 +100,33 @@ function buildCandidate(body: ThreecxConfigBody, existing: SetupThreecxConfig | 
   };
 }
 
+/** Un module en pause ne sert plus ses données ; sa configuration reste lisible pour le réactiver. */
+async function rejectIfDisabled(reply: FastifyReply): Promise<boolean> {
+  return await rejectIfPluginDisabled(reply, "3cx", "Téléphonie 3CX");
+}
+
 export default async function threecxRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get("/api/3cx/status", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     const status = await getThreecxStatus();
     const lastPoll = lastKnownThreecxPoll();
     return reply.send({ ...status, ...(lastPoll ? { lastPoll } : {}) });
   });
 
   fastify.get("/api/3cx/active-calls", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     const { items, ...rest } = await getThreecxActiveCalls();
     return reply.send({ ...rest, calls: items });
   });
 
   fastify.get("/api/3cx/extensions", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     const { items, ...rest } = await getThreecxExtensions();
     return reply.send({ ...rest, extensions: items });
   });
 
   fastify.get("/api/3cx/queues", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     const { items, ...rest } = await getThreecxQueues();
     return reply.send({ ...rest, queues: items });
   });

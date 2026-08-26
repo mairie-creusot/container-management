@@ -26,6 +26,7 @@ const SecretsPage = lazy(() => import("@/features/secrets/SecretsPage"));
 const ContainersPage = lazy(() => import("@/features/containers/ContainersPage"));
 const PublicationPage = lazy(() => import("@/features/publication/PublicationPage"));
 const SettingsPage = lazy(() => import("@/features/settings/SettingsPage"));
+const ModulesPage = lazy(() => import("@/features/plugins/ModulesPage"));
 const NotificationChannelsPage = lazy(() => import("@/features/notificationChannels/NotificationChannelsPage"));
 const EnvironmentsPage = lazy(() => import("@/features/clusters/EnvironmentsPage"));
 const NotificationsPage = lazy(() => import("@/features/notifications/NotificationsPage"));
@@ -72,6 +73,8 @@ function renderView(view: string) {
       return <PublicationPage />;
     case "settings":
       return <SettingsPage />;
+    case "modules":
+      return <ModulesPage />;
     case "notification-channels":
       return <NotificationChannelsPage />;
     case "clusters":

@@ -27,6 +27,7 @@
  */
 
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { rejectIfPluginDisabled } from "../plugins/activation.js";
 import {
   getHycuEvents,
   getHycuJobs,
@@ -61,30 +62,41 @@ function toPublicConfig(cfg: SetupHycuConfig): HycuConfig {
   return { url: cfg.url, username: cfg.username };
 }
 
+/** Un module en pause ne sert plus ses données ; sa configuration reste lisible pour le réactiver. */
+async function rejectIfDisabled(reply: FastifyReply): Promise<boolean> {
+  return await rejectIfPluginDisabled(reply, "hycu", "Sauvegarde HYCU");
+}
+
 export default async function hycuRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get("/api/hycu/status", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     const status = await getHycuStatus();
     const lastPoll = lastKnownHycuPoll();
     return reply.send({ ...status, ...(lastPoll ? { lastPoll } : {}) });
   });
 
   fastify.get("/api/hycu/vms", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     return reply.send(await getHycuVms());
   });
 
   fastify.get("/api/hycu/policies", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     return reply.send(await getHycuPolicies());
   });
 
   fastify.get("/api/hycu/targets", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     return reply.send(await getHycuTargets());
   });
 
   fastify.get("/api/hycu/jobs", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     return reply.send(await getHycuJobs());
   });
 
   fastify.get("/api/hycu/events", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     return reply.send(await getHycuEvents());
   });
 

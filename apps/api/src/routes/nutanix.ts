@@ -108,6 +108,7 @@
  */
 
 import multipart from "@fastify/multipart";
+import { rejectIfPluginDisabled } from "../plugins/activation.js";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import WebSocket from "ws";
 import { config } from "../config.js";
@@ -198,21 +199,29 @@ function imageTypeForFilename(filename: string): NutanixUploadImageType | undefi
   return undefined;
 }
 
+/** Un module en pause ne sert plus ses données ; sa configuration reste lisible pour le réactiver. */
+async function rejectIfDisabled(reply: FastifyReply): Promise<boolean> {
+  return await rejectIfPluginDisabled(reply, "nutanix", "Virtualisation Nutanix");
+}
+
 export default async function nutanixRoutes(fastify: FastifyInstance): Promise<void> {
   // Multipart scopé à ce plugin (seule la route /images/upload le consomme).
   await fastify.register(multipart, { limits: { fileSize: IMAGE_UPLOAD_MAX_BYTES, files: 1 } });
 
   fastify.get("/api/nutanix/vms", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     return reply.send(await getNutanixVms());
   });
 
   // Statistiques/alertes temps réel — GET purs, tout rôle authentifié (garde globale
   // plugins/auth.ts), aucune mutation possible (voir en-tête de fichier).
   fastify.get("/api/nutanix/cluster-stats", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     return reply.send(await getNutanixClusterStats());
   });
 
   fastify.get<{ Querystring: { limit?: string } }>("/api/nutanix/alerts", async (request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     const rawLimit = request.query?.limit;
     // `limit` invalide = borne par défaut du service, jamais un 400 : un panneau d'affichage ne
     // doit pas rester vide à cause d'un paramètre mal formé.
@@ -267,6 +276,7 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
   // restart}, PAS le niveau admin-only de GET .../files/hexdump). -----------------------------
 
   fastify.post<{ Params: { uuid: string } }>("/api/nutanix/vms/:uuid/start", async (request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     try {
       const result = await startNutanixVm(request.params.uuid);
       return reply.send(result);
@@ -276,6 +286,7 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
   });
 
   fastify.post<{ Params: { uuid: string } }>("/api/nutanix/vms/:uuid/stop", async (request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     try {
       const result = await stopNutanixVm(request.params.uuid);
       return reply.send(result);
@@ -285,6 +296,7 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
   });
 
   fastify.post<{ Params: { uuid: string } }>("/api/nutanix/vms/:uuid/restart", async (request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     try {
       const result = await restartNutanixVm(request.params.uuid);
       return reply.send(result);
@@ -310,6 +322,7 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
   );
 
   fastify.delete<{ Params: { uuid: string } }>("/api/nutanix/vms/:uuid", async (request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     try {
       const result = await deleteNutanixVm(request.params.uuid);
       return reply.send(result);
@@ -323,10 +336,12 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
   // cycle de vie ci-dessus, mêmes traductions d'erreur (sendNutanixActionError). -----------------
 
   fastify.get("/api/nutanix/subnets", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     return reply.send(await getNutanixSubnets());
   });
 
   fastify.post<{ Params: { uuid: string }; Body: { sizeMib?: number } }>("/api/nutanix/vms/:uuid/disks", async (request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     const sizeMib = request.body?.sizeMib;
     if (typeof sizeMib !== "number" || !Number.isFinite(sizeMib)) {
       return reply.code(400).send({ error: "sizeMib (number, MiB) is required" });
@@ -340,6 +355,7 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
   });
 
   fastify.post<{ Params: { uuid: string }; Body: { subnetUuid?: string } }>("/api/nutanix/vms/:uuid/nics", async (request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     const subnetUuid = request.body?.subnetUuid?.trim();
     if (!subnetUuid) {
       return reply.code(400).send({ error: "subnetUuid is required" });
@@ -381,10 +397,12 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
   // journalise que méthode+chemin, voir plugins/audit.ts), jamais échoïsé dans une erreur. -------
 
   fastify.get("/api/nutanix/images", async (_request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     return reply.send(await getNutanixImages());
   });
 
   fastify.post<{ Body: { name?: string; sourceUri?: string } }>("/api/nutanix/images", async (request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     const name = request.body?.name?.trim();
     const sourceUri = request.body?.sourceUri?.trim();
     if (!name || !sourceUri) {
@@ -409,6 +427,7 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
   // Upload direct d'un fichier image : multipart champ `name` (AVANT le champ `file` dans le corps)
   // + champ `file` streamé tel quel vers Prism — voir services/nutanix.ts#uploadNutanixImage.
   fastify.post("/api/nutanix/images/upload", async (request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     if (!request.isMultipart()) {
       return reply.code(400).send({ error: "multipart/form-data expected (fields: name, file)" });
     }
@@ -522,6 +541,7 @@ export default async function nutanixRoutes(fastify: FastifyInstance): Promise<v
   });
 
   fastify.get<{ Params: { uuid: string } }>("/api/nutanix/tasks/:uuid", async (request, reply) => {
+    if (await rejectIfDisabled(reply)) return;
     try {
       return reply.send(await getNutanixTask(request.params.uuid));
     } catch (err) {

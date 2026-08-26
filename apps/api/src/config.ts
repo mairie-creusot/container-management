@@ -7,6 +7,9 @@
  * doivent être remplacés via l'environnement avant tout déploiement réel.
  */
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 export type Role = "admin" | "operator" | "viewer";
 
 function readString(name: string, fallback: string): string {
@@ -92,6 +95,40 @@ function readTrustedPluginKeys(name: string): Record<string, string> {
   }
   return keys;
 }
+
+/** Identifiant réservé de la clé d'ORIGINE : celle qu'un build grave dans l'image pour signer les
+ * intégrations livrées avec QUAI. PLUGIN_TRUSTED_KEYS ne peut pas la remplacer. */
+export const PLUGIN_ORIGIN_KEY_ID = "quai-origin";
+
+/** Nom du fichier de clé publique d'origine, posé à côté des paquets par scripts/build-origin-plugins.mjs. */
+export const PLUGIN_ORIGIN_KEY_FILE = "origin-key.pub";
+
+/**
+ * Clé PUBLIQUE d'origine : valeur directe (PLUGIN_ORIGIN_KEY) ou fichier `origin-key.pub` du
+ * répertoire des paquets d'origine. Absente hors image : QUAI retombe alors sur son catalogue
+ * interne (voir plugins/origin.ts). La clé privée correspondante n'existe plus après le build.
+ */
+function readOriginPublicKey(originPath: string | undefined): string | undefined {
+  const inline = readOptionalString("PLUGIN_ORIGIN_KEY");
+  if (inline !== undefined) {
+    if (inline.includes("PRIVATE KEY")) {
+      // eslint-disable-next-line no-console
+      console.warn("[config] PLUGIN_ORIGIN_KEY ressemble à une clé privée — ignorée, seule la clé publique se configure ici");
+      return undefined;
+    }
+    return inline.trim();
+  }
+  if (originPath === undefined) return undefined;
+  try {
+    const material = readFileSync(path.join(path.resolve(originPath), PLUGIN_ORIGIN_KEY_FILE), "utf-8").trim();
+    return material.length > 0 && !material.includes("PRIVATE KEY") ? material : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+const pluginOriginPath = readOptionalString("PLUGIN_ORIGIN_PATH");
+const pluginOriginKey = readOriginPublicKey(pluginOriginPath);
 
 export const config = {
   server: {
@@ -198,11 +235,23 @@ export const config = {
     // audit-log.jsonl : les modules installés vivent avec les DONNÉES, jamais dans le code livré,
     // pour survivre à une reconstruction d'image et disparaître réellement à la désinstallation.
     installPath: readOptionalString("PLUGINS_PATH"),
+    // Répertoire des paquets d'ORIGINE gravés dans l'image (deploy/docker/Dockerfile.api) : les
+    // intégrations livrées avec QUAI, empaquetées et signées au build, installées au premier
+    // démarrage puis pleinement désinstallables. Non défini = repli sur le catalogue interne
+    // importé statiquement (développement, tests) — voir plugins/origin.ts.
+    originPath: pluginOriginPath,
+    // Renseigné UNIQUEMENT quand une clé d'origine est réellement configurée : c'est ce qui
+    // distingue un paquet d'origine d'un module tiers portant le même identifiant.
+    originKeyId: pluginOriginKey === undefined ? undefined : PLUGIN_ORIGIN_KEY_ID,
     // Clés publiques autorisées à signer un module. AUCUNE clé configurée = l'installation de
     // modules externes est indisponible ; les greffons livrés avec l'image continuent de tourner.
     // La signature est la SEULE frontière de sécurité : un module installé s'exécute dans ce
     // process, qui a accès au socket Docker, à l'annuaire et à la clé de chiffrement.
-    trustedKeys: readTrustedPluginKeys("PLUGIN_TRUSTED_KEYS"),
+    // La clé d'origine est ajoutée EN DERNIER : PLUGIN_TRUSTED_KEYS ne peut pas la détourner.
+    trustedKeys:
+      pluginOriginKey === undefined
+        ? readTrustedPluginKeys("PLUGIN_TRUSTED_KEYS")
+        : { ...readTrustedPluginKeys("PLUGIN_TRUSTED_KEYS"), [PLUGIN_ORIGIN_KEY_ID]: pluginOriginKey },
     // Taille maximale d'un paquet accepté à l'installation, décodé (somme de ses fichiers).
     maxPackageBytes: readNumber("PLUGIN_MAX_PACKAGE_BYTES", 2 * 1024 * 1024),
     // Délais d'expiration des appels AUX GREFFONS (plugins/guard.ts). Sans isolation hors processus,

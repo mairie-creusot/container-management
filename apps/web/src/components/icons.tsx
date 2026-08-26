@@ -160,6 +160,14 @@ export function IconHistory({ className }: IconProps) {
   );
 }
 
+/** Pièce de puzzle — la gestion des modules, distincte de IconStack (ce qu'ils apportent). */
+export function IconPuzzle({ className }: IconProps) {
+  return base(
+    <path d="M10 4a2 2 0 1 1 4 0v1h3a1 1 0 0 1 1 1v3h1a2 2 0 1 1 0 4h-1v3a1 1 0 0 1-1 1h-3v-1a2 2 0 1 0-4 0v1H6a1 1 0 0 1-1-1v-3H4a2 2 0 1 1 0-4h1V6a1 1 0 0 1 1-1h4V4Z" />,
+    className,
+  );
+}
+
 export function IconStack({ className }: IconProps) {
   return base(
     <>

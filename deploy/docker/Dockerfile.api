@@ -73,6 +73,20 @@ RUN pnpm --filter @quai/api build
 # réels), ce qui simplifie beaucoup le stage final ci-dessous.
 RUN pnpm --filter @quai/api deploy --prod /workspace/out/api
 
+# MODULES D'ORIGINE : les quatre intégrations livrées avec QUAI sont empaquetées et signées ICI,
+# avec une paire de clés Ed25519 générée pour ce seul build. La clé privée n'est jamais écrite sur
+# disque et disparaît avec ce processus ; seule la clé publique (origin-key.pub) part dans l'image
+# finale. Conséquences : aucun secret à conserver, et personne ne peut fabriquer un paquet que cette
+# image accepterait. Ce stage n'est PAS copié tel quel dans l'image finale — seul le répertoire de
+# paquets ci-dessous l'est, donc aucune couche livrée n'a jamais contenu la clé privée.
+# --host-root : chemin du code de l'application tel qu'il sera vu À L'EXÉCUTION (/app/dist),
+# jamais celui du build. Le script échoue si un greffon ne se charge pas : mieux vaut un build rouge
+# qu'une image dont une intégration serait silencieusement absente.
+RUN node scripts/build-origin-plugins.mjs \
+        --dist /workspace/out/api/dist \
+        --host-root /app/dist \
+        --out /workspace/origin-plugins
+
 # ---------------------------------------------------------------------------
 # Stage 3 : image finale minimale
 # ---------------------------------------------------------------------------
@@ -114,6 +128,14 @@ WORKDIR /app
 # node:22-slim fournit déjà un utilisateur non-root "node" (uid 1000) prêt
 # à l'emploi — inutile d'en recréer un.
 COPY --from=build --chown=node:node /workspace/out/api/ ./
+
+# Paquets d'origine + clé publique d'origine. VOLONTAIREMENT laissés à root : l'API tourne sous
+# "node" et ne doit pas pouvoir réécrire la clé qui décide de ce qu'elle accepte, ni les paquets
+# qu'elle réinstalle. Ils sont seulement LUS, puis recopiés dans /app/data au premier démarrage
+# (voir apps/api/src/plugins/origin.ts) — c'est cette copie, dans le volume de données, que l'admin
+# peut désinstaller pour de bon.
+COPY --from=build /workspace/origin-plugins/ /app/origin-plugins/
+ENV PLUGIN_ORIGIN_PATH=/app/origin-plugins
 
 # ./data/ (config.json/secrets.json/audit-log.jsonl/watchdog-state.json/...,
 # CONFIG_PATH par défaut, voir config.ts) est créée ET possédée par "node"

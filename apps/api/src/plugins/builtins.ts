@@ -1,5 +1,11 @@
 /**
- * CATALOGUE des greffons livrés avec le socle : ce que QUAI sait charger, pas ce qu'il charge.
+ * CATALOGUE INTERNE des greffons livrés avec le socle : ce que QUAI sait charger, pas ce qu'il charge.
+ *
+ * REPLI DE DÉVELOPPEMENT depuis l'empaquetage d'origine : en image, ces quatre intégrations sont
+ * livrées comme PAQUETS SIGNÉS installés dans le volume de données (plugins/origin.ts) et cette
+ * liste ne sert plus de catalogue. Elle reprend son rôle dès que l'image ne fournit aucun paquet
+ * d'origine — `pnpm dev`, `vitest` — sinon plus aucune intégration ne serait disponible en local.
+ * Dans les deux cas elle reste la liste des identifiants RÉSERVÉS à QUAI (isBuiltinPluginId).
  *
  * Aucune de ces entrées n'importe le module du greffon : elle porte son identifiant (celui de son
  * manifeste) et de quoi l'importer PLUS TARD. C'est plugins/loader.ts qui décide, à partir de
@@ -22,6 +28,8 @@ export interface PluginModuleEntry {
   id: string;
   /** Nom sous lequel le module exporte son greffon. */
   exportName: string;
+  /** Paquet d'ORIGINE de cette image — prouvé par la clé qui a signé le paquet, jamais déclaré. */
+  origin?: boolean;
   /** Import DYNAMIQUE — appelé uniquement si le greffon est actif. */
   load: () => Promise<unknown>;
 }

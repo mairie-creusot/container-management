@@ -87,7 +87,8 @@ describe("Aucune clé de confiance configurée", () => {
     expect(response.json().error).toContain("indisponible");
 
     const modules = await app.inject({ method: "GET", url: "/api/plugins/installed", cookies: adminCookie() });
-    expect(modules.json()).toEqual({ modules: [], installAvailable: false, trustedKeyIds: [] });
+    // `origin` vide : hors image, aucun paquet d'origine n'est livré (voir plugins/origin.ts).
+    expect(modules.json()).toEqual({ modules: [], origin: [], installAvailable: false, trustedKeyIds: [] });
   });
 
   it("un module déposé à la main sur le disque n'est ni chargé ni exécuté", async () => {

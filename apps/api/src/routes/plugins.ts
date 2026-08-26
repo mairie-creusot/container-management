@@ -5,7 +5,8 @@
  * GET    /api/plugins                       — greffons enregistrés : manifeste PUBLIC + état réel.
  * GET    /api/plugins/installed             — modules INSTALLÉS (admin) : confiance, version, provenance.
  * POST   /api/plugins/installed             — installe un paquet signé (admin), à chaud.
- * DELETE /api/plugins/installed/:id         — désinstalle un module (admin), à chaud.
+ * DELETE /api/plugins/installed/:id         — désinstalle un module (admin), à chaud, configuration comprise.
+ * POST   /api/plugins/installed/:id/restore — réinstalle un module d'ORIGINE désinstallé (admin).
  * GET    /api/plugins/:id/config            — vue SÛRE de la configuration (jamais un secret).
  * PUT    /api/plugins/:id/config            — configure/remplace (admin) — teste AVANT d'enregistrer.
  * POST   /api/plugins/:id/config/test       — teste une configuration candidate (admin), ne persiste rien.
@@ -42,10 +43,11 @@ import {
   trustedKeyIds,
   uninstallPlugin,
 } from "../plugins/installed.js";
+import { listOriginModules, rememberOriginRemoval, restoreOriginPlugin } from "../plugins/origin.js";
 import { getPlugin, listPlugins, unregisterPlugin } from "../plugins/registry.js";
 import { loadPluginForAdmin, refreshPluginActivation } from "../plugins/loader.js";
 import { config } from "../config.js";
-import { getSafeIntegrationConfig, setIntegrationEnabled } from "../services/setupStore.js";
+import { clearIntegrationConfig, getSafeIntegrationConfig, setIntegrationEnabled } from "../services/setupStore.js";
 
 /** Clés de pilotage du corps de requête : elles ne font pas partie de la configuration. */
 const CONTROL_KEYS = new Set(["skipTest"]);
@@ -217,6 +219,9 @@ export default async function pluginsRoutes(fastify: FastifyInstance): Promise<v
     if (rejectIfNotAdmin(request, reply)) return;
     return reply.send({
       modules: await listInstalledPlugins(),
+      // Modules d'ORIGINE livrés par l'image, y compris ceux que l'admin a désinstallés : leur
+      // paquet est resté dans l'image, ils sont restaurables.
+      origin: await listOriginModules(),
       // Aucune valeur de clé ne sort : seulement de quoi dire quelles signatures sont acceptées.
       installAvailable: isPluginInstallAvailable(),
       trustedKeyIds: trustedKeyIds(),
@@ -258,19 +263,58 @@ export default async function pluginsRoutes(fastify: FastifyInstance): Promise<v
   );
 
   /**
-   * DÉSINSTALLE : le répertoire est effacé du disque, puis le greffon retiré du socle — plus rien ne
-   * l'appelle et il ne reviendra pas au prochain démarrage. Ne touche QUE les modules installés :
-   * un identifiant inconnu du répertoire d'installation (un greffon livré, par exemple) répond 404
-   * sans jamais désenregistrer quoi que ce soit.
+   * DÉSINSTALLE : le répertoire est effacé du disque, la CONFIGURATION ENREGISTRÉE est retirée avec
+   * lui (l'écran prévient de cette perte), puis le greffon quitte le socle — plus rien ne l'appelle.
+   * Pour un module d'ORIGINE, le retrait est mémorisé : l'amorçage du prochain démarrage ne le
+   * réinstallera pas, et il reste restaurable depuis l'image. Un identifiant inconnu du répertoire
+   * d'installation répond 404 sans jamais désenregistrer quoi que ce soit.
    */
   fastify.delete<{ Params: { id: string } }>("/api/plugins/installed/:id", async (request, reply) => {
     if (rejectIfNotAdmin(request, reply)) return;
 
     const { id } = request.params;
+    // Résolu AVANT la suppression des fichiers : seul le greffon lui-même sait purger la
+    // configuration héritée d'un champ typé (plugins/<id>/config.ts#remove).
+    const plugin = await resolvePlugin(id);
+
     const removed = await uninstallPlugin(id);
     if (!removed.ok) return reply.code(removed.status).send({ error: removed.error });
+
     unregisterPlugin(id);
-    return reply.send({ ok: true });
+    const origin = await rememberOriginRemoval(id, request.authSession!.username);
+
+    // Le module est déjà parti : un secret indéchiffrable ne doit pas transformer une désinstallation
+    // réussie en erreur — le motif est tracé et rapporté, jamais avalé.
+    let configCleared = true;
+    try {
+      if (plugin) await configStoreOf(plugin).remove();
+      else await clearIntegrationConfig(id);
+    } catch (err) {
+      configCleared = false;
+      request.log.warn(`Configuration du module "${id}" non retirée : ${messageOf(err)}`);
+    }
+
+    return reply.send({ ok: true, origin, restorable: origin, configCleared });
+  });
+
+  /**
+   * RÉINSTALLE un module d'ORIGINE désinstallé : son paquet n'a jamais quitté l'image, il est
+   * vérifié puis reposé dans le volume de données, et la mémoire du retrait effacée. Sa
+   * configuration, retirée à la désinstallation, est à ressaisir.
+   */
+  fastify.post<{ Params: { id: string } }>("/api/plugins/installed/:id/restore", async (request, reply) => {
+    if (rejectIfNotAdmin(request, reply)) return;
+
+    const { id } = request.params;
+    const restored = await restoreOriginPlugin(id, request.authSession!.username);
+    if (!restored.ok) return reply.code(restored.status).send({ error: restored.error });
+
+    unregisterPlugin(id);
+    const outcome = await refreshPluginActivation(id);
+    const failure = outcome.failed.find((entry) => entry.id === id);
+    if (failure) return reply.code(500).send({ error: `Module d'origine refusé par le socle : ${failure.reason}` });
+
+    return reply.code(201).send({ module: restored.record, loaded: outcome.loaded.includes(id) });
   });
 
   fastify.get<{ Params: { id: string } }>("/api/plugins/:id/config", async (request, reply) => {

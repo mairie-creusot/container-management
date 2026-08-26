@@ -16,7 +16,8 @@ export type ViewId =
   | "backups"
   | "threecx"
   | "glpi"
-  | "settings";
+  | "settings"
+  | "modules";
 
 interface UiState {
   currentView: ViewId;
@@ -98,6 +99,7 @@ const PAGE_TITLES: Partial<Record<ViewId, string>> = {
   secrets: "Secrets",
   "notification-channels": "Canaux de notification",
   settings: "Réglages",
+  modules: "Modules",
 };
 
 export function pageTitle(view: ViewId): string {

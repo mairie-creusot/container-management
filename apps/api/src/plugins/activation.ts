@@ -25,3 +25,21 @@ export async function isPluginDisabled(pluginId: string): Promise<boolean> {
   const entry = await getSafeIntegrationConfig(pluginId);
   return entry !== null && !entry.enabled;
 }
+
+/**
+ * Les DONNÉES d'un module mis en pause ne doivent plus être servies par ses routes dédiées : sinon
+ * un module disparu du menu et du graphe continuerait d'alimenter des écrans, ce qui rend
+ * l'interrupteur mensonger. La CONFIGURATION, elle, reste servie (voir le périmètre ci-dessus) :
+ * c'est par elle qu'on réactive.
+ */
+export async function rejectIfPluginDisabled(
+  reply: { code: (status: number) => { send: (body: unknown) => unknown } },
+  pluginId: string,
+  moduleLabel: string,
+): Promise<boolean> {
+  if (!(await isPluginDisabled(pluginId))) return false;
+  reply.code(409).send({
+    error: `Le module « ${moduleLabel} » est désactivé : ses données ne sont plus servies. Réactivez-le dans Réglages › Modules.`,
+  });
+  return true;
+}
