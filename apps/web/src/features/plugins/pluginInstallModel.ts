@@ -16,8 +16,14 @@ export interface ModuleInventoryEntry {
   version: string | null;
   origin: ModuleOrigin;
   trust: ModuleTrust;
-  /** Clé de signature, telle que nommée par le serveur. */
+  /** Clé ou autorité de signature, telle que nommée par le serveur. */
   signedBy: string | null;
+  /** QUI a signé, quand une autorité le dit — `null` pour une signature par clé nue, qui ne porte
+   * aucune identité. Jamais déduit d'autre chose. */
+  signer: string | null;
+  /** Empreinte du certificat de signature : c'est elle qu'on pose côté serveur pour retirer ce
+   * signataire, donc elle doit être lisible et copiable ici. */
+  certificateFingerprint: string | null;
   /** Motif RÉEL du refus, tel que rendu par le serveur. */
   reason: string | null;
   /** Date ISO d'installation et auteur, quand le serveur les a conservés. */
@@ -153,8 +159,11 @@ function readEntry(value: unknown, defaultOrigin: ModuleOrigin): ModuleInventory
     origin,
     trust: readTrust(value, block, origin),
     signedBy:
-      firstString(block, ["keyId", "key", "signedBy", "signer", "label", "fingerprint"]) ??
+      firstString(block, ["keyId", "key", "signedBy", "label", "fingerprint"]) ??
       firstString(value, ["signedBy", "keyId"]),
+    signer: firstString(block, ["signer"]) ?? firstString(value, ["signer"]),
+    certificateFingerprint:
+      firstString(block, ["certificateFingerprint"]) ?? firstString(value, ["certificateFingerprint"]),
     reason:
       firstString(block, ["reason", "message", "error", "detail"]) ??
       firstString(value, ["trustReason", "reason", "error"]),
@@ -297,6 +306,8 @@ function rowFromSummary(summary: PluginSummary, origin: ModuleOrigin, trust: Mod
     origin,
     trust,
     signedBy: null,
+    signer: null,
+    certificateFingerprint: null,
     reason: null,
     installedAt: null,
     installedBy: null,
@@ -319,6 +330,8 @@ function rowFromRemovedOrigin(entry: OriginModuleEntry): ModuleRow {
     origin: "builtin",
     trust: "builtin",
     signedBy: null,
+    signer: null,
+    certificateFingerprint: null,
     reason: null,
     installedAt: null,
     installedBy: null,

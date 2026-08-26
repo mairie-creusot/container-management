@@ -320,7 +320,13 @@ export default function ModulesSection() {
           const notLoaded = plugins.status === "ready" && !removed && !refused && row.enabled === null;
           // Un module livré et jamais retiré n'a ni clé ni trace d'installation à montrer : sa liste
           // de détails serait vide et n'ajouterait qu'un blanc dans la carte.
-          const hasMeta = removed || row.signedBy !== null || row.installedAt !== null || row.installedBy !== null;
+          const hasMeta =
+            removed ||
+            row.signer !== null ||
+            row.signedBy !== null ||
+            row.certificateFingerprint !== null ||
+            row.installedAt !== null ||
+            row.installedBy !== null;
 
           return (
             <article
@@ -383,10 +389,26 @@ export default function ModulesSection() {
                     </>
                   ) : (
                     <>
+                      {/* Un module signé par certificat dit QUI l'a signé ; une clé nue ne le dit
+                          jamais, et rien n'est inventé à sa place. */}
+                      {row.signer !== null && (
+                        <div>
+                          <dt>Signé par</dt>
+                          <dd>{row.signer}</dd>
+                        </div>
+                      )}
                       {row.signedBy !== null && (
                         <div>
-                          <dt>Clé de signature</dt>
+                          <dt>{row.signer !== null ? "Autorité" : "Clé de signature"}</dt>
                           <dd>{row.signedBy}</dd>
+                        </div>
+                      )}
+                      {/* C'est cette empreinte qu'on pose dans PLUGIN_REVOKED_CERTS pour retirer ce
+                          signataire : sans elle à l'écran, la révocation resterait théorique. */}
+                      {row.certificateFingerprint !== null && (
+                        <div>
+                          <dt>Empreinte</dt>
+                          <dd>{row.certificateFingerprint}</dd>
                         </div>
                       )}
                       {row.installedAt !== null && (

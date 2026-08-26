@@ -236,6 +236,44 @@ describe("moduleInstallAvailability — jamais un bouton dont l'échec est certa
   });
 });
 
+describe("signature par certificat — le serveur dit qui a signé, l'écran le reprend", () => {
+  const payload = {
+    modules: [
+      {
+        id: "supervision",
+        name: "Supervision",
+        version: "1.0.0",
+        trusted: true,
+        keyId: "x509:Mairie Le Creusot Root CA",
+        signer: "BANAS Yann (signature de code)",
+        certificateFingerprint: "a".repeat(64),
+        installedAt: "2026-08-26T09:00:00.000Z",
+        installedBy: "ybanas",
+        reason: null,
+      },
+    ],
+    installAvailable: true,
+    trustedKeyIds: ["x509:Mairie Le Creusot Root CA"],
+  };
+
+  it("porte le signataire, l'autorité et l'empreinte qui sert à le retirer", () => {
+    const rows = deriveModuleRows(readySource(payload), { status: "ready", items: [] });
+    expect(rows[0]).toMatchObject({
+      signer: "BANAS Yann (signature de code)",
+      signedBy: "x509:Mairie Le Creusot Root CA",
+      certificateFingerprint: "a".repeat(64),
+      trust: "verified",
+    });
+  });
+
+  it("une signature par clé nue ne se voit prêter aucun signataire", () => {
+    const rows = deriveModuleRows(readySource(INVENTORY_PAYLOAD), { status: "ready", items: [] });
+    expect(rows[0]?.signer).toBeNull();
+    expect(rows[0]?.certificateFingerprint).toBeNull();
+    expect(rows[0]?.signedBy).toBe("ops-2026");
+  });
+});
+
 describe("modules d'origine désinstallés — la carte d'où on les réinstalle", () => {
   const plugins = { status: "ready" as const, items: [summary("hycu", "Sauvegarde HYCU", true, true)] };
   const payload = {

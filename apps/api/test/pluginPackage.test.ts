@@ -448,7 +448,7 @@ describe("Outil de signature hors ligne", () => {
 
     const keys = process.env.PLUGIN_TRUSTED_KEYS!;
     const ok = await execFileAsync(process.execPath, [signerPath, "verify", dir, "--keys", keys]);
-    expect(ok.stdout).toContain('module-verif 1.0.0, signé par "mairie-2026"');
+    expect(ok.stdout).toContain('module-verif 1.0.0, signé par la clé "mairie-2026"');
 
     const autresCles = JSON.stringify({
       [TRUSTED_KEY_ID]: strangerPair.publicKey.export({ format: "der", type: "spki" }).toString("base64"),

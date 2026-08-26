@@ -17,7 +17,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { config } from "../config.js";
-import { installedPluginsRoot, isOriginKeyId, writeInstalledPackage } from "./installed.js";
+import { certificateTrust, installedPluginsRoot, isOriginKeyId, writeInstalledPackage } from "./installed.js";
 import type { InstalledPluginRecord } from "./installed.js";
 import { isValidPluginId, readPackageFiles, verifyPluginPackage } from "./package.js";
 import type { PackageFiles, VerifiedPluginPackage } from "./package.js";
@@ -107,7 +107,7 @@ async function readOriginImage(): Promise<OriginImage> {
       continue;
     }
 
-    const verification = verifyPluginPackage(files, config.plugins.trustedKeys);
+    const verification = verifyPluginPackage(files, config.plugins.trustedKeys, certificateTrust());
     if (!verification.ok) {
       rejected.push({ id: entry.name, reason: verification.reason });
       continue;
@@ -238,7 +238,7 @@ async function isInstallCurrent(entry: OriginPackage): Promise<boolean> {
   } catch {
     return false;
   }
-  const verification = verifyPluginPackage(files, config.plugins.trustedKeys);
+  const verification = verifyPluginPackage(files, config.plugins.trustedKeys, certificateTrust());
   return verification.ok && verification.verified.digest === entry.verified.digest;
 }
 
@@ -325,6 +325,9 @@ export async function restoreOriginPlugin(id: string, by: string): Promise<Origi
       version: entry.verified.manifest.version,
       trusted: true,
       keyId: entry.verified.keyId,
+      // Un paquet d'origine est signé par la clé de l'image, pas par un certificat : aucun signataire.
+      signer: null,
+      certificateFingerprint: null,
       origin: true,
       installedAt: mark.installedAt,
       installedBy: mark.installedBy,

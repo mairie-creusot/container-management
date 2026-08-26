@@ -120,7 +120,7 @@ describe("Aucune clé de confiance configurée", () => {
       {
         id: "module-clandestin",
         reason:
-          "Aucune clé de confiance n'est configurée (PLUGIN_TRUSTED_KEYS) : l'installation et le chargement de modules externes sont indisponibles.",
+          "Aucune confiance n'est configurée (PLUGIN_TRUSTED_KEYS, PLUGIN_TRUSTED_CA) : l'installation et le chargement de modules externes sont indisponibles.",
       },
     ]);
     expect(await witnessLines()).toEqual([]);

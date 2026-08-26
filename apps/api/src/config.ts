@@ -96,6 +96,71 @@ function readTrustedPluginKeys(name: string): Record<string, string> {
   return keys;
 }
 
+const PEM_CERTIFICATE = /-----BEGIN CERTIFICATE-----[\sA-Za-z0-9+/=]+?-----END CERTIFICATE-----/g;
+
+/**
+ * ANCRES DE CONFIANCE X.509 pour la signature des modules : le certificat RACINE de l'autorité
+ * autorisée à habiliter un signataire — l'AD CS de la collectivité. Un module signé par un
+ * certificat que cette autorité a émis, portant l'usage « signature de code », est alors accepté
+ * sans qu'aucune clé publique de signataire soit connue du serveur : c'est l'autorité qui répond de
+ * ses porteurs, et qui peut leur retirer ce droit.
+ *
+ * Fournies en PEM, directement (PLUGIN_TRUSTED_CA, base64 accepté pour traverser sans dommage une
+ * variable de CI) ou par fichier (PLUGIN_TRUSTED_CA_FILE).
+ *
+ * Volontairement DISTINCT de NODE_EXTRA_CA_CERTS : faire confiance à une autorité pour valider le
+ * certificat d'un serveur HTTPS n'est pas lui donner le droit d'habiliter du code qui s'exécutera
+ * dans ce processus, avec le socket Docker et la clé de chiffrement. Les deux peuvent désigner la
+ * même autorité, mais ce doit être une décision écrite.
+ */
+function readTrustedCertificateAnchors(): string[] {
+  const inline = readOptionalString("PLUGIN_TRUSTED_CA");
+  const file = readOptionalString("PLUGIN_TRUSTED_CA_FILE");
+
+  let material = "";
+  if (inline !== undefined) {
+    material = inline.includes("BEGIN CERTIFICATE") ? inline : Buffer.from(inline, "base64").toString("utf-8");
+  } else if (file !== undefined) {
+    try {
+      material = readFileSync(path.resolve(file), "utf-8");
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(`[config] PLUGIN_TRUSTED_CA_FILE illisible (${file}) : ${err instanceof Error ? err.message : String(err)}`);
+      return [];
+    }
+  }
+  if (material.includes("PRIVATE KEY")) {
+    // eslint-disable-next-line no-console
+    console.warn("[config] PLUGIN_TRUSTED_CA contient une clé privée — ignorée, seuls des certificats se configurent ici");
+    return [];
+  }
+  return material.match(PEM_CERTIFICATE) ?? [];
+}
+
+/**
+ * Certificats de signature RÉVOQUÉS, par empreinte SHA-256 (celle qu'affiche `certutil` ou la
+ * console AD CS), séparées par des virgules, des espaces ou des retours à la ligne.
+ *
+ * QUAI ne consulte NI liste de révocation NI OCSP : ce serait un appel réseau au moment même où il
+ * décide de charger du code, et un échec de cet appel n'aurait aucune réponse honnête. Retirer un
+ * signataire se fait donc ici, explicitement — un module signé par un certificat listé cesse d'être
+ * chargé au cycle suivant, sans reconstruction d'image.
+ */
+function readRevokedCertificates(): string[] {
+  const raw = readOptionalString("PLUGIN_REVOKED_CERTS");
+  if (raw === undefined) return [];
+  const out: string[] = [];
+  for (const token of raw.split(/[\s,;]+/)) {
+    const normalized = token.replace(/:/g, "").trim().toLowerCase();
+    if (/^[0-9a-f]{64}$/.test(normalized)) out.push(normalized);
+    else if (normalized.length > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(`[config] PLUGIN_REVOKED_CERTS : "${token}" n'est pas une empreinte SHA-256 — ignorée`);
+    }
+  }
+  return out;
+}
+
 /** Identifiant réservé de la clé d'ORIGINE : celle qu'un build grave dans l'image pour signer les
  * intégrations livrées avec QUAI. PLUGIN_TRUSTED_KEYS ne peut pas la remplacer. */
 export const PLUGIN_ORIGIN_KEY_ID = "quai-origin";
@@ -252,6 +317,11 @@ export const config = {
       pluginOriginKey === undefined
         ? readTrustedPluginKeys("PLUGIN_TRUSTED_KEYS")
         : { ...readTrustedPluginKeys("PLUGIN_TRUSTED_KEYS"), [PLUGIN_ORIGIN_KEY_ID]: pluginOriginKey },
+    // Autorités habilitées à DÉLIVRER un certificat de signature de module (AD CS interne). Elles
+    // s'ajoutent aux clés ci-dessus sans les remplacer : une clé Ed25519 reste la voie simple, un
+    // certificat apporte en plus une identité de signataire et un retrait sans reconstruction.
+    trustedCertificates: readTrustedCertificateAnchors(),
+    revokedCertificates: readRevokedCertificates(),
     // Taille maximale d'un paquet accepté à l'installation, décodé (somme de ses fichiers).
     maxPackageBytes: readNumber("PLUGIN_MAX_PACKAGE_BYTES", 2 * 1024 * 1024),
     // Délais d'expiration des appels AUX GREFFONS (plugins/guard.ts). Sans isolation hors processus,

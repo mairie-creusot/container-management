@@ -4,9 +4,18 @@
  * Un paquet est un RÉPERTOIRE contenant :
  *   quai-plugin.json — manifeste de paquet : identifiant, version, point d'entrée, nom d'export, et
  *                      l'empreinte SHA-256 de CHAQUE fichier de code du paquet ;
- *   signature.json   — { algorithm: "ed25519", keyId, signature } : signature Ed25519 des OCTETS
- *                      EXACTS de quai-plugin.json (aucune re-sérialisation, donc aucune ambiguïté
- *                      de canonicalisation) ;
+ *   signature.json   — signature des OCTETS EXACTS de quai-plugin.json (aucune re-sérialisation,
+ *                      donc aucune ambiguïté de canonicalisation), sous l'une des deux formes :
+ *                        { algorithm: "ed25519", keyId, signature }
+ *                          — clé nue, dont la publique est configurée sur le serveur
+ *                            (PLUGIN_TRUSTED_KEYS). Simple, mais anonyme : la clé ne dit pas qui
+ *                            signe, et la retirer suppose de savoir laquelle retirer.
+ *                        { algorithm: "x509-sha256", signature, certificates: [...] }
+ *                          — certificat de signature de code délivré par une AUTORITÉ configurée
+ *                            (PLUGIN_TRUSTED_CA, l'AD CS de la collectivité). Le serveur n'a alors
+ *                            aucune clé de signataire à connaître : il vérifie que le certificat
+ *                            remonte à l'autorité, porte l'usage « signature de code » et n'a pas
+ *                            expiré. En prime, le paquet dit QUI l'a signé.
  *   le code lui-même — JavaScript ESM autonome (aucun import autre que les modules `node:`).
  *
  * Chaîne de confiance : la signature couvre le manifeste, le manifeste couvre les empreintes des
@@ -21,7 +30,7 @@
  * répertoire sérialisé, octet pour octet, signature comprise.
  */
 
-import { createHash, createPublicKey, verify as verifyEd25519 } from "node:crypto";
+import { X509Certificate, createHash, createPublicKey, verify as verifyEd25519, verify as verifySignature } from "node:crypto";
 import type { KeyObject } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
@@ -39,6 +48,13 @@ const PLUGIN_ID_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const BASE64_PATTERN = /^[A-Za-z0-9+/\s]*={0,2}$/;
 const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
 const MAX_FILES = 64;
+/** id-kp-codeSigning : l'usage qu'un certificat doit porter pour habiliter du code. */
+const CODE_SIGNING_EKU = "1.3.6.1.5.5.7.3.3";
+/** Une chaîne plus longue ne décrit plus une hiérarchie interne, elle décrit une boucle. */
+const MAX_CHAIN_LENGTH = 8;
+/** Préfixe des identifiants de confiance issus d'une autorité — jamais confondu avec une clé
+ * configurée, et surtout jamais avec "quai-origin" (voir isOriginKeyId). */
+export const CERTIFICATE_KEY_PREFIX = "x509:";
 
 export type PackageFiles = ReadonlyMap<string, Buffer>;
 
@@ -61,7 +77,27 @@ export interface VerifiedPluginPackage {
   keyId: string;
   /** SHA-256 des octets du manifeste signé : identifie le contenu exact du paquet. */
   digest: string;
+  /** QUI a signé, quand une autorité le dit : nom usuel du certificat de signature. Absent pour une
+   * signature par clé nue, qui ne porte aucune identité. */
+  signer?: string;
+  /** Empreinte SHA-256 du certificat de signature — celle à poser dans PLUGIN_REVOKED_CERTS pour
+   * retirer ce signataire. */
+  certificateFingerprint?: string;
 }
+
+/**
+ * Confiance apportée par une AUTORITÉ, à côté des clés publiques configurées une à une. Un module
+ * signé par un certificat que cette autorité a émis, portant l'usage « signature de code », est
+ * accepté sans que sa clé soit connue du serveur.
+ */
+export interface CertificateTrust {
+  /** Certificats racines, en PEM, autorisés à habiliter un signataire de module. */
+  anchors: readonly string[];
+  /** Empreintes SHA-256 (hex minuscule, sans séparateur) de certificats retirés à la main. */
+  revoked: readonly string[];
+}
+
+const NO_CERTIFICATE_TRUST: CertificateTrust = { anchors: [], revoked: [] };
 
 export type PackageVerification = { ok: true; verified: VerifiedPluginPackage } | { ok: false; reason: string };
 
@@ -102,6 +138,172 @@ function trustedPublicKey(material: string): KeyObject | undefined {
   } catch {
     return undefined;
   }
+}
+
+/** Nom usuel d'un sujet X.509 ("CN=BANAS Yann") — le seul morceau lisible par un humain. */
+function commonName(subject: string): string | undefined {
+  for (const line of subject.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("CN=")) return trimmed.slice(3).trim();
+  }
+  return undefined;
+}
+
+/** Empreinte SHA-256 normalisée : minuscules, sans les deux-points de l'affichage Windows. */
+function fingerprintOf(certificate: X509Certificate): string {
+  return certificate.fingerprint256.replace(/:/g, "").toLowerCase();
+}
+
+function parseCertificate(material: string | Buffer): X509Certificate | undefined {
+  try {
+    return new X509Certificate(material);
+  } catch {
+    return undefined;
+  }
+}
+
+/** `validFrom`/`validTo` sont les seules formes présentes dans toutes les versions supportées de
+ * Node : une date illisible rend le certificat invalide, jamais valide par défaut. */
+function isCurrentlyValid(certificate: X509Certificate, now: Date): boolean {
+  const from = new Date(certificate.validFrom).getTime();
+  const to = new Date(certificate.validTo).getTime();
+  if (Number.isNaN(from) || Number.isNaN(to)) return false;
+  return from <= now.getTime() && now.getTime() <= to;
+}
+
+interface CertificateVerdict {
+  keyId: string;
+  signer: string;
+  fingerprint: string;
+}
+
+/**
+ * Signature par CERTIFICAT. Ce qui est exigé, dans cet ordre, et sans exception :
+ *  - le certificat de signature n'est pas listé comme retiré, ni aucun de ses émetteurs ;
+ *  - il est valide À CET INSTANT, comme tous les certificats de la chaîne ;
+ *  - il porte explicitement l'usage « signature de code » — un certificat sans cet usage habilite
+ *    tout, donc rien : il est refusé plutôt qu'interprété largement ;
+ *  - il a réellement signé les octets du manifeste ;
+ *  - il remonte, de proche en proche, à une autorité configurée sur CE serveur.
+ *
+ * L'identifiant de confiance rendu est dérivé de l'AUTORITÉ, jamais de ce que le paquet annonce :
+ * sinon un signataire tiers pourrait se déclarer "quai-origin" et usurper une intégration livrée.
+ */
+function verifyCertificateSignature(
+  manifestBytes: Buffer,
+  rawCertificates: unknown,
+  signature: Buffer,
+  trust: CertificateTrust,
+  now: Date,
+): { ok: true; verdict: CertificateVerdict } | { ok: false; reason: string } {
+  if (trust.anchors.length === 0) {
+    return {
+      ok: false,
+      reason:
+        "Ce paquet est signé par certificat, mais aucune autorité de signature n'est configurée sur ce serveur (PLUGIN_TRUSTED_CA) : rien ne permet d'en juger.",
+    };
+  }
+  if (!Array.isArray(rawCertificates) || rawCertificates.length === 0) {
+    return { ok: false, reason: `${PACKAGE_SIGNATURE_NAME} ne porte aucun certificat : une signature par certificat doit fournir sa chaîne.` };
+  }
+  if (rawCertificates.length > MAX_CHAIN_LENGTH) {
+    return { ok: false, reason: `Chaîne de certificats trop longue (${rawCertificates.length}) : ${MAX_CHAIN_LENGTH} au maximum.` };
+  }
+
+  const chain: X509Certificate[] = [];
+  for (const [index, entry] of (rawCertificates as unknown[]).entries()) {
+    if (typeof entry !== "string" || !BASE64_PATTERN.test(entry.replace(/-----[A-Z ]+-----/g, ""))) {
+      return { ok: false, reason: `Certificat n°${index + 1} illisible : du DER en base64 (ou du PEM) est attendu.` };
+    }
+    const certificate = parseCertificate(entry.includes("BEGIN CERTIFICATE") ? entry : Buffer.from(entry, "base64"));
+    if (!certificate) return { ok: false, reason: `Certificat n°${index + 1} illisible : ce n'est pas un certificat X.509 exploitable.` };
+    chain.push(certificate);
+  }
+
+  const anchors: X509Certificate[] = [];
+  for (const material of trust.anchors) {
+    const anchor = parseCertificate(material);
+    if (anchor) anchors.push(anchor);
+  }
+  if (anchors.length === 0) {
+    return { ok: false, reason: "Aucune autorité de signature exploitable n'est configurée : corrigez PLUGIN_TRUSTED_CA." };
+  }
+
+  const revoked = new Set(trust.revoked);
+  for (const certificate of chain) {
+    const fingerprint = fingerprintOf(certificate);
+    if (revoked.has(fingerprint)) {
+      return {
+        ok: false,
+        reason: `Le certificat « ${commonName(certificate.subject) ?? fingerprint} » a été retiré (PLUGIN_REVOKED_CERTS) : ce module n'est plus accepté.`,
+      };
+    }
+  }
+
+  const leaf = chain[0]!;
+  const leafName = commonName(leaf.subject) ?? leaf.subject.split("\n")[0] ?? "certificat sans nom";
+  for (const certificate of chain) {
+    if (!isCurrentlyValid(certificate, now)) {
+      return {
+        ok: false,
+        reason: `Le certificat « ${commonName(certificate.subject) ?? "sans nom"} » n'est pas valide aujourd'hui (${certificate.validFrom} → ${certificate.validTo}).`,
+      };
+    }
+  }
+
+  if (!leaf.keyUsage?.includes(CODE_SIGNING_EKU)) {
+    return {
+      ok: false,
+      reason: `Le certificat « ${leafName} » ne porte pas l'usage « signature de code » : il ne peut pas habiliter un module.`,
+    };
+  }
+
+  let signatureValid = false;
+  try {
+    signatureValid = verifySignature("sha256", manifestBytes, leaf.publicKey, signature);
+  } catch {
+    signatureValid = false;
+  }
+  if (!signatureValid) {
+    return { ok: false, reason: `Signature invalide : le manifeste du paquet ne correspond pas à ce que « ${leafName} » a signé.` };
+  }
+
+  // Remontée de proche en proche : chaque certificat doit avoir été RÉELLEMENT émis par le suivant.
+  let current = leaf;
+  for (const issuer of chain.slice(1)) {
+    if (!issuer.ca) {
+      return { ok: false, reason: `« ${commonName(issuer.subject) ?? "un certificat de la chaîne"} » n'est pas une autorité : il ne peut pas avoir émis un certificat.` };
+    }
+    if (!current.checkIssued(issuer) || !current.verify(issuer.publicKey)) {
+      return { ok: false, reason: `Chaîne de certificats rompue : « ${commonName(current.subject) ?? "un certificat"} » n'a pas été émis par « ${commonName(issuer.subject) ?? "le certificat suivant"} ».` };
+    }
+    current = issuer;
+  }
+
+  const topFingerprint = fingerprintOf(current);
+  for (const anchor of anchors) {
+    // La racine peut être fournie dans la chaîne (elle est alors la même que l'ancre) ou rester
+    // implicite (le dernier certificat fourni a été émis par l'ancre) : les deux formes existent.
+    const isAnchorItself = fingerprintOf(anchor) === topFingerprint;
+    const issuedByAnchor = !isAnchorItself && current.checkIssued(anchor) && current.verify(anchor.publicKey);
+    if (!isAnchorItself && !issuedByAnchor) continue;
+    if (!isCurrentlyValid(anchor, now)) {
+      return { ok: false, reason: `L'autorité « ${commonName(anchor.subject) ?? "configurée"} » n'est plus valide (${anchor.validFrom} → ${anchor.validTo}).` };
+    }
+    return {
+      ok: true,
+      verdict: {
+        keyId: `${CERTIFICATE_KEY_PREFIX}${commonName(anchor.subject) ?? "autorité"}`,
+        signer: leafName,
+        fingerprint: fingerprintOf(leaf),
+      },
+    };
+  }
+
+  return {
+    ok: false,
+    reason: `Le certificat « ${leafName} » ne remonte à aucune autorité configurée sur ce serveur : il n'a pas été délivré par une autorité que QUAI reconnaît.`,
+  };
 }
 
 function parseJson(bytes: Buffer): unknown {
@@ -169,11 +371,15 @@ function readPackageManifest(bytes: Buffer): { ok: true; manifest: PluginPackage
  * SEULE porte d'entrée de la confiance. Rien d'autre dans le socle ne décide qu'un module est
  * fiable, et rien n'est importé tant que cette fonction n'a pas répondu `ok`.
  */
-export function verifyPluginPackage(files: PackageFiles, trustedKeys: Readonly<Record<string, string>>): PackageVerification {
+export function verifyPluginPackage(
+  files: PackageFiles,
+  trustedKeys: Readonly<Record<string, string>>,
+  certificateTrust: CertificateTrust = NO_CERTIFICATE_TRUST,
+): PackageVerification {
   const trustedIds = Object.keys(trustedKeys);
-  if (trustedIds.length === 0) {
+  if (trustedIds.length === 0 && certificateTrust.anchors.length === 0) {
     return refuse(
-      "Aucune clé de confiance n'est configurée (PLUGIN_TRUSTED_KEYS) : l'installation et le chargement de modules externes sont indisponibles.",
+      "Aucune confiance n'est configurée (PLUGIN_TRUSTED_KEYS, PLUGIN_TRUSTED_CA) : l'installation et le chargement de modules externes sont indisponibles.",
     );
   }
 
@@ -187,37 +393,62 @@ export function verifyPluginPackage(files: PackageFiles, trustedKeys: Readonly<R
 
   const signatureDoc = parseJson(signatureBytes);
   if (!isRecord(signatureDoc)) return refuse(`${PACKAGE_SIGNATURE_NAME} n'est pas un objet JSON exploitable.`);
-  if (signatureDoc.algorithm !== "ed25519") {
-    return refuse(`Algorithme de signature non supporté : ${JSON.stringify(signatureDoc.algorithm)} — seul "ed25519" est accepté.`);
-  }
-  const keyId = signatureDoc.keyId;
-  if (typeof keyId !== "string" || keyId.trim().length === 0) {
-    return refuse(`${PACKAGE_SIGNATURE_NAME} n'indique pas quelle clé a signé (keyId).`);
+  const algorithm = signatureDoc.algorithm;
+  if (algorithm !== "ed25519" && algorithm !== "x509-sha256") {
+    return refuse(
+      `Algorithme de signature non supporté : ${JSON.stringify(algorithm)} — "ed25519" (clé nue) et "x509-sha256" (certificat) sont acceptés.`,
+    );
   }
   const rawSignature = signatureDoc.signature;
   if (typeof rawSignature !== "string" || !BASE64_PATTERN.test(rawSignature)) {
     return refuse(`${PACKAGE_SIGNATURE_NAME} ne porte pas de signature base64 exploitable.`);
   }
 
-  const material = trustedKeys[keyId];
-  if (material === undefined) {
-    return refuse(
-      `Signature émise par la clé "${keyId}", inconnue du serveur : seules les clés de confiance configurées (${trustedIds.join(", ")}) sont acceptées.`,
-    );
-  }
-  const publicKey = trustedPublicKey(material);
-  if (!publicKey) {
-    return refuse(`La clé de confiance "${keyId}" n'est pas une clé publique Ed25519 exploitable : corrigez PLUGIN_TRUSTED_KEYS.`);
-  }
+  let keyId: string;
+  let signer: string | undefined;
+  let certificateFingerprint: string | undefined;
 
-  let valid = false;
-  try {
-    valid = verifyEd25519(null, manifestBytes, publicKey, Buffer.from(rawSignature, "base64"));
-  } catch {
-    valid = false;
-  }
-  if (!valid) {
-    return refuse(`Signature invalide : le manifeste du paquet ne correspond pas à ce que la clé "${keyId}" a signé.`);
+  if (algorithm === "x509-sha256") {
+    const outcome = verifyCertificateSignature(
+      manifestBytes,
+      signatureDoc.certificates,
+      Buffer.from(rawSignature, "base64"),
+      certificateTrust,
+      new Date(),
+    );
+    if (!outcome.ok) return refuse(outcome.reason);
+    // Dérivé de l'AUTORITÉ : ce que le paquet annonce dans keyId n'entre jamais en compte, sans quoi
+    // un signataire tiers se déclarerait "quai-origin" et usurperait une intégration livrée.
+    keyId = outcome.verdict.keyId;
+    signer = outcome.verdict.signer;
+    certificateFingerprint = outcome.verdict.fingerprint;
+  } else {
+    const declared = signatureDoc.keyId;
+    if (typeof declared !== "string" || declared.trim().length === 0) {
+      return refuse(`${PACKAGE_SIGNATURE_NAME} n'indique pas quelle clé a signé (keyId).`);
+    }
+    keyId = declared;
+
+    const material = trustedKeys[keyId];
+    if (material === undefined) {
+      return refuse(
+        `Signature émise par la clé "${keyId}", inconnue du serveur : seules les clés de confiance configurées (${trustedIds.join(", ") || "aucune"}) sont acceptées.`,
+      );
+    }
+    const publicKey = trustedPublicKey(material);
+    if (!publicKey) {
+      return refuse(`La clé de confiance "${keyId}" n'est pas une clé publique Ed25519 exploitable : corrigez PLUGIN_TRUSTED_KEYS.`);
+    }
+
+    let valid = false;
+    try {
+      valid = verifyEd25519(null, manifestBytes, publicKey, Buffer.from(rawSignature, "base64"));
+    } catch {
+      valid = false;
+    }
+    if (!valid) {
+      return refuse(`Signature invalide : le manifeste du paquet ne correspond pas à ce que la clé "${keyId}" a signé.`);
+    }
   }
 
   const manifest = readPackageManifest(manifestBytes);
@@ -237,7 +468,16 @@ export function verifyPluginPackage(files: PackageFiles, trustedKeys: Readonly<R
     }
   }
 
-  return { ok: true, verified: { manifest: manifest.manifest, keyId, digest: sha256(manifestBytes) } };
+  return {
+    ok: true,
+    verified: {
+      manifest: manifest.manifest,
+      keyId,
+      digest: sha256(manifestBytes),
+      ...(signer !== undefined ? { signer } : {}),
+      ...(certificateFingerprint !== undefined ? { certificateFingerprint } : {}),
+    },
+  };
 }
 
 /** Fichiers d'un paquet posé sur disque, chemins relatifs à `dir`. Lève si le paquet déborde. */

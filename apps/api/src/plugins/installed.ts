@@ -16,6 +16,7 @@
  * paquet refusé : le code d'un module non vérifié n'est jamais importable.
  */
 
+import { X509Certificate } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -23,13 +24,14 @@ import { config } from "../config.js";
 import { isBuiltinPluginId } from "./builtins.js";
 import type { PluginModuleEntry } from "./builtins.js";
 import {
+  CERTIFICATE_KEY_PREFIX,
   INSTALL_MARK_NAME,
   decodePackageEnvelope,
   isValidPluginId,
   readPackageFiles,
   verifyPluginPackage,
 } from "./package.js";
-import type { PackageFiles, VerifiedPluginPackage } from "./package.js";
+import type { CertificateTrust, PackageFiles, VerifiedPluginPackage } from "./package.js";
 
 /** Identifiants que le socle se réserve : ils servent de segment de route (/api/plugins/installed). */
 const RESERVED_PLUGIN_IDS = new Set(["installed"]);
@@ -49,6 +51,12 @@ export interface InstalledPluginRecord {
   version: string | null;
   trusted: boolean;
   keyId: string | null;
+  /** QUI a signé, quand une AUTORITÉ le dit (nom usuel du certificat) — `null` pour une signature
+   * par clé nue, qui ne porte aucune identité. */
+  signer: string | null;
+  /** Empreinte SHA-256 du certificat de signature : celle à poser dans PLUGIN_REVOKED_CERTS pour
+   * retirer ce signataire sans reconstruire quoi que ce soit. */
+  certificateFingerprint: string | null;
   /** Paquet d'ORIGINE de cette image : prouvé par la clé qui l'a signé, jamais par sa trace d'installation. */
   origin: boolean;
   installedAt: string | null;
@@ -75,12 +83,38 @@ export function installedPluginsRoot(): string {
   return path.join(path.dirname(path.resolve(config.setup.configPath)), "plugins");
 }
 
-/** Identifiants des clés de confiance configurées — jamais leur valeur. La clé d'ORIGINE en est
- * exclue : sa clé privée n'existe plus après le build, personne ne peut signer avec elle. */
+/** Confiance apportée par une AUTORITÉ (AD CS interne), telle que la configuration la décrit. */
+export function certificateTrust(): CertificateTrust {
+  return { anchors: config.plugins.trustedCertificates, revoked: config.plugins.revokedCertificates };
+}
+
+/** Nom usuel d'une autorité configurée, pour l'afficher sans jamais sortir son certificat. */
+function anchorLabels(): string[] {
+  const labels: string[] = [];
+  for (const material of config.plugins.trustedCertificates) {
+    let subject: string;
+    try {
+      subject = new X509Certificate(material).subject;
+    } catch {
+      continue;
+    }
+    const cn = subject
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line.startsWith("CN="));
+    labels.push(`${CERTIFICATE_KEY_PREFIX}${cn === undefined ? "autorité" : cn.slice(3).trim()}`);
+  }
+  return labels;
+}
+
+/** Identifiants de confiance configurés — jamais leur valeur. La clé d'ORIGINE en est exclue : sa
+ * clé privée n'existe plus après le build, personne ne peut signer avec elle. Les autorités de
+ * certification y figurent : elles habilitent des signataires que le serveur n'a pas à connaître. */
 export function trustedKeyIds(): string[] {
-  return Object.keys(config.plugins.trustedKeys)
-    .filter((keyId) => keyId !== config.plugins.originKeyId)
-    .sort();
+  return [
+    ...Object.keys(config.plugins.trustedKeys).filter((keyId) => keyId !== config.plugins.originKeyId),
+    ...anchorLabels(),
+  ].sort();
 }
 
 /** Le paquet a-t-il été signé par la clé d'origine de CETTE image ? */
@@ -145,7 +179,7 @@ async function scanInstalled(): Promise<ScannedPackage[]> {
       continue;
     }
 
-    const verification = verifyPluginPackage(files, config.plugins.trustedKeys);
+    const verification = verifyPluginPackage(files, config.plugins.trustedKeys, certificateTrust());
     if (!verification.ok) {
       scanned.push({ id: entry.name, dir, mark, verified: null, reason: verification.reason });
       continue;
@@ -173,6 +207,8 @@ export async function listInstalledPlugins(): Promise<InstalledPluginRecord[]> {
     version: entry.verified?.manifest.version ?? null,
     trusted: entry.verified !== null,
     keyId: entry.verified?.keyId ?? null,
+    signer: entry.verified?.signer ?? null,
+    certificateFingerprint: entry.verified?.certificateFingerprint ?? null,
     origin: entry.verified !== null && isOriginKeyId(entry.verified.keyId),
     installedAt: entry.mark.installedAt,
     installedBy: entry.mark.installedBy,
@@ -272,17 +308,17 @@ export async function installPluginPackage(body: unknown, installedBy: string): 
       ok: false,
       status: 503,
       error:
-        "Aucune clé de confiance n'est configurée (PLUGIN_TRUSTED_KEYS) : l'installation de modules externes est indisponible sur ce serveur.",
+        "Aucune confiance n'est configurée (PLUGIN_TRUSTED_KEYS pour une clé, PLUGIN_TRUSTED_CA pour une autorité) : l'installation de modules externes est indisponible sur ce serveur.",
     };
   }
 
   const envelope = decodePackageEnvelope(body, config.plugins.maxPackageBytes);
   if (!envelope.ok) return { ok: false, status: 400, error: envelope.reason };
 
-  const verification = verifyPluginPackage(envelope.files, config.plugins.trustedKeys);
+  const verification = verifyPluginPackage(envelope.files, config.plugins.trustedKeys, certificateTrust());
   if (!verification.ok) return { ok: false, status: 400, error: verification.reason };
 
-  const { manifest, keyId } = verification.verified;
+  const { manifest, keyId, signer, certificateFingerprint } = verification.verified;
   if (isBuiltinPluginId(manifest.id)) {
     return {
       ok: false,
@@ -311,6 +347,8 @@ export async function installPluginPackage(body: unknown, installedBy: string): 
       version: manifest.version,
       trusted: true,
       keyId,
+      signer: signer ?? null,
+      certificateFingerprint: certificateFingerprint ?? null,
       origin: isOriginKeyId(keyId),
       installedAt: mark.installedAt,
       installedBy: mark.installedBy,
