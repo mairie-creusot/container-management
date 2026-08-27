@@ -1,0 +1,522 @@
+[
+  {
+    "method": "DELETE",
+    "path": "/api/3cx/config"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/ad-dns/config"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/automation/edges/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/automation/nodes/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/backups/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/certificates/:subject"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/certificates/config"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/containers/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/cron-jobs/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/github/repos/:owner/:repo/file-overrides"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/glpi/config"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/hycu/config"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/iac/workspaces/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/iac/workspaces/:id/files/:path"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/images/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/lxc/config"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/networks/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/notification-channels/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/nutanix/config"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/nutanix/vms/:uuid"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/plugins/:id/config"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/plugins/installed/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/registries/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/remote-environments/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/reverse-proxy/routes/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/secrets/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/service-modules/bindings/:nodeId"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/templates/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/topology/groups/:id"
+  },
+  {
+    "method": "DELETE",
+    "path": "/api/volumes/:name"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/backups/:id"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/cron-jobs/:id"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/glpi/inventory/computers/:id"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/notification-channels/:id"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/nutanix/vms/:uuid/compute"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/registries/:id"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/remote-environments/:id"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/secrets/:id"
+  },
+  {
+    "method": "PATCH",
+    "path": "/api/topology/groups/:id"
+  },
+  {
+    "method": "POST",
+    "path": "/api/3cx/config/test"
+  },
+  {
+    "method": "POST",
+    "path": "/api/ad-dns/test"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/login"
+  },
+  {
+    "method": "POST",
+    "path": "/api/automation/edges"
+  },
+  {
+    "method": "POST",
+    "path": "/api/automation/nodes"
+  },
+  {
+    "method": "POST",
+    "path": "/api/backups"
+  },
+  {
+    "method": "POST",
+    "path": "/api/backups/:id/restore/:runId"
+  },
+  {
+    "method": "POST",
+    "path": "/api/backups/:id/run"
+  },
+  {
+    "method": "POST",
+    "path": "/api/certificates/config/test"
+  },
+  {
+    "method": "POST",
+    "path": "/api/certificates/issue"
+  },
+  {
+    "method": "POST",
+    "path": "/api/containers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/containers/:id/env"
+  },
+  {
+    "method": "POST",
+    "path": "/api/containers/:id/mounts"
+  },
+  {
+    "method": "POST",
+    "path": "/api/containers/:id/processes/:pid/kill"
+  },
+  {
+    "method": "POST",
+    "path": "/api/containers/:id/processes/:pid/restart"
+  },
+  {
+    "method": "POST",
+    "path": "/api/containers/:id/rename"
+  },
+  {
+    "method": "POST",
+    "path": "/api/containers/:id/restart"
+  },
+  {
+    "method": "POST",
+    "path": "/api/containers/:id/start"
+  },
+  {
+    "method": "POST",
+    "path": "/api/containers/:id/stop"
+  },
+  {
+    "method": "POST",
+    "path": "/api/cron-jobs"
+  },
+  {
+    "method": "POST",
+    "path": "/api/cron-jobs/:id/trigger"
+  },
+  {
+    "method": "POST",
+    "path": "/api/github/repos/:owner/:repo/deploy"
+  },
+  {
+    "method": "POST",
+    "path": "/api/gitops/sync"
+  },
+  {
+    "method": "POST",
+    "path": "/api/glpi/config/test"
+  },
+  {
+    "method": "POST",
+    "path": "/api/glpi/inventory/computers"
+  },
+  {
+    "method": "POST",
+    "path": "/api/glpi/tickets/:id/followup"
+  },
+  {
+    "method": "POST",
+    "path": "/api/hycu/config/test"
+  },
+  {
+    "method": "POST",
+    "path": "/api/iac/lint"
+  },
+  {
+    "method": "POST",
+    "path": "/api/iac/workspaces"
+  },
+  {
+    "method": "POST",
+    "path": "/api/iac/workspaces/:id/run"
+  },
+  {
+    "method": "POST",
+    "path": "/api/images/:id/scan"
+  },
+  {
+    "method": "POST",
+    "path": "/api/images/:id/update"
+  },
+  {
+    "method": "POST",
+    "path": "/api/images/pull"
+  },
+  {
+    "method": "POST",
+    "path": "/api/networks"
+  },
+  {
+    "method": "POST",
+    "path": "/api/networks/:id/connect"
+  },
+  {
+    "method": "POST",
+    "path": "/api/networks/:id/disconnect"
+  },
+  {
+    "method": "POST",
+    "path": "/api/notification-channels"
+  },
+  {
+    "method": "POST",
+    "path": "/api/notification-channels/:id/test"
+  },
+  {
+    "method": "POST",
+    "path": "/api/notifications/read-all"
+  },
+  {
+    "method": "POST",
+    "path": "/api/nutanix/images"
+  },
+  {
+    "method": "POST",
+    "path": "/api/nutanix/images/upload"
+  },
+  {
+    "method": "POST",
+    "path": "/api/nutanix/vms"
+  },
+  {
+    "method": "POST",
+    "path": "/api/nutanix/vms/:uuid/disks"
+  },
+  {
+    "method": "POST",
+    "path": "/api/nutanix/vms/:uuid/migrate"
+  },
+  {
+    "method": "POST",
+    "path": "/api/nutanix/vms/:uuid/nics"
+  },
+  {
+    "method": "POST",
+    "path": "/api/nutanix/vms/:uuid/restart"
+  },
+  {
+    "method": "POST",
+    "path": "/api/nutanix/vms/:uuid/start"
+  },
+  {
+    "method": "POST",
+    "path": "/api/nutanix/vms/:uuid/stop"
+  },
+  {
+    "method": "POST",
+    "path": "/api/plugins/:id/actions/:actionId"
+  },
+  {
+    "method": "POST",
+    "path": "/api/plugins/:id/config/test"
+  },
+  {
+    "method": "POST",
+    "path": "/api/plugins/installed"
+  },
+  {
+    "method": "POST",
+    "path": "/api/plugins/installed/:id/restore"
+  },
+  {
+    "method": "POST",
+    "path": "/api/registries"
+  },
+  {
+    "method": "POST",
+    "path": "/api/remote-environments"
+  },
+  {
+    "method": "POST",
+    "path": "/api/reverse-proxy/push"
+  },
+  {
+    "method": "POST",
+    "path": "/api/reverse-proxy/routes"
+  },
+  {
+    "method": "POST",
+    "path": "/api/reverse-proxy/routes/:id/resync-dns"
+  },
+  {
+    "method": "POST",
+    "path": "/api/secrets"
+  },
+  {
+    "method": "POST",
+    "path": "/api/secrets/:id/reveal"
+  },
+  {
+    "method": "POST",
+    "path": "/api/setup/complete"
+  },
+  {
+    "method": "POST",
+    "path": "/api/setup/reset"
+  },
+  {
+    "method": "POST",
+    "path": "/api/setup/test/docker"
+  },
+  {
+    "method": "POST",
+    "path": "/api/setup/test/kubernetes"
+  },
+  {
+    "method": "POST",
+    "path": "/api/setup/test/ldap"
+  },
+  {
+    "method": "POST",
+    "path": "/api/setup/test/nutanix"
+  },
+  {
+    "method": "POST",
+    "path": "/api/setup/test/registry"
+  },
+  {
+    "method": "POST",
+    "path": "/api/templates"
+  },
+  {
+    "method": "POST",
+    "path": "/api/templates/:id/build"
+  },
+  {
+    "method": "POST",
+    "path": "/api/templates/:id/validate"
+  },
+  {
+    "method": "POST",
+    "path": "/api/topology/groups"
+  },
+  {
+    "method": "POST",
+    "path": "/api/volumes"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/3cx/config"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/ad-dns/config"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/certificates/config"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/github/repos/:owner/:repo/auto-deploy"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/github/repos/:owner/:repo/config-values"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/github/repos/:owner/:repo/file-overrides"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/github/token"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/glpi/config"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/hycu/config"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/iac/workspaces/:id/files/:path"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/lxc/config"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/nutanix/config"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/plugins/:id/config"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/plugins/:id/enabled"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/service-modules/bindings"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/setup/ldap"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/templates/:id"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/templates/build-defaults"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/topology/groups/:id/positions"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/topology/positions"
+  }
+]

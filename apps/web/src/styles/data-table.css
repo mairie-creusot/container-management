@@ -417,3 +417,40 @@
     opacity: 0.45;
   }
 }
+
+/* Filtres du journal de traçabilité (features/audit/AuditPage.tsx) — une seule ligne qui se replie,
+   au-dessus du tableau : chercher ne doit pas coûter un écran de formulaire. */
+.audit-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.audit-filters__search {
+  flex: 1 1 260px;
+  min-width: 200px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.audit-filters select {
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.audit-filters__count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--color-text-faint);
+  font-variant-numeric: tabular-nums;
+}

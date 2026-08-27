@@ -58,6 +58,23 @@ const RESOURCE_LABELS: Record<string, string> = {
   volumes: "les volumes",
 };
 
+/** Famille de ressource d'un chemin ("/api/nutanix/vms/x" -> "nutanix") — base du filtre par
+ * domaine de la page Traçabilité. Chaîne vide si le chemin n'en porte pas. */
+export function resourceOf(path: string): string {
+  return path.split("/").filter(Boolean)[1] ?? "";
+}
+
+/** Libellé français d'une famille, ou la famille brute si elle n'est pas encore nommée — jamais un
+ * libellé inventé qui masquerait une famille inconnue. */
+export function resourceLabelOf(resource: string): string {
+  if (!resource) return "Autre";
+  const label = RESOURCE_LABELS[resource];
+  if (!label) return resource;
+  // "les conteneurs" -> "Conteneurs" : le filtre affiche un nom, pas un fragment de phrase.
+  const withoutArticle = label.replace(/^(les |le |la |l'|des |du )/i, "");
+  return withoutArticle.charAt(0).toUpperCase() + withoutArticle.slice(1);
+}
+
 /** Ce qu'il faut d'un manifeste de greffon pour nommer ses actions dans le journal. */
 export interface PluginAuditLabels {
   /** Nom lisible du greffon ("Virtualisation Nutanix"). */
@@ -103,6 +120,12 @@ export function describeAction(event: AuditEvent, plugins?: ReadonlyMap<string, 
   if (path === "/api/setup/ldap") return "a modifié la configuration de l'annuaire LDAP";
   if (path.startsWith("/api/setup/test/")) return "a testé une connexion (assistant de configuration)";
 
+  if (resource === "containers" && subAction === "processes" && segments[5]) {
+    // Action sur UN processus vu depuis l'intérieur du conteneur (onglet Composition interne).
+    const pid = segments[4];
+    if (segments[5] === "kill") return `a tué le processus ${pid} dans le conteneur ${shortId(idOrAction)}`;
+    if (segments[5] === "restart") return `a relancé le processus ${pid} dans le conteneur ${shortId(idOrAction)}`;
+  }
   if (resource === "containers") {
     if (method === "POST" && !idOrAction) return "a déployé un conteneur";
     if (subAction === "start") return `a démarré le conteneur ${shortId(idOrAction)}`;
@@ -174,6 +197,17 @@ export function describeAction(event: AuditEvent, plugins?: ReadonlyMap<string, 
       const [, , , owner, repo] = segments;
       return `a configuré le déploiement automatique de ${owner}/${repo}`;
     }
+    if (path.endsWith("/config-values")) {
+      const [, , , owner, repo] = segments;
+      // Les valeurs elles-mêmes ne sont jamais journalisées (elles peuvent référencer un secret).
+      return `a modifié les variables de déploiement de ${owner}/${repo}`;
+    }
+    if (path.endsWith("/file-overrides")) {
+      const [, , , owner, repo] = segments;
+      return method === "DELETE"
+        ? `a rétabli un fichier d'origine de ${owner}/${repo}`
+        : `a surchargé un fichier de ${owner}/${repo} pour le déploiement`;
+    }
   }
   if (resource === "notification-channels") {
     if (method === "POST" && !idOrAction) return "a créé un canal de notification";
@@ -197,6 +231,10 @@ export function describeAction(event: AuditEvent, plugins?: ReadonlyMap<string, 
       if (subId === "stop") return `a arrêté la VM Nutanix ${shortId(subAction)}`;
       if (subId === "restart") return `a redémarré la VM Nutanix ${shortId(subAction)}`;
       if (subId === "disks") return `a ajouté un disque à la VM Nutanix ${shortId(subAction)}`;
+      // PATCH .../compute : vCPU, cœurs par vCPU et/ou mémoire (routes/nutanix.ts) — le corps n'est
+      // jamais journalisé, donc on nomme ce qui est modifiable, pas la valeur choisie.
+      if (subId === "compute") return `a modifié les ressources (vCPU/mémoire) de la VM Nutanix ${shortId(subAction)}`;
+      if (subId === "migrate") return `a migré à chaud la VM Nutanix ${shortId(subAction)} vers un autre hôte`;
       if (subId === "nics") return `a ajouté une carte réseau à la VM Nutanix ${shortId(subAction)}`;
       if (method === "POST" && !subAction) return "a créé une VM Nutanix";
       if (method === "DELETE") return `a supprimé la VM Nutanix ${shortId(subAction)}`;
@@ -223,6 +261,9 @@ export function describeAction(event: AuditEvent, plugins?: ReadonlyMap<string, 
     // Le corps de la requête n'est jamais journalisé (il peut porter un secret) : le sens de la
     // bascule n'est donc pas connu ici, et on ne l'invente pas.
     if (subAction === "enabled") return `a changé l'activation du module « ${pluginName} »`;
+  }
+  if (resource === "glpi" && idOrAction === "tickets" && subId === "followup") {
+    return `a ajouté un suivi au ticket GLPI ${shortId(subAction)}`;
   }
   if (resource === "lxc") {
     if (idOrAction === "config" && method === "PUT") return "a configuré l'hôte LXD";

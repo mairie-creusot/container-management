@@ -11,7 +11,7 @@ import {
 import { usePluginNavItems } from "@/features/plugins/usePluginNav";
 import type { PluginNavItem } from "@/features/plugins/pluginsModel";
 import { buildSettingsSections } from "@/features/settings/settingsSections";
-import { canAdminister } from "@/features/auth/authSlice";
+import { canAdminister, canOperate } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import Brand from "@/components/Brand";
 import {
@@ -251,7 +251,9 @@ export default function Sidebar() {
           </button>
         )}
 
-        {canAdminister(session) && (
+        {/* Traçabilité ouverte à qui AGIT sur le parc, pas seulement aux admins : une équipe doit
+            voir ce que font ses collègues sur les mêmes machines. */}
+        {canOperate(session) && (
           <button
             type="button"
             className={`sidebar__item${currentView === "audit" ? " is-active" : ""}`}
