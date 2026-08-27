@@ -100,10 +100,18 @@ ENV NODE_ENV=production \
 # intégrations infra-as-code de ce projet). DEBIAN_FRONTEND=noninteractive évite que le paquet
 # krb5-user ne bloque ce build sur sa question debconf "royaume Kerberos par défaut" — sans
 # incidence, chaque appel fournit son propre krb5.conf temporaire (KRB5_CONFIG).
+#
+# `curl` (services/winrm.ts) : WinRM s'authentifie en Kerberos/SPNEGO. `curl --negotiate` le fait
+# avec la bibliothèque GSS-API du système, en lisant le ticket de la personne connectée — le paquet
+# `curl` de Debian est compilé avec GSS-API. Réimplémenter SPNEGO en TypeScript serait long, fragile,
+# et entrerait dans le chemin qui décide de ce qui s'exécute sur les serveurs Windows.
 RUN DEBIAN_FRONTEND=noninteractive apt-get update && apt-get install -y --no-install-recommends \
         krb5-user \
         dnsutils \
-    && rm -rf /var/lib/apt/lists/*
+        curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --version | grep -qi "GSS-API" \
+    && curl --version | grep -qi "SPNEGO"
 
 # Autorités de certification INTERNES (AD CS de la collectivité, certificat auto-signé d'un
 # service interne...). Sans elles, tout appel HTTPS vers un service interne échoue avant

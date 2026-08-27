@@ -38,6 +38,7 @@ import { fetchImageHistory, fetchImages } from "@/features/images/imagesSlice";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import { ContainerConsoleBody } from "@/components/ContainerConsole";
 import { VmConsoleBody } from "@/components/VmConsole";
+import WindowsServicesPanel from "@/features/windows/WindowsServicesPanel";
 import { ContainerLogsBody } from "@/features/containers/ContainerLogs";
 import VulnerabilitiesPanel from "@/components/VulnerabilitiesPanel";
 import { formatCpuTime, formatProcessAge, hexdumpRows } from "@/utils/containerInternalsFormat";
@@ -122,7 +123,7 @@ const PROCESS_POLL_INTERVAL_MS = 2500;
  * suspect, jamais un téléchargement de fichier entier. */
 const HEXDUMP_WINDOW_BYTES = 512;
 
-type ViewMode = "shell" | "logs" | "dependencies" | "interior" | "recipe" | "module" | "console";
+type ViewMode = "shell" | "logs" | "dependencies" | "interior" | "recipe" | "module" | "console" | "services";
 
 /** Menu contextuel de la vue "recette" — une cible par rôle de nœud synthétique + le canevas vide. */
 type RecipeMenuTarget =
@@ -620,6 +621,11 @@ export default function TopologySubGraphPanel({
   // la console VNC, qui donne clavier et souris à l'intérieur de la machine — c'est elle qui prend
   // ici la place exacte où un conteneur a son Shell.
   const isNutanixVmRoot = rootNode?.kind === "nutanix-vm";
+  /** Hôte à interroger : l'IP RÉELLE rapportée par Prism si elle existe, sinon le nom de la VM.
+   * Aucune adresse n'est devinée — sans l'une ni l'autre, l'onglet Services n'est pas proposé. */
+  const windowsHost = isNutanixVmRoot
+    ? (rootNode?.nutanixNetworks ?? []).flatMap((nic) => nic.ips ?? [])[0] ?? rootNode?.label ?? ""
+    : "";
 
   // --- Vue "recette" (nœuds "image-template" uniquement, 18/08/2026) ----------------------------
   // La recette réelle (base + steps) vient de state.templates.items — la projection topologie ne
@@ -1376,6 +1382,21 @@ export default function TopologySubGraphPanel({
               >
                 Console
               </button>
+              {/* Aucune détection d'OS : Prism ne dit pas ce qui tourne dans la VM. L'onglet est
+                  proposé, et c'est la tentative qui tranche — « injoignable sur 5986 » est une
+                  réponse honnête, une détection devinée ne le serait pas. */}
+              {windowsHost.length > 0 && (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={viewMode === "services"}
+                  className={`topology-subgraph-panel__mode-btn${viewMode === "services" ? " is-active" : ""}`}
+                  onClick={() => chooseViewMode("services")}
+                  title="Services Windows de cette machine, lus sous votre propre compte"
+                >
+                  Services
+                </button>
+              )}
               {!rootModuleBinding && (
                 <button
                   type="button"
@@ -1457,6 +1478,11 @@ export default function TopologySubGraphPanel({
         </div>
       </div>
 
+      {viewMode === "services" && windowsHost.length > 0 && (
+        <div className="topology-subgraph-panel__shell">
+          <WindowsServicesPanel host={windowsHost} />
+        </div>
+      )}
       {viewMode === "console" && rootNode && rootNode.status === "running" && (
         <div className="topology-subgraph-panel__shell">
           <VmConsoleBody vmUuid={rawRootId} vmName={rootNode.label} />

@@ -13,6 +13,7 @@ import { config } from "../config.js";
 import { authenticate, diagnoseLdapAccount, LdapAuthError } from "../services/ldap.js";
 import { signSessionToken, verifySessionToken } from "../services/session.js";
 import { recordAuditEvent } from "../services/auditLog.js";
+import { destroyTicket, establishTicket } from "../services/kerberosSession.js";
 
 interface LoginBody {
   username?: string;
@@ -58,6 +59,15 @@ export default async function authRoutes(fastify: FastifyInstance): Promise<void
     try {
       const result = await authenticate(username, password);
       const token = signSessionToken(result);
+
+      // Ticket Kerberos pour agir sur Windows SOUS L'IDENTITÉ de cette personne (voir
+      // services/kerberosSession.ts) : son mot de passe ne traverse que le stdin de `kinit`, il
+      // n'est jamais conservé. Capacité OPTIONNELLE — un domaine non configuré ou un KDC muet ne
+      // doit jamais empêcher de se connecter à QUAI pour administrer des conteneurs.
+      const ticket = await establishTicket(result.username, password);
+      if (!ticket.ok && ticket.configured) {
+        request.log.warn({ username: result.username, reason: ticket.reason }, "Ticket Kerberos non obtenu");
+      }
 
       reply.setCookie(config.session.cookieName, token, {
         httpOnly: true,
@@ -132,6 +142,8 @@ export default async function authRoutes(fastify: FastifyInstance): Promise<void
     if (token) {
       try {
         const payload = verifySessionToken(token);
+        // Le ticket Kerberos ne survit pas à la session qui l'a fait naître.
+        await destroyTicket(payload.username);
         await recordAuditEvent({
           actor: payload.username,
           actorDisplayName: payload.displayName,

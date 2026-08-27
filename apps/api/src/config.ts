@@ -324,6 +324,21 @@ export const config = {
     // indéfiniment (voir finding É4, docs/reports/optimization-audit-2026-08-12.md).
     requestTimeoutMs: readNumber("GITOPS_GIT_TIMEOUT_MS", 15_000),
   },
+  windows: {
+    // Agir sur Windows SOUS L'IDENTITÉ de la personne connectée : un ticket Kerberos est obtenu à
+    // sa connexion (services/kerberosSession.ts), jamais son mot de passe conservé. Le realm et le
+    // KDC viennent de la configuration DNS Active Directory — c'est le même domaine.
+    kinitTimeoutMs: readNumber("WINDOWS_KINIT_TIMEOUT_MS", 10_000),
+    // Borne que QUAI s'impose : la durée RÉELLE est décidée par le KDC, elle n'est pas devinée ici.
+    // Au-delà, le ticket est détruit et la personne doit se reconnecter pour agir sur Windows.
+    ticketTtlMs: readNumber("WINDOWS_TICKET_TTL_MS", 8 * 60 * 60 * 1000),
+    // WinRM en HTTPS (5986) : en HTTP simple, WinRM exige un chiffrement AU NIVEAU DU MESSAGE que
+    // `curl --negotiate` ne sait pas produire — le service refuse alors « unencrypted traffic ».
+    winrmPort: readNumber("WINDOWS_WINRM_PORT", 5986),
+    winrmTimeoutMs: readNumber("WINDOWS_WINRM_TIMEOUT_MS", 20_000),
+    // Autorité interne présentée par les listeners WinRM (la même que le reste du parc).
+    caBundlePath: readString("NODE_EXTRA_CA_CERTS", ""),
+  },
   setup: {
     // Persistance de l'assistant de configuration au premier lancement (cf. ARCHITECTURE.md,
     // chapitre "Assistant de configuration au premier lancement"). Défaut dev : fichier local

@@ -46,6 +46,7 @@ import reverseProxyRoutes from "./routes/reverseProxy.js";
 import scanRoutes from "./routes/scan.js";
 import secretsRoutes from "./routes/secrets.js";
 import serviceModulesRoutes from "./routes/serviceModules.js";
+import windowsRoutes from "./routes/windows.js";
 import setupRoutes from "./routes/setup.js";
 import templatesRoutes from "./routes/templates.js";
 import threecxRoutes from "./routes/threecx.js";
@@ -139,6 +140,7 @@ export function buildServer() {
   void fastify.register(backupsRoutes);
   void fastify.register(automationRoutes);
   void fastify.register(serviceModulesRoutes);
+  void fastify.register(windowsRoutes);
   void fastify.register(pluginsRoutes);
 
   // /health : chemin attendu par les healthchecks Docker et les probes Kubernetes (voir deploy/).

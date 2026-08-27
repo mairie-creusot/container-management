@@ -4150,3 +4150,58 @@
     max-height: 200px;
   }
 }
+
+/* Onglet « Services » d'une VM (features/windows/WindowsServicesPanel.tsx) — services réels lus par
+   WinRM sous le compte de la personne connectée. */
+.windows-services {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.windows-services__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.windows-services__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.windows-services__toolbar input {
+  flex: 1 1 240px;
+  max-width: 340px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-text);
+  font-size: 13px;
+}
+
+.windows-services__count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--color-text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Nom technique du service sous son libellé : c'est lui qu'on tape dans une console. */
+.windows-services__name {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-faint);
+}
+
+.topology-subgraph-panel__note.is-denied {
+  border-color: var(--color-warning);
+  color: var(--color-warning);
+}
