@@ -37,6 +37,7 @@ import { createTopologyGroup, fetchTopology } from "@/features/topology/topology
 import { fetchImageHistory, fetchImages } from "@/features/images/imagesSlice";
 import ContextMenu, { type ContextMenuItem } from "@/components/ContextMenu";
 import { ContainerConsoleBody } from "@/components/ContainerConsole";
+import { VmConsoleBody } from "@/components/VmConsole";
 import { ContainerLogsBody } from "@/features/containers/ContainerLogs";
 import VulnerabilitiesPanel from "@/components/VulnerabilitiesPanel";
 import { formatCpuTime, formatProcessAge, hexdumpRows } from "@/utils/containerInternalsFormat";
@@ -121,7 +122,7 @@ const PROCESS_POLL_INTERVAL_MS = 2500;
  * suspect, jamais un téléchargement de fichier entier. */
 const HEXDUMP_WINDOW_BYTES = 512;
 
-type ViewMode = "shell" | "logs" | "dependencies" | "interior" | "recipe" | "module";
+type ViewMode = "shell" | "logs" | "dependencies" | "interior" | "recipe" | "module" | "console";
 
 /** Menu contextuel de la vue "recette" — une cible par rôle de nœud synthétique + le canevas vide. */
 type RecipeMenuTarget =
@@ -613,6 +614,12 @@ export default function TopologySubGraphPanel({
 
   // --- Vue "Composition interne" (conteneurs uniquement, fusion du 13/08/2026) -------------------
   const isContainerRoot = rootNode?.kind === "container";
+
+  // --- Vue "Console" (VM Nutanix uniquement) ----------------------------------------------------
+  // Une VM n'aura jamais Shell ni Logs : Prism n'expose ni l'un ni l'autre. Son équivalent réel est
+  // la console VNC, qui donne clavier et souris à l'intérieur de la machine — c'est elle qui prend
+  // ici la place exacte où un conteneur a son Shell.
+  const isNutanixVmRoot = rootNode?.kind === "nutanix-vm";
 
   // --- Vue "recette" (nœuds "image-template" uniquement, 18/08/2026) ----------------------------
   // La recette réelle (base + steps) vient de state.templates.items — la projection topologie ne
@@ -1356,6 +1363,32 @@ export default function TopologySubGraphPanel({
               </button>
             </div>
           )}
+          {/* Une VM liée à un module a déjà « Dépendances » dans la bascule ci-dessus : on ne le
+              propose pas deux fois, seule « Console » s'ajoute. */}
+          {isNutanixVmRoot && (
+            <div className="topology-subgraph-panel__mode-toggle" role="tablist" aria-label="Vue de la VM">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={viewMode === "console"}
+                className={`topology-subgraph-panel__mode-btn${viewMode === "console" ? " is-active" : ""}`}
+                onClick={() => chooseViewMode("console")}
+              >
+                Console
+              </button>
+              {!rootModuleBinding && (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={viewMode === "dependencies"}
+                  className={`topology-subgraph-panel__mode-btn${viewMode === "dependencies" ? " is-active" : ""}`}
+                  onClick={() => chooseViewMode("dependencies")}
+                >
+                  Dépendances
+                </button>
+              )}
+            </div>
+          )}
           {isContainerRoot && (
             <div className="topology-subgraph-panel__mode-toggle" role="tablist" aria-label="Vue du sous-graphe">
               <button
@@ -1424,6 +1457,17 @@ export default function TopologySubGraphPanel({
         </div>
       </div>
 
+      {viewMode === "console" && rootNode && rootNode.status === "running" && (
+        <div className="topology-subgraph-panel__shell">
+          <VmConsoleBody vmUuid={rawRootId} vmName={rootNode.label} />
+        </div>
+      )}
+      {viewMode === "console" && rootNode && rootNode.status !== "running" && (
+        <div className="empty-state topology-interior__status-message">
+          Cette VM est arrêtée — une console n'affiche un écran que sur une machine démarrée. Démarrez-la depuis le menu
+          du nœud, puis rouvrez cet onglet.
+        </div>
+      )}
       {viewMode === "shell" && rootNode && rootNode.status === "running" && (
         <div className="topology-subgraph-panel__shell">
           <ContainerConsoleBody containerId={rawRootId} containerName={rootNode.label} />

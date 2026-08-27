@@ -16,6 +16,14 @@ interface VmConsoleProps {
   onClose: () => void;
 }
 
+interface VmConsoleBodyProps {
+  /** Toujours renseigné ici : le corps n'est monté que lorsqu'une VM est réellement ciblée. */
+  vmUuid: string;
+  vmName: string;
+  /** Absent quand la console est affichée EN LIGNE (onglet du sous-graphe) : il n'y a rien à fermer. */
+  onClose?: (() => void) | undefined;
+}
+
 type ConnectionStatus = "connecting" | "connected" | "closed" | "error";
 
 const STATUS_LABEL: Record<ConnectionStatus, string> = {
@@ -33,14 +41,19 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
  * WebSocket réelle vers QUAI, jamais directement vers Prism Central/l'hyperviseur — voir
  * routes/nutanix.ts#GET /api/nutanix/vms/:uuid/console) — noVNC/RFB à la place de xterm.js.
  */
-export default function VmConsole({ vmUuid, vmName, onClose }: VmConsoleProps) {
-  const open = vmUuid !== null;
+/**
+ * Le CONTENU de la console, sans fenêtre autour — même découpe que ContainerConsole.tsx#
+ * ContainerConsoleBody, pour la même raison : cette console s'affiche aussi bien en modale que
+ * comme onglet du sous-graphe d'une VM, à la place exacte où un conteneur a son Shell. Une seule
+ * implémentation de la connexion RFB, jamais deux à garder d'accord.
+ */
+export function VmConsoleBody({ vmUuid, vmName, onClose }: VmConsoleBodyProps) {
   const screenHostRef = useRef<HTMLDivElement>(null);
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!vmUuid || !screenHostRef.current) return;
+    if (!screenHostRef.current) return;
 
     // Même garde-fou EXACT que ContainerConsole.tsx#ContainerConsoleBody (voir son commentaire de
     // tête d'effet) : un `disconnect` déclenché par le nettoyage ci-dessous arrive de façon
@@ -94,28 +107,38 @@ export default function VmConsole({ vmUuid, vmName, onClose }: VmConsoleProps) {
   }, [vmUuid]);
 
   return (
-    <Modal open={open} onClose={onClose} labelledBy="vm-console-title">
-      {open && (
-        <div className="vm-console-modal">
-          <div className="vm-console-modal__header">
-            <div>
-              <div id="vm-console-title" className="vm-console-modal__title">
-                Console — {vmName}
-              </div>
-              <div className="vm-console-modal__subtitle">Accès clavier/souris réel à la VM — comme en bureau à distance</div>
-            </div>
-            <div className={`vm-console-modal__status vm-console-modal__status--${status}`}>
-              <span className="vm-console-modal__status-dot" />
-              {STATUS_LABEL[status]}
-            </div>
-            <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
-              Fermer
-            </button>
+    <div className="vm-console-modal">
+      <div className="vm-console-modal__header">
+        <div>
+          <div id="vm-console-title" className="vm-console-modal__title">
+            Console — {vmName}
           </div>
-          <div className="vm-console-modal__screen" ref={screenHostRef} />
-          {errorMessage && <div className="error-banner vm-console-modal__error">{errorMessage}</div>}
+          <div className="vm-console-modal__subtitle">Accès clavier/souris réel à la VM — comme en bureau à distance</div>
         </div>
-      )}
+        <div className={`vm-console-modal__status vm-console-modal__status--${status}`}>
+          <span className="vm-console-modal__status-dot" />
+          {STATUS_LABEL[status]}
+        </div>
+        {onClose && (
+          <button type="button" className="btn btn-ghost btn-sm" onClick={onClose}>
+            Fermer
+          </button>
+        )}
+      </div>
+      <div className="vm-console-modal__screen" ref={screenHostRef} />
+      {errorMessage && <div className="error-banner vm-console-modal__error">{errorMessage}</div>}
+    </div>
+  );
+}
+
+/**
+ * Console VNC en MODALE — enveloppe seule, le contenu réel est VmConsoleBody ci-dessus (même
+ * patron que ContainerConsole.tsx).
+ */
+export default function VmConsole({ vmUuid, vmName, onClose }: VmConsoleProps) {
+  return (
+    <Modal open={vmUuid !== null} onClose={onClose} labelledBy="vm-console-title">
+      {vmUuid !== null && <VmConsoleBody vmUuid={vmUuid} vmName={vmName} onClose={onClose} />}
     </Modal>
   );
 }
