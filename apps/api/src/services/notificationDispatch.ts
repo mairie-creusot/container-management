@@ -116,46 +116,102 @@ async function sendEmail(email: NonNullable<EffectiveNotificationChannel["email"
 }
 
 /**
- * Telegram Bot API : POST https://api.telegram.org/bot<jeton>/sendMessage, corps
- * `{ chat_id, text }`. Le jeton fait partie de l'URL — il ne doit JAMAIS apparaître dans un
- * message d'erreur, d'où l'URL remplacée par un libellé fixe dans le rapport d'échec. Un refus
- * répond 200 ou 4xx avec `{ ok: false, description }` : les deux sont traités comme un échec.
+ * Forme d'un jeton de bot Telegram : `<identifiant numérique>:<secret>`. Vérifiée AVANT tout appel,
+ * parce que les erreurs de saisie réelles (jeton et destinataire intervertis, préfixe « bot » de
+ * l'URL recopié dans le jeton, jeton tronqué) produisent toutes le même « HTTP 404: Not Found » côté
+ * Telegram — un message qui n'apprend rien à qui le lit.
  */
-async function sendTelegram(telegram: { botToken: string; chatId: string }, event: Omit<SystemNotificationEvent, "read">): Promise<void> {
+const TELEGRAM_TOKEN_SHAPE = /^\d+:[A-Za-z0-9_-]{30,}$/;
+
+function telegramTokenComplaint(botToken: string): string | undefined {
+  if (botToken !== botToken.trim()) return "le jeton contient un espace ou un retour à la ligne au début ou à la fin.";
+  if (botToken.toLowerCase().startsWith("bot")) {
+    return 'le jeton commence par « bot » : ce préfixe appartient à l\'URL de l\'API, il ne fait pas partie du jeton donné par @BotFather.';
+  }
+  if (!botToken.includes(":")) {
+    return "le jeton ne contient pas de « : » : un jeton Telegram s'écrit « 123456789:AA... ». Vérifiez que le jeton et le destinataire ne sont pas intervertis.";
+  }
+  if (!TELEGRAM_TOKEN_SHAPE.test(botToken)) return "le jeton n'a pas la forme attendue « 123456789:AA... » (identifiant numérique, deux-points, secret).";
+  return undefined;
+}
+
+interface TelegramReply {
+  ok?: boolean;
+  description?: string;
+  result?: { username?: string };
+}
+
+async function callTelegram(botToken: string, method: string, body: unknown): Promise<{ status: number; parsed: TelegramReply; raw: string }> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), config.notificationChannels.requestTimeoutMs);
   try {
-    const response = await fetch(`https://api.telegram.org/bot${telegram.botToken}/sendMessage`, {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: telegram.chatId,
-        text: `[QUAI] ${levelLabel(event.level)} — ${event.message}`,
-        disable_web_page_preview: true,
-      }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     });
     const raw = await response.text().catch(() => "");
-    let description = "";
+    let parsed: TelegramReply = {};
     try {
-      const parsed = JSON.parse(raw) as { ok?: boolean; description?: string };
-      if (parsed.ok === false) description = parsed.description ?? "refus sans motif";
+      parsed = JSON.parse(raw) as TelegramReply;
     } catch {
-      description = response.ok ? "" : raw.slice(0, 300);
+      parsed = {};
     }
-    if (!response.ok || description) {
-      throw new Error(`HTTP ${response.status}${description ? `: ${description}` : ""}`);
+    return { status: response.status, parsed, raw };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Telegram Bot API : POST https://api.telegram.org/bot<jeton>/sendMessage, corps `{ chat_id, text }`.
+ * Le jeton fait partie de l'URL — il ne doit JAMAIS apparaître dans un message d'erreur, d'où
+ * l'URL remplacée par un libellé fixe dans le rapport d'échec.
+ *
+ * En cas d'échec SEULEMENT, un second appel (`getMe`, qui ne teste que le jeton) départage les deux
+ * causes possibles : un jeton refusé et un destinataire introuvable donnent tous deux « 404 Not
+ * Found », et sans cette distinction on ne sait pas quel champ corriger. Le chemin nominal reste à
+ * un seul appel : rien n'est ajouté au coût d'une notification qui passe.
+ */
+async function sendTelegram(telegram: { botToken: string; chatId: string }, event: Omit<SystemNotificationEvent, "read">): Promise<void> {
+  const complaint = telegramTokenComplaint(telegram.botToken);
+  if (complaint) throw new Error(`api.telegram.org (jeton masqué): ${complaint}`);
+
+  try {
+    const sent = await callTelegram(telegram.botToken, "sendMessage", {
+      chat_id: telegram.chatId,
+      text: `[QUAI] ${levelLabel(event.level)} — ${event.message}`,
+      disable_web_page_preview: true,
+    });
+    if (sent.parsed.ok === true) return;
+
+    const description = sent.parsed.description ?? (sent.raw ? sent.raw.slice(0, 300) : "refus sans motif");
+
+    // Qui est fautif ? `getMe` ne dépend QUE du jeton : s'il passe, le jeton est bon et c'est le
+    // destinataire qui pose problème ; s'il échoue, c'est le jeton, quel que soit le destinataire.
+    const identity = await callTelegram(telegram.botToken, "getMe", {});
+    if (identity.parsed.ok !== true) {
+      throw new Error(
+        `le jeton du bot est refusé par Telegram (${identity.parsed.description ?? `HTTP ${identity.status}`}). ` +
+          "Un jeton régénéré dans @BotFather invalide immédiatement le précédent — vérifiez-le auprès de @BotFather.",
+      );
     }
+
+    const bot = identity.parsed.result?.username ? `@${identity.parsed.result.username}` : "le bot";
+    throw new Error(
+      `${bot} est bien reconnu, mais le destinataire "${telegram.chatId}" est refusé (${description}). ` +
+        "Pour un groupe ou un canal, l'identifiant commence par « -100 » et le bot doit y avoir été ajouté ; " +
+        "pour une personne, elle doit avoir écrit au bot au moins une fois.",
+    );
   } catch (err) {
     const reason =
       err instanceof Error && err.name === "AbortError"
-        ? `timed out after ${config.notificationChannels.requestTimeoutMs}ms`
+        ? `délai dépassé après ${config.notificationChannels.requestTimeoutMs} ms`
         : err instanceof Error
           ? err.message
           : String(err);
     throw new Error(`api.telegram.org (jeton masqué): ${reason}`);
-  } finally {
-    clearTimeout(timeout);
   }
 }
 

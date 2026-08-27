@@ -18,6 +18,9 @@ import type { EffectiveNotificationChannel } from "../src/services/notificationC
 const SECRET_TOKEN = "T000/B000/XXXXXXXXSUPERSECRETSLACKTOKEN";
 const SLACK_WEBHOOK_URL = `https://hooks.slack.com/services/${SECRET_TOKEN}`;
 const GENERIC_WEBHOOK_URL_WITH_QUERY_TOKEN = "https://notify.example.com/incoming?token=super-secret-generic-token";
+/** Forme RÉELLE d'un jeton Telegram : identifiant numérique, deux-points, secret. Un jeton d'une
+ * autre forme est refusé AVANT tout appel réseau (voir telegramTokenComplaint). */
+const TELEGRAM_TOKEN = "8123456789:AAH1kQwErTyUiOpAsDfGhJkLzXcVbNm0987";
 
 function fakeChannel(overrides: Partial<EffectiveNotificationChannel>): EffectiveNotificationChannel {
   return {
@@ -109,34 +112,101 @@ describe("notificationDispatch — ne journalise/ne persiste/ne renvoie jamais l
 
   it("Telegram : le jeton du bot n'apparaît jamais dans un message d'échec (il est dans l'URL)", async () => {
     getEffectiveNotificationChannelMock.mockResolvedValue(
-      fakeChannel({ kind: "telegram", telegram: { botToken: SECRET_TOKEN, chatId: "123456789" } }),
+      fakeChannel({ kind: "telegram", telegram: { botToken: TELEGRAM_TOKEN, chatId: "123456789" } }),
     );
 
     const result = await sendTestNotification("chan-1");
 
     expect(result.ok).toBe(false);
-    expect(result.message).not.toContain(SECRET_TOKEN);
+    expect(result.message).not.toContain(TELEGRAM_TOKEN);
     expect(result.message).toContain("api.telegram.org");
   });
 
   it("Telegram : un refus de l'API ({ ok: false }) est un échec, même en HTTP 200", async () => {
-    fetchMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      text: async () => JSON.stringify({ ok: false, description: "Bad Request: chat not found" }),
-    });
+    // sendMessage refuse, puis getMe départage : ici le bot est valide, donc c'est le destinataire.
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: false, description: "Bad Request: chat not found" }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true, result: { username: "quai_bot" } }),
+      });
     getEffectiveNotificationChannelMock.mockResolvedValue(
-      fakeChannel({ kind: "telegram", telegram: { botToken: SECRET_TOKEN, chatId: "999" } }),
+      fakeChannel({ kind: "telegram", telegram: { botToken: TELEGRAM_TOKEN, chatId: "999" } }),
     );
 
     const result = await sendTestNotification("chan-1");
 
     expect(result.ok).toBe(false);
     expect(result.message).toContain("chat not found");
-    expect(result.message).not.toContain(SECRET_TOKEN);
-    const [url, init] = fetchMock.mock.calls.at(-1)!;
-    expect(String(url)).toBe(`https://api.telegram.org/bot${SECRET_TOKEN}/sendMessage`);
+    expect(result.message).not.toContain(TELEGRAM_TOKEN);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toBe(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`);
     expect(JSON.parse(String((init as { body: string }).body)).chat_id).toBe("999");
+  });
+
+  it("Telegram : un jeton refusé est nommé comme tel, pas confondu avec un destinataire introuvable", async () => {
+    // Les deux causes donnent « 404 Not Found » côté Telegram : c'est getMe qui les départage.
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 404,
+      text: async () => JSON.stringify({ ok: false, error_code: 404, description: "Not Found" }),
+    });
+    getEffectiveNotificationChannelMock.mockResolvedValue(
+      fakeChannel({ kind: "telegram", telegram: { botToken: TELEGRAM_TOKEN, chatId: "-1001234567890" } }),
+    );
+
+    const result = await sendTestNotification("chan-1");
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain("jeton du bot est refusé");
+    expect(result.message).toContain("BotFather");
+    expect(result.message).not.toContain(TELEGRAM_TOKEN);
+  });
+
+  it("Telegram : un destinataire refusé nomme le bot reconnu et ce qu'il faut vérifier", async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 400,
+        text: async () => JSON.stringify({ ok: false, description: "Bad Request: chat not found" }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true, result: { username: "quai_bot" } }),
+      });
+    getEffectiveNotificationChannelMock.mockResolvedValue(
+      fakeChannel({ kind: "telegram", telegram: { botToken: TELEGRAM_TOKEN, chatId: "42" } }),
+    );
+
+    const result = await sendTestNotification("chan-1");
+
+    expect(result.message).toContain("@quai_bot");
+    expect(result.message).toContain('"42"');
+    expect(result.message).toContain("-100");
+  });
+
+  it("Telegram : une saisie manifestement fautive est expliquée SANS appeler l'API", async () => {
+    for (const [botToken, expected] of [
+      ["bot8123456789:AAH1kQwErTyUiOpAsDfGhJkLzXcVbNm0987", "préfixe"],
+      ["-1001234567890", "intervertis"],
+      ["8123456789:court", "forme attendue"],
+    ] as const) {
+      getEffectiveNotificationChannelMock.mockResolvedValue(
+        fakeChannel({ kind: "telegram", telegram: { botToken, chatId: "123" } }),
+      );
+      const result = await sendTestNotification("chan-1");
+
+      expect(result.ok, botToken).toBe(false);
+      expect(result.message, botToken).toContain(expected);
+    }
+    // Aucun appel réseau : une erreur de saisie se dit sans déranger Telegram.
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("une URL de webhook malformée ne provoque jamais un throw non maîtrisé (repli explicite, jamais l'URL brute)", async () => {
