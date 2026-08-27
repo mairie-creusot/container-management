@@ -113,6 +113,8 @@ export default function NotificationChannelsSection() {
 
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
+  /** Le jeton d'un canal existant n'est remplacé que sur demande EXPLICITE — voir le champ plus bas. */
+  const [replaceTelegramToken, setReplaceTelegramToken] = useState(false);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
 
   useEffect(() => {
@@ -121,12 +123,14 @@ export default function NotificationChannelsSection() {
 
   function openCreateForm() {
     setEditingId(null);
+    setReplaceTelegramToken(false);
     setForm(EMPTY_FORM);
     setFormOpen(true);
   }
 
   function openEditForm(channel: NotificationChannelRef) {
     setEditingId(channel.id);
+    setReplaceTelegramToken(false);
     setForm({
       ...EMPTY_FORM,
       kind: channel.kind,
@@ -152,6 +156,7 @@ export default function NotificationChannelsSection() {
   function closeForm() {
     setFormOpen(false);
     setEditingId(null);
+    setReplaceTelegramToken(false);
     setForm(EMPTY_FORM);
   }
 
@@ -198,7 +203,9 @@ export default function NotificationChannelsSection() {
     if (form.kind === "discord") return editingId ? true : !!form.discordWebhookUrl.trim();
     if (form.kind === "telegram") {
       // En édition, le chat peut être changé seul (le jeton déjà enregistré est conservé).
-      return editingId ? !!form.telegramChatId.trim() : !!form.telegramBotToken.trim() && !!form.telegramChatId.trim();
+      // À l'édition, le jeton n'est exigé que si l'on a demandé à le remplacer.
+      if (editingId && !replaceTelegramToken) return !!form.telegramChatId.trim();
+      return !!form.telegramBotToken.trim() && !!form.telegramChatId.trim();
     }
     if (form.kind === "email") {
       return !!(form.smtpHost.trim() && form.fromAddress.trim() && form.toAddress.trim());
@@ -344,20 +351,39 @@ export default function NotificationChannelsSection() {
             <>
               <div className="field">
                 <label htmlFor="channel-telegram-token">Jeton du bot</label>
-                <input
-                  id="channel-telegram-token"
-                  type="password"
-                  autoComplete="new-password"
-                  value={form.telegramBotToken}
-                  onChange={(event) => setForm((f) => ({ ...f, telegramBotToken: event.target.value }))}
-                  placeholder="123456789:AA…"
-                  {...(editingId ? {} : { required: true })}
-                />
-                <p className="create-container-hint">
-                  {editingId
-                    ? "Laisser vide pour conserver le jeton déjà enregistré."
-                    : "Obtenu auprès de @BotFather sur Telegram."}
-                </p>
+                {/* À l'ÉDITION, le champ reste verrouillé tant qu'on ne demande pas explicitement à
+                    remplacer le jeton. Un champ `password` peut être pré-rempli par le gestionnaire
+                    de mots de passe du navigateur : sans ce verrou, la valeur autoremplie écrasait
+                    silencieusement un jeton valide, et le canal se mettait à échouer en 404. */}
+                {editingId && !replaceTelegramToken ? (
+                  <>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => setReplaceTelegramToken(true)}
+                    >
+                      Remplacer le jeton
+                    </button>
+                    <p className="create-container-hint">
+                      Le jeton déjà enregistré est conservé. Il n'est jamais réaffiché.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <input
+                      id="channel-telegram-token"
+                      type="password"
+                      autoComplete="off"
+                      data-lpignore="true"
+                      data-1p-ignore="true"
+                      value={form.telegramBotToken}
+                      onChange={(event) => setForm((f) => ({ ...f, telegramBotToken: event.target.value }))}
+                      placeholder="123456789:AA…"
+                      required
+                    />
+                    <p className="create-container-hint">Obtenu auprès de @BotFather sur Telegram.</p>
+                  </>
+                )}
               </div>
               <div className="field">
                 <label htmlFor="channel-telegram-chat">Destinataire (chat_id)</label>

@@ -14,6 +14,10 @@ process.env.CONFIG_ENCRYPTION_KEY = "3".repeat(64); // clé fixe pour ce process
 
 const store = await import("../src/services/notificationChannelsStore.js");
 
+/** Forme RÉELLE d'un jeton Telegram : identifiant numérique, deux-points, secret. QUAI refuse
+ * d'enregistrer toute valeur qui n'y ressemble pas (voir assertValidTelegramToken). */
+const TELEGRAM_TOKEN = "8123456789:AAH1kQwErTyUiOpAsDfGhJkLzXcVbNm0987";
+
 const notificationChannelsPath = path.join(path.dirname(tmpConfigPath), "notification-channels.json");
 
 afterAll(async () => {
@@ -112,17 +116,17 @@ describe("notificationChannelsStore — CRUD", () => {
       kind: "telegram",
       name: "telegram-test",
       enabled: true,
-      telegram: { botToken: "123456789:AAsecret-token", chatId: "42" },
+      telegram: { botToken: TELEGRAM_TOKEN, chatId: "42" },
     });
     // La vue "safe" expose le destinataire (pas un secret) mais jamais le jeton.
     expect(created.telegram).toEqual({ chatId: "42", hasBotToken: true });
-    expect(JSON.stringify(created)).not.toContain("AAsecret-token");
+    expect(JSON.stringify(created)).not.toContain(TELEGRAM_TOKEN);
 
     const updated = await store.updateNotificationChannel(created.id, { telegram: { chatId: "-1001234567890" } });
     expect(updated?.telegram).toEqual({ chatId: "-1001234567890", hasBotToken: true });
 
     const effective = await store.getEffectiveNotificationChannel(created.id);
-    expect(effective?.telegram).toEqual({ botToken: "123456789:AAsecret-token", chatId: "-1001234567890" });
+    expect(effective?.telegram).toEqual({ botToken: TELEGRAM_TOKEN, chatId: "-1001234567890" });
 
     await store.deleteNotificationChannel(created.id);
   });
@@ -132,8 +136,36 @@ describe("notificationChannelsStore — CRUD", () => {
       store.createNotificationChannel({ kind: "telegram", name: "x", enabled: true, telegram: { botToken: "", chatId: "42" } }),
     ).rejects.toThrow(/botToken/);
     await expect(
-      store.createNotificationChannel({ kind: "telegram", name: "x", enabled: true, telegram: { botToken: "t", chatId: "" } }),
+      store.createNotificationChannel({ kind: "telegram", name: "x", enabled: true, telegram: { botToken: TELEGRAM_TOKEN, chatId: "" } }),
     ).rejects.toThrow(/chatId/);
+  });
+
+  it("telegram : QUAI ne STOCKE jamais une valeur qui ne peut pas être un jeton", async () => {
+    // Cas réel : le champ est de type `password` et un gestionnaire de mots de passe peut le
+    // pré-remplir à l'édition — sans ce refus, la valeur autoremplie écrasait un jeton valide et le
+    // canal se mettait à échouer en 404 alors que le vrai jeton fonctionnait.
+    for (const bad of ["MotDePasseDuNavigateur", `bot${TELEGRAM_TOKEN}`, "8123456789:court", "-1001234567890"]) {
+      await expect(
+        store.createNotificationChannel({ kind: "telegram", name: "x", enabled: true, telegram: { botToken: bad, chatId: "42" } }),
+        bad,
+      ).rejects.toThrow(/botToken/);
+    }
+
+    // Et il ne peut pas non plus l'écraser par une modification.
+    const created = await store.createNotificationChannel({
+      kind: "telegram",
+      name: "telegram-garde-fou",
+      enabled: true,
+      telegram: { botToken: TELEGRAM_TOKEN, chatId: "42" },
+    });
+    await expect(
+      store.updateNotificationChannel(created.id, { telegram: { botToken: "MotDePasseDuNavigateur", chatId: "42" } }),
+    ).rejects.toThrow(/botToken/);
+
+    // Le jeton d'origine est intact : un refus ne doit rien avoir modifié.
+    const effective = await store.getEffectiveNotificationChannel(created.id);
+    expect(effective?.telegram?.botToken).toBe(TELEGRAM_TOKEN);
+    await store.deleteNotificationChannel(created.id);
   });
 
   it("404s (undefined) when updating/deleting an unknown id", async () => {

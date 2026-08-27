@@ -228,6 +228,32 @@ function assertValidUrl(value: string, field: string): void {
   if (!ok) throw new NotificationChannelValidationError(`${field} must be a valid http(s) URL`);
 }
 
+/**
+ * Forme d'un jeton de bot Telegram : `<identifiant numérique>:<secret>`. Vérifiée À L'ENREGISTREMENT,
+ * pas seulement à l'envoi : QUAI ne doit jamais STOCKER une valeur qui ne peut pas être un jeton.
+ *
+ * Le cas réel qui a motivé ce contrôle (27/08/2026) : le champ est de type `password`, et un
+ * gestionnaire de mots de passe du navigateur peut le pré-remplir à l'ouverture du formulaire
+ * d'édition. Sans ce garde-fou, la valeur autoremplie remplaçait silencieusement un jeton valide —
+ * le canal se mettait alors à échouer en « HTTP 404 » alors que le vrai jeton, lui, fonctionnait.
+ */
+const TELEGRAM_TOKEN_SHAPE = /^\d+:[A-Za-z0-9_-]{30,}$/;
+
+function assertValidTelegramToken(value: string): void {
+  const token = value.trim();
+  if (token.toLowerCase().startsWith("bot")) {
+    throw new NotificationChannelValidationError(
+      "telegram.botToken : le préfixe « bot » appartient à l'URL de l'API, il ne fait pas partie du jeton de @BotFather.",
+    );
+  }
+  if (!TELEGRAM_TOKEN_SHAPE.test(token)) {
+    throw new NotificationChannelValidationError(
+      "telegram.botToken : forme attendue « 123456789:AA… » (identifiant numérique, deux-points, secret). " +
+        "Si ce champ a été pré-rempli par votre navigateur, ressaisissez le jeton donné par @BotFather.",
+    );
+  }
+}
+
 function assertValidPort(value: number, field: string): void {
   if (!Number.isInteger(value) || value < 1 || value > 65535) {
     throw new NotificationChannelValidationError(`${field} must be an integer between 1 and 65535`);
@@ -262,6 +288,7 @@ function assertValidInput(input: NotificationChannelInput, requireCredentials: b
     if (requireCredentials && !input.telegram?.chatId?.trim()) {
       throw new NotificationChannelValidationError('telegram.chatId is required for kind "telegram"');
     }
+    if (input.telegram?.botToken?.trim()) assertValidTelegramToken(input.telegram.botToken);
   } else if (input.kind === "email") {
     const email = input.email;
     if (requireCredentials) {
@@ -413,6 +440,7 @@ export async function updateNotificationChannel(
     // Jeton vide = on conserve celui déjà chiffré, même convention que le mot de passe SMTP.
     const chatId = patch.telegram.chatId?.trim() ? patch.telegram.chatId.trim() : (existing.telegram?.chatId ?? "");
     if (!chatId) throw new NotificationChannelValidationError("telegram.chatId is required");
+    if (patch.telegram.botToken?.trim()) assertValidTelegramToken(patch.telegram.botToken);
     nextTelegram = {
       botToken: patch.telegram.botToken?.trim()
         ? encryptSecretIfNeeded(patch.telegram.botToken.trim())
