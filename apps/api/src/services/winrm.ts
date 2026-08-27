@@ -81,7 +81,14 @@ function endpointFor(host: string): string {
 }
 
 /** Enveloppe SOAP commune — `action` et `body` sont les seules parties qui changent. */
-function envelope(host: string, resourceUri: string, action: string, body: string, selector?: Record<string, string>): string {
+export function wsmanEnvelope(
+  host: string,
+  resourceUri: string,
+  action: string,
+  body: string,
+  selector?: Record<string, string>,
+  options?: Record<string, string>,
+): string {
   const selectorSet =
     selector === undefined
       ? ""
@@ -100,6 +107,11 @@ function envelope(host: string, resourceUri: string, action: string, body: strin
     '<w:Locale xml:lang="fr-FR" s:mustUnderstand="false"/>',
     `<w:OperationTimeout>PT${Math.round(config.windows.winrmTimeoutMs / 1000)}S</w:OperationTimeout>`,
     selectorSet,
+    options === undefined
+      ? ""
+      : `<w:OptionSet>${Object.entries(options)
+          .map(([name, value]) => `<w:Option Name="${escapeXml(name)}">${escapeXml(value)}</w:Option>`)
+          .join("")}</w:OptionSet>`,
     "</s:Header>",
     `<s:Body>${body}</s:Body>`,
     "</s:Envelope>",
@@ -190,7 +202,7 @@ function classify(host: string, result: CurlResult): WinrmFailure | undefined {
   return { kind: "failed", message: `curl a échoué (code ${result.code})${detail ? ` : ${detail}` : ""}` };
 }
 
-async function callWsman(host: string, ticket: KerberosTicket, body: string): Promise<WinrmResult<string>> {
+export async function callWsman(host: string, ticket: KerberosTicket, body: string): Promise<WinrmResult<string>> {
   const args = [
     "--silent",
     "--show-error",
@@ -239,7 +251,7 @@ export async function enumerateWmiClass(
   const first = await callWsman(
     host,
     ticket,
-    envelope(
+    wsmanEnvelope(
       host,
       resourceUri,
       `${ENUMERATION_NS}/Enumerate`,
@@ -257,7 +269,7 @@ export async function enumerateWmiClass(
     const next = await callWsman(
       host,
       ticket,
-      envelope(
+      wsmanEnvelope(
         host,
         resourceUri,
         `${ENUMERATION_NS}/Pull`,
@@ -291,7 +303,7 @@ export async function invokeWmiMethod(
   const response = await callWsman(
     host,
     ticket,
-    envelope(
+    wsmanEnvelope(
       host,
       resourceUri,
       `${resourceUri}/${method}`,

@@ -15,6 +15,7 @@
 import type { FastifyInstance } from "fastify";
 import { controlWindowsService, listWindowsServices } from "../services/windowsServices.js";
 import { ticketStatusFor } from "../services/kerberosSession.js";
+import { listWindowsRoles } from "../services/windowsRoles.js";
 
 /** Un état honnête vaut un 200 : « injoignable » ou « refusé » est une RÉPONSE, pas une panne de
  * QUAI. Seule l'absence de paramètre est une erreur de la requête. */
@@ -24,6 +25,14 @@ export default async function windowsRoutes(fastify: FastifyInstance): Promise<v
     if (!host) return reply.code(400).send({ error: "Paramètre requis : host" });
 
     return reply.send(await listWindowsServices(host, request.authSession!.username));
+  });
+
+  /** Rôles RÉELLEMENT installés — ce qui décide des onglets proposés pour cette machine. */
+  fastify.get<{ Querystring: { host?: string } }>("/api/windows/roles", async (request, reply) => {
+    const host = request.query?.host?.trim();
+    if (!host) return reply.code(400).send({ error: "Paramètre requis : host" });
+
+    return reply.send(await listWindowsRoles(host, request.authSession!.username));
   });
 
   /** Ce que l'interface a besoin de savoir avant de proposer un onglet Windows : ai-je un ticket ? */
