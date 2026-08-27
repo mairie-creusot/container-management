@@ -135,7 +135,7 @@ export default function App() {
   // Greffon désactivé alors qu'on était sur sa page : on la quitte au lieu de la laisser ouverte.
   useEffect(() => {
     if (!isPluginView(currentView)) return;
-    if (pluginNavItems.some((item) => item.view === currentView)) return;
+    if (pluginNavItems.some((item) => item.target.kind === "page" && item.target.view === currentView)) return;
     dispatch(setCurrentView("overview"));
   }, [dispatch, currentView, pluginNavItems]);
 

@@ -47,7 +47,7 @@ describe("derivePluginNavItems — une entrée n'existe que si son greffon est a
   it("activé mais pas configuré : l'entrée reste, signalée à configurer", () => {
     const items = derivePluginNavItems({ status: "ready", items: [summary("3cx", true, false)] });
     expect(items).toEqual([
-      { pluginId: "3cx", view: "threecx", label: "Téléphonie", needsConfiguration: true },
+      { pluginId: "3cx", label: "Téléphonie", target: { kind: "page", view: "threecx" }, needsConfiguration: true },
     ]);
   });
 
@@ -57,6 +57,36 @@ describe("derivePluginNavItems — une entrée n'existe que si son greffon est a
       items: [summary("hycu", false, true), summary("3cx", false, false), summary("glpi", false, true)],
     });
     expect(items).toEqual([]);
+  });
+
+  it("un module SANS page apparaît quand même, dirigé vers ce qu'il apporte réellement", () => {
+    // La question est revenue deux fois : un module actif absent du menu se lit comme une panne.
+    const nutanix: PluginSummary = {
+      manifest: { ...manifest("nutanix"), name: "Virtualisation Nutanix", permissions: { network: [], mutates: true, graphNodeKinds: ["nutanix-vm"] } },
+      enabled: true,
+      configured: true,
+    };
+    const demo: PluginSummary = {
+      manifest: { ...manifest("demo"), name: "Module de démonstration" },
+      enabled: true,
+      configured: false,
+    };
+    const items = derivePluginNavItems({ status: "ready", items: [summary("hycu", true, true), nutanix, demo] });
+
+    expect(labels(items)).toEqual(["Sauvegardes", "Virtualisation Nutanix", "Module de démonstration"]);
+    // Nutanix n'a pas de page à lui : ses nœuds vivent dans le graphe, c'est là qu'on l'envoie.
+    expect(items[1]?.target).toEqual({ kind: "graph" });
+    // Le module de démonstration n'apporte ni page ni nœud : il ne reste que sa configuration.
+    expect(items[2]?.target).toEqual({ kind: "settings" });
+  });
+
+  it("un module désactivé disparaît, page ou pas", () => {
+    const nutanix: PluginSummary = {
+      manifest: { ...manifest("nutanix"), permissions: { network: [], mutates: true, graphNodeKinds: ["nutanix-vm"] } },
+      enabled: false,
+      configured: true,
+    };
+    expect(derivePluginNavItems({ status: "ready", items: [nutanix] })).toEqual([]);
   });
 
   it("l'ordre suit le catalogue, pas l'ordre de la réponse", () => {

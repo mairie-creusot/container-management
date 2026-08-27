@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import {
   NAV_ITEMS,
@@ -9,6 +9,8 @@ import {
   type ViewId,
 } from "@/features/ui/uiSlice";
 import { usePluginNavItems } from "@/features/plugins/usePluginNav";
+import type { PluginNavItem } from "@/features/plugins/pluginsModel";
+import { buildSettingsSections } from "@/features/settings/settingsSections";
 import { canAdminister } from "@/features/auth/authSlice";
 import { useConfirm } from "@/components/ConfirmProvider";
 import Brand from "@/components/Brand";
@@ -28,6 +30,7 @@ import {
   IconPhone,
   IconStack,
   IconPuzzle,
+  IconVm,
 } from "@/components/icons";
 
 type IconComponent = (props: { className?: string }) => JSX.Element;
@@ -48,6 +51,7 @@ const PLUGIN_ICONS: Record<string, IconComponent> = {
   hycu: IconBackup,
   "3cx": IconPhone,
   glpi: IconLifebuoy,
+  nutanix: IconVm,
 };
 
 const EXTENSIONS_OPEN_KEY = "quai.sidebar.extensions";
@@ -73,11 +77,14 @@ export default function Sidebar() {
   const currentView = useAppSelector((state) => state.ui.currentView);
   const unsavedFormActive = useAppSelector((state) => state.ui.unsavedFormActive);
   const session = useAppSelector((state) => state.auth.session);
+  const plugins = useAppSelector((state) => state.plugins);
   const pluginNavItems = usePluginNavItems();
   const confirm = useConfirm();
 
   const [extensionsOpen, setExtensionsOpen] = useState(readExtensionsOpen);
-  const activeIsExtension = pluginNavItems.some((item) => item.view === currentView);
+  const activeIsExtension = pluginNavItems.some((item) => item.target.kind === "page" && item.target.view === currentView);
+  // Section de Réglages d'un module qui n'apporte ni page ni nœud : c'est tout ce qu'il a à ouvrir.
+  const sections = useMemo(() => buildSettingsSections(plugins), [plugins]);
 
   // Arriver sur une page d'extension (renvoi depuis les Réglages, par exemple) déplie le tiroir :
   // sinon l'entrée active serait invisible. Choix non mémorisé — seul un clic sur l'en-tête l'est.
@@ -109,6 +116,26 @@ export default function Sidebar() {
   async function handleOpenSettings() {
     if (currentView !== "settings" && !(await confirmLeaveCurrentView())) return;
     dispatch(openSettingsSection(null));
+  }
+
+  /** Où mène l'entrée d'un module : sa page, le graphe où vivent ses nœuds, ou sa configuration. */
+  async function handlePluginNav(item: PluginNavItem) {
+    if (item.target.kind === "page") return handleNavigate(item.target.view);
+    if (item.target.kind === "graph") return handleNavigate("clusters");
+    if (currentView !== "settings" && !(await confirmLeaveCurrentView())) return;
+    const section = sections.find((entry) => entry.pluginId === item.pluginId);
+    dispatch(openSettingsSection(section?.id ?? item.pluginId));
+  }
+
+  /** Ce que l'entrée va ouvrir, dit avant le clic — un module sans page n'a pas à surprendre. */
+  function navHint(item: PluginNavItem): string {
+    const suffix =
+      item.target.kind === "graph"
+        ? " — ses machines et ses liens sont dans le graphe des Environnements"
+        : item.target.kind === "settings"
+          ? " — ce module n'apporte que sa configuration"
+          : "";
+    return `${item.label}${item.needsConfiguration ? " — à configurer" : ""}${suffix}`;
   }
 
   function toggleExtensions() {
@@ -172,14 +199,15 @@ export default function Sidebar() {
             ) : (
               <div className="sidebar__group-items">
                 {pluginNavItems.map((item) => {
-                  const Icon = PLUGIN_ICONS[item.pluginId] ?? IconStack;
+                  const Icon = PLUGIN_ICONS[item.pluginId] ?? IconPuzzle;
+                  const active = item.target.kind === "page" && currentView === item.target.view;
                   return (
                     <button
                       key={item.pluginId}
                       type="button"
-                      className={`sidebar__item sidebar__item--nested${currentView === item.view ? " is-active" : ""}`}
-                      onClick={() => handleNavigate(item.view)}
-                      title={item.needsConfiguration ? `${item.label} — à configurer` : item.label}
+                      className={`sidebar__item sidebar__item--nested${active ? " is-active" : ""}`}
+                      onClick={() => void handlePluginNav(item)}
+                      title={navHint(item)}
                     >
                       <span className="sidebar__icon">
                         <Icon />

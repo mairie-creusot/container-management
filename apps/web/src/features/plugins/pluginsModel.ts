@@ -116,26 +116,78 @@ export const PLUGIN_NAV_CATALOG: readonly PluginNavDefinition[] = [
   { pluginId: "glpi", view: "glpi", label: "Assistance GLPI" },
 ];
 
-export interface PluginNavItem extends PluginNavDefinition {
+/**
+ * Où mène l'entrée d'un module dans le tiroir « Extensions ».
+ *  - "page"     : le module apporte sa propre page (Sauvegardes, Téléphonie, Assistance GLPI) ;
+ *  - "graph"    : il n'apporte pas de page mais des nœuds — ses données vivent dans le graphe des
+ *                 Environnements, c'est là qu'on l'envoie (cas de Nutanix) ;
+ *  - "settings" : il n'apporte ni page ni nœud, seule sa configuration existe.
+ *
+ * Sans ces deux dernières formes, un module parfaitement actif restait absent du menu et se lisait
+ * comme un module en panne — la question est revenue deux fois.
+ */
+export type PluginNavTarget = { kind: "page"; view: ViewId } | { kind: "graph" } | { kind: "settings" };
+
+export interface PluginNavItem {
+  pluginId: string;
+  label: string;
+  target: PluginNavTarget;
   /** Greffon activé mais pas configuré : sa page reste le seul endroit qui l'explique. */
   needsConfiguration: boolean;
 }
 
-/** Greffon désactivé ou inconnu du serveur : pas d'entrée. Liste pas encore obtenue
- * (`idle`/`loading`/`unavailable`) : tout le catalogue, rien ne disparaît sur une supposition. */
+function manifestName(manifest: PluginManifest): string {
+  const name = manifest.name;
+  return typeof name === "string" && name.trim().length > 0 ? name.trim() : manifest.id;
+}
+
+/**
+ * Une entrée par module ACTIF, quelle que soit sa forme. Un module désactivé n'en a pas. Tant que la
+ * liste n'a pas répondu (`idle`/`loading`/`unavailable`), le catalogue des pages est rendu tel quel :
+ * rien ne disparaît sur une supposition.
+ *
+ * Ordre : les pages connues d'abord, dans l'ordre du catalogue (le menu ne se réorganise pas sous
+ * les yeux de l'utilisateur), puis les autres modules dans l'ordre du serveur.
+ */
 export function derivePluginNavItems(
   source: PluginsNavSource,
   catalog: readonly PluginNavDefinition[] = PLUGIN_NAV_CATALOG,
 ): PluginNavItem[] {
   if (source.status !== "ready") {
-    return catalog.map((definition) => ({ ...definition, needsConfiguration: false }));
+    return catalog.map((definition) => ({
+      pluginId: definition.pluginId,
+      label: definition.label,
+      target: { kind: "page", view: definition.view },
+      needsConfiguration: false,
+    }));
   }
 
+  const active = source.items.filter((entry) => entry.enabled);
   const items: PluginNavItem[] = [];
+  const placed = new Set<string>();
+
   for (const definition of catalog) {
-    const summary = source.items.find((entry) => entry.manifest.id === definition.pluginId);
-    if (!summary || !summary.enabled) continue;
-    items.push({ ...definition, needsConfiguration: !summary.configured });
+    const summary = active.find((entry) => entry.manifest.id === definition.pluginId);
+    if (!summary) continue;
+    placed.add(definition.pluginId);
+    items.push({
+      pluginId: definition.pluginId,
+      label: definition.label,
+      target: { kind: "page", view: definition.view },
+      needsConfiguration: !summary.configured,
+    });
+  }
+
+  for (const summary of active) {
+    const id = summary.manifest.id;
+    if (placed.has(id)) continue;
+    const contributesNodes = (summary.manifest.permissions?.graphNodeKinds?.length ?? 0) > 0;
+    items.push({
+      pluginId: id,
+      label: manifestName(summary.manifest),
+      target: contributesNodes ? { kind: "graph" } : { kind: "settings" },
+      needsConfiguration: !summary.configured,
+    });
   }
   return items;
 }

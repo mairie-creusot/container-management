@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useState, type FormEvent } from
 import { useAppDispatch, useAppSelector } from "@/hooks";
 import { useConfirm } from "@/components/ConfirmProvider";
 import StatusPill from "@/components/StatusPill";
-import { IconCheck, IconInfo } from "@/components/icons";
+import { IconCheck, IconInfo, IconPuzzle } from "@/components/icons";
 import { openSettingsSection } from "@/features/ui/uiSlice";
 import { fetchPlugins, setPluginEnabled } from "@/features/plugins/pluginsSlice";
 import { pluginContributions } from "@/features/plugins/pluginsModel";
@@ -123,6 +123,13 @@ export default function ModulesSection() {
 
   function sectionIdFor(pluginId: string): string | null {
     return sections.find((section) => section.pluginId === pluginId)?.id ?? null;
+  }
+
+  /** Icône et description viennent de la section de Réglages du module — écrites une seule fois,
+   * jamais recopiées ici. Un module que le serveur n'a pas chargé n'en a pas : rien n'est inventé. */
+  function presentationOf(pluginId: string) {
+    const meta = sections.find((section) => section.pluginId === pluginId);
+    return { Icon: meta?.icon ?? IconPuzzle, description: meta?.description ?? null };
   }
 
   /** Ce que le module apporte — déduit de son manifeste, donc absent tant qu'il n'est pas chargé. */
@@ -314,6 +321,7 @@ export default function ModulesSection() {
           // Renvoi vers la configuration : seulement si le serveur a réellement chargé ce module.
           const configurable = sectionId !== null && !refused && !removed;
           const contributions = contributionsFor(row.id);
+          const { Icon, description } = presentationOf(row.id);
           // Installé, signature vérifiée, et pourtant inconnu de GET /api/plugins : le serveur ne l'a
           // pas chargé. C'est le seul cas où « installé » et « présent dans l'interface » divergent —
           // et il n'est affirmé qu'une fois la liste des modules chargés réellement obtenue.
@@ -335,6 +343,9 @@ export default function ModulesSection() {
               className={`card module-card${refused ? " module-card--untrusted" : ""}${removed ? " module-card--removed" : ""}`}
             >
               <div className="module-card__head">
+                <span className="module-card__icon" aria-hidden="true">
+                  <Icon />
+                </span>
                 <div className="module-card__identity">
                   <h4 className="module-card__name">{row.name}</h4>
                   <span className="module-card__id">
@@ -368,6 +379,8 @@ export default function ModulesSection() {
                   </>
                 )}
               </div>
+
+              {description !== null && <p className="module-card__description">{description}</p>}
 
               {contributions.length > 0 && (
                 <p className="module-card__contributions">
