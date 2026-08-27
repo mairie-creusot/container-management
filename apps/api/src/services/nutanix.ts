@@ -186,6 +186,18 @@ interface NutanixNicEntry {
 
 interface NutanixEntityResources {
   power_state?: string;
+  /**
+   * Système d'exploitation invité, tel que les Nutanix Guest Tools le RAPPORTENT depuis l'intérieur
+   * de la VM. Absent quand NGT n'est pas installé — c'est alors une inconnue assumée, jamais une
+   * déduction à partir du nom de la VM ou de son image.
+   */
+  guest_tools?: {
+    nutanix_guest_tools?: {
+      guest_os_version?: string;
+      available_version?: string;
+      ngt_state?: string;
+    };
+  };
   num_sockets?: number;
   num_vcpus_per_socket?: number;
   memory_size_mib?: number;
@@ -388,6 +400,9 @@ function mapVmEntity(entity: NutanixVmEntity, hostsByUuid: NutanixHostByUuid, su
     };
   });
 
+  // Rapporté PAR la VM (Nutanix Guest Tools), jamais deviné : sans NGT, on ne sait pas, et on le dit.
+  const guestOs = resources.guest_tools?.nutanix_guest_tools?.guest_os_version?.trim();
+
   return {
     id: entity.metadata?.uuid ?? entity.status?.name ?? entity.spec?.name ?? "unknown-vm",
     name: entity.status?.name ?? entity.spec?.name ?? "VM sans nom",
@@ -399,6 +414,7 @@ function mapVmEntity(entity: NutanixVmEntity, hostsByUuid: NutanixHostByUuid, su
     ...(hostUuid ? { hostUuid } : {}),
     ...(hostName ? { hostName } : {}),
     ...(typeof hostPlacementConfirmed === "boolean" ? { hostPlacementConfirmed } : {}),
+    ...(guestOs ? { guestOs } : {}),
     ...(disks.length > 0 ? { disks } : {}),
     ...(networks.length > 0 ? { networks } : {}),
     ...(apiError ? { apiError: true, ...(apiErrorMessage ? { apiErrorMessage } : {}) } : {}),

@@ -28,7 +28,7 @@ interface RouteEntry {
 const SAMPLES: Record<string, string> = {
   ":id": "abc123def456",
   ":uuid": "4f2c1e88-1111-2222-3333-444455556666",
-  ":name": "donnees-postgres",
+  ":name": "Spooler",
   ":subject": "gitlab.lecreusot.priv",
   ":nodeId": "nutanix-vm%3A4f2c1e88",
   ":runId": "run-2026-08-27",
@@ -36,6 +36,7 @@ const SAMPLES: Record<string, string> = {
   ":actionId": "vm.start",
   ":packageName": "openssl",
   ":pluginId": "hycu",
+  ":action": "start",
 };
 
 function concretePath(pattern: string): string {

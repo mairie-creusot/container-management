@@ -265,6 +265,11 @@ export function describeAction(event: AuditEvent, plugins?: ReadonlyMap<string, 
   if (resource === "glpi" && idOrAction === "tickets" && subId === "followup") {
     return `a ajouté un suivi au ticket GLPI ${shortId(subAction)}`;
   }
+  if (resource === "windows" && idOrAction === "services" && subId) {
+    const service = shortId(subAction);
+    if (subId === "start") return `a démarré le service Windows « ${service} »`;
+    if (subId === "stop") return `a arrêté le service Windows « ${service} »`;
+  }
   if (resource === "lxc") {
     if (idOrAction === "config" && method === "PUT") return "a configuré l'hôte LXD";
     if (idOrAction === "config" && method === "DELETE") return "a désactivé l'hôte LXD";

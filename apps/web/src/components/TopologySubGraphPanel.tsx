@@ -626,6 +626,14 @@ export default function TopologySubGraphPanel({
   const windowsHost = isNutanixVmRoot
     ? (rootNode?.nutanixNetworks ?? []).flatMap((nic) => nic.ips ?? [])[0] ?? rootNode?.label ?? ""
     : "";
+  /**
+   * L'onglet Services n'est masqué que si on a la PREUVE que ce n'est pas un Windows : l'OS invité
+   * rapporté par les Nutanix Guest Tools depuis l'intérieur de la VM. Sans NGT, l'OS est inconnu —
+   * et une inconnue ne justifie pas de retirer une possibilité, c'est la tentative qui tranchera.
+   */
+  const guestOs = rootNode?.nutanixGuestOs?.toLowerCase() ?? "";
+  const provenNotWindows = guestOs.length > 0 && !guestOs.includes("windows");
+  const showServicesTab = isNutanixVmRoot && windowsHost.length > 0 && !provenNotWindows;
 
   // --- Vue "recette" (nœuds "image-template" uniquement, 18/08/2026) ----------------------------
   // La recette réelle (base + steps) vient de state.templates.items — la projection topologie ne
@@ -1385,14 +1393,18 @@ export default function TopologySubGraphPanel({
               {/* Aucune détection d'OS : Prism ne dit pas ce qui tourne dans la VM. L'onglet est
                   proposé, et c'est la tentative qui tranche — « injoignable sur 5986 » est une
                   réponse honnête, une détection devinée ne le serait pas. */}
-              {windowsHost.length > 0 && (
+              {showServicesTab && (
                 <button
                   type="button"
                   role="tab"
                   aria-selected={viewMode === "services"}
                   className={`topology-subgraph-panel__mode-btn${viewMode === "services" ? " is-active" : ""}`}
                   onClick={() => chooseViewMode("services")}
-                  title="Services Windows de cette machine, lus sous votre propre compte"
+                  title={
+                    guestOs.length > 0
+                      ? `Services Windows de cette machine (${rootNode?.nutanixGuestOs}), lus sous votre propre compte`
+                      : "Services Windows — l'OS de cette VM n'est pas rapporté (Nutanix Guest Tools absents) : la tentative dira si WinRM répond"
+                  }
                 >
                   Services
                 </button>
@@ -1478,9 +1490,9 @@ export default function TopologySubGraphPanel({
         </div>
       </div>
 
-      {viewMode === "services" && windowsHost.length > 0 && (
+      {viewMode === "services" && showServicesTab && (
         <div className="topology-subgraph-panel__shell">
-          <WindowsServicesPanel host={windowsHost} />
+          <WindowsServicesPanel host={windowsHost} canOperate={operate} />
         </div>
       )}
       {viewMode === "console" && rootNode && rootNode.status === "running" && (

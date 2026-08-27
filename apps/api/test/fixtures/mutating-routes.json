@@ -440,6 +440,10 @@
     "path": "/api/volumes"
   },
   {
+    "method": "POST",
+    "path": "/api/windows/services/:name/:action"
+  },
+  {
     "method": "PUT",
     "path": "/api/3cx/config"
   },

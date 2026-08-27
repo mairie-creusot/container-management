@@ -54,7 +54,7 @@ fsSync.writeFileSync(
 );
 
 const { establishTicket, destroyAllTickets } = await import("../src/services/kerberosSession.js");
-const { listWindowsServices } = await import("../src/services/windowsServices.js");
+const { controlWindowsService, listWindowsServices } = await import("../src/services/windowsServices.js");
 const { extractInstances } = await import("../src/services/winrm.js");
 const { setAdDnsConfig, clearAdDnsConfig } = await import("../src/services/setupStore.js");
 
@@ -233,6 +233,91 @@ describe("chaque échec dit ce qui s'est réellement passé", () => {
   it("un hôte vide n'est jamais interrogé", async () => {
     planResponses([]);
     const outcome = await listWindowsServices("   ", "ybanas");
+    expect(outcome.status).toBe("failed");
+    expect(curlLines()).toEqual([]);
+  });
+});
+
+/** Réponse d'invocation de méthode Win32_Service, forme réelle. */
+function invokeResponse(returnValue: number, method = "StartService"): string {
+  return (
+    `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope">` +
+    `<s:Body><p:${method}_OUTPUT xmlns:p="http://schemas.microsoft.com/wbem/wsman/1/wmi/root/cimv2/Win32_Service">` +
+    `<p:ReturnValue>${returnValue}</p:ReturnValue></p:${method}_OUTPUT></s:Body></s:Envelope>`
+  );
+}
+
+describe("démarrer / arrêter un service — la mutation", () => {
+  it("vise l'instance EXACTE par son sélecteur, jamais la classe entière", async () => {
+    // Après l'action, l'état est relu : deux appels, l'invocation puis l'énumération.
+    planResponses([invokeResponse(0), servicesResponse([])]);
+    const outcome = await controlWindowsService("srv.lecreusot.priv", "Spooler", "start", "ybanas");
+
+    expect(outcome.status).toBe("done");
+    const body = curlLines()[0] ?? "";
+    expect(body).toContain("<w:Selector Name=\"Name\">Spooler</w:Selector>");
+    expect(body).toContain("Win32_Service/StartService");
+  });
+
+  it("arrêter appelle StopService, pas StartService", async () => {
+    planResponses([invokeResponse(0, "StopService")]);
+    const outcome = await controlWindowsService("srv.lecreusot.priv", "Spooler", "stop", "ybanas");
+
+    expect(outcome.status).toBe("done");
+    expect(curlLines()[0]).toContain("Win32_Service/StopService");
+  });
+
+  it("droits insuffisants côté Windows : refus explicite, jamais un succès", async () => {
+    planResponses([invokeResponse(2)]);
+    const outcome = await controlWindowsService("srv.lecreusot.priv", "Spooler", "start", "ybanas");
+
+    expect(outcome.status).toBe("denied");
+    if (outcome.status === "done") return;
+    expect(outcome.message).toContain("n'a pas le droit");
+  });
+
+  it("un code documenté est traduit fidèlement — « déjà démarré » n'est pas un succès", async () => {
+    planResponses([invokeResponse(10)]);
+    const outcome = await controlWindowsService("srv.lecreusot.priv", "Spooler", "start", "ybanas");
+
+    expect(outcome.status).toBe("failed");
+    if (outcome.status === "done") return;
+    expect(outcome.message).toContain("déjà en cours d'exécution");
+  });
+
+  it("un code INCONNU est rendu tel quel, jamais interprété au hasard", async () => {
+    planResponses([invokeResponse(4242)]);
+    const outcome = await controlWindowsService("srv.lecreusot.priv", "Spooler", "start", "ybanas");
+
+    expect(outcome.status).toBe("failed");
+    if (outcome.status === "done") return;
+    expect(outcome.message).toContain("4242");
+  });
+
+  it("sans code de retour, l'état réel est déclaré INCONNU plutôt que supposé", async () => {
+    planResponses([
+      `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><p:StartService_OUTPUT/></s:Body></s:Envelope>`,
+    ]);
+    const outcome = await controlWindowsService("srv.lecreusot.priv", "Spooler", "start", "ybanas");
+
+    expect(outcome.status).toBe("failed");
+    if (outcome.status === "done") return;
+    expect(outcome.message).toContain("inconnu");
+  });
+
+  it("sans ticket, rien n'est tenté sur la machine", async () => {
+    await destroyAllTickets();
+    planResponses([]);
+    const outcome = await controlWindowsService("srv.lecreusot.priv", "Spooler", "start", "ybanas");
+
+    expect(outcome.status).toBe("no-ticket");
+    expect(curlLines()).toEqual([]);
+  });
+
+  it("un nom de service vide n'est jamais envoyé", async () => {
+    planResponses([]);
+    const outcome = await controlWindowsService("srv.lecreusot.priv", "   ", "start", "ybanas");
+
     expect(outcome.status).toBe("failed");
     expect(curlLines()).toEqual([]);
   });

@@ -68,6 +68,9 @@ function nutanixVmToNode(vm: NutanixVm): TopologyNode {
     // complet. Consommé UNIQUEMENT par topologyGraphShared.tsx (web) pour la couleur/le pointillé
     // d'une arête "hosts" hôte physique -> VM, jamais recalculé ici.
     ...(typeof vm.hostPlacementConfirmed === "boolean" ? { nutanixHostPlacementConfirmed: vm.hostPlacementConfirmed } : {}),
+    // OS invité rapporté par les Nutanix Guest Tools. Absent sans NGT — l'interface ne masque
+    // l'onglet Services que si elle a la PREUVE que ce n'est pas un Windows, jamais sur une inconnue.
+    ...(vm.guestOs ? { nutanixGuestOs: vm.guestOs } : {}),
     ...(vm.disks && vm.disks.length > 0 ? { nutanixDisks: vm.disks } : {}),
     ...(vm.networks && vm.networks.length > 0 ? { nutanixNetworks: vm.networks } : {}),
     ...(networkAttachments.length > 0 ? { attachments: networkAttachments } : {}),

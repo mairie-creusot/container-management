@@ -6,11 +6,14 @@
  * Une personne sans droits sur ce serveur reçoit un refus du serveur lui-même, rapporté tel quel —
  * QUAI ne lui accorde rien que son compte n'aurait pas ailleurs, et ne lui refuse rien qu'il aurait.
  *
- * LECTURE SEULE : aucune route mutante ici, donc aucune ligne d'audit à écrire pour ce premier lot.
+ * La lecture n'écrit rien. Démarrer ou arrêter un service, en revanche, est une MUTATION sur une
+ * machine de production : journalisée automatiquement (plugins/audit.ts), confirmée par l'interface
+ * avant d'arriver ici, et son statut HTTP dit la vérité — un refus de Windows ne doit jamais
+ * apparaître comme un « OK » dans le journal.
  */
 
 import type { FastifyInstance } from "fastify";
-import { listWindowsServices } from "../services/windowsServices.js";
+import { controlWindowsService, listWindowsServices } from "../services/windowsServices.js";
 import { ticketStatusFor } from "../services/kerberosSession.js";
 
 /** Un état honnête vaut un 200 : « injoignable » ou « refusé » est une RÉPONSE, pas une panne de
@@ -27,4 +30,31 @@ export default async function windowsRoutes(fastify: FastifyInstance): Promise<v
   fastify.get("/api/windows/ticket", async (request, reply) => {
     return reply.send(ticketStatusFor(request.authSession!.username));
   });
+
+  /**
+   * Démarre ou arrête un service RÉEL. Mutante : journalisée automatiquement (plugins/audit.ts),
+   * et l'interface la fait confirmer avant d'arriver ici.
+   *
+   * Le hook global exige déjà operator/admin pour toute méthode mutante ; c'est ensuite WINDOWS qui
+   * tranche, avec les droits du compte de la personne connectée.
+   */
+  fastify.post<{ Params: { name: string; action: string }; Querystring: { host?: string } }>(
+    "/api/windows/services/:name/:action",
+    async (request, reply) => {
+      const host = request.query?.host?.trim();
+      if (!host) return reply.code(400).send({ error: "Paramètre requis : host" });
+
+      const { action } = request.params;
+      if (action !== "start" && action !== "stop") {
+        return reply.code(400).send({ error: `Action inconnue : "${action}" — "start" ou "stop" attendu.` });
+      }
+
+      const outcome = await controlWindowsService(host, request.params.name, action, request.authSession!.username);
+      // Un refus de Windows n'est pas une panne de QUAI, mais ce n'est pas non plus un succès : le
+      // statut HTTP doit le dire, sinon le journal marquerait « OK » une action qui n'a rien fait.
+      if (outcome.status === "done") return reply.send(outcome);
+      const code = outcome.status === "denied" ? 403 : outcome.status === "unreachable" ? 502 : 409;
+      return reply.code(code).send(outcome);
+    },
+  );
 }

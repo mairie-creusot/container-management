@@ -271,3 +271,38 @@ export async function enumerateWmiClass(
 
   return { ok: true, value: { instances, truncated: context !== undefined } };
 }
+
+/**
+ * Appelle une MÉTHODE d'une instance WMI (Win32_Service.StartService…). Le sélecteur désigne
+ * l'instance exacte — jamais une action « sur la classe », qui frapperait tout.
+ *
+ * Rend le `ReturnValue` brut de Windows : c'est l'appelant qui sait ce que ce code signifie pour SA
+ * méthode (les codes de Win32_Service ne sont pas ceux d'une autre classe), et le traduire ici
+ * produirait des messages faux dès la première méthode ajoutée.
+ */
+export async function invokeWmiMethod(
+  host: string,
+  className: string,
+  method: string,
+  selector: Record<string, string>,
+  ticket: KerberosTicket,
+): Promise<WinrmResult<{ returnValue: number | undefined }>> {
+  const resourceUri = `${WMI_RESOURCE_BASE}/${className}`;
+  const response = await callWsman(
+    host,
+    ticket,
+    envelope(
+      host,
+      resourceUri,
+      `${resourceUri}/${method}`,
+      `<p:${method}_INPUT xmlns:p="${escapeXml(resourceUri)}"/>`,
+      selector,
+    ),
+  );
+  if (!response.ok) return response;
+
+  const match = /<(?:[A-Za-z0-9_]+:)?ReturnValue(?:\s[^>]*)?>([\s\S]*?)<\/(?:[A-Za-z0-9_]+:)?ReturnValue>/.exec(response.value);
+  const raw = match?.[1]?.trim();
+  const parsed = raw === undefined ? Number.NaN : Number(raw);
+  return { ok: true, value: { returnValue: Number.isFinite(parsed) ? parsed : undefined } };
+}

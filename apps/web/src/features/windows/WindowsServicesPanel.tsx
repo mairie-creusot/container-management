@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ApiError, apiGet } from "@/api/client";
+import { ApiError, apiGet, apiPost } from "@/api/client";
+import { useConfirm } from "@/components/ConfirmProvider";
 
 /** Miroir de WindowsServicesOutcome (apps/api/src/services/windowsServices.ts). */
 interface WindowsService {
@@ -28,10 +29,14 @@ const STATUS_LABEL: Record<WindowsService["status"], string> = {
  * certificat non validé ou droits insuffisants, c'est l'état exact qui s'affiche, avec le message du
  * serveur. Un écran de consultation ne doit pas laisser croire qu'une machine n'a aucun service.
  *
- * LECTURE SEULE dans ce lot — démarrer ou arrêter un service est une mutation sur une machine de
- * production, elle viendra avec sa confirmation et sa trace.
+ * Démarrer ou arrêter un service est une MUTATION sur une machine de production : confirmée avant
+ * d'être envoyée, journalisée par le socle, et le résultat RÉEL est relu ensuite — jamais un état
+ * optimiste affiché comme si l'action avait forcément abouti.
  */
-export default function WindowsServicesPanel({ host }: { host: string }) {
+export default function WindowsServicesPanel({ host, canOperate }: { host: string; canOperate: boolean }) {
+  const confirm = useConfirm();
+  const [busyService, setBusyService] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -64,14 +69,43 @@ export default function WindowsServicesPanel({ host }: { host: string }) {
 
   const running = services.filter((service) => service.status === "running").length;
 
+  async function act(service: WindowsService, action: "start" | "stop") {
+    const verb = action === "start" ? "Démarrer" : "Arrêter";
+    const ok = await confirm({
+      title: `${verb} « ${service.displayName} » ?`,
+      description:
+        action === "stop"
+          ? `Ce service sera arrêté sur ${host}, une machine en production. Les applications qui en dépendent cesseront de fonctionner immédiatement.`
+          : `Ce service sera démarré sur ${host}. L'action est exécutée avec vos propres droits Windows.`,
+      confirmLabel: verb,
+      variant: action === "stop" ? "danger" : "default",
+    });
+    if (!ok) return;
+
+    setBusyService(service.name);
+    setError(null);
+    setNotice(null);
+    try {
+      await apiPost(`/windows/services/${encodeURIComponent(service.name)}/${action}?host=${encodeURIComponent(host)}`, {});
+      setNotice(`« ${service.displayName} » : ${action === "start" ? "démarré" : "arrêté"}.`);
+    } catch (err) {
+      // Le motif vient de Windows (droits, dépendances, état) : il est rendu tel quel.
+      setError(err instanceof ApiError ? err.message : "L'action n'a pas abouti.");
+    } finally {
+      setBusyService(null);
+      // L'état réel est RELU dans tous les cas : c'est la machine qui dit ce qu'il en est, pas nous.
+      await load();
+    }
+  }
+
   return (
     <div className="windows-services">
       <div className="windows-services__head">
         <div>
           <strong>Services de {host}</strong>
           <p className="create-container-hint" style={{ margin: "2px 0 0" }}>
-            Lus sur la machine par WinRM, sous votre propre compte : vous voyez ce que vos droits Windows vous
-            permettent de voir, ni plus ni moins. Lecture seule.
+            Lus sur la machine par WinRM, sous votre propre compte : vous voyez — et ne pilotez — que ce que vos
+            droits Windows permettent, ni plus ni moins.
           </p>
         </div>
         <button type="button" className="btn btn-ghost btn-sm" onClick={() => void load()} disabled={loading}>
@@ -80,6 +114,7 @@ export default function WindowsServicesPanel({ host }: { host: string }) {
       </div>
 
       {error && <div className="error-banner">{error}</div>}
+      {notice && <div className="success-banner">{notice}</div>}
 
       {outcome && outcome.status !== "ready" && (
         <div className={`topology-subgraph-panel__note${outcome.status === "denied" ? " is-denied" : ""}`}>
@@ -121,6 +156,7 @@ export default function WindowsServicesPanel({ host }: { host: string }) {
                     <th>État</th>
                     <th>Démarrage</th>
                     <th>Compte</th>
+                    {canOperate && <th />}
                   </tr>
                 </thead>
                 <tbody>
@@ -139,6 +175,23 @@ export default function WindowsServicesPanel({ host }: { host: string }) {
                       </td>
                       <td>{service.startMode || "—"}</td>
                       <td className="cell-mono">{service.account || "—"}</td>
+                      {canOperate && (
+                        <td>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            disabled={busyService !== null || service.status === "unknown"}
+                            onClick={() => void act(service, service.status === "running" ? "stop" : "start")}
+                            title={
+                              service.status === "unknown"
+                                ? "Service dans un état transitoire : attendez qu'il se stabilise."
+                                : undefined
+                            }
+                          >
+                            {busyService === service.name ? "…" : service.status === "running" ? "Arrêter" : "Démarrer"}
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>

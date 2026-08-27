@@ -394,6 +394,9 @@ export interface NutanixVm {
   id: string;
   name: string;
   powerState: "on" | "off" | "unknown";
+  /** OS invité rapporté par les Nutanix Guest Tools depuis l'INTÉRIEUR de la VM ("windows server
+   * 2019 datacenter"). Absent sans NGT : QUAI ne devine jamais l'OS d'après le nom ou l'image. */
+  guestOs?: string;
   numVcpus: number;
   memoryMib: number;
   /** Nom du cluster Nutanix physique hébergeant la VM. */
@@ -1093,6 +1096,9 @@ export interface TopologyNode {
   nutanixHostPlacementConfirmed?: boolean;
   /** VM Nutanix uniquement : disques réels (voir services/nutanix.ts#NutanixVmDisk) — absent si
    * Prism Central n'a renvoyé aucun disque, jamais un tableau vide fabriqué en cas d'échec. */
+  /** OS invité rapporté par les Nutanix Guest Tools depuis l'intérieur de la VM. Absent sans
+   * NGT : c'est une inconnue assumée, jamais une déduction à partir du nom ou de l'image. */
+  nutanixGuestOs?: string;
   nutanixDisks?: NutanixVmDisk[];
   /** VM Nutanix uniquement : interfaces réseau réelles avec VLAN/subnet résolu et IP(s) (voir
    * services/nutanix.ts#NutanixVmNetwork). */

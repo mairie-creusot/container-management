@@ -422,6 +422,10 @@ export interface TopologyNode {
    * complet. */
   nutanixHostPlacementConfirmed?: boolean;
   /** VM Nutanix uniquement : disques réels — voir apps/api/src/types.ts#NutanixVmDisk. */
+  /** OS invité rapporté par les Nutanix Guest Tools depuis l'intérieur de la VM. Absent sans
+   * NGT : l'onglet Services n'est masqué que sur PREUVE que ce n'est pas un Windows, jamais sur
+   * une inconnue. */
+  nutanixGuestOs?: string;
   nutanixDisks?: NutanixVmDisk[];
   /** VM Nutanix uniquement : interfaces réseau réelles (VLAN/subnet/IP résolus) — voir
    * apps/api/src/types.ts#NutanixVmNetwork. */

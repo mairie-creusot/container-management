@@ -11,7 +11,7 @@
  */
 
 import { ticketFor } from "./kerberosSession.js";
-import { enumerateWmiClass } from "./winrm.js";
+import { enumerateWmiClass, invokeWmiMethod } from "./winrm.js";
 import type { WinrmFailure } from "./winrm.js";
 
 /** État tel que Windows le rapporte, projeté sur le vocabulaire déjà utilisé par le graphe. */
@@ -93,4 +93,87 @@ export async function listWindowsServices(host: string, username: string): Promi
   });
 
   return { status: "ready", host: target, services, truncated: result.value.truncated };
+}
+
+/**
+ * Codes de retour de Win32_Service.StartService/StopService, tels que Microsoft les documente.
+ * Traduits ICI parce qu'ils sont propres à CETTE classe — un code 5 ne veut pas dire la même chose
+ * ailleurs. Un code inconnu n'est jamais présenté comme un succès : il est rendu tel quel.
+ */
+const SERVICE_RETURN_MESSAGES: Record<number, string> = {
+  0: "",
+  1: "L'opération n'est pas prise en charge par ce service.",
+  2: "Accès refusé : votre compte Windows n'a pas le droit de piloter ce service.",
+  3: "Le service a des services dépendants en cours d'exécution.",
+  5: "Le service n'est pas dans un état permettant cette opération.",
+  7: "Le service n'a pas répondu à temps.",
+  8: "Erreur inconnue rapportée par le gestionnaire de services.",
+  9: "Le chemin du service est introuvable.",
+  10: "Le service est déjà en cours d'exécution.",
+  11: "La base de données des services est verrouillée.",
+  15: "Le service n'a pas démarré : dépendance manquante.",
+  21: "Paramètre invalide rapporté par le gestionnaire de services.",
+  22: "Le compte du service est invalide.",
+  24: "Le service est déjà en cours d'arrêt.",
+};
+
+export type ServiceAction = "start" | "stop";
+
+export type ServiceActionOutcome =
+  | { status: "done"; host: string; service: string; action: ServiceAction }
+  | { status: "no-ticket" | "unreachable" | "denied" | "failed"; host: string; service: string; message: string };
+
+/**
+ * Démarre ou arrête un service RÉEL. Mutation sur une machine de production : elle est journalisée
+ * automatiquement (plugins/audit.ts) et l'interface la fait confirmer avant d'arriver ici.
+ *
+ * Les droits sont ceux de WINDOWS : un refus vient du gestionnaire de services de la machine, pas
+ * d'une règle inventée par QUAI.
+ */
+export async function controlWindowsService(
+  host: string,
+  service: string,
+  action: ServiceAction,
+  username: string,
+): Promise<ServiceActionOutcome> {
+  const target = host.trim();
+  const name = service.trim();
+  if (target.length === 0 || name.length === 0) {
+    return { status: "failed", host, service, message: "Hôte et nom de service sont tous deux requis." };
+  }
+
+  const ticket = await ticketFor(username);
+  if (!ticket) {
+    return {
+      status: "no-ticket",
+      host: target,
+      service: name,
+      message: "Aucun ticket Kerberos pour votre session : reconnectez-vous à QUAI avant d'agir sur un service.",
+    };
+  }
+
+  const method = action === "start" ? "StartService" : "StopService";
+  const result = await invokeWmiMethod(target, "Win32_Service", method, { Name: name }, ticket);
+  if (!result.ok) {
+    const failure = result.failure;
+    return { status: failure.kind === "no-ticket" ? "no-ticket" : failure.kind, host: target, service: name, message: failure.message };
+  }
+
+  const code = result.value.returnValue;
+  if (code === 0) return { status: "done", host: target, service: name, action };
+  if (code === undefined) {
+    return {
+      status: "failed",
+      host: target,
+      service: name,
+      message: "La machine n'a pas renvoyé de code de retour : l'état réel du service est inconnu, vérifiez-le avant de réessayer.",
+    };
+  }
+  const known = SERVICE_RETURN_MESSAGES[code];
+  return {
+    status: code === 2 ? "denied" : "failed",
+    host: target,
+    service: name,
+    message: known && known.length > 0 ? known : `Le gestionnaire de services a répondu par le code ${code}.`,
+  };
 }
