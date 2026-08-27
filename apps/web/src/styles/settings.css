@@ -358,3 +358,46 @@
     white-space: nowrap;
   }
 }
+
+/* Modale « Lier ce nœud à un module » (features/serviceModules/ServiceModuleBindModal.tsx) — elle
+   réutilise les cartes de la page Modules, dans une grille plus étroite. */
+.modal-card:has(.bind-module) {
+  max-width: 860px;
+}
+
+.bind-module {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 80px);
+}
+
+.bind-module__head {
+  padding: 18px 22px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.bind-module__head h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.bind-module__body {
+  padding: 16px 22px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.bind-module__body .modules-grid {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  margin-bottom: 0;
+}
+
+.bind-module__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 14px 22px;
+  border-top: 1px solid var(--color-border);
+}

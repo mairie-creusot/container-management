@@ -19,7 +19,7 @@
 import type { FastifyInstance } from "fastify";
 import { getTopology } from "../services/topology.js";
 import {
-  getServiceModuleProvider,
+  resolveServiceModuleProvider,
   listEffectiveBindings,
   listServiceModules,
 } from "../services/serviceModules.js";
@@ -66,7 +66,8 @@ export default async function serviceModulesRoutes(fastify: FastifyInstance): Pr
     if (!nodeId || !moduleId) {
       return reply.code(400).send({ error: "Champs requis manquants : nodeId, moduleId" });
     }
-    if (!getServiceModuleProvider(moduleId)) {
+    // Résolution COMPLÈTE : un module apporté par un greffon actif est liable comme les autres.
+    if (!(await resolveServiceModuleProvider(moduleId))) {
       return reply.code(400).send({ error: `Module inconnu : ${moduleId}` });
     }
     const binding = await setManualBinding(nodeId, moduleId, request.authSession!.username);
@@ -80,7 +81,7 @@ export default async function serviceModulesRoutes(fastify: FastifyInstance): Pr
   });
 
   fastify.get<{ Params: { moduleId: string } }>("/api/service-modules/:moduleId/snapshot", async (request, reply) => {
-    const provider = getServiceModuleProvider(request.params.moduleId);
+    const provider = await resolveServiceModuleProvider(request.params.moduleId);
     if (!provider) return reply.code(404).send({ error: `Module inconnu : ${request.params.moduleId}` });
     return reply.send(await provider.getSnapshot());
   });

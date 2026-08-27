@@ -12,6 +12,7 @@
  */
 
 export { default as ServiceModuleView, MODULE_SNAPSHOT_POLL_INTERVAL_MS } from "./ServiceModuleView";
+export { default as ServiceModuleBindModal } from "./ServiceModuleBindModal";
 export { useServiceModuleBindings } from "./useServiceModuleBindings";
 export {
   buildServiceModuleGraph,

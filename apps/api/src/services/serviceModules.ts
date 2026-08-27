@@ -46,6 +46,9 @@ import { loadThreecxPluginConfig } from "../plugins/threecx/config.js";
 import { getThreecxActiveCalls, getThreecxExtensions, getThreecxQueues, getThreecxStatus, isThreecxConfigured } from "./threecx.js";
 import { lastKnownDnsSync, listRoutes } from "./reverseProxy.js";
 import { getManualBinding, listManualBindings } from "./serviceBindingsStore.js";
+import { configStoreOf } from "../plugins/configStore.js";
+import { ensurePluginsLoaded } from "../plugins/loader.js";
+import { listPlugins } from "../plugins/registry.js";
 import type { TopologyNode } from "../types.js";
 
 // --- La forme générique ---------------------------------------------------------------------------
@@ -582,16 +585,67 @@ export const threecxModuleProvider: ServiceModuleProvider = {
 
 // --- Le registre ----------------------------------------------------------------------------------
 
-/** Ajouter un module = ajouter UNE entrée ici (voir le patron "3cx" documenté en tête de fichier). */
+/** Fournisseurs ÉCRITS ICI, pour les deux intégrations dont l'instantané dépasse ce qu'un manifeste
+ * peut décrire (résolution DNS réelle, appels en cours du PBX). */
 export const SERVICE_MODULE_PROVIDERS: ServiceModuleProvider[] = [adDnsModuleProvider, threecxModuleProvider];
+
+/**
+ * Tout module ACTIF est un module métier liable à un nœud. Un greffon décrit déjà son instantané
+ * (Plugin#snapshot) : il n'y a aucune raison que seules deux intégrations écrites à la main puissent
+ * être rattachées à une VM. C'est ce qui permet de dire « cette VM PORTE HYCU / GLPI / ce module
+ * tiers » et d'ouvrir ses données depuis le nœud lui-même.
+ *
+ * Aucune LIAISON AUTOMATIQUE pour ces modules : le socle ignore la forme de leur configuration, il
+ * ne peut donc prouver aucun hôte. Le rapprochement se fait à la main (PUT /api/service-modules/
+ * bindings), ce qui est explicite et vérifiable — jamais un hôte deviné dans une configuration
+ * opaque, qui rattacherait un module à la mauvaise machine.
+ */
+async function pluginServiceModuleProviders(): Promise<ServiceModuleProvider[]> {
+  await ensurePluginsLoaded();
+  const native = new Set(SERVICE_MODULE_PROVIDERS.map((provider) => provider.id));
+  const providers: ServiceModuleProvider[] = [];
+
+  for (const plugin of listPlugins()) {
+    const { id, name, configSchema } = plugin.manifest;
+    // Un fournisseur écrit à la main l'emporte : son instantané est plus riche que le générique.
+    if (native.has(id)) continue;
+    const schema = configSchema as { description?: unknown; title?: unknown };
+    const description =
+      typeof schema.description === "string" && schema.description.trim().length > 0
+        ? schema.description.trim()
+        : typeof schema.title === "string" && schema.title.trim().length > 0
+          ? schema.title.trim()
+          : `Module « ${name} ».`;
+
+    providers.push({
+      id,
+      label: name,
+      description,
+      isConfigured: async () => (await configStoreOf(plugin).load()) !== null,
+      configuredHosts: async () => [],
+      getSnapshot: async () => (await plugin.snapshot((await configStoreOf(plugin).load()) ?? {})) as ServiceModuleSnapshot,
+    });
+  }
+  return providers;
+}
+
+/** Tous les fournisseurs : ceux écrits ici, puis ceux qu'apportent les modules actifs. */
+export async function allServiceModuleProviders(): Promise<ServiceModuleProvider[]> {
+  return [...SERVICE_MODULE_PROVIDERS, ...(await pluginServiceModuleProviders())];
+}
 
 export function getServiceModuleProvider(moduleId: string): ServiceModuleProvider | undefined {
   return SERVICE_MODULE_PROVIDERS.find((provider) => provider.id === moduleId);
 }
 
+/** Résolution COMPLÈTE (modules actifs compris) — celle que les routes doivent utiliser. */
+export async function resolveServiceModuleProvider(moduleId: string): Promise<ServiceModuleProvider | undefined> {
+  return (await allServiceModuleProviders()).find((provider) => provider.id === moduleId);
+}
+
 export async function listServiceModules(): Promise<ServiceModuleDescriptor[]> {
   return Promise.all(
-    SERVICE_MODULE_PROVIDERS.map(async (provider) => ({
+    (await allServiceModuleProviders()).map(async (provider) => ({
       id: provider.id,
       label: provider.label,
       description: provider.description,

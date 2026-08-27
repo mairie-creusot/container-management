@@ -47,7 +47,7 @@ import { canAdminister, canOperate } from "@/features/auth/authSlice";
 // d'EnvironmentsPage.tsx en composant réutilisable — jamais un formulaire simplifié dupliqué ici,
 // une seule source de vérité (exigence utilisateur explicite de la maquette validée).
 import RemoteEnvironmentCreateModal from "@/features/remoteEnvironments/RemoteEnvironmentCreateModal";
-import { serviceModuleMenuItem, useServiceModuleBindings } from "@/features/serviceModules";
+import { ServiceModuleBindModal, serviceModuleMenuItem, useServiceModuleBindings } from "@/features/serviceModules";
 // "Ajouter Nutanix…" (même menu) : Nutanix se configure via la page Réglages
 // (features/clusters/NutanixConfigSection.tsx, seul flux réel existant — test de connexion Prism
 // Central avant persistance) — l'entrée du spotlight NAVIGUE vers ce réglage plutôt que de
@@ -2751,7 +2751,13 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
   // Suppressions déclenchées ailleurs (panneau de détail d'une VM, page Conteneurs) : la carte
   // pulse quand même, l'état vient des slices.
   // Modules métier (AD/DNS, 3CX…) liés à un nœud — pastille sur la carte + entrée de menu.
-  const { bindingByNodeId: serviceModuleBindings } = useServiceModuleBindings();
+  const {
+    bindingByNodeId: serviceModuleBindings,
+    modules: serviceModules,
+    refresh: refreshServiceModuleBindings,
+  } = useServiceModuleBindings();
+  // Nœud dont on est en train de choisir le module porté — null tant qu'aucune liaison n'est demandée.
+  const [bindingTarget, setBindingTarget] = useState<{ nodeId: string; label: string } | null>(null);
   const nutanixDeletePendingUuid = useAppSelector((s) => s.nutanix.deletePendingUuid);
   const containerDeletePendingId = useAppSelector((s) => s.containers.deletePendingId);
   async function withDeleteAnimation(nodeId: string, run: () => Promise<unknown>): Promise<void> {
@@ -3937,6 +3943,15 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
     // "Ouvrir le module <label>" pour un nœud lié à un service métier — null si aucun module.
     const moduleItem = serviceModuleMenuItem(serviceModuleBindings.get(node.id), () => openSubGraph(node.id, x, y));
     if (moduleItem) items.push(moduleItem);
+    // « Ce nœud PORTE ce service » : le rapprochement automatique exige une preuve (hôte configuré
+    // qui correspond au nom ou à une IP réelle du nœud). Quand elle n'existe pas — une VM dont le
+    // nom ne dit rien du service qu'elle héberge — c'est l'administrateur qui l'affirme.
+    if (operate) {
+      items.push({
+        label: serviceModuleBindings.get(node.id) ? "Changer le module lié…" : "Lier à un module…",
+        onClick: () => setBindingTarget({ nodeId: node.id, label: node.label }),
+      });
+    }
     // "Grouper la sélection" (retour utilisateur du 13/08/2026 : "si je fait clic droit jai rien
     // pour creer le groupe") — jusqu'ici cette action n'existait QUE via le bouton flottant en haut
     // à droite du canevas (voir plus bas), jamais accessible depuis le clic droit sur l'un des
@@ -4529,6 +4544,20 @@ export default function TopologyGraph({ height = 460, onSelectNode, refreshInter
           tranche). Resté monté pendant l'animation de sortie (`subGraphMounted`), démonté
           seulement une fois celle-ci terminée (`handleSubGraphExited`, voir openSubGraph/
           closeSubGraph ci-dessus). */}
+      {/* Liaison manuelle nœud -> module métier : elle rend le module accessible DEPUIS la machine
+          qui le porte, sans quitter le graphe. */}
+      {bindingTarget && (
+        <ServiceModuleBindModal
+          open
+          nodeId={bindingTarget.nodeId}
+          nodeLabel={bindingTarget.label}
+          modules={serviceModules}
+          current={serviceModuleBindings.get(bindingTarget.nodeId)}
+          onClose={() => setBindingTarget(null)}
+          onChanged={refreshServiceModuleBindings}
+        />
+      )}
+
       {subGraphMounted && data && (
         <TopologySubGraphPanel
           topology={data}

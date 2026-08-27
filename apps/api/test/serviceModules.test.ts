@@ -30,6 +30,7 @@ const {
   mergeBindings,
   nodeIdentity,
   resolveAutomaticBindings,
+  resolveServiceModuleProvider,
   SERVICE_MODULE_PROVIDERS,
 } = await import("../src/services/serviceModules.js");
 const { resetServiceBindingsCacheForTests } = await import("../src/services/serviceBindingsStore.js");
@@ -73,6 +74,49 @@ describe("registre de modules métier", () => {
       expect(typeof provider.configuredHosts).toBe("function");
       expect(typeof provider.getSnapshot).toBe("function");
     }
+  });
+});
+
+describe("tout module ACTIF est un module métier liable", () => {
+  // Sans cela, seuls les deux fournisseurs écrits à la main étaient rattachables à une VM : HYCU,
+  // GLPI, Nutanix et tout module tiers décrivent pourtant déjà leur instantané.
+  it("les greffons livrés rejoignent le registre, avec le libellé de leur manifeste", async () => {
+    const modules = await listServiceModules();
+    const ids = modules.map((m) => m.id);
+
+    expect(ids).toContain("hycu");
+    expect(ids).toContain("nutanix");
+    expect(modules.find((m) => m.id === "hycu")?.label).toBe("Sauvegarde HYCU");
+    // Rien n'est configuré dans ce CONFIG_PATH isolé : c'est dit, jamais supposé.
+    expect(modules.find((m) => m.id === "hycu")?.configured).toBe(false);
+  });
+
+  it("un fournisseur ÉCRIT À LA MAIN l'emporte sur le greffon de même identifiant", async () => {
+    // "3cx" existe des deux côtés : l'instantané écrit ici sait rendre les appels en cours, pas
+    // celui déduit du manifeste. Un seul doit rester, et c'est le plus riche.
+    const modules = await listServiceModules();
+    expect(modules.filter((m) => m.id === "3cx")).toHaveLength(1);
+    expect((await resolveServiceModuleProvider("3cx"))?.description).toContain("appels en cours");
+  });
+
+  it("résout un module de greffon par son identifiant, et rend son instantané réel", async () => {
+    const provider = await resolveServiceModuleProvider("hycu");
+    expect(provider).toBeDefined();
+
+    const snapshot = await provider!.getSnapshot();
+    expect(snapshot.moduleId).toBe("hycu");
+    // Non configuré : listes VIDES et état explicite, jamais des données de démonstration.
+    expect(snapshot.status).toBe("not-configured");
+    expect(snapshot.entities).toEqual([]);
+  });
+
+  it("un greffon n'apporte AUCUNE liaison automatique : le socle ne devine aucun hôte", async () => {
+    const provider = await resolveServiceModuleProvider("hycu");
+    expect(await provider!.configuredHosts()).toEqual([]);
+  });
+
+  it("un identifiant inconnu reste inconnu, greffons compris", async () => {
+    expect(await resolveServiceModuleProvider("nope")).toBeUndefined();
   });
 });
 
